@@ -272,7 +272,7 @@ The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server
 
 ## Telemetry Configuration (`telemetry`)
 
-Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per-template or per-agent in `scion-agent.yaml`.
+Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per agent in `scion-agent.yaml` (a template's `telemetry` block is ignored).
 
 See the [Metrics & OpenTelemetry guide](/scion/hosted/single-node/metrics/) for operational details.
 

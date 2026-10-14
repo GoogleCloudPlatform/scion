@@ -855,8 +855,6 @@ When running with a postgres database, operational settings (Layer-1) can be con
 
 Most server settings can be overridden via environment variables using the `SCION_SERVER_` prefix. Write each path segment in upper case and drop the underscores inside a multi-word field name: `read_timeout` becomes `READTIMEOUT`, not `READ_TIMEOUT`. A name that the Hub does not recognise is ignored and logged as a warning at startup, with a suggested spelling where one exists. An exported but empty `SCION_SERVER_*` or `SCION_SEED_*` variable is treated as unset, so it never overrides a configured value. Each key's working variable is listed as `x-env-var` in the [settings schema](https://github.com/GoogleCloudPlatform/scion/blob/main/pkg/config/schemas/settings-v1.schema.json).
 
-A `settings.yaml` value that does not parse for its key (for example a string where a number is expected) is ignored for that key only: the key falls back to its default, or stays unset, and a warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features.
-
 There are two exceptions to the pattern:
 
 - The broker's listener settings under `server.broker` use the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT`.
@@ -885,6 +883,8 @@ There are two exceptions to the pattern:
 - `server.secrets.gcp_replication_locations` -> `SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS`
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
+
+A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own `server` settings are not covered: a value there that does not parse can make the server ignore the whole `server` section of `settings.yaml`.
 
 ### Logging Environment Variables
 
@@ -981,15 +981,15 @@ The operator-configured Hub endpoint is resolved from the environment, flags and
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
 1. `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` — explicit Hub public URL.
-2. Project-level `hub.endpoint` setting (deprecated, see below).
-3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+2. The `--base-url` flag or `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+3. `hub.endpoint` (or `SCION_HUB_ENDPOINT`) — deprecated, see below.
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
    - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
      The derived URL is the IAP front end, which the Hub's own host does not serve. On a co-located broker (for example, the single-node VM deployment), agents dispatched to Docker therefore receive `http://scion-hub.internal:<hub listen port>` instead. That hostname is mapped to the Docker host gateway, so the agents reach the Hub directly while staying on bridge networking. Agents dispatched to Podman receive `http://host.containers.internal:<port>`, which Podman resolves itself. On rootless Podman 5.0 to 5.2 with pasta networking, that name can be missing or unreachable (fixed in Podman 5.3). A host-gateway mapping has the same gap there, so upgrade Podman if agents cannot reach the Hub. This applies whatever the broker's default runtime is, including Docker or Podman runtime profiles on a Kubernetes-default broker. Agents dispatched to Kubernetes runtime profiles, Cloud Run, or Apple container still receive the derived URL.
    - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
 5. Auto-computed `http://localhost:{port}` (last resort).
 
-Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is deprecated: the server logs a warning at startup, `scion doctor` reports it, and the fallback is removed in the next release. Set `server.hub.public_url` or `server.broker.hub_endpoint` instead. A workstation whose `hub.endpoint` is its own loopback URL is not affected.
+Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is deprecated: the server logs a warning at startup, `scion doctor` reports it, and the fallback is removed in the next release. Set `server.hub.public_url` or `server.broker.hub_endpoint` instead. A server that runs only the Runtime Broker uses `hub.endpoint` right after item 1. A workstation whose `hub.endpoint` is its own loopback URL is not affected.
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 

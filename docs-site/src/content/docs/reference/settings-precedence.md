@@ -910,9 +910,10 @@ reincarnate's reprovision), and as the start/restart body's `image`. All of thes
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
 agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
 image back writes nothing into `InlineConfig`. A template's image is **not** sent as the top tier.
-On create the broker reads it from the hydrated template, at the template tier. On a later start
-or restart (which carries no template) it comes from the template's own value recorded at
-provision, unless a template of that name exists locally.
+Historically, on create the broker read it from the hydrated template, at the template tier, and on
+a later start or restart from the template's own value recorded at provision. A template's image is
+now ignored (see
+[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
 
 `AppliedConfig.Image` is the Hub's display record: filled from the template at create, then
 overwritten with the image the broker reports. The broker's provision-only response reports the
@@ -967,7 +968,7 @@ until it is reincarnated. The broker cannot tell that image apart from a genuine
 
 **Hub template records:** an image set only on the Hub template record (its stored config), and
 not in the template's `scion-agent.yaml`, is no longer applied, because the broker reads the
-template image from the template's files. Put it in the template file.
+template image from the template's files. Set it in the harness-config or a profile override.
 
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove

@@ -89,11 +89,11 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
 
 - **Runtime profiles.** There is no profile step. A `TZ` in a profile's `harness_overrides` env is not used, and profiles have no `env` key. See [Removed: profile `timezone`](/scion/reference/orchestrator-settings/#removed-profile-timezone).
 - **Broker-local values.** The Runtime Broker ignores `TZ` from:
-  - broker-local templates;
+  - broker-local templates (skipped silently: template env never sets `TZ` for a Hub-dispatched agent);
   - the broker settings' harness-config entry `env`;
   - the agent's persisted `scion-agent.json`.
 
-  It logs a warning, and adds a start warning, for each non-empty value it drops that differs from the value the Hub sent. An empty `TZ: ""` marker never passes the broker host's `TZ` through.
+  For the other two sources, it logs a warning, and adds a start warning, for each non-empty value it drops that differs from the value the Hub sent. An empty `TZ: ""` marker never passes the broker host's `TZ` through.
 - **`config.env` on update.** A `TZ` key in `config.env` on an agent `PATCH` is ignored with the warning `TZ in config.env is ignored; use explicitTimezone`.
 - **Secrets.** A secret that targets `TZ` is dropped with a warning.
 
@@ -137,7 +137,7 @@ Without a Hub there is no `TZ` chain, no Hub default timezone and no display pre
   - an inline config passed with `scion create --config`;
   - a template's `env`, the lowest-precedence fallback: it is used only when no other source sets `TZ`, and only for local agents.
 
-  An empty `TZ: ""` in an inline config passes your machine's `TZ` through. An empty template `TZ` is skipped with a warning. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over an inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when an inline config sets one; a non-empty template `TZ` then still fills it. With no `TZ` in any of them, the container uses the image default (UTC).
+  An empty `TZ: ""` in an inline config passes your machine's `TZ` through. An empty template `TZ` is skipped with a warning. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over an inline-config `TZ`. If it is empty, `scion start` fails with `cannot start agent: 1 required environment variable(s) have no value: TZ`, even when an inline config or template sets one. With no `TZ` in any of them, the container uses the image default (UTC).
 - **CLI display** uses your local zone, with `--tz` and `--utc` as above.
 
 A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.

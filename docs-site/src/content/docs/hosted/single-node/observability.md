@@ -261,7 +261,7 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
   scion hub env clear --project SCION_LOG_LEVEL
   ```
 
-- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of a template or an inline `--config` file. A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 

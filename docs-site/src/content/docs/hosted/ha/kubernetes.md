@@ -52,7 +52,7 @@ The Runtime Broker's heartbeat lists agents on each runtime with its own deadlin
 
 ### Agent-Level Kubernetes Configuration
 
-Per-agent Kubernetes settings in `~/.scion/settings.yaml`:
+Per-agent Kubernetes settings (the agent's `scion-agent.yaml` or `scion create --config`):
 
 ```yaml
 kubernetes:
@@ -449,7 +449,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
-- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the template or the agent's saved config.
+- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's saved config.
 - `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
@@ -765,13 +765,13 @@ When the kubelet created the provisioning state directory, the provisioning init
 
 Workspaces provisioned before the provisioning state directory existed have `.scion-provisioned` in the workspace root. It is still honoured, so those workspaces are not provisioned again, and provisioning adds it to the checkout's `.git/info/exclude`. While Pods of a project may still run images with an older `sciontool`, the init container also takes the provisioning lock in the workspace root (`.scion-provision.lock`) before the one in the state directory. That lock is transient and excluded from git, and leftover lock entries are cleaned up on a later provisioning run.
 
-The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any template of the project uses an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
+The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any agent of the project runs an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
 
 - runs the full provisioning step again: an existing clone is reused, but the whole workspace is chowned recursively on every start;
 - writes `.scion-provisioned` back into the workspace root (newer images add it to the git excludes);
 - if it only waits for another Pod's provisioning, times out, because the newer image writes the sentinel in the state directory.
 
-No data is lost in these cases, but to keep the workspace free of provisioning files, update the images of all of a project's templates to a release that includes the provisioning state directory.
+No data is lost in these cases, but to keep the workspace free of provisioning files, update the images of the project's harness-configs to a release that includes the provisioning state directory.
 
 `mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
 
