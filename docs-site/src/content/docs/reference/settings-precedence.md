@@ -803,6 +803,8 @@ through their own chain, defined in `ProvisionAgent`'s harness-config merge
 The template tier no longer receives a value: a template's `image` and `kubernetes` keys are
 ignored with a warning (see
 [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
+Exception: an agent provisioned before this change still uses the template image and pull policy
+recorded at its provision when its template can no longer be resolved.
 
 Only an *explicit* profile override moves above the template; the plain `harness_configs.<name>`
 defaults stay below it. A profile's `image_pull_policy` moves up only together with a profile
@@ -914,14 +916,13 @@ a later start or restart from the template's own value recorded at provision. A 
 now ignored (see
 [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
 
-`AppliedConfig.Image` is the Hub's display record: filled from the template at create, then
+`AppliedConfig.Image` is the Hub's display record: filled from the request's explicit image at create, then
 overwritten with the image the broker reports. The broker's provision-only response reports the
 image `Start` will run. The field never feeds a later dispatch, so a hub restart re-resolves the
 profile-override, settings and file tiers live rather than freezing the image applied at creation.
 [Reincarnating an Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent)'s plan preview
 approximates this image precedence from the Hub's own view. It can differ from what the broker
-runs: it still starts from an image set on the Hub template record, which the broker no longer
-applies, and when the broker resolves the agent's harness config itself the preview cannot look up
+runs: when the broker resolves the agent's harness config itself the preview cannot look up
 the profile override. The broker resolves the final image, including the profile override, and the
 image it reports replaces the preview once the agent starts.
 
@@ -1016,7 +1017,8 @@ recorded at its last provision, with a warning, rather than falling through to H
 file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
 value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
 merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
-`image` is now ignored, so no template value is recorded.
+`image` is now ignored, so new agents record no template value; values recorded for older agents
+are still replayed.
 
 ---
 
