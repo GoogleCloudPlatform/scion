@@ -713,3 +713,57 @@ func TestReleaseIfAgent_MissingRow_ReturnsNotFound_SweepStillReleases(t *testing
 func TestCapacityPredicates_StoreAndHubAgree(t *testing.T) {
 	assert.Equal(t, containerStatusStopQueued, store.ContainerStatusStopQueued)
 }
+
+// hideAfterReadStore drops agentID from the sweep's batch read of the agents
+// holding rows, as a soft-deleted agent would look, and runs afterRead right
+// after that read, once, while armed.
+type hideAfterReadStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	agentID   string
+	afterRead func()
+	done      bool
+}
+
+func (h *hideAfterReadStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	out, err := h.Store.GetAgentsByIDs(ctx, ids)
+	if err != nil || !h.fault.Active() || h.done {
+		return out, err
+	}
+	for _, id := range ids {
+		if id == h.agentID {
+			h.done = true
+			delete(out, id)
+			h.afterRead()
+			break
+		}
+	}
+	return out, err
+}
+
+// The release of a missing or soft-deleted agent's row is conditional on
+// the row too: a restore and a start that re-reserved after the read keep
+// their slot.
+func TestSweep_StaleDeletedObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
+	srv, s, hook, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *hideAfterReadStore {
+		return &hideAfterReadStore{Store: inner, fault: f}
+	})
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rerez-del")
+	a := newQuotaTestAgent(t, s, broker, project, "rerez-del", state.PhaseRunning)
+	seedSlot(t, s, broker.ID, a.ID)
+
+	var fresh *store.UsageReservation
+	hook.agentID = a.ID
+	hook.afterRead = func() {
+		require.NoError(t, s.ReleaseReservation(context.Background(), brokerLimitDefID(t, s), a.ID))
+		fresh = seedSlot(t, s, broker.ID, a.ID)
+	}
+	fault.Arm()
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	require.NotNil(t, fresh)
+	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, held, "the re-reserved slot is not freed by the stale observation")
+	assert.Equal(t, fresh.ID, held.ID)
+}
