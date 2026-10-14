@@ -149,12 +149,22 @@ func (s *Server) DrainLaunches(ctx context.Context, max time.Duration) {
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, max)
 	defer cancel()
+	// Wait for each launch until the bound; stop waiting at the first
+	// timeout, then count which launches have finished.
+wait:
+	for _, rec := range recs {
+		select {
+		case <-rec.done:
+		case <-waitCtx.Done():
+			break wait
+		}
+	}
 	finished := 0
 	for _, rec := range recs {
 		select {
 		case <-rec.done:
 			finished++
-		case <-waitCtx.Done():
+		default:
 		}
 	}
 	d.expired.Store(true)
