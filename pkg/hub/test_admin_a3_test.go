@@ -545,20 +545,30 @@ func TestTestAdminA3_PurgeCallers(t *testing.T) {
 	// deny for every admin kind), before any purge logic: the decision
 	// names the policy and the sink records the refusal for the caller.
 	for kind, caller := range kinds {
+		policyLines := func() int {
+			n := 0
+			for _, l := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
+				if l["user_id"] == caller.Identity.ID && l["class"] == "permission" && l["subject"] == permissionTestIdentityIssue &&
+					l["issuance_id"] == caller.Identity.IssuanceID && l["route_id"] != nil && l["route_id"] != "" {
+					n++
+				}
+			}
+			return n
+		}
+		before := policyLines()
 		rec := doRequestWithToken(t, srv, caller.AccessToken, http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s as purge caller: %s", kind, rec.Body.String())
+		assert.Equal(t, testIdentityReasonFixtureCall, taReason(t, rec), "%s: the answer names the test-identity cause", kind)
+		assert.Contains(t, rec.Body.String(), `"denied_by":"`+string(DeniedByTestAdminPolicy)+`"`, "%s: and the test-admin policy", kind)
+		// The HTTP request itself wrote the policy refusal: a new sink line
+		// for this caller's issuance with the route ID (only a request
+		// context carries them), counted before any direct Decide below.
+		assert.Equal(t, before+1, policyLines(), "%s: the request's refusal is the test-admin policy's, in the sink", kind)
 		d := srv.authzService.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(tsaIdentity(t, s, caller.Identity.ID)),
 			Credential: credentialContextForIdentity(tsaIdentity(t, s, caller.Identity.ID)), Resource: Resource{Type: "test_identity"},
 			Action: ActionIssue, Permission: permissionTestIdentityIssue, TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue)})
 		assert.False(t, d.Allowed)
-		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: the refusal is the test-admin policy's: %s", kind, d.Reason)
-		var found bool
-		for _, l := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
-			if l["user_id"] == caller.Identity.ID && l["class"] == "permission" && l["subject"] == permissionTestIdentityIssue {
-				found = true
-			}
-		}
-		assert.True(t, found, "%s: the policy refusal of test_identity.issue is in the sink", kind)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: the decision names the test-admin policy: %s", kind, d.Reason)
 	}
 
 	// Control: a human who passes the route's test_identity.issue check

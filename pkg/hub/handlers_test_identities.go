@@ -444,6 +444,15 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 	})
 	if !decision.Allowed {
 		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, decision.Reason)
+		// A test identity with an admin role holds test_identity.issue
+		// through its role, and the test-admin policy refuses it: the
+		// answer names the test-identity cause, as for every test kind
+		// below (admin tier A3, carry item 3).
+		if decision.DeniedBy == DeniedByTestAdminPolicy {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
+				map[string]interface{}{"reason": testIdentityReasonFixtureCall, "denied_by": string(DeniedByTestAdminPolicy)})
+			return nil, false
+		}
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 		return nil, false
 	}
