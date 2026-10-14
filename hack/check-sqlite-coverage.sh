@@ -35,7 +35,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
-CHECK=check-sqlite-coverage
+CHECK="check-sqlite-coverage"
 
 provenance() {
   local sha
@@ -61,7 +61,7 @@ sqlite_test_dirs() {
     | sed -e 's|/go.mod$|/|')"
   # Pattern uses POSIX ERE (-E); no GNU-only \| or \b. --exclude-dir is
   # in both GNU and BSD grep.
-  (cd "$root" && grep -rlE --include='*_test.go' --exclude-dir=vendor \
+  (cd "$root" || exit; grep -rlE --include='*_test.go' --exclude-dir=vendor \
     --exclude-dir=node_modules --exclude-dir=.git \
     -e '^//go:build .*!no_sqlite([^A-Za-z0-9_]|$)' . || true) \
     | grep -vE '/(testdata|vendor|node_modules)/' \
@@ -159,7 +159,7 @@ self_test() {
     rc=0
     out="$(scan "$tmp" "$@" 2>&1)" || rc=$?
     if [[ "$rc" -ne "$want" ]] || { [[ -n "$sub" ]] && [[ "$out" != *"$sub"* ]]; }; then
-      echo "$CHECK self-test FAIL: patterns [$*]: want rc $want${sub:+ and '$sub'}, got rc $rc: $out" >&2
+      echo "$CHECK self-test FAIL: patterns [$*]: want rc $want${sub:+ and \"$sub\"}, got rc $rc: $out" >&2
       fails=$((fails + 1))
     fi
   }
