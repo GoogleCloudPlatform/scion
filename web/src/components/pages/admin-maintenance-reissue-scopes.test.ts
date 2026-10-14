@@ -150,7 +150,7 @@ async function settle(page: MaintenancePage, rounds = 10): Promise<void> {
 
 async function mount(opts: MountOpts): Promise<MaintenancePage> {
   vi.stubGlobal('fetch', vi.fn(makeHandler(opts)));
-  el = document.createElement('scion-page-admin-maintenance') as MaintenancePage;
+  el = document.createElement('scion-page-admin-maintenance');
   document.body.appendChild(el);
   await settle(el);
   return el;
