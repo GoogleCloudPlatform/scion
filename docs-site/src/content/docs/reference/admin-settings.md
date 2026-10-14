@@ -278,7 +278,7 @@ To streamline management of complex environments, the **General** settings tab i
 
 1. **General Card**: Houses central Hub identity, registration endpoints, and core server configurations.
 2. **Agent Defaults Card** (with dedicated sub-tabs):
-   - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely.
+   - Configures default resource constraints (`max_turns`, `max_duration`, limits). These fields can be cleared to blank in the UI, which persists them as `null` in the Hub settings database instead of preserving their previous values, allowing administrators to remove default constraints entirely. A change to the limits (`default_max_turns`, `default_max_model_calls`, `default_max_duration`) or to `default_resources` reaches existing agents at their next start or restart, unless the agent, its template or (for resources) its broker profile sets the value. Agents created before this behaviour was added keep the limits they have stored. See [Where hub `agent_defaults` rank](/scion/reference/settings-precedence/#where-hub-agent_defaults-rank).
    - Introduces **Default Model** (`default_model`), **Default Thinking Level** (`default_thinking_level`), and **Default Agent Role** (`default_agent_role`) fields directly into the agent default pipeline (with the default agent role updated from `baseline` to `full` for usability).
    - Introduces **Default Runtime Broker** (`default_runtime_broker`), a hub-level default that participates in the [broker resolution cascade](/scion/hosted/ha/multi-broker/#broker-selection). When a project has no default broker and no broker is explicitly requested, the hub-level default is used if the broker is online and dispatchable.
    - **Default Timezone** (`agent_defaults.default_timezone`): an IANA zone picker for the `TZ` sent to agent containers that have no pinned timezone and no `TZ` in the Hub environment-variable store. Empty means no default, so those containers use the image default (UTC). Invalid names and `Local` are rejected with `422`. It sets agent containers only, not how the web UI displays times. See [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents) for the full chain.
@@ -320,6 +320,8 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 | *Tracking deployment configuration* | Seeded section — re-syncs on restart |
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |
 | Deprecation banner | `SCION_SERVER_*` used for Layer-1 settings |
+
+The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
 
 ### Error Handling
 

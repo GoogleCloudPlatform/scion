@@ -4,7 +4,7 @@ description: The scion artifact command and the /api/v1/artifacts routes for pub
 ---
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, or when the hub's `artifacts` settings section is disabled, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages and no *Artifacts* item in the sidebar. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)). Artifacts require Hub mode.
+Artifacts are behind the `hub.artifacts` experiment, which is **off by default**. While it is off, or when the hub's `artifacts` settings section is disabled, every `/api/v1/artifacts` route answers `404` and the web UI shows no artifact pages and no *Artifacts* item in the sidebar. An admin enables it under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 :::
 
 An **artifact** is a published file or folder (a *bundle*) with a stable reference, `scion://artifact/<id>`, that works from any runtime broker, in any project the reader can access, and in the web UI. The hub stores the bytes, so a reader never needs access to the publisher's filesystem or shared directories.

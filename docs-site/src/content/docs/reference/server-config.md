@@ -71,8 +71,8 @@ Controls the central Hub API server.
 | `missing_agent_grace` | duration | `"3m"` | How long a `running` (or `stopping`) agent may be absent from its Runtime Broker's heartbeat before the Hub marks it `error` with exit reason `container_missing` (an existing `preempted` or `evicted` exit reason and its message are kept). Applies only when the broker is online, reported a complete runtime inventory, and sent a recent previous heartbeat; agents with a lifecycle operation in progress are skipped. Values below `"1m"` fall back to the default. Env: `SCION_SERVER_HUB_MISSINGAGENTGRACE`. |
 | `start_claim_lease_ttl` | duration | `"90s"` | Lease of the claim the Hub takes before dispatching any agent start; the Hub process running the start renews it every third of this. Allowed `30s` to `5m`; other values fall back to the default. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCLAIMLEASETTL`. |
 | `start_max_duration` | duration | `"12m"` | Hard deadline on any agent start, including a wait for another Hub node to dispatch it. Minimum `11m` (the broker's pod-ready bound plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTMAXDURATION`. |
-| `start_unconfirmed_hold` | duration | `"13m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `12m40s` (the broker's whole start budget plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
-| `start_create_unconfirmed_hold` | duration | `"5m"` | `start_unconfirmed_hold` for a new agent's create-and-start. Allowed `3m` up to `start_unconfirmed_hold`. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
+| `start_unconfirmed_hold` | duration | `"17m"` | Longest time a start whose outcome is unknown (for example a dispatch timeout) keeps other starts of the agent waiting, until the runtime shows whether it created anything. Minimum `16m` (the Runtime Broker's 15-minute bound on a synchronous start, plus a minute). Hot-reloaded. Env: `SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD`. |
+| `start_create_unconfirmed_hold` | duration | `"16m"` | `start_unconfirmed_hold` for a new agent's create-and-start. The Runtime Broker may go on starting the agent for up to 15 minutes after the Hub stops waiting for it, so the allowed range is `16m` up to `start_unconfirmed_hold`. A value from an earlier release below the minimum (for example `5m`) is raised to `16m` with a warning, and a lower `start_unconfirmed_hold` (for example `13m`) to `16m`; such values still save. Hot-reloaded. Env: `SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD`. |
 | `perf_trace` | bool | `false` | Turns on per-request performance tracing for diagnosis. Observe only. See [Request performance tracing](#request-performance-tracing) and the [developer guide](/scion/contributing/perf-tracing/). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PERFTRACE`. |
 | `membership_sweep_report_only` | bool | `false` | Puts the membership-standing sweep in report-only mode: it logs and audits (`agent_hold_would_set`) each agent it would hold and stop, and holds and stops none. Off by default (the sweep enforces). Holds from membership changes made while it is on still apply. Set it on every replica: the sweep runs on whichever replica takes its lock, and a replica left enforcing holds the listed agents at its next sweep. For the first boot after an upgrade; see [Upgrading: report-only first boot](/scion/reference/agent-suspension/#upgrading-report-only-first-boot). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_MEMBERSHIPSWEEPREPORTONLY`. |
 | `cors` | object | | CORS configuration (see below). |
@@ -163,7 +163,7 @@ Asynchronous create is the `hub.async_agent_launch` [experiment](/scion/referenc
 - **Turning it off.** Creates sent after the experiment is turned off are synchronous. Launches the broker has already accepted are not cancelled: they finish, or are ended by `launch_timeout` or broker loss, as before.
 - **Starts during a launch.** While a launch is in progress and before its deadline, a start or restart of that agent returns the launching agent with HTTP 200 instead of starting it again (a restart adds the warning `agent is launching; restart not performed`), and `scion start` keeps waiting. Restore, reincarnate, and wake are refused with `agent_launching`.
 
-**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate`, `cloudrun`, and `cloudrun-sandbox`) also falls back to the synchronous create.
+**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate` and `cloudrun`) also falls back to the synchronous create.
 
 **Slow pod starts.** On clusters with slow node provisioning, for example GKE Autopilot cold starts where a new node is added and the agent image takes several minutes to pull, raise `launch_timeout` so the launch is not ended first:
 
@@ -182,6 +182,11 @@ server:
 - **Symptoms.** If the service allocates CPU only during requests (the Cloud Run default), the launch stalls after the create response. The broker stops reporting, so the Hub ends the launch and sets the agent to `error` with launch error `broker_lost` (or `launch_timeout`). With minimum instances at zero, idle scale-in can also end a broker mid-launch, with the same result.
 - **Startup warning.** The server cannot see the service's CPU setting. When the Runtime Broker is enabled and the process runs on a Cloud Run service (`K_SERVICE` set, `CLOUD_RUN_INSTANCE` unset), it logs this warning once at startup: "If this Cloud Run service allocates CPU only during requests, async agent launches will stall after the create response and be reaped. Deploy with --no-cpu-throttling and set SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true to silence this."
 - **Silencing it.** Set the environment variable `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` on a service deployed with `--no-cpu-throttling`. It is an assertion, not a check: remove it if you redeploy with CPU throttling. The Cloud Run deploy script (`scripts/cloudrun/deploy.sh`) sets both.
+
+**Brokers using the `cloudrun-sandbox` runtime.** On the single-node [Cloud Run Instance tier](/scion/hosted/single-node/hub-setup-cloudrun/), the Runtime Broker runs on the Cloud Run Instance and starts each agent as a Cloud Run Sandbox. With `async_agent_launch: true`, eligible creates that opt in are asynchronous:
+
+- **Launch timeout.** Set `launch_timeout` to at least `"60s"`. A sandbox start may not finish within a shorter budget, and the launch is then ended with `launch_timeout`.
+- **CPU after the create response (not verified).** Async on this runtime assumes the Cloud Run Instance keeps CPU allocated while the broker finishes the launch in the background after the create response. This has not been verified on a live Instance. If the Instance does not keep CPU allocated, launches stall after the create response and the Hub ends them with `broker_lost` or `launch_timeout`; the synchronous create (`async_agent_launch: false`, the default) is not affected. To return to it, set `async_agent_launch: false` and restart the Hub. The startup warning above covers Cloud Run services only and is not logged on an Instance.
 
 #### Request performance tracing
 
@@ -229,7 +234,68 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type` (`docker` or `kubernetes`), an optional `display_name`, and for `kubernetes` the optional `context`, `namespace`, `kubeconfig`, `kubernetes_service_account_mappings`, `kubernetes_block_service_account`, `shared_dir_storage_class` and `shared_dir_size`. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). An entry may also set `agent_defaults`, the workload defaults of the agents it runs (see below). |
+
+#### Flat instance runtime target (`server.broker.instances[].runtime_target`)
+
+The runtime target of one flat Runtime Broker instance, and the instance's own infrastructure defaults. A flat instance never uses Runtime Broker Profiles, so these fields take the place that a profile and its runtime entry hold for a regular Runtime Broker. Each default keeps its usual precedence: an agent's own value still wins over it, and an unset field falls back to the same global setting as before. All fields are local operator policy. They are read only from the global `settings.yaml` and are never sent to the Hub. Unknown keys and invalid values refuse startup with an error that names the settings path. A Kubernetes-only field on a `docker` instance is refused with `field not valid for runtime target type docker`.
+
+| Field | Type | Applies to | Description |
+| :--- | :--- | :--- | :--- |
+| `type` | string | both | `docker` or `kubernetes`. Required. |
+| `display_name` | string | both | Non-sensitive name shown in the UI. Default: the type. |
+| `context` | string | kubernetes | Context in the loaded kubeconfig. Default: its current context. |
+| `namespace` | string | kubernetes | Namespace for the instance's agents. Default: `SCION_K8S_NAMESPACE`, `POD_NAMESPACE`, the service account's namespace, else `default`. |
+| `kubeconfig` | string | kubernetes | Absolute path of the instance's own kubeconfig file, then its only configuration and credential source. Default: the process's normal kubeconfig loading. |
+| `kubernetes_block_service_account` | string | kubernetes | Kubernetes ServiceAccount for pods whose GCP identity mode resolves to `block`. |
+| `kubernetes_service_account_mappings` | map | kubernetes | GCP service account email to the Kubernetes ServiceAccount bound to it through Workload Identity, for GCP identity mode `assign`. |
+| `shared_dir_storage_class` | string | kubernetes | Default storage class for shared directory PVCs (must support ReadWriteMany). An agent's own `kubernetes.shared_dir_storage_class` wins. |
+| `shared_dir_size` | string | kubernetes | Default size of each shared directory PVC, a positive Kubernetes quantity such as `40Gi`. Default: `10Gi`. An agent's own `kubernetes.shared_dir_size` wins. |
+| `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
+| `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
+| `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `shared_dir_storage_backend` | string | both | `local` or `nfs`. Shared directory storage backend for the instance's new agents. Default: [`server.shared_dir_storage.backend`](#shared-directory-storage-servershared_dir_storage). |
+| `shared_dir_storage_backends` | map | both | Shared directory name to `local` or `nfs`, for the instance's new agents. A directory the map does not name uses `shared_dir_storage_backend`. |
+| `home_storage_backend` | string | kubernetes | `local` or `nfs`. Home storage of the instance's new agents. Default: [`server.home_storage.backend`](#agent-home-storage-serverhome_storage). The `nfs` backend still needs the `hub.k8s_nfs_home` experiment. |
+| `home_storage_leaf` | string | kubernetes | `pod` or `broker`: how the home directory is created on the export. Default: `server.home_storage.leaf`. |
+
+Notes on the storage backends:
+
+- **Recorded decisions are kept.** The backends apply only when an agent starts for the first time. An agent keeps the shared directory backends and the home storage it recorded then, even if the instance's settings change later.
+- **The nfs backend needs the global NFS block.** An instance that selects `nfs` for shared directories or for the home needs a complete [`server.shared_dir_storage.nfs`](#shared-directory-storage-servershared_dir_storage) block in the same file. Without one, startup is refused, as for any other invalid entry: none of the process's instances start until the settings are fixed.
+- **Plugins read the global settings.** Plugins resolve a shared directory's host path from the global settings, not from an instance. At startup, a warning is logged for each instance whose backend differs from the global one. Set the same backend in the global settings to keep them in agreement.
+
+#### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
+
+An optional block of workload defaults for the agents a flat Runtime Broker instance runs. A flat instance does not use Runtime Broker profiles, so these take the place of the matching profile settings. Each value sits exactly where the profile value sat in its own precedence order: a template, the agent's own configuration or the request still wins wherever it won over a profile, and an unset value falls through to the same lower settings. The block is read from `settings.yaml` only and is never sent to the Hub. Unknown keys are refused at startup, naming the settings path.
+
+| Key | Type | Precedence |
+| :--- | :--- | :--- |
+| `default_harness_config` | string | Below the template's and the agent's stored harness config; above the top-level `default_harness_config`. |
+| `image_registry` | string | Above the top-level `image_registry`. |
+| `volumes` | list of volume mounts | Appended after the harness config's volumes. |
+| `resources` | resource spec | The agent's own resources win over it; it wins over the Hub `agent_defaults.resources` and `default_resources`. |
+| `harness_overrides.<harness-config>` | `image`, `image_pull_policy`, `user`, `auth_selected_type`, `env`, `volumes`, `resources` | Applied over `harness_configs.<harness-config>`, as a profile's harness override is. An explicit `image` outranks the template and inline images (only a request image beats it). Its `resources` rank above the agent's own. An empty `env` value in any override marks a key the user must supply. Validated like a profile's harness override. |
+| `secrets` | list of secret declarations (no values) | Required secrets, between the harness config's secrets and the template's. |
+| `clone_depth` | `"full"` or an integer from 1 | Below the template's or agent's `clone_depth`; unset keeps the default shallow clone. |
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: docker-1
+        name: docker-1
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: registry.example.com/team
+          resources:
+            requests:
+              memory: 2Gi
+          harness_overrides:
+            claude:
+              auth_selected_type: vertex-ai
+```
 
 ### Database (`server.database`)
 
@@ -309,6 +375,8 @@ Proxy authentication configuration (consulted when `server.auth.mode` is set to 
 | :--- | :--- | :--- | :--- |
 | `provider` | string | | Selects the proxy auth provider: `"iap"`, `"jwt"`, or `"header"`. |
 | `require_trusted_proxy_ip` | bool | `false` | Enables defense-in-depth IP allowlisting. Uses the trusted_proxies CIDR list. |
+| `driver_principals` | list | `[]` | Exact emails (no wildcards) of the browser drivers, such as a test-UI service account, that may carry test identity browser sessions through the proxy. A driver principal never gets a hub account: without a test identity session, page navigations and assertion-only API requests get `403` (`driver_principal_has_no_session`), and API requests with its ID token never act as it (`401` or `403`). Startup only; never writable through the settings API and not shown by it. A hub whose `mode` is not `"proxy"` refuses to start with a non-empty list. See [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/#iap-fronted-hubs). |
+| `driver_token_audience` | string | | The IAP OAuth client ID. On `/api/v1/` requests, a driver's Google ID token with exactly this audience is replaced by the test identity session it carries (only when every condition in the how-to holds). Unset: never replaced. Startup only; never writable through the settings API and not shown by it. |
 
 #### Google IAP Settings (`server.auth.proxy.iap`)
 
@@ -844,6 +912,7 @@ Configuration for inbound OIDC-based federation authentication.
 | `allowed_emails` | list of strings | | Restrict user tokens to specific email claims (supports wildcards e.g. `*@example.com`). |
 | `allowed_domains` | list of strings | | Google issuer only. Restrict **user** principals presenting an [external bearer token](/scion/hosted/single-node/auth/#external-bearer-tokens-google-credential-pass-through) to these email domains (exact, case-insensitive, no wildcards or subdomain matching). The Hub sign-in policy still applies. Never consulted for service accounts. |
 | `allowed_gcp_projects` | list of strings | | Google issuer only. Admit **service-account** principals whose GCP project ID (parsed from the service account email) is listed. Empty admits no service accounts. Distinct from `allowed_projects`, which matches Scion project IDs. |
+| `allow_visitor_grants` | bool | `false` | `issuer_type` `user` or `hub` only. Lets holders of `project.manage_visitors` (project owners and admins, hub admins) grant visitor access to users of this issuer, by email, while the `federation.project_visitors` experiment is on; granting also needs every permission of the `project-visitor` role on the project. The email must also pass `allowed_emails` and `allowed_domains`. A granted user's first request from this issuer with that email (present, and verified where the token carries `email_verified`) links the grant to the token's subject. When `false`, the Hub refuses visitor grants for the issuer, links no new visitor, and refuses the issuer's linked visitors on their next request (`403`). Their grants are kept, so setting it back to `true` restores access with no grant change. |
 
 ### OIDC Login (`server.oidc_login`)
 
@@ -1022,6 +1091,20 @@ Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is de
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 
 The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
+
+#### The hub a Runtime Broker reports to
+
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose Runtime Broker runs next to the Hub, the Runtime Broker uses the Hub's localhost address when that setting is unset. A server that runs only a Runtime Broker falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+
+#### Deprecated fallback to the CLI's hub endpoint
+
+`hub.endpoint` and `SCION_HUB_ENDPOINT` are CLI settings. The CLI now keeps its Hubs in a per-user hub list (see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/)), and the server's own endpoints belong in `server.hub.public_url` and `server.broker.hub_endpoint`. When the server's endpoint actually comes from the legacy fallback, the server logs this warning once at startup:
+
+```text
+deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
+```
+
+There is no warning when removing the fallback would not change the result, for example on a workstation whose `hub.endpoint` is its own loopback address. On a host configured as a server, `scion doctor` reports the same text as its `server-hub-endpoint` check; it cannot see the server's flags, so it warns only when every way the server could run would be affected. Selecting a Hub with `scion use` never changes the endpoint a server advertises.
 
 #### Splitting the agent endpoint from the public URL
 

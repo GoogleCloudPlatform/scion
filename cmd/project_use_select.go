@@ -74,11 +74,7 @@ var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
 // environment applies, as for 'hub auth login'), else only the transport of
 // the hub's own entry.
 func useLoginClientOptions(endpoint string) ([]hubclient.Option, error) {
-	settings, err := config.LoadSettings(useSettingsPath())
-	if err != nil {
-		settings = &config.Settings{}
-	}
-	if hubGetsFullChain(settings, endpoint, false) {
+	if hubGetsFullChain(endpoint, false) {
 		return nil, nil
 	}
 	src, mode, err := fanOutTransport(endpoint)
@@ -166,9 +162,9 @@ type useLookup struct {
 
 // useCandidateHubs returns the hubs to search: only the hub given with
 // --hub, or else SCION_HUB_ENDPOINT/SCION_HUB_URL, when one is set
-// (explicit is then true); else every registered hub, plus the effective
-// hub from the settings when it has no hub entry.
-func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []useHub, explicit bool, err error) {
+// (explicit is then true); else every registered hub (the hub of a link
+// entry or the current context always has an entry).
+func useCandidateHubs(c *config.CLIContext) (hubs []useHub, explicit bool, err error) {
 	chosen := hubFlagEndpoint()
 	if chosen == "" {
 		chosen, _ = envHubEndpoint()
@@ -187,14 +183,6 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []u
 	for _, name := range c.HubNames() {
 		hubs = append(hubs, useHub{Name: name, Endpoint: c.Hubs[name].Endpoint})
 	}
-	if ep := GetHubEndpoint(settings); ep != "" {
-		if _, h := c.HubByEndpoint(ep); h == nil {
-			if err := config.ValidateHubURL(ep); err != nil {
-				return nil, false, err
-			}
-			hubs = append(hubs, useHub{Endpoint: ep})
-		}
-	}
 	if len(hubs) == 0 {
 		return nil, false, errHubNotConfigured
 	}
@@ -204,7 +192,7 @@ func useCandidateHubs(c *config.CLIContext, settings *config.Settings) (hubs []u
 // fanOut reports whether hub must get only credentials bound to it: unless
 // the user chose it or it is the effective hub (see hubGetsFullChain).
 func (l *useLookup) fanOut(hub useHub) bool {
-	return !hubGetsFullChain(l.settings, hub.Endpoint, l.explicit)
+	return !hubGetsFullChain(hub.Endpoint, l.explicit)
 }
 
 // remember records projects seen on hub for the known-project list.
@@ -492,7 +480,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 		settings = &config.Settings{}
 	}
 	c, _ := config.LoadCLIContext()
-	hubs, explicit, err := useCandidateHubs(c, settings)
+	hubs, explicit, err := useCandidateHubs(c)
 	if err != nil {
 		return err
 	}
@@ -677,8 +665,8 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		})
 	}
 	// Announce a new entry only for a URL given with --hub. An endpoint
-	// from the environment or settings gets its entry silently, as before
-	// there were hub nicknames.
+	// from the environment gets its entry silently, as before there were
+	// hub nicknames.
 	if registered && hubFlagEndpoint() != "" {
 		printRegisteredHub(out, hubName, endpoint)
 	}
@@ -694,13 +682,13 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		warnHubTokenForContextHub(stderr, hubName)
 	}
 	if dir, ok := walkedProject(); ok && projectPath == "" && !globalMode {
-		dirHub := mergedHubEndpoint(dir)
+		// The hub of the directory project is that of its link entry; an
+		// unlinked directory project uses the current hub, the one just
+		// selected.
+		dirHub := hubName
 		c, _ := config.LoadCLIContext()
-		if name, _ := c.HubByEndpoint(dirHub); name != "" {
-			dirHub = name
-		}
-		if dirHub == "" {
-			dirHub = "-"
+		if p, _ := c.LinkEntryFor(config.LinkPathForProject(dir)); p != nil {
+			dirHub = p.Hub
 		}
 		_, _ = fmt.Fprintf(out, "Note: in this directory, project '%s' (%s, hub '%s') takes precedence; '%s' applies outside scion project directories.\n",
 			config.GetProjectName(dir), displayProjectDir(dir), dirHub, shown)

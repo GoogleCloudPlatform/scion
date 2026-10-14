@@ -82,6 +82,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentDeleteLocalOnly(ctx context.Context, 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop. Pinned agents never move
+	// (reincarnate_move.go refuses them upstream); this is defence in
+	// depth for a corrupted pin.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	if err := d.requireAgentMoveBroker(ctx, agent); err != nil {
 		return err
 	}

@@ -221,6 +221,10 @@ const (
 	// createStageWorkspaceUpload: the hub-managed workspace upload ran past
 	// its own budget (hubWorkspaceUploadTimeout).
 	createStageWorkspaceUpload = "workspace_upload"
+	// createStageEnvFinalize: the env submit's finalize dispatch, which
+	// starts the agent. Recorded only when its outcome is unknown
+	// (keepUnknownOutcomeStart); the finalize never rolls the create back.
+	createStageEnvFinalize = "env_finalize"
 	// createStageManagedRecord: the managed create's post-create write
 	// (managed Runtime, interaction ID) failed (ptone/scion#3557).
 	createStageManagedRecord = "managed_record"
@@ -342,7 +346,7 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		}, "compensation", true); err != nil {
+		}, "compensation"); err != nil {
 			return err
 		}
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {

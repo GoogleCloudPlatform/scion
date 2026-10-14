@@ -182,8 +182,11 @@ func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
 //
 //   - ErrLifecycleDeferred: returned unchanged with no launch write here; the
 //     owner node runs dispatchLaunching itself.
-//   - error, env requirements, or a synchronous answer from a broker without
-//     async support: the launch is ended as not_launched.
+//   - an error whose outcome is unknown (isUnknownDispatchOutcome: the
+//     request may have reached the broker): the launch is kept and returned
+//     as accepted with no owner, and no error (ptone/scion#4866).
+//   - any other error, env requirements, or a synchronous answer from a
+//     broker without async support: the launch is ended as not_launched.
 //   - launchPending with the matching ID: the launch is marked accepted and
 //     returned. The agent row is now provisioning.
 //   - launchPending with another ID: the launch is ended and
@@ -248,6 +251,22 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		// Raised by routing before any send. The owner's BeginLaunch
 		// supersedes launchID; no further write here.
 		return nil, nil, nil, err
+	case err != nil && isUnknownDispatchOutcome(err):
+		// The broker may have received the request and be launching
+		// (ptone/scion#4866): ending the launch here would make its claim
+		// answer 409 not_launched and tear the launch down. Accept the
+		// launch exactly as an acknowledged one, with no owner yet (the
+		// row moves to provisioning, so callers, the CLI and the web
+		// follow it as any accepted launch): the broker's first claim
+		// records the owner, and if the request never arrived the launch
+		// reaper ends the launch (lost, or timed out at its deadline). No
+		// error is returned, so the minted credential is kept, as for any
+		// accepted launch.
+		d.log.Warn("Async launch send outcome unknown; keeping the launch for the broker's claim or the launch reaper",
+			"agent_id", agent.ID, "launch_id", launchID, "error", err)
+		d.markLaunchAccepted(ctx, agent, launchID, "")
+		addDispatchWarnings(ctx, launchOutcomeUnknownWarning)
+		return nil, nil, &LaunchAccepted{ID: launchID}, nil
 	case err != nil:
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return nil, nil, nil, err
@@ -256,18 +275,7 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		d.endLaunchNotLaunched(ctx, agent, launchID)
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
-		// Detached from the request, like endLaunchNotLaunched: the broker
-		// is already launching, so a client disconnect must not drop this
-		// write.
-		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, resp.LaunchInstanceID)
-		if err != nil {
-			// The broker is launching; its first claim records the owner
-			// if this write was lost.
-			d.log.Warn("Failed to record accepted launch",
-				"agent_id", agent.ID, "launch_id", launchID, "error", err)
-		}
+		d.markLaunchAccepted(ctx, agent, launchID, resp.LaunchInstanceID)
 		d.log.Info("Agent create accepted for async launch",
 			"agent_id", agent.ID, "project_id", agent.ProjectID, "launch_id", launchID,
 			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
@@ -283,6 +291,25 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		return nil, nil, nil, errLaunchEchoMismatch
 	}
 }
+
+// markLaunchAccepted records launchID as accepted (owner may be empty: the
+// broker's first claim records it). It uses a context detached from the
+// request, like endLaunchNotLaunched: the broker may already be launching,
+// so a client disconnect must not drop this write.
+func (d *HTTPAgentDispatcher) markLaunchAccepted(ctx context.Context, agent *store.Agent, launchID, owner string) {
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if _, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, owner); err != nil {
+		// The broker is launching; its first claim records the owner
+		// if this write was lost.
+		d.log.Warn("Failed to record accepted launch",
+			"agent_id", agent.ID, "launch_id", launchID, "error", err)
+	}
+}
+
+// launchOutcomeUnknownWarning is the dispatch warning for a launch kept
+// after a send whose outcome is unknown.
+const launchOutcomeUnknownWarning = "The runtime broker did not confirm the launch request; the launch is kept and settles when the broker reports it, or ends when the launch times out."
 
 // endLaunchNotLaunched ends launchID as not_launched. It uses a context
 // detached from the request so a client disconnect cannot strand the launch.

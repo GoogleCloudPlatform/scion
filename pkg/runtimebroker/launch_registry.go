@@ -241,6 +241,18 @@ func (r *launchRegistry) otherRunInFlightID(key launchKey, runID string) (string
 	return "", false
 }
 
+// anyInFlight reports whether any launch or create is registered under
+// key, whatever its run or agent ID (a purge of retained files refuses
+// then, ptone/scion#4744). False for a nil registry.
+func (r *launchRegistry) anyInFlight(key launchKey) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.records[key] != nil
+}
+
 // runInFlight reports whether the launch registered under key is of run
 // runID exactly. False for an empty runID or a launch with no run ID.
 func (r *launchRegistry) runInFlight(key launchKey, runID string) bool {
