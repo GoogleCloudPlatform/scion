@@ -848,6 +848,10 @@ async function clickInFrameLink(
     .click()
     .then(() => 'clicked')
     .catch((err: unknown) => redactViews(firstLine(err)));
+  if (DIAG_LEGS_ON) {
+    // Right after the click: did the banner (in normal flow) move or appear?
+    rec.bannerAfterClick = await bannerState(page, null);
+  }
   await page.waitForTimeout(1_000);
   rec.after1s = { viewFrames: viewFrameStates(page), frameDetached: await frameDetached(page) };
   const firstNavigated = !alreadyThere && (await frameReaches(page, targetEntry, seq, 4_000));
