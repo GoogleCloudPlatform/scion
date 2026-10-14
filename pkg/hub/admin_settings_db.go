@@ -94,7 +94,7 @@ type ServerConfigDBResponse struct {
 // bootstrap merge differs from the admin-set DB value in a managed section.
 type SupersededKey struct {
 	Key    string `json:"key"`
-	Source string `json:"source"` // "seed_env", "yaml", or "server_env"
+	Source string `json:"source"` // "seed_env", "yaml", "server_env", or "default"
 }
 
 // DeprecatedEnvKeyInfo represents a SCION_SERVER_* env var that targets a
@@ -443,7 +443,10 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 // (ptone/scion#4865), and a key is attributed to the seed layer only when
 // that layer gave it its value: a key the unseeded merge gives the same
 // value comes from a layer above the seed, which wins over it
-// (ptone/scion#4904).
+// (ptone/scion#4904). When the above-seed bootstrap is set too
+// (SetAboveSeedBootstrap, as startup does), such a key that no layer above
+// the seed sets is attributed to the seed layer when it has the key, else to
+// the coded defaults ("default", ptone/scion#4983).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
@@ -452,6 +455,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	}
 	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
 	unseededK := ops.unseededKoanf
+	aboveSeedK := ops.aboveSeedKoanf
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
@@ -484,6 +488,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 			continue
 		}
 		unseededMap := unseededSectionMap(unseededK, sec.Name)
+		aboveSeedMap := unseededSectionMap(aboveSeedK, sec.Name)
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
@@ -504,12 +509,22 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				bootstrapVal = unseededPublicURL
 			}
 			keySeedEnvK := seedEnvK
+			unsetAboveSeed := false
 			if unseededVal, ok := unseededMap[key]; ok && reflect.DeepEqual(unseededVal, bootstrapVal) {
-				// A layer above the seed (settings.yaml, the --config
-				// location or SCION_SERVER_*) gives the key this value
-				// and wins over a seed value, so the key is not
-				// attributed to the seed layer (ptone/scion#4904).
-				keySeedEnvK = nil
+				_, above := aboveSeedMap[key]
+				if aboveSeedK == nil || above {
+					// A layer above the seed (settings.yaml, the --config
+					// location or SCION_SERVER_*) gives the key this value
+					// and wins over a seed value, so the key is not
+					// attributed to the seed layer (ptone/scion#4904).
+					keySeedEnvK = nil
+				} else {
+					// No layer above the seed sets the key, so its value
+					// comes from the seed layer, when it has the key (a
+					// seed value equal to the default), else from the coded
+					// defaults (ptone/scion#4983).
+					unsetAboveSeed = true
+				}
 			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
@@ -522,9 +537,13 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				if koanfPath == "" {
 					koanfPath = key
 				}
+				source := detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key)
+				if unsetAboveSeed && source == "yaml" {
+					source = "default"
+				}
 				superseded = append(superseded, SupersededKey{
 					Key:    koanfPath,
-					Source: detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key),
+					Source: source,
 				})
 			}
 		}
@@ -820,7 +839,14 @@ func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string)
 	// Map the section-level key (e.g. "admin_emails") to koanf paths and check
 	// which layer provides the value.
 	for _, kp := range sec.KoanfPaths {
-		if opsettings.SectionKeyFromKoanfPath(kp) != key {
+		sectionKey := opsettings.SectionKeyFromKoanfPath(kp)
+		if sectionKey == "" {
+			// Sections without a JSON field mapping (agent_defaults) use
+			// the koanf path as the key, as computeSupersededKeys does
+			// (ptone/scion#4983).
+			sectionKey = kp
+		}
+		if sectionKey != key {
 			continue
 		}
 		if serverEnvK != nil && serverEnvK.Exists(kp) {

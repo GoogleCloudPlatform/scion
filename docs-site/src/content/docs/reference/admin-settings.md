@@ -321,6 +321,8 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 | ⓘ *Superseded by database value* | Deployment config differs from the admin-set value |
 | Deprecation banner | `SCION_SERVER_*` used for Layer-1 settings |
 
+The superseded notice names the layer each deployment value comes from: `SCION_SERVER_*`, `settings.yaml` (or the `--config` location), `SCION_SEED_*`, or *built-in default* for a value that no setting or variable sets. A layer is named when it sets the key, even to the default value, so a `SCION_SEED_*` value equal to the default is shown as `SCION_SEED_*`. The admin API reports these as `source` in `superseded_keys`: `server_env`, `yaml`, `seed_env`, or `default`.
+
 ### Error Handling
 
 The admin UI provides structured feedback on save:
