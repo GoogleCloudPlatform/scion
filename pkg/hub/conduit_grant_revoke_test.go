@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,4 +254,74 @@ func TestConduitGrantRingLostSettleWriteRereads(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := recheck.Lookup(first.KeyID)
 	assert.False(t, ok)
+}
+
+// gatedGrantKeyStore holds every Load while gated, until released.
+type gatedGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	gated   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	if g.gated.Load() {
+		g.entered <- struct{}{}
+		<-g.release
+	}
+	return g.memoryConduitGrantKeyStore.Load(ctx)
+}
+
+// TestConduitGrantFreshFetchDoesNotHoldSigning: a hub-direct key fetch
+// whose store read is in progress does not hold up signing, and the fetch
+// returns a ring at least as new as the request: a rotation stored while
+// the fetch waited to read is in its answer.
+func TestConduitGrantFreshFetchDoesNotHoldSigning(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	gated := &gatedGrantKeyStore{memoryConduitGrantKeyStore: mem, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	b := newConduitGrantKeys(gated, clk.Now)
+	_, err := b.signer(ctx) // creates and caches the ring
+	require.NoError(t, err)
+
+	gated.gated.Store(true)
+	type result struct {
+		keys []grant.PublicKey
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		keys, err := b.freshPublicKeys(ctx)
+		done <- result{keys, err}
+	}()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch did not read the store")
+	}
+	signed := make(chan error, 1)
+	go func() {
+		_, err := b.signer(ctx)
+		signed <- err
+	}()
+	select {
+	case err := <-signed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("signing waited for a key fetch's store read")
+	}
+
+	a := newConduitGrantKeys(mem, clk.Now)
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	gated.gated.Store(false)
+	close(gated.release)
+	r := <-done
+	require.NoError(t, r.err)
+	var found bool
+	for _, k := range r.keys {
+		found = found || k.KeyID == rot.KeyID
+	}
+	assert.True(t, found, "the fetch's answer predates a rotation stored before its read")
 }

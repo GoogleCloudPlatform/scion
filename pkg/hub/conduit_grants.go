@@ -147,8 +147,9 @@ type conduitGrantKeyStore interface {
 	// Create stores a ring where none exists, or returns
 	// store.ErrAlreadyExists.
 	Create(ctx context.Context, ring *grant.KeyRing) error
-	// CompareAndSwap replaces the ring only if its revision is still rev.
-	// It returns applied=false when another writer got there first.
+	// CompareAndSwap replaces the ring only if its revision is still rev;
+	// an applied swap stores it at revision rev+1. It returns
+	// applied=false when another writer got there first.
 	CompareAndSwap(ctx context.Context, ring *grant.KeyRing, rev int) (applied bool, err error)
 }
 
@@ -279,6 +280,10 @@ type conduitGrantKeys struct {
 	mu       sync.Mutex
 	ring     *grant.KeyRing
 	loadedAt time.Time
+	// rev is the stored revision the cached ring was read at (0 for a
+	// ring this node created). A fresh read installs its ring only if its
+	// revision is not older.
+	rev int
 	// unreadableLoggedAt rate-limits the unreadable-ring ERROR.
 	unreadableLoggedAt time.Time
 }
@@ -310,30 +315,9 @@ func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, e
 	if k.ring != nil && now.Sub(k.loadedAt) < conduitGrantKeyRefresh {
 		return k.ring, nil
 	}
-	ring, rev, err := k.store.Load(ctx)
-	if err == nil {
-		next := cloneKeyRing(ring)
-		if next.Settle(now, k.retention()) {
-			applied, cerr := k.store.CompareAndSwap(ctx, next, rev)
-			switch {
-			case cerr != nil:
-				slog.Warn("Conduit grant key ring: could not store the settled ring", "error", cerr)
-				ring = next
-			case applied:
-				ring = next
-			default:
-				// Another writer stored a newer ring (for example a
-				// revocation): read that one instead of caching a ring
-				// settled from the superseded revision. It is settled in
-				// memory only; the next load writes it back.
-				if ring, _, err = k.store.Load(ctx); err == nil {
-					ring = cloneKeyRing(ring)
-					ring.Settle(now, k.retention())
-				}
-			}
-		}
-	}
+	ring, rev, err := k.loadSettled(ctx)
 	if errors.Is(err, store.ErrNotFound) {
+		rev = 0
 		ring, err = k.bootstrap(ctx, now)
 	}
 	if err != nil {
@@ -342,8 +326,40 @@ func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, e
 		}
 		return nil, fmt.Errorf("conduit grant key ring: %w", err)
 	}
-	k.ring, k.loadedAt = ring, now
+	k.ring, k.rev, k.loadedAt = ring, rev, now
 	return ring, nil
+}
+
+// loadSettled reads the stored ring and settles it. A settled ring that
+// changed is written back with a compare-and-swap. If that write loses to
+// another writer (for example a revocation), the newer stored ring is read
+// once more and settled in memory only, rather than returning a ring settled
+// from the superseded revision. It returns the ring and the revision it was
+// read at, and does not touch the cache, so callers need not hold k.mu.
+func (k *conduitGrantKeys) loadSettled(ctx context.Context) (*grant.KeyRing, int, error) {
+	now := k.now()
+	ring, rev, err := k.store.Load(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	next := cloneKeyRing(ring)
+	if !next.Settle(now, k.retention()) {
+		return ring, rev, nil
+	}
+	applied, cerr := k.store.CompareAndSwap(ctx, next, rev)
+	switch {
+	case cerr != nil:
+		slog.Warn("Conduit grant key ring: could not store the settled ring", "error", cerr)
+		return next, rev, nil
+	case applied:
+		return next, rev + 1, nil
+	}
+	if ring, rev, err = k.store.Load(ctx); err != nil {
+		return nil, 0, err
+	}
+	ring = cloneKeyRing(ring)
+	ring.Settle(now, k.retention())
+	return ring, rev, nil
 }
 
 // logUnreadableLocked reports an unreadable stored ring at most once per
@@ -410,19 +426,41 @@ func (k *conduitGrantKeys) settleNow(ctx context.Context) error {
 const conduitGrantKeyRecheckFresh = 5 * time.Second
 
 // freshPublicKeys returns every published verification key from a fresh
-// read of the stored ring (one secret row), bypassing the cache, and
-// caches that read. The hub-direct channel (the grant-key route and the
-// token-refresh response) uses it, so a target's fetch reflects every
-// stored rotation and revocation whichever hub node serves it.
+// read of the stored ring (one secret row), bypassing the cache. The
+// hub-direct channel (the grant-key route and the token-refresh response)
+// uses it, so a target's fetch reflects every rotation and revocation stored
+// before the fetch arrived, whichever hub node serves it. The read and its
+// settle run without k.mu, so concurrent fetches never hold up signing;
+// the lock is taken only to cache the result when its revision is not older
+// than the cached ring's. With no stored ring yet, the ring is created
+// under the lock as on every other path.
 func (k *conduitGrantKeys) freshPublicKeys(ctx context.Context) ([]grant.PublicKey, error) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	k.ring = nil
-	ring, err := k.currentLocked(ctx)
-	if err != nil {
-		return nil, err
+	ring, rev, err := k.loadSettled(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		k.ring = nil
+		ring, err := k.currentLocked(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return ring.PublicKeys(k.now()), nil
 	}
-	return ring.PublicKeys(k.now()), nil
+	now := k.now()
+	if err != nil {
+		if errors.Is(err, errConduitGrantRingUnreadable) {
+			k.mu.Lock()
+			k.logUnreadableLocked(now, err)
+			k.mu.Unlock()
+		}
+		return nil, fmt.Errorf("conduit grant key ring: %w", err)
+	}
+	k.mu.Lock()
+	if k.ring == nil || rev >= k.rev {
+		k.ring, k.rev, k.loadedAt = ring, rev, now
+	}
+	k.mu.Unlock()
+	return ring.PublicKeys(now), nil
 }
 
 // publicKeys returns every published verification key.
@@ -496,7 +534,7 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 			return ConduitGrantKeyRotation{}, fmt.Errorf("store rotated conduit grant key ring: %w", err)
 		}
 		if applied {
-			k.ring, k.loadedAt = next, now
+			k.ring, k.rev, k.loadedAt = next, rev+1, now
 			out := ConduitGrantKeyRotation{KeyID: key.KeyID, Retiring: []ConduitGrantKeyRetirement{}}
 			for _, rk := range next.Keys {
 				if rk.KeyID == key.KeyID {
@@ -553,7 +591,7 @@ func (k *conduitGrantKeys) revoke(ctx context.Context, kid string) error {
 			return fmt.Errorf("store conduit grant key ring: %w", err)
 		}
 		if applied {
-			k.ring, k.loadedAt = next, now
+			k.ring, k.rev, k.loadedAt = next, rev+1, now
 			slog.Warn("Conduit grant key revoked", "kid", kid)
 			return nil
 		}
