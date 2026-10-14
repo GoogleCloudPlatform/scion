@@ -448,6 +448,13 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		// through its role, and the test-admin policy refuses it: the
 		// answer names the test-identity cause, as for every test kind
 		// below (admin tier A3, carry item 3).
+		// A caller whose kind could not be read is refused by the same
+		// policy (fail-closed) but may be a person: it gets a neutral
+		// answer, never test-identity wording (review N1).
+		if decision.DeniedBy == DeniedByTestAdminPolicy && decision.Reason == testAdminPolicyKindErrorReason {
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "unable to verify the caller; retry later", nil)
+			return nil, false
+		}
 		if decision.DeniedBy == DeniedByTestAdminPolicy {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
 				map[string]interface{}{"reason": testIdentityReasonFixtureCall, "denied_by": string(DeniedByTestAdminPolicy)})
