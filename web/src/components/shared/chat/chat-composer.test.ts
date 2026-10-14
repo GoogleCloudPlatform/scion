@@ -23,7 +23,7 @@
  * away both halves of it.
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -602,6 +602,10 @@ describe('composer — upload project scope', () => {
  * topic's project, which a DM refuses at send.
  */
 describe('composer — conversation switch', () => {
+  // Drafts live in localStorage; each test starts and ends with none.
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
   /** Mount a composer open on topic A. */
   async function mountTopic(): Promise<any> {
     const el = document.createElement('scion-chat-composer') as any;
@@ -735,7 +739,6 @@ describe('composer — conversation switch', () => {
 
   it('a topic send that fails after a switch restores nothing into the DM', async () => {
     const { chatDraftStorageKey } = await import('../../../client/chat-drafts.js');
-    localStorage.clear();
     const el = await mountTopic();
     respondWith(201, { attachments: [STORED], failures: [] });
     await selectFiles(el, ['compose.yaml']);
@@ -763,7 +766,73 @@ describe('composer — conversation switch', () => {
     // The text is kept as the topic's draft, under the usual draft rules.
     expect(localStorage.getItem(chatDraftStorageKey('topic-a'))).toBe('for the topic');
     expect(localStorage.getItem(chatDraftStorageKey('dm:user:u1:user:u2'))).toBeNull();
-    localStorage.clear();
+  });
+
+  it("a topic send that fails after a switch leaves the DM's own upload alone", async () => {
+    const el = await mountTopic();
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+
+    await switchToDM(el);
+    respondWith(201, { attachments: [{ ...STORED, id: 'att-dm' }], failures: [] });
+    await selectFiles(el, ['dm.txt']);
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-dm']);
+    expect(el.text).toBe('');
+  });
+
+  it('a schedule that fails after a switch restores nothing into the DM', async () => {
+    const { chatDraftStorageKey } = await import('../../../client/chat-drafts.js');
+    const el = await mountTopic();
+    el.text = 'send this later';
+    const scheduled: any[] = [];
+    el.addEventListener('chat-schedule', (e: CustomEvent) => scheduled.push(e.detail));
+    el.doSchedule('2026-10-15T09:00:00Z');
+    expect(scheduled).toHaveLength(1);
+    expect(el.text).toBe('');
+
+    await switchToDM(el);
+    el.text = 'typed in the DM';
+    scheduled[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.text).toBe('typed in the DM');
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.pendingArtifacts).toEqual([]);
+    expect(localStorage.getItem(chatDraftStorageKey('topic-a'))).toBe('send this later');
+    expect(localStorage.getItem(chatDraftStorageKey('dm:user:u1:user:u2'))).toBeNull();
+  });
+
+  it('a send that fails after switching away and back restores everything', async () => {
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+
+    await switchToDM(el);
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    await el.updateComplete;
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.pendingArtifacts).toHaveLength(1);
+    expect(el.text).toBe('for the topic');
   });
 
   it('a topic send that fails without a switch restores files and artifacts', async () => {
