@@ -70,10 +70,9 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// Broker material reads need the owner relationship or broker.update,
 	// and a token carries no broker.update, so the super-admin owns the
 	// fixture broker; its secret sits in the same backend.
-	broker, err := s.GetRuntimeBroker(ctx, ids.runtimeBroker)
+	owned, err := s.SetRuntimeBrokerCreatedByIfEmpty(ctx, ids.runtimeBroker, adminID)
 	require.NoError(t, err)
-	broker.CreatedBy = adminID
-	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+	require.True(t, owned, "the fixture broker has no owner before the matrix assigns one")
 	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
 		Name: ids.brokerSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
 		Scope: secret.ScopeRuntimeBroker, ScopeID: ids.runtimeBroker,
