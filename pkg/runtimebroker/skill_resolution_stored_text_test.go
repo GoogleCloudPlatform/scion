@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,8 +24,11 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // Store a fixed reason phrase for skill resolver errors; full detail goes
@@ -131,7 +135,11 @@ func TestSyncCreate_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 func TestStartRestart_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 	refPattern := regexp.MustCompile(`^Failed to provision agent: required skill "` + regexp.QuoteMeta(resolverTestSkill) +
 		`" could not be resolved: resolver error \(ref ([^()]+)\)$`)
-	for _, op := range []string{"start", "restart"} {
+	for _, tc := range []struct{ op, generalMsg string }{
+		{"start", "Agent start failed"},
+		{"restart", "Agent restart failed"},
+	} {
+		op := tc.op
 		t.Run(op, func(t *testing.T) {
 			srv := newTestServer(t)
 			logs := &syncBuffer{}
@@ -154,8 +162,7 @@ func TestStartRestart_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 			if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
 				t.Errorf("response body carries resolver text: %s", w.Body.String())
 			}
-			generalMsg := map[string]string{"start": "Agent start failed", "restart": "Agent restart failed"}[op]
-			assertResolverLogRecord(t, logs.String(), generalMsg, m[1])
+			assertResolverLogRecord(t, logs.String(), tc.generalMsg, m[1])
 		})
 	}
 }
@@ -236,4 +243,87 @@ func TestProvisionOnly_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 			assertResolverLogRecord(t, logs.String(), "", runID)
 		})
 	}
+}
+
+// resolverTimeoutError is a resolver call cut off by the launch deadline.
+func resolverTimeoutError() error {
+	return fmt.Errorf("provision: %w: %w", &agent.SkillResolutionError{
+		URI:     resolverTestSkill,
+		Code:    agent.SkillErrCodeTimeout,
+		Message: "timed out reaching GitHub: " + resolverTestBody,
+	}, context.DeadlineExceeded)
+}
+
+// TestAsyncLaunch_SkillResolverDeadline_LogsOnceRedacted covers a resolver
+// cut off by the launch deadline: the launch reports launch_timeout with
+// its own text, and the skill failure is still logged once, redacted, with
+// the general record's correlation id.
+func TestAsyncLaunch_SkillResolverDeadline_LogsOnceRedacted(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.startBlock = make(chan struct{}) // never closed: Start blocks until ctx' expires
+	defer close(mgr.startBlock)
+	mgr.startCancelErr = resolverTimeoutError()
+	srv, rtb := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	// LaunchTimeoutSeconds=21, the smallest accepted value, leaves ctx' a
+	// budget of about 1s.
+	w := postCreate(t, srv, map[string]any{
+		"id": "skill-deadline-async", "name": "skill-deadline-async", "asyncLaunch": true, "launchId": "L-skill-deadline",
+		"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"launchTimeoutSeconds": 21, "config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("async create: status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var failed *hubclient.AgentLaunchReport
+	if !waitUntil(t, 8*time.Second, func() bool {
+		for _, r := range rtb.getLaunchReports() {
+			if r.Report.State == hubclient.AgentLaunchReportStateFailed {
+				failed = r.Report
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("no failed terminal report; reports: %+v", rtb.getLaunchReports())
+	}
+	if failed.ErrorCode != api.LaunchCodeLaunchTimeout {
+		t.Fatalf("error code = %q, want %q", failed.ErrorCode, api.LaunchCodeLaunchTimeout)
+	}
+	if want := "launch timed out before the agent started"; failed.Message != want {
+		t.Errorf("stored message = %q, want %q", failed.Message, want)
+	}
+	assertResolverLogRecord(t, logs.String(), "runLaunch: agent start failed", startErrTextRunID)
+}
+
+// TestSyncCreate_SkillResolverDeadline_LogsOnceRedacted is the synchronous
+// create counterpart.
+func TestSyncCreate_SkillResolverDeadline_LogsOnceRedacted(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.setStartErr(resolverTimeoutError())
+	srv, _ := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "skill-deadline-sync", "projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"config": map[string]any{"template": "claude"},
+	})
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error body: %v (status %d, body %s)", err, w.Code, w.Body.String())
+	}
+	want := `Failed to provision agent: required skill "` + resolverTestSkill + `" could not be resolved: timed out reaching the skill source (ref ` + startErrTextRunID + `)`
+	if resp.Error.Message != want {
+		t.Errorf("message = %q, want %q", resp.Error.Message, want)
+	}
+	if w.Code != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusGatewayTimeout)
+	}
+	assertResolverLogRecord(t, logs.String(), "Agent create failed", startErrTextRunID)
 }

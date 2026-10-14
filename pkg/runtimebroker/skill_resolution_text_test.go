@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 func TestSkillResolutionPublicText(t *testing.T) {
@@ -94,32 +95,89 @@ func TestPublicSkillRef(t *testing.T) {
 
 func TestRedactURLsInText(t *testing.T) {
 	in := `GCP API error (500): {"see":"https://u:pw-1@api.example.test/v1/x?sig=qv-1&token=qv-2&qv-3#qv-4"} and http://plain.example.test/p ok`
-	got := redactURLsInText(in)
-	for _, v := range []string{"pw-1", "qv-1", "qv-2", "qv-3", "qv-4"} {
-		if strings.Contains(got, v) {
-			t.Errorf("redacted text %q still carries %q", got, v)
-		}
-	}
-	for _, kept := range []string{"GCP API error (500)", "api.example.test/v1/x", "sig=REDACTED", "token=REDACTED&REDACTED#REDACTED", "http://plain.example.test/p ok"} {
-		if !strings.Contains(got, kept) {
-			t.Errorf("redacted text %q lost %q", got, kept)
-		}
+	want := `GCP API error (500): {"see":"https://api.example.test/v1/x?REDACTED and http://plain.example.test/p ok`
+	if got := redactURLsInText(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestRedactURLsInText_QueryAndFragmentForms(t *testing.T) {
-	tests := map[string]string{
-		"see https://h.example.test/p?qv-1":            "see https://h.example.test/p?REDACTED",
-		"see https://h.example.test/p#k=qv-1":          "see https://h.example.test/p#REDACTED",
-		"see https://h.example.test/p?a=qv-1&&b":       "see https://h.example.test/p?a=REDACTED&&REDACTED",
-		"see https://h.example.test/p?a=qv-1, then go": "see https://h.example.test/p?a=REDACTED, then go",
-		"(at https://h.example.test/p?a=qv-1).":        "(at https://h.example.test/p?a=REDACTED).",
-		"no url here":                                  "no url here",
+// TestRedactURLsInText_Forms has one case per URL form the redaction must
+// handle.
+func TestRedactURLsInText_Forms(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"query part with no =",
+			"see https://h.example.test/p?qv-1 now", "see https://h.example.test/p?REDACTED now"},
+		{"fragment only",
+			"see https://h.example.test/p#k=qv-1 now", "see https://h.example.test/p#REDACTED now"},
+		{"query and fragment",
+			"see https://h.example.test/p?a=qv-1#qv-2", "see https://h.example.test/p?REDACTED"},
+		{"empty query parts",
+			"see https://h.example.test/p?a=qv-1&&b", "see https://h.example.test/p?REDACTED"},
+		{"userinfo",
+			"see https://u:pw-1@h.example.test/p.", "see https://h.example.test/p."},
+		{"two URLs joined with a comma",
+			"https://a.example.test/p,https://u:pw-1@b.example.test/x?qv-1",
+			"https://a.example.test/p,https://b.example.test/x?REDACTED"},
+		{"two URLs joined with no separator",
+			"https://a.example.test/p?qv-1https://u:pw-1@b.example.test/x",
+			"https://a.example.test/p?REDACTEDhttps://b.example.test/x"},
+		{"raw quote inside the query",
+			`see https://h.example.test/p?a="qv-1"&b=qv-2 now`, "see https://h.example.test/p?REDACTED now"},
+		{"raw angle brackets inside the query",
+			"see https://h.example.test/p?a=<qv-1>&b=qv-2 now", "see https://h.example.test/p?REDACTED now"},
+		{"raw quote inside the userinfo",
+			`see https://u:p"w-1@h.example.test/p now`, "see https://h.example.test/p now"},
+		{"space inside the query ends the URL",
+			"see https://h.example.test/p?a=qv-1 b=c", "see https://h.example.test/p?REDACTED b=c"},
+		{"trailing punctuation in a query value",
+			"see https://h.example.test/p?a=qv-1).", "see https://h.example.test/p?REDACTED"},
+		{"trailing punctuation in a fragment",
+			"see https://h.example.test/p#qv-1,", "see https://h.example.test/p#REDACTED"},
+		{"trailing punctuation after a path",
+			`(at "https://h.example.test/p").`, `(at "https://h.example.test/p").`},
+		{"IPv6 host",
+			"see https://[::1] now", "see https://[::1] now"},
+		{"IPv6 host with port in parentheses",
+			"(see https://[2001:db8::1]:8443/p)", "(see https://[2001:db8::1]:8443/p)"},
+		{"bracket closing prose",
+			"[see https://h.example.test/p]", "[see https://h.example.test/p]"},
+		{"upper-case scheme",
+			"HTTPS://h.example.test/p?qv-1", "https://h.example.test/p?REDACTED"},
+		{"artifact path",
+			"https://h.example.test/api/v1/artifacts/tok-1/x", "https://h.example.test" + logging.RedactedArtifactPath},
+		{"other schemes are out of scope",
+			"gs://bucket/o?qv-1 ssh://u@h", "gs://bucket/o?qv-1 ssh://u@h"},
+		{"no url", "no url here?", "no url here?"},
 	}
-	for in, want := range tests {
-		if got := redactURLsInText(in); got != want {
-			t.Errorf("redactURLsInText(%q) = %q, want %q", in, got, want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactURLsInText(tt.in); got != tt.want {
+				t.Errorf("redactURLsInText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSkillResolutionPublicText_LongControlByteRefKeepsCorrelationID checks
+// the cap applies after quoting: each control byte quotes as four bytes.
+func TestSkillResolutionPublicText_LongControlByteRefKeepsCorrelationID(t *testing.T) {
+	const runID = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b"
+	e := &agent.SkillResolutionError{URI: strings.Repeat("\x01", 300), Code: agent.SkillErrCodeInvalidURI}
+	got := skillResolutionPublicText(e, runID)
+	if len(got) > 512 {
+		t.Errorf("text is %d bytes, want at most 512: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "invalid skill URI (ref "+runID+")") {
+		t.Errorf("text %q does not end with the phrase and correlation id", got)
+	}
+	q := quotedSkillRef(e.URI)
+	if !strings.HasPrefix(q, `"\x01`) || !strings.HasSuffix(q, `\x01…"`) || len(q) > maxPublicSkillRefLen+2+len("…") {
+		t.Errorf("quotedSkillRef = %q (%d bytes), want whole escapes, an ellipsis and at most %d bytes", q, len(q), maxPublicSkillRefLen+2+len("…"))
+	}
+	if short := quotedSkillRef("gh://o/r/s@v"); short != `"gh://o/r/s@v"` {
+		t.Errorf("quotedSkillRef(short) = %q, want it quoted as by %%q", short)
 	}
 }
 

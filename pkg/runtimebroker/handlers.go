@@ -1579,6 +1579,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
 		if err != nil {
+			// A skill failure anywhere in the error chain has its full text
+			// logged once, with the correlation id its response carries.
+			provisionSkill := skillFailureFrom(err, opts.RunID)
+			if provisionSkill != nil {
+				s.logSkillResolutionFailure(provisionSkill,
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+			}
 			if d, ok := harnessPolicyRefusalFrom(err); ok {
 				markAttemptFailed(d.HTTPStatus, d.detail())
 				span.SetStatus(codes.Error, d.detail())
@@ -1618,9 +1625,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			var skillErr *agent.SkillResolutionError
 			if errors.As(err, &skillErr) {
 				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
-				provisionSkill := skillFailureFrom(skillErr, opts.RunID)
-				s.logSkillResolutionFailure(provisionSkill,
-					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
 				SkillResolutionFailed(w, skillErr, provisionSkill.ref)
 				return
 			}
@@ -1721,6 +1725,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
 			runtimeFailureLogAttrs(err)...)...)
+		if createSkill != nil {
+			s.logSkillResolutionFailure(createSkill,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+		}
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1789,8 +1797,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// broker paths (ptone/scion#3113). The full error is logged above.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
-			s.logSkillResolutionFailure(createSkill,
-				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
@@ -3339,6 +3345,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.agentLifecycleLog.Error("Agent start failed", append([]any{
 			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
 			failureLogAttrs(err, startSkill)...)...)
+		if startSkill != nil {
+			s.logSkillResolutionFailure(startSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the
@@ -3360,8 +3370,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
-			s.logSkillResolutionFailure(startSkill,
-				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
@@ -4438,6 +4446,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		restartSkill := skillFailureFrom(err, opts.RunID)
 		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
 			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		if restartSkill != nil {
+			s.logSkillResolutionFailure(restartSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
@@ -4451,8 +4463,6 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// is not reported as a missing agent.
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
-			s.logSkillResolutionFailure(restartSkill,
-				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
 			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
 			return
 		}

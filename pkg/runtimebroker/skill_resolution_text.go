@@ -21,7 +21,9 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -63,42 +65,74 @@ func skillResolutionPhrase(code string) string {
 // not parse as a URL.
 const unparseableSkillRef = "(unparseable skill URL)"
 
-// maxPublicSkillRefLen bounds the skill reference shown to the user, so
-// the correlation id at the end of the text survives the hub's cut of a
-// stored failure reason to 512 bytes.
+// maxPublicSkillRefLen bounds the skill reference shown to the user, as
+// quoted in the text (without the quotes) and as the skill detail, so the
+// correlation id at the end of the text survives the hub's cut of a stored
+// failure reason to 512 bytes.
 const maxPublicSkillRefLen = 200
 
-// publicSkillRef returns the declared skill reference uri for user-visible
+// redactSkillRef returns the declared skill reference uri for user-visible
 // text. An http(s) reference loses its userinfo, query and fragment, and
 // its path is redacted by logging.RedactURL where that applies; any other
-// reference (gh://, a registry name) is kept. A reference longer than
-// maxPublicSkillRefLen bytes is cut there, at a rune boundary, and ends in
-// an ellipsis.
-func publicSkillRef(uri string) string {
-	ref := uri
+// reference (gh://, a registry name) is kept.
+func redactSkillRef(uri string) string {
 	lower := strings.ToLower(uri)
-	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
-		u, err := url.Parse(uri)
-		if err != nil {
-			return unparseableSkillRef
-		}
-		u.User = nil
-		u.RawQuery = ""
-		u.ForceQuery = false
-		u.Fragment = ""
-		u.RawFragment = ""
-		ref = logging.RedactURL(u)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return uri
 	}
-	return capText(ref, maxPublicSkillRefLen)
+	u, err := url.Parse(uri)
+	if err != nil {
+		return unparseableSkillRef
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return logging.RedactURL(u)
 }
 
-// capText returns s cut to at most max bytes at a rune boundary, with an
-// ellipsis appended when it was cut.
-func capText(s string, max int) string {
-	if len(s) <= max {
+// publicSkillRef returns redactSkillRef(uri) cut to maxPublicSkillRefLen
+// bytes (see capText), for the skill detail of an error response.
+func publicSkillRef(uri string) string {
+	return capText(redactSkillRef(uri), maxPublicSkillRefLen)
+}
+
+// quotedSkillRef returns redactSkillRef(uri) quoted as by %q. When the
+// quoted text between the quotes is longer than maxPublicSkillRefLen bytes,
+// it is cut at an escape boundary and ends in an ellipsis: the cap applies
+// after quoting, because %q writes a control or invalid byte as four bytes.
+func quotedSkillRef(uri string) string {
+	ref := redactSkillRef(uri)
+	q := strconv.Quote(ref)
+	if len(q)-2 <= maxPublicSkillRefLen {
+		return q
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(ref); {
+		_, w := utf8.DecodeRuneInString(ref[i:])
+		esc := strconv.Quote(ref[i : i+w])
+		esc = esc[1 : len(esc)-1]
+		if b.Len()-1+len(esc) > maxPublicSkillRefLen {
+			b.WriteString("…")
+			break
+		}
+		b.WriteString(esc)
+		i += w
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// capText returns s cut to at most limit bytes at a rune boundary, with an
+// ellipsis appended when it was cut. limit should be at least
+// utf8.UTFMax, so that a cut text keeps at least one rune.
+func capText(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
@@ -112,11 +146,11 @@ func capText(s string, max int) string {
 // correlation id that also appears in the server-side log record. An empty
 // ref is left out.
 func skillResolutionPublicText(e *agent.SkillResolutionError, ref string) string {
-	uri := publicSkillRef(e.URI)
+	uri := quotedSkillRef(e.URI)
 	if e.Code == agent.SkillErrCodeInstallFailed {
-		return fmt.Sprintf("required skill %q could not be installed: %s", uri, e.Message)
+		return fmt.Sprintf("required skill %s could not be installed: %s", uri, e.Message)
 	}
-	text := fmt.Sprintf("required skill %q could not be resolved: %s", uri, skillResolutionPhrase(e.Code))
+	text := fmt.Sprintf("required skill %s could not be resolved: %s", uri, skillResolutionPhrase(e.Code))
 	if e.Status > 0 {
 		text += fmt.Sprintf(" (status %d)", e.Status)
 	}
@@ -140,49 +174,95 @@ func skillResolutionCorrelationID(runID string) string {
 	return hex.EncodeToString(b[:])
 }
 
-// textURLPattern matches an http(s) URL inside free text.
-var textURLPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
+// urlStartPattern matches the start of an http(s) URL inside free text.
+var urlStartPattern = regexp.MustCompile(`(?i)https?://`)
 
-// urlTrailingPunct is punctuation that, at the end of a textURLPattern
-// match, is taken to belong to the surrounding prose, not to the URL.
-const urlTrailingPunct = ".,;:!?)]}"
+// urlTrailingPunct is punctuation that, at the end of a URL with no query
+// or fragment, is taken to belong to the surrounding text, not to the URL.
+const urlTrailingPunct = `.,;:!)]}"'<>`
 
-// redactedLogValue replaces a query value or userinfo in a logged URL.
+// redactedLogValue replaces a query or fragment in a logged URL.
 const redactedLogValue = "REDACTED"
 
 // redactURLsInText returns s with every http(s) URL in it redacted for the
-// server-side log: userinfo replaced; every query value replaced, keeping
-// the keys, and every query part with no "=" replaced whole; a fragment
-// replaced; and the path redacted by logging.RedactURL where that applies.
-// Punctuation ending a URL (see urlTrailingPunct) is kept as text. The rest
-// of s is unchanged.
+// server-side log. Each URL runs from its "http://" or "https://" to the
+// next whitespace or the next "http://" or "https://", so two URLs joined
+// with no separator are redacted one by one, and a URL holding a raw quote
+// or angle bracket is redacted whole. In each URL the userinfo is dropped,
+// everything after the first "?" (the query and any fragment) becomes
+// "?REDACTED", a fragment with no query becomes "#REDACTED", and an
+// artifact path becomes logging.RedactedArtifactPath. Punctuation ending a
+// URL with no query or fragment (see urlTrailingPunct; "]" only when the
+// URL has no "[", as in an IPv6 host) is kept as text. The rest of s is
+// unchanged.
+//
+// Only http and https are handled. URLs with other schemes (gs://, s3://,
+// ftp://, ssh://, or scp-style git@host:path) are out of scope and logged
+// as they are.
 func redactURLsInText(s string) string {
-	return textURLPattern.ReplaceAllStringFunc(s, func(match string) string {
-		raw := strings.TrimRight(match, urlTrailingPunct)
-		trailing := match[len(raw):]
-		u, err := url.Parse(raw)
-		if err != nil {
-			return "(unparseable URL)" + trailing
+	starts := urlStartPattern.FindAllStringIndex(s, -1)
+	if len(starts) == 0 {
+		return s
+	}
+	var b strings.Builder
+	prev := 0
+	for i, loc := range starts {
+		b.WriteString(s[prev:loc[0]])
+		end := len(s)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
 		}
-		if u.User != nil {
-			u.User = url.User(redactedLogValue)
+		if ws := strings.IndexFunc(s[loc[0]:end], unicode.IsSpace); ws >= 0 {
+			end = loc[0] + ws
 		}
-		if u.RawQuery != "" {
-			parts := strings.Split(u.RawQuery, "&")
-			for i, p := range parts {
-				if key, _, ok := strings.Cut(p, "="); ok {
-					parts[i] = key + "=" + redactedLogValue
-				} else if p != "" {
-					parts[i] = redactedLogValue
-				}
-			}
-			u.RawQuery = strings.Join(parts, "&")
+		b.WriteString(redactURLToken(s[loc[0]:end], loc[1]-loc[0]))
+		prev = end
+	}
+	b.WriteString(s[prev:])
+	return b.String()
+}
+
+// redactURLToken redacts one URL found by redactURLsInText. schemeLen is
+// the length of its "http://" or "https://".
+func redactURLToken(token string, schemeLen int) string {
+	scheme := strings.ToLower(token[:schemeLen])
+	rest := token[schemeLen:]
+	var suffix, trailing string
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		if rest[i] == '?' {
+			suffix = "?" + redactedLogValue
+		} else {
+			suffix = "#" + redactedLogValue
 		}
-		if u.Fragment != "" || u.RawFragment != "" {
-			u.Fragment, u.RawFragment = redactedLogValue, ""
+		rest = rest[:i]
+	} else {
+		rest, trailing = trimURLTrailing(rest)
+	}
+	authority, path := rest, ""
+	if j := strings.IndexByte(rest, '/'); j >= 0 {
+		authority, path = rest[:j], rest[j:]
+	}
+	if k := strings.LastIndexByte(authority, '@'); k >= 0 {
+		authority = authority[k+1:]
+	}
+	if u, err := url.Parse(scheme + authority + path); err == nil && logging.IsCredentialURL(u) {
+		path = logging.RedactedArtifactPath
+	}
+	return scheme + authority + path + suffix + trailing
+}
+
+// trimURLTrailing splits rest, a URL after its scheme with no query or
+// fragment, into the URL and the punctuation that ends it (see
+// urlTrailingPunct). "]" is trimmed only when rest has no "[".
+func trimURLTrailing(rest string) (head, trailing string) {
+	end := len(rest)
+	for end > 0 && strings.IndexByte(urlTrailingPunct, rest[end-1]) >= 0 {
+		if rest[end-1] == ']' && strings.Contains(rest[:end], "[") {
+			break
 		}
-		return logging.RedactURL(u) + trailing
-	})
+		end--
+	}
+	return rest[:end], rest[end:]
 }
 
 // skillResolutionLogError returns the text of err for the server-side log,
