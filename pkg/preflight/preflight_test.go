@@ -1,0 +1,165 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package preflight
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+)
+
+func check(name string, run func(context.Context, Env) ([]Finding, error)) Check {
+	return Check{Name: name, Timeout: time.Second, Run: run}
+}
+
+func findings(fs ...Finding) func(context.Context, Env) ([]Finding, error) {
+	return func(context.Context, Env) ([]Finding, error) { return fs, nil }
+}
+
+// Checks run in name order; findings are sorted; info counts in neither
+// Blocking nor Warnings.
+func TestRunAll_OrderAndCounts(t *testing.T) {
+	r := NewRegistry()
+	r.Register(check("z.last", findings(Finding{Code: "z.last.w", Severity: SeverityWarn})))
+	r.Register(check("a.first", findings(
+		Finding{Code: "a.first.i", Severity: SeverityInfo},
+		Finding{Code: "a.first.b", Severity: SeverityBlock},
+	)))
+	rep := r.RunAll(context.Background(), nil)
+	if rep.Version != 1 || strings.Join(rep.Checks, ",") != "a.first,z.last" {
+		t.Fatalf("version %d checks %v, want 1 and [a.first z.last]", rep.Version, rep.Checks)
+	}
+	var codes []string
+	for _, f := range rep.Findings {
+		codes = append(codes, f.Check+":"+f.Code)
+	}
+	if got := strings.Join(codes, ","); got != "a.first:a.first.b,a.first:a.first.i,z.last:z.last.w" {
+		t.Fatalf("findings = %s", got)
+	}
+	if rep.Blocking != 1 || rep.Warnings != 1 {
+		t.Fatalf("blocking %d warnings %d, want 1 and 1 (info is not counted)", rep.Blocking, rep.Warnings)
+	}
+}
+
+// An error, a panic and a timeout each give one could_not_run block finding.
+func TestRunAll_CouldNotRun(t *testing.T) {
+	r := NewRegistry()
+	r.Register(check("c.err", func(context.Context, Env) ([]Finding, error) { return nil, errors.New("boom") }))
+	r.Register(check("c.panic", func(context.Context, Env) ([]Finding, error) { panic("bad") }))
+	r.Register(Check{Name: "c.slow", Timeout: 10 * time.Millisecond, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond)
+		return nil, nil
+	}})
+	rep := r.RunAll(context.Background(), nil)
+	want := map[string]string{"c.err": "boom", "c.panic": "panic: bad", "c.slow": "timed out"}
+	if len(rep.Findings) != 3 || rep.Blocking != 3 {
+		t.Fatalf("findings %+v, want 3 blocking could_not_run", rep.Findings)
+	}
+	for _, f := range rep.Findings {
+		if f.Code != f.Check+".could_not_run" || f.Severity != SeverityBlock || !strings.Contains(f.Message, want[f.Check]) {
+			t.Fatalf("finding %+v, want %s.could_not_run (block) mentioning %q", f, f.Check, want[f.Check])
+		}
+	}
+}
+
+// A finding with an unknown severity becomes an invalid_finding block.
+func TestRunAll_InvalidSeverity(t *testing.T) {
+	r := NewRegistry()
+	r.Register(check("c.bad", findings(Finding{Code: "c.bad.x", Severity: "fatal"})))
+	rep := r.RunAll(context.Background(), nil)
+	if len(rep.Findings) != 1 || rep.Findings[0].Code != "c.bad.invalid_finding" || rep.Blocking != 1 {
+		t.Fatalf("findings %+v, want one c.bad.invalid_finding block", rep.Findings)
+	}
+}
+
+// Subjects are capped; SubjectCount keeps the full count.
+func TestRunAll_SubjectsCapped(t *testing.T) {
+	var subjects []string
+	for i := 0; i < MaxSubjects+5; i++ {
+		subjects = append(subjects, fmt.Sprintf("p/a%02d", i))
+	}
+	r := NewRegistry()
+	r.Register(check("c.many", findings(Finding{Code: "c.many.x", Severity: SeverityWarn, Subjects: subjects})))
+	f := r.RunAll(context.Background(), nil).Findings[0]
+	if len(f.Subjects) != MaxSubjects || f.SubjectCount != MaxSubjects+5 {
+		t.Fatalf("subjects %d, count %d; want %d and %d", len(f.Subjects), f.SubjectCount, MaxSubjects, MaxSubjects+5)
+	}
+}
+
+// Register refuses bad names, duplicates, a missing timeout and a nil Run.
+func TestRegister_Validation(t *testing.T) {
+	ok := func(context.Context, Env) ([]Finding, error) { return nil, nil }
+	for _, c := range []struct {
+		name  string
+		check Check
+	}{
+		{"undotted", Check{Name: "profiles", Timeout: time.Second, Run: ok}},
+		{"upper case", Check{Name: "Settings.Profiles", Timeout: time.Second, Run: ok}},
+		{"no timeout", Check{Name: "a.b", Run: ok}},
+		{"nil run", Check{Name: "a.b", Timeout: time.Second}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: Register did not panic", c.name)
+				}
+			}()
+			NewRegistry().Register(c.check)
+		}()
+	}
+	r := NewRegistry()
+	r.Register(Check{Name: "a.b", Timeout: time.Second, Run: ok})
+	defer func() {
+		if recover() == nil {
+			t.Errorf("duplicate: Register did not panic")
+		}
+	}()
+	r.Register(Check{Name: "a.b", Timeout: time.Second, Run: ok})
+}
+
+// The profile catalog mapping, kind by kind.
+func TestProfileFindingSeverity(t *testing.T) {
+	cases := []struct {
+		kind        config.ProfileCatalogFindingKind
+		preExisting bool
+		sev         Severity
+		code        string
+	}{
+		{config.ProfileFindingActiveProfile, false, SeverityBlock, "settings.profiles.active_profile"},
+		{config.ProfileFindingActiveProfile, true, SeverityWarn, "settings.profiles.active_profile.pre_existing"},
+		{config.ProfileFindingProjectActiveProfile, false, SeverityBlock, "settings.profiles.project_active_profile"},
+		{config.ProfileFindingProjectActiveProfile, true, SeverityWarn, "settings.profiles.project_active_profile.pre_existing"},
+		{config.ProfileFindingAgentSavedProfile, false, SeverityBlock, "settings.profiles.agent_saved_profile"},
+		{config.ProfileFindingAgentSavedProfile, true, SeverityWarn, "settings.profiles.agent_saved_profile.pre_existing"},
+		{config.ProfileFindingProfileRuntimeMissing, false, SeverityBlock, "settings.profiles.profile_runtime_missing"},
+		{config.ProfileFindingProfileRuntimeMissing, true, SeverityWarn, "settings.profiles.profile_runtime_missing.pre_existing"},
+		{config.ProfileFindingDroppedUnused, false, SeverityWarn, "settings.profiles.dropped_unused_profile"},
+		{config.ProfileFindingActiveProfileFallback, false, SeverityInfo, "settings.profiles.active_profile_fallback"},
+		{config.ProfileFindingActiveProfileChanged, false, SeverityInfo, "settings.profiles.active_profile_changed"},
+		{config.ProfileCatalogFindingKind("future_kind"), false, SeverityBlock, "settings.profiles.future_kind"},
+	}
+	for _, c := range cases {
+		sev, code := ProfileFindingSeverity(config.ProfileCatalogFinding{Kind: c.kind, PreExisting: c.preExisting})
+		if sev != c.sev || code != c.code {
+			t.Errorf("%s (pre_existing %v) = %s %s, want %s %s", c.kind, c.preExisting, sev, code, c.sev, c.code)
+		}
+	}
+}

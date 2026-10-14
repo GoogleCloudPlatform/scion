@@ -1,0 +1,208 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Package preflight is the registry of named checks the admin rebuild runs
+// with a newly built binary before installing it (ptone/scion#5057). Each
+// check returns findings with a severity: block findings stop the rebuild,
+// warn and info findings are shown only.
+package preflight
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"sort"
+	"sync"
+	"time"
+)
+
+// Severity is how a finding affects the rebuild.
+type Severity string
+
+const (
+	// SeverityBlock stops the rebuild unless it is forced.
+	SeverityBlock Severity = "block"
+	// SeverityWarn is shown and does not stop the rebuild.
+	SeverityWarn Severity = "warn"
+	// SeverityInfo is shown and counted in neither Blocking nor Warnings.
+	SeverityInfo Severity = "info"
+)
+
+func (s Severity) valid() bool {
+	return s == SeverityBlock || s == SeverityWarn || s == SeverityInfo
+}
+
+// MaxSubjects caps Finding.Subjects; SubjectCount holds the full count.
+const MaxSubjects = 20
+
+// Finding is one result of a check. Message and Remediation are human text
+// and carry no settings values.
+type Finding struct {
+	Check        string         `json:"check"`
+	Code         string         `json:"code"`
+	Severity     Severity       `json:"severity"`
+	Message      string         `json:"message"`
+	Remediation  string         `json:"remediation,omitempty"`
+	Subjects     []string       `json:"subjects,omitempty"`
+	SubjectCount int            `json:"subjectCount,omitempty"`
+	Data         map[string]any `json:"data,omitempty"`
+}
+
+// Check is a named check. Run returns the check's findings; an error, a
+// timeout or a panic becomes one block finding "<name>.could_not_run".
+type Check struct {
+	Name    string
+	Timeout time.Duration
+	Run     func(ctx context.Context, env Env) ([]Finding, error)
+}
+
+// Env is what a check reads. It is opaque to the registry; the preflight
+// command fills it.
+type Env any
+
+// ReportVersion is the version of Report. Adding optional fields keeps it;
+// removing or renaming a field, or changing a meaning, bumps it.
+const ReportVersion = 1
+
+// Report is the preflight document the command prints.
+type Report struct {
+	Version  int       `json:"version"`
+	Checks   []string  `json:"checks"`
+	Findings []Finding `json:"findings"`
+	Blocking int       `json:"blocking"`
+	Warnings int       `json:"warnings"`
+}
+
+var checkNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
+
+// Registry holds named checks.
+type Registry struct {
+	mu     sync.Mutex
+	checks map[string]Check
+}
+
+// NewRegistry returns an empty registry.
+func NewRegistry() *Registry { return &Registry{checks: map[string]Check{}} }
+
+// Register adds c. It panics on a programming error: a name that is not
+// dotted lower case (for example "settings.profiles"), a duplicate name, a
+// timeout that is not positive, or a nil Run.
+func (r *Registry) Register(c Check) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case !checkNameRE.MatchString(c.Name):
+		panic(fmt.Sprintf("preflight: check name %q is not dotted lower case", c.Name))
+	case c.Timeout <= 0:
+		panic(fmt.Sprintf("preflight: check %q has no positive timeout", c.Name))
+	case c.Run == nil:
+		panic(fmt.Sprintf("preflight: check %q has no Run", c.Name))
+	}
+	if _, dup := r.checks[c.Name]; dup {
+		panic(fmt.Sprintf("preflight: check %q registered twice", c.Name))
+	}
+	r.checks[c.Name] = c
+}
+
+// RunAll runs every registered check in name order, each under its own
+// timeout, and returns the report. A check that errors, times out or panics
+// gives one block finding with code "<name>.could_not_run"; a finding with a
+// severity the registry does not know gives "<name>.invalid_finding"
+// (block) in its place. Findings are sorted by check, code and subjects.
+func (r *Registry) RunAll(ctx context.Context, env Env) Report {
+	r.mu.Lock()
+	names := make([]string, 0, len(r.checks))
+	for name := range r.checks {
+		names = append(names, name)
+	}
+	checks := r.checks
+	r.mu.Unlock()
+	sort.Strings(names)
+
+	rep := Report{Version: ReportVersion, Checks: names, Findings: []Finding{}}
+	for _, name := range names {
+		for _, f := range runOne(ctx, checks[name], env) {
+			if !f.Severity.valid() {
+				f = Finding{Check: name, Code: name + ".invalid_finding", Severity: SeverityBlock,
+					Message: fmt.Sprintf("check %s returned a finding with unknown severity %q (code %q)", name, f.Severity, f.Code)}
+			}
+			f.Check = name
+			rep.Findings = append(rep.Findings, capSubjects(f))
+		}
+	}
+	sort.SliceStable(rep.Findings, func(i, j int) bool {
+		a, b := rep.Findings[i], rep.Findings[j]
+		if a.Check != b.Check {
+			return a.Check < b.Check
+		}
+		if a.Code != b.Code {
+			return a.Code < b.Code
+		}
+		return fmt.Sprint(a.Subjects) < fmt.Sprint(b.Subjects)
+	})
+	for _, f := range rep.Findings {
+		switch f.Severity {
+		case SeverityBlock:
+			rep.Blocking++
+		case SeverityWarn:
+			rep.Warnings++
+		}
+	}
+	return rep
+}
+
+// runOne runs c under its timeout with panic recovery.
+func runOne(ctx context.Context, c Check, env Env) []Finding {
+	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	type result struct {
+		findings []Finding
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				done <- result{err: fmt.Errorf("panic: %v", p)}
+			}
+		}()
+		f, err := c.Run(ctx, env)
+		done <- result{findings: f, err: err}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			return []Finding{couldNotRun(c.Name, res.err.Error())}
+		}
+		return res.findings
+	case <-ctx.Done():
+		return []Finding{couldNotRun(c.Name, fmt.Sprintf("timed out after %s", c.Timeout))}
+	}
+}
+
+func couldNotRun(name, why string) Finding {
+	return Finding{Check: name, Code: name + ".could_not_run", Severity: SeverityBlock,
+		Message: fmt.Sprintf("check %s could not run: %s", name, why)}
+}
+
+// capSubjects keeps at most MaxSubjects subjects and records the full count.
+func capSubjects(f Finding) Finding {
+	if f.SubjectCount < len(f.Subjects) {
+		f.SubjectCount = len(f.Subjects)
+	}
+	if len(f.Subjects) > MaxSubjects {
+		f.Subjects = append([]string(nil), f.Subjects[:MaxSubjects]...)
+	}
+	return f
+}
