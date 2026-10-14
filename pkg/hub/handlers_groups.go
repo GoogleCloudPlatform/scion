@@ -334,20 +334,26 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.CreateGroup(ctx, group); err != nil {
+	// The group, its parent membership, and that membership's audit record
+	// commit or roll back together.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.CreateGroup(ctx, group); err != nil {
+			return err
+		}
+		if parentEdge == nil {
+			return nil
+		}
+		return s.auditGroupMemberAddTx(ctx, tx, parentEdge, canDelegateResult, canDelegateReason)
+	}); err != nil {
 		if parentEdge != nil {
 			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
 		}
-		if err == store.ErrAlreadyExists {
+		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "Group with this slug already exists")
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
-	}
-
-	if parentEdge != nil {
-		s.auditGroupMemberAdd(ctx, parentEdge, canDelegateResult, canDelegateReason)
 	}
 
 	s.groupsLogger().Info("group created",
@@ -899,20 +905,6 @@ func (s *Server) releaseGroupMemberSlot(ctx context.Context, groupID, memberType
 	s.quotaService.Release(ctx, store.LimitMaxMembersPerGroup, groupMembershipQuotaID(groupID, memberType, memberID))
 }
 
-// auditGroupMemberAdd writes the group_member_add mutation audit record for a
-// membership that was just created, with the CanDelegate result and reason
-// returned by authorizeGroupMemberGrant.
-func (s *Server) auditGroupMemberAdd(ctx context.Context, member *store.GroupMember, canDelegateResult, canDelegateReason string) {
-	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
-		MutationType:      "group_member_add",
-		TargetType:        "group_membership",
-		TargetID:          member.GroupID,
-		AfterSummary:      `{"groupId":"` + member.GroupID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
-		CanDelegateResult: canDelegateResult,
-		CanDelegateReason: canDelegateReason,
-	})
-}
-
 // auditGroupMemberAddTx writes the group_member_add mutation audit record
 // for member on tx, attributed to the request actor, so it commits or rolls
 // back with the membership.
@@ -930,6 +922,25 @@ func (s *Server) auditGroupMemberAddTx(ctx context.Context, tx store.Store, memb
 	applyHubActorFallback(record)
 	if err := tx.CreateMutationAudit(ctx, record); err != nil {
 		return fmt.Errorf("audit group member add: %w", err)
+	}
+	return nil
+}
+
+// auditGroupMemberRemoveTx writes the group_member_remove mutation audit
+// record on tx, attributed to the request actor, so it commits or rolls back
+// with the removal.
+func (s *Server) auditGroupMemberRemoveTx(ctx context.Context, tx store.Store, groupID, memberType, memberID string) error {
+	record := &store.MutationAuditRecord{
+		MutationType:  "group_member_remove",
+		TargetType:    "group_membership",
+		TargetID:      groupID,
+		BeforeSummary: `{"groupId":"` + groupID + `","memberType":"` + memberType + `","memberId":"` + memberID + `"}`,
+	}
+	// The store stamps the record's time.
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit group member remove: %w", err)
 	}
 	return nil
 }
@@ -1166,7 +1177,15 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 		}
 	}
 
-	if err := s.store.RemoveGroupMember(ctx, group.ID, memberType, memberID); err != nil {
+	// The removal and its audit record commit or roll back together. The
+	// loss enqueue, quota release and notification below run only after
+	// the commit.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.RemoveGroupMember(ctx, group.ID, memberType, memberID); err != nil {
+			return err
+		}
+		return s.auditGroupMemberRemoveTx(ctx, tx, group.ID, memberType, memberID)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -1174,13 +1193,6 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 
 	// Release quota reservation for the removed member (best-effort).
 	s.releaseGroupMemberSlot(ctx, group.ID, memberType, memberID)
-
-	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
-		MutationType:  "group_member_remove",
-		TargetType:    "group_membership",
-		TargetID:      group.ID,
-		BeforeSummary: `{"groupId":"` + group.ID + `","memberType":"` + memberType + `","memberId":"` + memberID + `"}`,
-	})
 
 	if memberType == store.GroupMemberTypeUser {
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: memberID})

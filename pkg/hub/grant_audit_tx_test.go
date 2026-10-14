@@ -144,6 +144,69 @@ func TestGroupMemberAuditFailureRollsBack(t *testing.T) {
 	assert.NotEmpty(t, audits[0].ActorPrincipalID)
 }
 
+// Group create with a parent writes the parent membership's audit record
+// in the same transaction; an injected audit failure leaves no group and
+// no child edge under the parent.
+func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
+	srv, real := testServer(t)
+	ctx := context.Background()
+	parent := &store.Group{ID: tid("cg-audit-parent"), Name: "cg audit parent", Slug: "cg-audit-parent", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, real.CreateGroup(ctx, parent))
+	req := CreateGroupRequest{Name: "cg audit child", Slug: "cg-audit-child", ParentID: parent.ID}
+
+	srv.store = &createTxFaultStore{Store: real, auditErrFor: "group_member_add"}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	_, err := real.GetGroupBySlug(ctx, req.Slug)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no group after the audit failure")
+	children, err := real.ListGroups(ctx, store.GroupFilter{ParentID: parent.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, children.Items, "no child edge after the audit failure")
+	assert.Empty(t, grantAudits(t, real, "group_member_add", parent.ID))
+
+	srv.store = real
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var child store.Group
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&child))
+	audits := grantAudits(t, real, "group_member_add", parent.ID)
+	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
+	assert.Contains(t, audits[0].AfterSummary, child.ID)
+	assert.NotEmpty(t, audits[0].ActorPrincipalID)
+}
+
+// Group-member removal writes exactly one audit record in the same
+// transaction; an injected audit failure leaves the membership in place.
+func TestGroupMemberRemoveAuditFailureRollsBack(t *testing.T) {
+	srv, real := testServer(t)
+	ctx := context.Background()
+	group := &store.Group{ID: tid("gm-rm-audit-group"), Name: "gm rm audit", Slug: "gm-rm-audit", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, real.CreateGroup(ctx, group))
+	userID := tid("gm-rm-audit-user")
+	seedRolesTestUser(t, real, userID, "gm-rm-audit@test.com")
+	require.NoError(t, real.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: group.ID, MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: store.GroupMemberRoleMember,
+	}))
+	path := "/api/v1/groups/" + group.ID + "/members/" + store.GroupMemberTypeUser + "/" + userID
+
+	srv.store = &createTxFaultStore{Store: real, auditErrFor: "group_member_remove"}
+	rec := doRequest(t, srv, http.MethodDelete, path, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	_, err := real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	require.NoError(t, err, "membership kept after the audit failure")
+	assert.Empty(t, grantAudits(t, real, "group_member_remove", group.ID))
+
+	srv.store = real
+	rec = doRequest(t, srv, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err = real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	audits := grantAudits(t, real, "group_member_remove", group.ID)
+	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
+	assert.Contains(t, audits[0].BeforeSummary, userID)
+	assert.NotEmpty(t, audits[0].ActorPrincipalID)
+}
+
 // The role-binding audit summary is valid JSON for any field value,
 // including control characters and invalid UTF-8, and round-trips valid
 // UTF-8 values unchanged.
