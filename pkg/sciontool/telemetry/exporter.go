@@ -27,7 +27,6 @@ import (
 )
 
 var (
-	errOTLPCACertsNotFound = otlptls.ErrCACertsNotFound
 	// errOTLPIncompleteClientKeyPair reports that only one of the OTLP
 	// client certificate and key paths is set; mTLS needs both.
 	errOTLPIncompleteClientKeyPair = otlptls.ErrIncompleteClientKeyPair
