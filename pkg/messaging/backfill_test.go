@@ -1109,8 +1109,7 @@ func (c *countingMessageStore) ListMessages(ctx context.Context, filter store.Me
 
 // TestBackfill_NoPerPageTotalCount checks that the scan does not ask the
 // store for a total count on any page. Nothing reads the count, and the
-// store runs a COUNT over every matching message for it, so a per-page
-// count makes a full scan quadratic in the table size.
+// store runs a COUNT over every matching message for it on each page.
 func TestBackfill_NoPerPageTotalCount(t *testing.T) {
 	ctx := context.Background()
 	projectID := uuid.NewString()
