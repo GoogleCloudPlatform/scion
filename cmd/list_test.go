@@ -1919,7 +1919,7 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		filterAncestors = refID
 
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 
@@ -1933,7 +1933,7 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		filterAncestors = emptyRefID
 
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 
@@ -2006,7 +2006,7 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	run := func() {
 		t.Helper()
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 		require.NoError(t, err)
@@ -2371,7 +2371,7 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	run := func(ctx *HubContext) error {
 		t.Helper()
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(ctx)
 		})
 		return err

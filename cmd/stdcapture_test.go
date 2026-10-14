@@ -88,8 +88,6 @@ type goexitTB struct {
 func (goexitTB) Helper()                 {}
 func (goexitTB) FailNow()                { runtime.Goexit() }
 func (f goexitTB) Fatalf(string, ...any) { f.FailNow() }
-func (goexitTB) Errorf(string, ...any) {}
-func (goexitTB) Cleanup(func())          {}
 
 // runCapture runs fn under captureFile on a fresh goroutine, so a FailNow
 // (runtime.Goexit) or panic inside fn ends only that goroutine. It returns
@@ -150,17 +148,27 @@ func TestCaptureFileRestoresOnFailure(t *testing.T) {
 func TestCaptureFileLargeOutput(t *testing.T) {
 	// Well past a pipe buffer, so a helper that reads only after fn returns
 	// would block forever.
+	// The capture runs off the test goroutine (so a hang can time out), so
+	// it reports through the channel and only the test goroutine fails.
 	want := strings.Repeat("0123456789abcdef", 1<<16)
-	got := make(chan string, 1)
+	type result struct {
+		out string
+		err error
+	}
+	got := make(chan result, 1)
 	go func() {
-		got <- captureStdout(t, func() { fmt.Print(want) })
+		out, err := redirectFile(&os.Stdout, func() { fmt.Print(want) })
+		got <- result{out, err}
 	}()
 	select {
-	case out := <-got:
-		if out != want {
-			t.Fatalf("captured %d bytes, want %d", len(out), len(want))
+	case res := <-got:
+		if res.err != nil {
+			t.Fatalf("os.Pipe: %v", res.err)
+		}
+		if res.out != want {
+			t.Fatalf("captured %d bytes, want %d", len(res.out), len(want))
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("captureStdout blocked on output larger than the pipe buffer")
+		t.Fatal("capture blocked on output larger than the pipe buffer")
 	}
 }
