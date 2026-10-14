@@ -167,6 +167,11 @@ func TestBeginShutdown_StopsHubDispatch(t *testing.T) {
 	client := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
 	srv.SetDispatcher(d)
+	// testServer does not start the background services; give it a
+	// scheduler (not started) so the mark's halt is observable.
+	srv.mu.Lock()
+	srv.scheduler = NewScheduler(s, slog.Default())
+	srv.mu.Unlock()
 	agent := &store.Agent{ID: tid("agent-1"), Name: "test-agent", Slug: "test-agent", RuntimeBrokerID: broker.ID}
 
 	require.NoError(t, d.DispatchAgentStop(ctx, agent), "dispatch works before the mark")
@@ -188,12 +193,10 @@ func TestBeginShutdown_StopsHubDispatch(t *testing.T) {
 	srv.mu.RLock()
 	scheduler := srv.scheduler
 	srv.mu.RUnlock()
-	if scheduler != nil {
-		select {
-		case <-scheduler.stopCh:
-		default:
-			t.Error("scheduler not halted at the mark")
-		}
+	select {
+	case <-scheduler.stopCh:
+	default:
+		t.Error("scheduler not halted at the mark")
 	}
 	rt := srv.scheduledRuntime()
 	rt.mu.Lock()

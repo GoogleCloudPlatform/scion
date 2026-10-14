@@ -6298,9 +6298,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.config.SchedulerMaxConcurrency != nil {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
-	// Written under s.mu: in combined mode the CleanupResources goroutine
-	// (cmd/server_foreground.go) is already running and reads s.scheduler
-	// under s.mu.RLock. The reads in registerSchedulerHandlers below run on
+	// Written under s.mu: a shutdown that begins during startup reads
+	// s.scheduler under s.mu.RLock (BeginShutdown, CleanupResources). The reads in registerSchedulerHandlers below run on
 	// this goroutine, after this write, so they need no lock.
 	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.mu.Lock()

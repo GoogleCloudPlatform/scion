@@ -271,7 +271,7 @@ func TestShutdownExitWatchdog(t *testing.T) {
 		defer close(done)
 		p.armExitWatchdog(done)
 		q.begin(syscall.SIGTERM)
-		require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(9750*time.Millisecond)))
+		require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(9750*time.Millisecond)), "watchdog timer not armed at T0+G-250ms")
 		clk.Advance(9749 * time.Millisecond)
 		select {
 		case <-exits:
