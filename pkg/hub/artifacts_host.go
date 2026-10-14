@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"net/http"
 	"path"
@@ -352,22 +353,73 @@ var _ artifacts.ScopeChecker = (*artifactHost)(nil)
 // gone. One store query covers the page: refs holds at most one id per
 // row of a list page (artifacts.MaxListLimit), well under the store's
 // project list limit. A store error fails the call.
+//
+// A ref made by artifacts.MessageScopeRef names a message instead: it
+// exists while the store has it and it is not soft-deleted
+// (messagesExist). The maintenance pass asks about at most one page of
+// message refs at a time.
 func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(refs))
 	if h.server == nil || len(refs) == 0 {
 		return out, nil
 	}
-	res, err := h.server.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: refs},
-		store.ListOptions{Limit: len(refs), SkipTotalCount: true})
+	var projects, messages []string
+	for _, ref := range refs {
+		if id, ok := artifacts.ParseMessageScopeRef(ref); ok {
+			messages = append(messages, id)
+		} else {
+			projects = append(projects, ref)
+		}
+	}
+	if len(projects) > 0 {
+		res, err := h.server.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: projects},
+			store.ListOptions{Limit: len(projects), SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		found := make(map[string]bool, len(res.Items))
+		for _, p := range res.Items {
+			found[strings.ToLower(p.ID)] = true
+		}
+		for _, ref := range projects {
+			out[ref] = found[strings.ToLower(ref)]
+		}
+	}
+	if len(messages) > 0 {
+		live, err := h.messagesExist(ctx, messages)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range messages {
+			out[artifacts.MessageScopeRef(id)] = live[id]
+		}
+	}
+	return out, nil
+}
+
+// messagesExist reports, for each id, whether the message is stored and
+// not soft-deleted on the web-chat channel: one message lookup and one
+// extension lookup for all of them. A store error fails the call.
+func (h *artifactHost) messagesExist(ctx context.Context, ids []string) (map[string]bool, error) {
+	s := h.server
+	msgs, err := s.store.GetMessagesByIDs(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	found := make(map[string]bool, len(res.Items))
-	for _, p := range res.Items {
-		found[strings.ToLower(p.ID)] = true
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	var exts map[string]*WebChatMessageExt
+	if wcs != nil {
+		if exts, err = wcs.GetMessageExts(ctx, ids); err != nil {
+			return nil, err
+		}
 	}
-	for _, ref := range refs {
-		out[ref] = found[strings.ToLower(ref)]
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m := msgs[id]
+		ext := exts[id]
+		out[id] = m != nil && (ext == nil || ext.DeletedAt == nil)
 	}
 	return out, nil
 }
@@ -585,4 +637,78 @@ func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bo
 		return false
 	}
 	return h.server.authzService.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: scopeRef}, ActionManage).Allowed
+}
+
+var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
+
+// PermitsMessageRead implements artifacts.MessageScopeHost: whether the
+// caller's credential allows reading messages at all. A session user or the
+// dev user may; a scoped user access token may when its ceiling allows
+// inbox.read. Every other identity is refused: agents read attachments
+// only through the fetch path of a later phase (ptone/scion#4596).
+func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return false
+	}
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *DevUser:
+		return id.ID() != ""
+	case *ScopedUserIdentity:
+		return id.ID() != "" && id.Ceiling().Allows(permInboxRead)
+	default:
+		return false
+	}
+}
+
+// MayReadMessage implements artifacts.MessageScopeHost: whether the calling
+// user may read message messageID now. The message must exist and not be
+// deleted; then the user reads it through its conversation or thread
+// (canReadNativeMessage: DM participants, project readers for a project
+// thread, active participants of a group without a project), or is one of
+// its addressees. It answers only for the identity of the request (users,
+// as PermitsMessageRead), and every lookup failure answers false.
+func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) bool {
+	if h.server == nil || messageID == "" || !h.PermitsMessageRead(ctx) {
+		return false
+	}
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil || user.ID() == "" {
+		return false
+	}
+	s := h.server
+	msg, err := s.store.GetMessage(ctx, messageID)
+	if err != nil || msg == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "artifacts: attachment message lookup failed", "message", messageID, "error", err)
+		}
+		return false
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs != nil {
+		ext, err := wcs.GetMessageExt(ctx, messageID)
+		if err != nil {
+			slog.WarnContext(ctx, "artifacts: attachment message state lookup failed", "message", messageID, "error", err)
+			return false
+		}
+		if ext != nil && ext.DeletedAt != nil {
+			return false
+		}
+	}
+	if s.canReadNativeMessage(ctx, user, msg) {
+		return true
+	}
+	addressees, err := s.store.ListAddressees(ctx, messageID)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
+		return false
+	}
+	for _, a := range addressees {
+		if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == user.ID() {
+			return true
+		}
+	}
+	return false
 }

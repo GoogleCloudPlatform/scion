@@ -26,6 +26,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -358,7 +359,36 @@ func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, t
 	// logged.
 	var attachmentRefs []AttachmentRef
 	if len(in.Attachments) > 0 && target.wcs != nil {
+		var svc *artifacts.Service
+		if s.attachmentArtifactsReady() {
+			svc = s.attachmentService()
+		}
 		for _, aid := range in.Attachments {
+			// An attachment stored as an artifact (ptone/scion#4595) is
+			// usable only as an unsent upload of the sender, in any
+			// conversation the sender may post to; sending binds it to the
+			// message. Any other attachment of the artifact service is
+			// refused like a missing one, and never looked up below.
+			if svc != nil {
+				info, state, err := svc.UsableAttachment(ctx, aid, artifacts.PrincipalKindUser, user.ID())
+				reason := ""
+				switch {
+				case err != nil:
+					reason = "attachment lookup failed: " + err.Error()
+				case state == artifacts.AttachmentUnusable:
+					reason = "attachment is not an unsent upload of the sender"
+				}
+				if reason != "" {
+					logReferenceRefused(ctx, chatSendPath(target.Key), reason, user)
+					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
+				}
+				if state == artifacts.AttachmentUsable {
+					attachmentRefs = append(attachmentRefs, AttachmentRef{
+						ID: info.ID, Name: info.Name, MimeType: info.MediaType, Size: info.Size, artifact: true,
+					})
+					continue
+				}
+			}
 			meta, err := target.wcs.GetAttachment(ctx, aid)
 			reason := ""
 			switch {

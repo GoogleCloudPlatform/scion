@@ -274,3 +274,42 @@ Nobody could retire an artifact whose owner is an agent, and once that agent was
 - **`ownerDeleted` is read-gated.** It is shown only on responses the caller can already read (GET, PATCH, and list rows, each of which passes the GET read check). A future enumeration that surfaces it must gate it per row the same way, or it becomes an "owner gone" oracle across unreadable artifacts.
 
 Not in phase 1: custodian clauses 2 (the delegating user, live or recorded sponsor) and 3 (hub-admins when the home is deleted; super-admins are already reached through clause 1), custodians on PATCH and grant or link removal, metadata-only answers for custodians who cannot read, transfer, bulk retire, live-agent expiry, the web UI, and the orphan policy.
+
+## 10. Attachments (ptone/scion#4594)
+
+Design decision D14 kept the chat `AttachmentStore` beside the artifact service in v1 and planned a follow-on that moves attachments onto artifacts. The approved plan (ptone/scion#4594, Option B) stores each web-chat attachment as an artifact whose scope is the message it was sent in. It ships in phases; phase 1, ptone/scion#4595, is the vertical slice described here. Everything is behind the experiment `hub.attachment_artifacts` (server and web layers, default off).
+
+### 10.1 Scope kinds and the read rule
+
+- **Two scope kinds.** `upload` holds a file uploaded and not yet sent; its `scope_ref` is the uploader as `kind:id`. `message` holds a file sent in a message; its `scope_ref` is the message id. The scope columns are free text, so the kinds need no DDL.
+- **One read decision.** `canReadWith` (`pkg/artifacts/read.go`) stays the only read decision. For an attachment scope it applies `canReadAttachmentScope`, in this order: the host implements `MessageScopeHost`; `PermitsMessageRead` (the credential allows reading messages at all); the attachment has a ready version; then, for an upload, the caller is its uploader, and for a message attachment, `MayReadMessage(scope_ref)`. Project permissions and grants never apply to these rows.
+- **`MessageScopeHost`** is an optional, string-only host extension on the pattern of `ScopeChecker` (D13). A host without it makes every attachment unreadable. The hub's adapter answers for the identity of the request only: `PermitsMessageRead` is true for a session or dev user, and for a scoped user access token whose ceiling allows `inbox.read`; agents get false in phase 1 (agent fetch is ptone/scion#4596). `MayReadMessage` requires a stored message that is not deleted, then `canReadNativeMessage` (DM participants, project readers for a project thread, current participants of a group without a project), or the caller among the message's addressees (`ListAddressees`). Every lookup failure answers false.
+- **The result.** An attachment is exactly as readable as its message, at the moment it is read. A participant who leaves a group without a project loses its attachments on the next request; a new participant gains them.
+
+### 10.2 What attachment rows never do
+
+- **Artifact routes and lists.** `Store.GetArtifact` excludes attachment scopes, so every artifact route, message reference resolution and the recipient check answer for an attachment id with the same `404` as for an unknown id, including to a reader of the message, and including grant and link creation. The list candidate filter (`writeCandidateFilters`) excludes them, and so does share-link resolution. `Store.GetAttachment` is the only lookup that returns them, by artifact id or `legacy_attachment_id`.
+- **Store refusals.** `PutGrant`, `PutReviewGrant`, `CreateLink`, `CreateVersion`, `UpdateArtifact` and `SetExpiry` read the row's scope kind under its lock and refuse with `ErrAttachmentNotShareable`, which the routes map to `409 attachment_not_shareable`. With the route lookup above, a request reaches that refusal only for a row that became an attachment after the route read it.
+- **Orphans.** The owner liveness reconciler (§9) skips attachment rows: the message is their custodian, and the sender is recorded as owner for provenance only.
+
+### 10.3 Lifecycle
+
+| Event | Effect |
+|---|---|
+| Upload (`POST /api/v1/chat/attachments`, experiment on) | Request and response contract unchanged. Each file passes the existing deny-list and markup classifier, then becomes an `upload`-scoped artifact with one ready version of kind `attachment` (`Service.CreateAttachment`). Limits: `artifacts.max_file_bytes` per file, 10 per message. |
+| Send (web chat) | Validation accepts an attachment of the artifact service only as an unsent upload of the sender (`UsableAttachment`), in any conversation the sender may post to; anything else is refused with the existing "not available in this conversation" error. After the message is stored, `BindAttachment` moves each upload to `message:<id>` under the row lock. A bind lost to a concurrent send is logged and the attachment is left out of the message. |
+| Download (`GET /api/v1/chat/attachments/{id}`) | Resolved in the artifact service first, whether or not the experiment is on now, then in the legacy store. A readable attachment is delivered through `serveFile`: the artifact file headers, `inline` only for safe types, `302` to a signed URL on an object store, streamed with `?stream=1`. An unreadable one gets the route's single not-found answer and is not looked up in the legacy store. |
+| History | `messageAttachments` merges both stores, with the same `{id, name, mime, size}` shape. |
+| Agent recipients | Each attachment is staged into the project scratchpad from its stored bytes through `Service.OpenBoundAttachment`, which checks no caller and requires the attachment to be bound to the message being sent. It is called only from the send path after persistence (pinned by `TestOpenBoundAttachmentReachableOnlyFromSendPath`); ptone/scion#4597 replaces it. |
+| Message deleted (`handleMessageDelete`) | `Service.RetireScope("message", id)` soft-deletes its attachments at once (actor `system`, authority `message_deleted`). |
+| Maintenance pass | `RetireAttachments` retires uploads older than `UploadTTL` (24 hours; authority `attachment_unsent`) and the attachments of every message `ScopeChecker.ScopesExist` reports gone; message refs are passed as `message:<id>`. This covers messages removed without the delete hook. Bytes follow the blob sweep, by reference, after `gc_grace_hours`. |
+
+### 10.4 Schema
+
+Migration `0009_attachments`, both dialects, nullable columns, no backfill: `artifact.legacy_attachment_id` (unique where set; the backfill phase fills it so legacy ids keep resolving), `artifact_version.source_attachment_id` and `source_message_id` (written from publish by reference, ptone/scion#4599), and an index on `artifact (scope_kind, created_at)` for live rows.
+
+### 10.5 Invariants for later phases
+
+- **One read rule.** Any new path that serves an attachment's bytes on behalf of a request goes through `canReadWith`. `OpenBoundAttachment` is the one exception, and it stays reachable from the send path only.
+- **Fail closed.** An unknown scope kind, a host without `MessageScopeHost`, an unanswered lookup and any store error refuse.
+- **Experiment off means today's behaviour** for new uploads, while attachments stored when it was on stay readable.

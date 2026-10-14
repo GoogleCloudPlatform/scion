@@ -63,7 +63,18 @@ Do not post credentials, tokens, keys or other sensitive material in a space thr
 :::
 
 :::note[Attachment and shared-directory permissions]
-Shared directories and the storage that holds chat attachments do not have fine-grained permissions: access is not limited per conversation or per member. Do not rely on attachments or shared directories for files that only some project members may see. A planned move of attachments to artifacts will add finer-grained access for attachments.
+Shared directories, and the attachment store that holds chat attachments by default, grant access by project, not per conversation or per member. Keep files that only some project members may see out of them.
+
+With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat is stored as an attachment of the message it is sent in, and is exactly as readable as that message at the moment it is read:
+
+- **Direct message:** its two participants.
+- **Thread in a project space:** everyone who can read the project.
+- **Group conversation without a project:** its current participants. Someone who joins can read the attachments of earlier messages, and someone who leaves stops being able to read them.
+- **Anyone the message is addressed to.**
+
+Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Anyone else gets the same "not found" answer as for an attachment that does not exist. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
+
+Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
 :::
 
 ---

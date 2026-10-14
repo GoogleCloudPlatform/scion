@@ -134,6 +134,14 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// AttachmentArtifacts gates storing web-chat attachments as message-scoped
+// artifacts (ptone/scion#4595): while it is on, POST /api/v1/chat/attachments
+// stores each file through the artifact service, which must be installed
+// with its settings section enabled (hub.artifacts need not be on). The hub
+// checks it on every upload. Attachments stored while it was on stay
+// readable after it is turned off.
+const AttachmentArtifacts = "hub.attachment_artifacts"
+
 // ChatScheduledSend gates scheduled send in native web chat: the Schedule
 // send menu item and pending-message banners in the web UI, the hub's
 // /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
@@ -264,6 +272,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3202",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-05",
+	},
+	{
+		Name:        AttachmentArtifacts,
+		Title:       "Attachments as artifacts",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: each one is readable exactly by the readers of that message, and is removed when the message is deleted. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4594",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-12",
 	},
 	{
 		Name:        "hub.conduit",
