@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	atlasmigrate "ariga.io/atlas/sql/migrate"
@@ -331,7 +332,21 @@ func applyKeepalives(params map[string]string) {
 // preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
 // ("relation already exists") is silently skipped so that new tables are
 // created alongside pre-existing ones.
+//
+// AutoMigrate is safe for concurrent use within one process: calls are
+// serialized by autoMigrateMu, because ent's schema migration mutates the
+// package-level tables in pkg/ent/migrate (Atlas setupTables writes each
+// table's column map), and two unserialized calls can crash the process with
+// "fatal error: concurrent map writes". The lock is process-local and is held
+// for the whole call. It does not coordinate separate processes or Hub
+// replicas sharing one database; on Postgres that is the job of the advisory
+// lock taken by entadapter.CompositeStore.MigrateWithSchemaLock
+// (ptone/scion#1078). Code that calls client.Schema.Create directly bypasses
+// this lock.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
+	autoMigrateMu.Lock()
+	defer autoMigrateMu.Unlock()
+
 	migrateOpts := []entschema.MigrateOption{
 		migrate.WithDropColumn(false),
 		migrate.WithDropIndex(false),
@@ -347,6 +362,9 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	}
 	return dropDecisionAuditTable(ctx, client)
 }
+
+// autoMigrateMu serializes AutoMigrate within the process; see AutoMigrate.
+var autoMigrateMu sync.Mutex
 
 // skipExistingRelations is an Ent schema ApplyHook that makes DDL
 // idempotent on Postgres by skipping any statement that fails with
