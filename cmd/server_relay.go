@@ -175,6 +175,9 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 func runRelayRole(ctx context.Context, cfg *config.GlobalConfig) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The config is loaded: remove the server secret env names (unread)
+	// so nothing the relay starts inherits them.
+	unsetServerSecretEnv()
 	if err := validateRelayRoleConfig(cfg); err != nil {
 		return err
 	}

@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -131,6 +132,36 @@ func TestRunRelayRoleChecksConfigBeforeTheDatabase(t *testing.T) {
 	cfg.Hub.Conduit.PeerSecret = ""
 	err := runRelayRole(context.Background(), cfg)
 	assert.ErrorContains(t, err, "peer_secret is required on --role relay")
+}
+
+// TestRunRelayRoleUnsetsServerSecretEnv: by the time the relay opens its
+// database, none of the server secret env names is in the process env, the
+// relay still has its peer secret in the config, and nothing kept a session
+// secret in memory.
+func TestRunRelayRoleUnsetsServerSecretEnv(t *testing.T) {
+	isolateServerSecretEnv(t)
+	for _, name := range serverSecretEnvNames {
+		t.Setenv(name, "value-of-"+name)
+	}
+	prev := openRelayDB
+	t.Cleanup(func() { openRelayDB = prev })
+	errStop := errors.New("stop before the database")
+	cfg := relayRoleTestConfig()
+	var present []string
+	var peerSecret string
+	openRelayDB = func(context.Context, relaydb.Options) (*relaydb.DB, error) {
+		for _, name := range serverSecretEnvNames {
+			if _, ok := os.LookupEnv(name); ok {
+				present = append(present, name)
+			}
+		}
+		peerSecret = cfg.Hub.Conduit.PeerSecretValue()
+		return nil, errStop
+	}
+	require.ErrorIs(t, runRelayRole(context.Background(), cfg), errStop)
+	assert.Empty(t, present, "server secret env names still set when the relay opens its database")
+	assert.Equal(t, relayRoleTestPeerSecret, peerSecret, "the relay lost its peer secret")
+	assert.Empty(t, capturedSessionSecret, "the relay kept a session secret in memory")
 }
 
 // TestRelayServerConfigReadsRelaySettings: the relay's configuration comes

@@ -157,6 +157,104 @@ func TestScrubServerSecretEnv_PeerSecretNamesAreTheSetting(t *testing.T) {
 	}
 }
 
+// funcBody returns the body of the top-level function name in file.
+func funcBody(t *testing.T, file, name string) *ast.BlockStmt {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == name {
+			return fn.Body
+		}
+	}
+	t.Fatalf("%s not found in %s", name, file)
+	return nil
+}
+
+// usedNames returns the identifiers and pkg.Name selectors used in body,
+// with the position of the first use of each.
+func usedNames(body *ast.BlockStmt) map[string]token.Pos {
+	used := map[string]token.Pos{}
+	add := func(name string, pos token.Pos) {
+		if _, seen := used[name]; !seen {
+			used[name] = pos
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			if pkg, ok := x.X.(*ast.Ident); ok {
+				add(pkg.Name+"."+x.Sel.Name, x.Pos())
+			}
+		case *ast.Ident:
+			add(x.Name, x.Pos())
+		}
+		return true
+	})
+	return used
+}
+
+// TestUnsetServerSecretEnv_ReadsNothing: the unset-only helper removes every
+// scrubbed name without reading any of them: no env read, no captured value,
+// no deprecation warning.
+func TestUnsetServerSecretEnv_ReadsNothing(t *testing.T) {
+	used := usedNames(funcBody(t, "server_secret_env.go", "unsetServerSecretEnv"))
+	if _, ok := used["os.Unsetenv"]; !ok {
+		t.Error("unsetServerSecretEnv does not call os.Unsetenv")
+	}
+	for _, read := range []string{"os.Getenv", "os.LookupEnv", "os.Environ", "sessionSecretFromEnv", "capturedSessionSecret", "webSessionSecret", "resolveSessionSecret", "sessionSecretValue"} {
+		if _, ok := used[read]; ok {
+			t.Errorf("unsetServerSecretEnv uses %s", read)
+		}
+	}
+
+	isolateServerSecretEnv(t)
+	logs := captureSecretEnvSlog(t)
+	for _, name := range serverSecretEnvNames {
+		t.Setenv(name, "value-of-"+name)
+	}
+	unsetServerSecretEnv()
+	for _, name := range serverSecretEnvNames {
+		if _, ok := os.LookupEnv(name); ok {
+			t.Errorf("%s is still set in the process env", name)
+		}
+	}
+	if capturedSessionSecret != "" {
+		t.Error("unsetServerSecretEnv kept a session secret in memory")
+	}
+	if strings.Contains(logs.String(), "deprecated") {
+		t.Error("unsetServerSecretEnv logged a deprecation warning, so it read SESSION_SECRET")
+	}
+}
+
+// TestRelayRoleUsesOnlyTheUnsetOnlyHelper: --role relay never reaches the
+// capturing scrub. runServerStart dispatches the relay role before it calls
+// scrubServerSecretEnv, and runRelayRole calls unsetServerSecretEnv and
+// none of the session secret readers.
+func TestRelayRoleUsesOnlyTheUnsetOnlyHelper(t *testing.T) {
+	start := usedNames(funcBody(t, "server_foreground.go", "runServerStart"))
+	relay, okRelay := start["runRelayRole"]
+	scrub, okScrub := start["scrubServerSecretEnv"]
+	if !okRelay || !okScrub {
+		t.Fatal("runServerStart no longer calls runRelayRole and scrubServerSecretEnv; update this test")
+	}
+	if relay > scrub {
+		t.Error("runServerStart calls scrubServerSecretEnv before it dispatches the relay role")
+	}
+
+	role := usedNames(funcBody(t, "server_relay.go", "runRelayRole"))
+	if _, ok := role["unsetServerSecretEnv"]; !ok {
+		t.Error("runRelayRole does not call unsetServerSecretEnv")
+	}
+	for _, reader := range []string{"scrubServerSecretEnv", "sessionSecretFromEnv", "resolveSessionSecret", "sessionSecretValue", "capturedSessionSecret"} {
+		if _, ok := role[reader]; ok {
+			t.Errorf("runRelayRole uses %s", reader)
+		}
+	}
+}
+
 // TestScrubServerSecretEnv_ChildProcessEnvIsClean starts a child process after
 // the scrub and checks that it inherits none of the scrubbed names.
 func TestScrubServerSecretEnv_ChildProcessEnvIsClean(t *testing.T) {

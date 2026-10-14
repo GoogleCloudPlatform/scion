@@ -56,6 +56,15 @@ func scrubServerSecretEnv() {
 	}
 }
 
+// unsetServerSecretEnv removes every name in serverSecretEnvNames from the
+// process env without reading any of them. The relay role calls it in place
+// of scrubServerSecretEnv, which also keeps the session secret in memory.
+func unsetServerSecretEnv() {
+	for _, name := range serverSecretEnvNames {
+		_ = os.Unsetenv(name)
+	}
+}
+
 // sessionSecretFromEnv returns SCION_SERVER_SESSION_SECRET, falling back to
 // the deprecated SESSION_SECRET with a warning.
 func sessionSecretFromEnv() string {
