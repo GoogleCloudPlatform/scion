@@ -137,3 +137,5 @@ Written without running any Go command (coordinator rule for this
 task); the generated ent code came from one approved `go generate` run.
 Compile, tests, ent-check, catalog and inventory checks run in the gate
 after review.
+
+2026-10-14: merged item 3A's final branch in. The visitor revoke route now goes through ProjectMembershipService.RemoveVisitor, which takes the actor ID and, for a binding a visitor rule created, records the exclusion before it deletes the binding in the same transaction (revoke order: rule, then binding; rule changes: project row, rule, bindings). The authority read census classifies the rule binding read in missingVisitorRules. Rule window narrowing and rule removal re-check the affected visitors' conduit streams after commit, using the bindings UpdateProjectVisitorRuleWindow now returns.
