@@ -39,6 +39,11 @@ Source can be:
   - An rclone URI (:gcs:bucket/path)
   - An archive URL (.tgz, .zip)
 
+For a GitHub URL the fetch authenticates with the first of these
+environment variables that is set: GH_{OWNER}__{REPO}, GH_{OWNER}, then
+GITHUB_TOKEN (OWNER and REPO uppercased, with "-" and "." as "_"). Other
+sources are fetched without a credential.
+
 The installed name is, in order of precedence: --name; the "name" field in
 the source's config.yaml; its "harness" field; the source directory name.
 
@@ -135,7 +140,7 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized)
+		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized, remoteFetchCredential(normalized))
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)
 		}

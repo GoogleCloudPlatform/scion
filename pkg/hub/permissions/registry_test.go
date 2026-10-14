@@ -132,6 +132,11 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
 
+	// agent selectors outside the agent:manage alias.
+	"agent:set_message_mode": {"agent.set_message_mode"},
+	"agent:stop_all":         {"agent.stop_all"},
+	"agent:update":           {"agent.update"},
+
 	// quota selectors (hub-wide limit, entitlement and usage administration).
 	"quota:create": {"quota.create"},
 	"quota:delete": {"quota.delete"},
