@@ -172,7 +172,7 @@ func TestStreamRenewalCrossesTheHop(t *testing.T) {
 	hub := newFakeHub(t)
 	clk := clock.NewFake(t0)
 	ro := newStreamRole(t, hub, clk, nil)
-	grant := []byte("eyJ0eXAiOiJjb25kdWl0LXJlbmV3YWwrand0In0.payload.sig")
+	grant := []byte("renewal-grant-bytes-for-the-hop-test")
 	hub.setAnswer(renewAnswer(string(grant), t0.Add(20*time.Minute)))
 	bridged := &recordingStreamRenewer{}
 	rec := &streamRecorder{}
