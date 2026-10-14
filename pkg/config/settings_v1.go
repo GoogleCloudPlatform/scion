@@ -137,14 +137,27 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -1196,6 +1209,21 @@ type VersionedSettings struct {
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
+
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
