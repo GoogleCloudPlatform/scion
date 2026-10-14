@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -205,6 +206,59 @@ func TestGroupMemberRemoveAuditFailureRollsBack(t *testing.T) {
 	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
 	assert.Contains(t, audits[0].BeforeSummary, userID)
 	assert.NotEmpty(t, audits[0].ActorPrincipalID)
+}
+
+// groupOwnerAddFaultStore fails every owner-role group membership add,
+// inside and outside transactions.
+type groupOwnerAddFaultStore struct {
+	store.Store
+}
+
+func (s *groupOwnerAddFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error { return fn(&groupOwnerAddFaultStore{Store: tx}) })
+}
+
+func (s *groupOwnerAddFaultStore) AddGroupMember(ctx context.Context, m *store.GroupMember) error {
+	if m.Role == store.GroupMemberRoleOwner {
+		return errors.New("injected group owner add fault")
+	}
+	return s.Store.AddGroupMember(ctx, m)
+}
+
+// Group create adds the creator's owner membership and its audit record in
+// the same transaction as the group; a failure of either write leaves no
+// group.
+func TestCreateGroupCreatorOwnerFailureRollsBack(t *testing.T) {
+	srv, real := testServer(t)
+	ctx := context.Background()
+	req := CreateGroupRequest{Name: "cg owner audit", Slug: "cg-owner-audit"}
+
+	for name, faulty := range map[string]store.Store{
+		"owner add fails":   &groupOwnerAddFaultStore{Store: real},
+		"owner audit fails": &createTxFaultStore{Store: real, auditErrFor: "group_member_add"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv.store = faulty
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			_, err := real.GetGroupBySlug(ctx, req.Slug)
+			assert.ErrorIs(t, err, store.ErrNotFound, "no group after the failure")
+		})
+	}
+
+	srv.store = real
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var group store.Group
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&group))
+	owner, err := real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, DevUserID)
+	require.NoError(t, err, "the creator is an owner of the new group")
+	assert.Equal(t, store.GroupMemberRoleOwner, owner.Role)
+	audits := grantAudits(t, real, "group_member_add", group.ID)
+	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
+	assert.Contains(t, audits[0].AfterSummary, DevUserID)
+	assert.Contains(t, audits[0].AfterSummary, `"role":"owner"`)
+	assert.Equal(t, DevUserID, audits[0].ActorPrincipalID)
 }
 
 // The role-binding audit summary is valid JSON for any field value,

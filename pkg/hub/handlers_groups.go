@@ -334,16 +334,33 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The group, its parent membership, and that membership's audit record
-	// commit or roll back together.
+	// The group, its parent membership, the creator's owner membership, and
+	// the audit record of each membership commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.CreateGroup(ctx, group); err != nil {
 			return err
 		}
-		if parentEdge == nil {
+		if parentEdge != nil {
+			if err := s.auditGroupMemberAddTx(ctx, tx, parentEdge, canDelegateResult, canDelegateReason); err != nil {
+				return err
+			}
+		}
+		if createdBy == "" {
 			return nil
 		}
-		return s.auditGroupMemberAddTx(ctx, tx, parentEdge, canDelegateResult, canDelegateReason)
+		owner := &store.GroupMember{
+			GroupID:    group.ID,
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   createdBy,
+			Role:       store.GroupMemberRoleOwner,
+			AddedBy:    createdBy,
+		}
+		if err := tx.AddGroupMember(ctx, owner); err != nil {
+			return fmt.Errorf("add creator as group owner: %w", err)
+		}
+		// The creator's own owner membership runs no delegation check, so
+		// the record carries no CanDelegate result.
+		return s.auditGroupMemberAddTx(ctx, tx, owner, "", "")
 	}); err != nil {
 		if parentEdge != nil {
 			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
@@ -361,20 +378,6 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		"slug", group.Slug,
 		"group_type", group.GroupType,
 		"created_by", createdBy)
-
-	// Add the creating user as an owner of the new group
-	if createdBy != "" {
-		if err := s.store.AddGroupMember(ctx, &store.GroupMember{
-			GroupID:    group.ID,
-			MemberType: store.GroupMemberTypeUser,
-			MemberID:   createdBy,
-			Role:       store.GroupMemberRoleOwner,
-		}); err != nil && err != store.ErrAlreadyExists {
-			// Log but don't fail the group creation
-			s.groupsLogger().Warn("failed to add creator as owner of new group",
-				"group", group.ID, "user", createdBy, "error", err)
-		}
-	}
 
 	writeJSON(w, http.StatusCreated, group)
 }
