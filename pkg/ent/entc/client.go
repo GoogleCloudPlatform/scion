@@ -423,7 +423,15 @@ func applyKeepalives(params map[string]string) {
 // of the advisory lock taken by entadapter.CompositeStore.MigrateWithSchemaLock
 // (ptone/scion#1078). Code that calls client.Schema.Create directly bypasses
 // this lock.
-func AutoMigrate(ctx context.Context, client *ent.Client) error {
+//
+// WithBeforeFKReconcile sets a hook that runs, under the lock and after
+// everything the caller ran before AutoMigrate, just before the reconcile
+// changes rows; a hook error aborts before anything is written.
+func AutoMigrate(ctx context.Context, client *ent.Client, opts ...AutoMigrateOption) error {
+	var cfg autoMigrateConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
 	select {
 	case autoMigrateSem <- struct{}{}:
 	case <-ctx.Done():
@@ -446,6 +454,9 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	var fkResult fkReconcileResult
 	if client.Driver().Dialect() == dialect.SQLite {
 		if drv, ok := client.Driver().(*entsql.Driver); ok {
+			if err := runBeforeFKReconcile(ctx, drv.DB(), cfg.beforeFKReconcile); err != nil {
+				return err
+			}
 			var err error
 			if fkResult, err = reconcileSQLiteForeignKeys(ctx, drv.DB()); err != nil {
 				return err
@@ -459,6 +470,20 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 		return err
 	}
 	return dropDecisionAuditTable(ctx, client)
+}
+
+// AutoMigrateOption configures AutoMigrate.
+type AutoMigrateOption func(*autoMigrateConfig)
+
+type autoMigrateConfig struct {
+	beforeFKReconcile BeforeFKReconcileFunc
+}
+
+// WithBeforeFKReconcile makes AutoMigrate call fn on SQLite just before the
+// foreign key reconcile changes rows; see BeforeFKReconcileFunc. A nil fn is
+// ignored.
+func WithBeforeFKReconcile(fn BeforeFKReconcileFunc) AutoMigrateOption {
+	return func(c *autoMigrateConfig) { c.beforeFKReconcile = fn }
 }
 
 // autoMigrateSem is a one-slot semaphore that serializes AutoMigrate within
