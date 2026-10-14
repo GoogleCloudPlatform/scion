@@ -221,9 +221,9 @@ func foreignKeyList(ctx context.Context, q sqlQuerier, table string) (map[int]fk
 	return out, nil
 }
 
-// tableColumns returns the table's columns (name -> NOT NULL) and its
+// fkTableColumns returns the table's columns (name -> NOT NULL) and its
 // primary-key columns in key order.
-func tableColumns(ctx context.Context, q sqlQuerier, table string) (map[string]bool, []string, error) {
+func fkTableColumns(ctx context.Context, q sqlQuerier, table string) (map[string]bool, []string, error) {
 	rows, err := q.QueryContext(ctx, "SELECT name, \"notnull\", pk FROM pragma_table_info(?)", table)
 	if err != nil {
 		return nil, nil, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
@@ -258,7 +258,7 @@ func tableColumns(ctx context.Context, q sqlQuerier, table string) (map[string]b
 // column list refers to the parent's primary key). ok is false when the
 // parent table does not exist.
 func resolveFK(ctx context.Context, q sqlQuerier, fk fkInfo) (fkInfo, bool, error) {
-	parentCols, parentPK, err := tableColumns(ctx, q, fk.parent)
+	parentCols, parentPK, err := fkTableColumns(ctx, q, fk.parent)
 	if err != nil {
 		return fk, false, err
 	}
@@ -315,6 +315,8 @@ func setNullList(cols []string) string {
 	return strings.Join(sets, ", ")
 }
 
+// quoteIdent double-quotes a SQLite identifier. It is shared with the
+// legacy-data migration, so it lives in this untagged file.
 func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
@@ -430,7 +432,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 			case "CASCADE":
 				stmt = fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdent(info.table), orphanPredicate(info))
 			case "SET NULL":
-				notNull, _, err := tableColumns(ctx, tx, info.table)
+				notNull, _, err := fkTableColumns(ctx, tx, info.table)
 				if err != nil {
 					return res, fmt.Errorf("foreign key reconcile: %w", err)
 				}

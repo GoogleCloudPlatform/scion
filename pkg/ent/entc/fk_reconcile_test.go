@@ -66,7 +66,7 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-func countRows(t *testing.T, db *sql.DB, query string) int {
+func fkCountRows(t *testing.T, db *sql.DB, query string) int {
 	t.Helper()
 	var n int
 	require.NoError(t, db.QueryRow(query).Scan(&n), query)
@@ -101,18 +101,18 @@ func TestReconcileSQLiteForeignKeys_AppliesDeclaredActions(t *testing.T) {
 	require.Empty(t, res.diagnostic())
 
 	// CASCADE: the orphan is deleted; the valid row and the NULL-key row stay.
-	require.Equal(t, 2, countRows(t, db, `SELECT count(*) FROM c_cascade`))
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM c_cascade WHERE id = 'orphan'`))
+	require.Equal(t, 2, fkCountRows(t, db, `SELECT count(*) FROM c_cascade`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM c_cascade WHERE id = 'orphan'`))
 	// SET NULL: the orphan's key is cleared, the row and the valid row stay.
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'orphan' AND pid IS NULL`))
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'ok' AND pid = 'p1'`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'orphan' AND pid IS NULL`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'ok' AND pid = 'p1'`))
 	// A REFERENCES clause without a column list resolves to the parent key.
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c_implicit WHERE id = 'orphan' AND pid IS NULL`))
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c_implicit WHERE id = 'ok' AND pid = 'p1'`))
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c_implicit WHERE id = 'orphan' AND pid IS NULL`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c_implicit WHERE id = 'ok' AND pid = 'p1'`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
 
 	// The connection's pragma state is restored.
-	require.Equal(t, 1, countRows(t, db, `PRAGMA foreign_keys`))
+	require.Equal(t, 1, fkCountRows(t, db, `PRAGMA foreign_keys`))
 
 	// Idempotent.
 	res, err = reconcileSQLiteForeignKeys(ctx, db)
@@ -133,9 +133,9 @@ func TestReconcileSQLiteForeignKeys_FollowsCascades(t *testing.T) {
 	res, err := reconcileSQLiteForeignKeys(ctx, db)
 	require.NoError(t, err)
 	require.Empty(t, res.Unrepaired)
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM b`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM b`))
 	// c1 was orphaned by the cascade, and gets its own declared action.
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c WHERE id = 'c1' AND bid IS NULL`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c WHERE id = 'c1' AND bid IS NULL`))
 }
 
 func TestReconcileSQLiteForeignKeys_LeavesUnrepairableAndReports(t *testing.T) {
@@ -155,11 +155,11 @@ func TestReconcileSQLiteForeignKeys_LeavesUnrepairableAndReports(t *testing.T) {
 	require.NoError(t, err)
 
 	// The declared actions are still applied to the repairable keys.
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM c_cascade WHERE id = 'orphan'`))
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'orphan' AND pid IS NULL`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM c_cascade WHERE id = 'orphan'`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM c_setnull WHERE id = 'orphan' AND pid IS NULL`))
 	// The rest are untouched.
 	for _, tbl := range []string{"c_noaction", "c_restrict", "c_notnull"} {
-		require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM `+tbl+` WHERE id = 'orphan' AND pid = 'gone'`), tbl)
+		require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM `+tbl+` WHERE id = 'orphan' AND pid = 'gone'`), tbl)
 	}
 
 	require.Len(t, res.Unrepaired, 3)
@@ -191,7 +191,7 @@ func TestReconcileSQLiteForeignKeys_LeavesUnrepairableAndReports(t *testing.T) {
 			mustExec(t, db, strings.TrimSpace(strings.TrimPrefix(line, "delete:")))
 		}
 	}
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
 }
 
 // A key whose parent table does not exist is left alone, even with a
@@ -203,13 +203,13 @@ func TestReconcileSQLiteForeignKeys_MissingParentTableLeftAlone(t *testing.T) {
 		`CREATE TABLE child (id TEXT PRIMARY KEY, pid TEXT REFERENCES nosuch(id) ON DELETE CASCADE)`,
 		`INSERT INTO child VALUES ('c1', 'x'), ('c2', NULL)`,
 	)
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
 
 	res, err := reconcileSQLiteForeignKeys(ctx, db)
 	require.NoError(t, err)
 	require.Len(t, res.Unrepaired, 1)
 	require.Equal(t, reasonNoParent, res.Unrepaired[0].reason)
-	require.Equal(t, 2, countRows(t, db, `SELECT count(*) FROM child`))
+	require.Equal(t, 2, fkCountRows(t, db, `SELECT count(*) FROM child`))
 
 	d := res.diagnostic()
 	require.Contains(t, d, `child(pid) -> nosuch ON DELETE CASCADE: 1 row(s) reference a table that does not exist`)
@@ -218,7 +218,7 @@ func TestReconcileSQLiteForeignKeys_MissingParentTableLeftAlone(t *testing.T) {
 	require.NotContains(t, d, "DELETE FROM")
 	require.NotContains(t, d, "UPDATE")
 	// The suggested statement is valid SQL.
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM (`+strings.TrimSuffix(inspect, ";")+`)`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM (`+strings.TrimSuffix(inspect, ";")+`)`))
 }
 
 func TestReconcileSQLiteForeignKeys_RollsBackWhenRepairWouldOrphanRows(t *testing.T) {
@@ -242,9 +242,9 @@ func TestReconcileSQLiteForeignKeys_RollsBackWhenRepairWouldOrphanRows(t *testin
 	require.Len(t, res.Unrepaired, 1)
 
 	// Nothing changed, not even the independent SET NULL repair.
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM b WHERE id = 'b1' AND aid = 'gone'`))
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM s WHERE id = 's1' AND aid = 'gone'`))
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM d WHERE id = 'd1' AND bid = 'b1'`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM b WHERE id = 'b1' AND aid = 'gone'`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM s WHERE id = 's1' AND aid = 'gone'`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM d WHERE id = 'd1' AND bid = 'b1'`))
 }
 
 func TestReconcileSQLiteForeignKeys_CleanDatabaseUnchanged(t *testing.T) {
@@ -263,8 +263,8 @@ func TestReconcileSQLiteForeignKeys_CleanDatabaseUnchanged(t *testing.T) {
 	res, err := reconcileSQLiteForeignKeys(ctx, db)
 	require.NoError(t, err)
 	require.Empty(t, res.Unrepaired)
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM writes`))
-	require.Equal(t, 2, countRows(t, db, `SELECT count(*) FROM child`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM writes`))
+	require.Equal(t, 2, fkCountRows(t, db, `SELECT count(*) FROM child`))
 }
 
 // --- AutoMigrate against the real schema ---
@@ -341,7 +341,7 @@ func makeColumnNullable(t *testing.T, db *sql.DB, table, column string) {
 
 func columnNotNull(t *testing.T, db *sql.DB, table, column string) bool {
 	t.Helper()
-	return countRows(t, db, fmt.Sprintf(`SELECT "notnull" FROM pragma_table_info('%s') WHERE name = '%s'`, table, column)) == 1
+	return fkCountRows(t, db, fmt.Sprintf(`SELECT "notnull" FROM pragma_table_info('%s') WHERE name = '%s'`, table, column)) == 1
 }
 
 // TestAutoMigrate_RebuildWithSetNullOrphans covers the upgrade failure: a
@@ -362,17 +362,17 @@ func TestAutoMigrate_RebuildWithSetNullOrphans(t *testing.T) {
 	mustExec(t, db, fmt.Sprintf(`DELETE FROM role_bindings WHERE id != '%s'`, orphanID))
 	insertRow(t, db, "role_bindings", map[string]any{"id": keptID, "principal_id": "kept", "role_definition_id": roleID})
 	mustExec(t, db, "PRAGMA foreign_keys = ON")
-	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+	require.Equal(t, 1, fkCountRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
 
 	require.NoError(t, AutoMigrate(ctx, client))
 
 	require.True(t, columnNotNull(t, db, "role_bindings", "principal_id"), "the table should have been rebuilt")
-	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id IS NULL AND principal_id = 'orphan'`, orphanID)))
-	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id = '%s'`, keptID, roleID)))
-	require.Equal(t, 2, countRows(t, db, `SELECT count(*) FROM role_bindings`))
-	require.Zero(t, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+	require.Equal(t, 2, fkCountRows(t, db, `SELECT count(*) FROM role_bindings`))
+	require.Zero(t, fkCountRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
 }
 
 // A binding row whose role reference is gone keeps its row, with the
@@ -393,7 +393,7 @@ func TestAutoMigrate_NullsOrphanedBindingReference(t *testing.T) {
 
 	require.NoError(t, AutoMigrate(ctx, client))
 
-	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id IS NULL
 		 AND principal_type = 'user' AND principal_id = 'p1' AND scope_type = 'project' AND scope_id = 's1'`,
 		bindingID)))
@@ -414,7 +414,7 @@ func TestAutoMigrate_NoActionOrphanWithoutRebuildStillMigrates(t *testing.T) {
 	require.NoError(t, AutoMigrate(ctx, client))
 	require.Contains(t, logs.String(), "level=ERROR")
 	require.Contains(t, logs.String(), `entitlement_bindings(limit_definition_id) -> limit_definitions(id) ON DELETE NO ACTION: 1 orphaned row(s)`)
-	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM entitlement_bindings WHERE id = '%s' AND limit_definition_id = '%s'`, rowID, gone)))
 }
 
@@ -436,7 +436,7 @@ func TestAutoMigrate_NoActionOrphanWithRebuildFailsWithDiagnostic(t *testing.T) 
 	msg := err.Error()
 	require.Contains(t, msg, `entitlement_bindings(limit_definition_id) -> limit_definitions(id) ON DELETE NO ACTION: 1 orphaned row(s)`)
 	require.Contains(t, msg, `DELETE FROM "entitlement_bindings" WHERE "entitlement_bindings"."limit_definition_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "limit_definitions" AS p WHERE p."id" = "entitlement_bindings"."limit_definition_id");`)
-	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(`SELECT count(*) FROM entitlement_bindings WHERE id = '%s'`, rowID)))
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(`SELECT count(*) FROM entitlement_bindings WHERE id = '%s'`, rowID)))
 }
 
 func TestAutoMigrate_CleanDatabaseHasNoFKDiagnostic(t *testing.T) {
