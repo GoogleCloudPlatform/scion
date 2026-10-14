@@ -26,6 +26,7 @@ package hostlimits
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -44,19 +45,20 @@ const (
 	// The per-agent allowances are judgment constants from two data
 	// points. A host on the kernel default max_user_instances=128 ran out
 	// at about 150 agents: about 0.85 instances per agent, the user's own
-	// processes included. One running Claude Code harness, measured,
-	// held 1 inotify instance and 996 watches on a large repository.
+	// processes included. One running Claude Code agent was observed
+	// holding 1 inotify instance and 996 watches on a repository of about
+	// 1000 directories (about one watch per directory).
 	//
-	// Instances: 1 per agent (the measured value and a ceiling of the
-	// observed 0.85) plus a reserve of 128 (the kernel default) for the
-	// user's processes that are not agents: 228 for 100 agents, so a host
-	// on the default warns at the default capacity, as the observed host
-	// would have.
+	// Instances: 1 per agent (the observed agent's value, and a ceiling of
+	// the 0.85 per agent) plus a reserve of 128 (the kernel default) for
+	// the user's processes that are not agents: 228 for 100 agents, so a
+	// host on the default warns at the default capacity, as the host that
+	// ran out would have.
 	//
-	// Watches did not run out on that host: 1024 per agent (the measured
+	// Watches did not run out on that host: 1024 per agent (the observed
 	// 996, rounded up) plus a reserve of 8192 (the old kernel default):
-	// 110592 for 100 agents. Recursive watchers on very large workspaces
-	// can need more.
+	// 110592 for 100 agents. Workspaces with many more directories can
+	// need more.
 
 	// InotifyInstancesPerAgent is the inotify instance allowance per agent.
 	InotifyInstancesPerAgent = 1
@@ -131,7 +133,10 @@ type InotifyResult struct {
 	// Reason says why the check does not apply.
 	Reason string
 	// Agents is the expected agent count the limits are judged against.
-	Agents    int
+	Agents int
+	// Defaulted is true when Agents is DefaultExpectedAgents because the
+	// caller gave no agent count.
+	Defaulted bool
 	Instances Limit
 	Watches   Limit
 }
@@ -141,14 +146,16 @@ type InotifyResult struct {
 // positive). It never fails: a value that cannot be read is unknown, and
 // with neither value known the check does not apply.
 func CheckInotify(r Reader, agents int) InotifyResult {
-	if agents <= 0 {
+	defaulted := agents <= 0
+	if defaulted {
 		agents = DefaultExpectedAgents
 	}
 	if r.GOOS != "linux" {
-		return InotifyResult{Agents: agents, Reason: "not a Linux host"}
+		return InotifyResult{Agents: agents, Defaulted: defaulted, Reason: "not a Linux host"}
 	}
 	res := InotifyResult{
 		Agents:    agents,
+		Defaulted: defaulted,
 		Instances: readLimit(r, maxUserInstancesPath),
 		Watches:   readLimit(r, maxUserWatchesPath),
 	}
@@ -228,9 +235,9 @@ func (res InotifyResult) Warning() string {
 }
 
 // agentsText names the agent count the limits were judged against, and
-// says when it is the default capacity rather than a configured one.
+// says when it is the default capacity rather than one the caller gave.
 func (res InotifyResult) agentsText() string {
-	if res.Agents == DefaultExpectedAgents {
+	if res.Defaulted {
 		return fmt.Sprintf("about %d agents (assuming the default capacity, max_agents_per_broker %d)", res.Agents, DefaultExpectedAgents)
 	}
 	return fmt.Sprintf("about %d agents", res.Agents)
@@ -261,7 +268,7 @@ type InotifyUsage struct {
 	Instances int
 	Watches   int
 	// Unreadable counts processes of the UID whose descriptors could not
-	// be read.
+	// be read (a process that exited during the scan is not counted).
 	Unreadable int
 }
 
@@ -302,6 +309,9 @@ func CountInotifyUsage(proc fs.FS, uid int) (InotifyUsage, bool) {
 			continue
 		}
 		fds, err := fs.ReadDir(proc, pid+"/fd")
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // the process exited after its status was read
+		}
 		if err != nil {
 			u.Unreadable++
 			continue

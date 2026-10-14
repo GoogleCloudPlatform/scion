@@ -126,11 +126,15 @@ func TestCheckInotify_Levels(t *testing.T) {
 
 func TestCheckInotify_AgentCount(t *testing.T) {
 	r := fakeReader(limits("200", "524288"))
-	if res := CheckInotify(r, 0); !res.InstancesLow() || res.Agents != DefaultExpectedAgents {
-		t.Fatalf("agents 0: low=%v agents=%d, want low at the default count", res.InstancesLow(), res.Agents)
+	if res := CheckInotify(r, 0); !res.InstancesLow() || res.Agents != DefaultExpectedAgents || !res.Defaulted {
+		t.Fatalf("agents 0: low=%v agents=%d defaulted=%v, want low at the default count", res.InstancesLow(), res.Agents, res.Defaulted)
 	}
 	if res := CheckInotify(r, -5); !res.InstancesLow() || res.Agents != DefaultExpectedAgents {
 		t.Fatalf("agents -5: low=%v agents=%d, want low at the default count", res.InstancesLow(), res.Agents)
+	}
+	// An explicit count equal to the default is not "assuming the default".
+	if res := CheckInotify(r, DefaultExpectedAgents); res.Defaulted || !strings.Contains(res.Warning(), "low for about 100 agents, which run") {
+		t.Fatalf("explicit 100 agents: defaulted=%v warning %q", res.Defaulted, res.Warning())
 	}
 	res := CheckInotify(r, 72) // 72*1+128 = 200: at the threshold
 	if res.InstancesLow() || res.Warning() != "" {
@@ -207,6 +211,8 @@ func TestCountInotifyUsage(t *testing.T) {
 		"sys/fs/inotify/max_user_instances": {Data: []byte("128\n")},
 		// a process with no status file.
 		"40/fd/3": link("anon_inode:inotify"),
+		// euid 1000, exited after its status was read: no fd directory.
+		"60/status": procStatus("1000", "1000"),
 		// a status file with only one UID field.
 		"50/status": {Data: []byte("Uid:\t1000\n")},
 		"50/fd/3":   link("anon_inode:inotify"),

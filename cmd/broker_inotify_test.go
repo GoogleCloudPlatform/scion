@@ -105,6 +105,31 @@ func TestBrokerAgentsShareHostUser(t *testing.T) {
 	}
 }
 
+func TestDoctorInotifyNotJudged(t *testing.T) {
+	docker := config.V1RuntimeBrokerInstanceConfig{Key: "d", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeDocker}}
+	k8s := config.V1RuntimeBrokerInstanceConfig{Key: "k", RuntimeTarget: &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeKubernetes}}
+	cases := []struct {
+		name           string
+		serverHost     bool
+		instances      []config.V1RuntimeBrokerInstanceConfig
+		defaultRuntime string
+		want           string
+	}{
+		{name: "not a server host", serverHost: false, defaultRuntime: "docker", want: "not a broker host"},
+		{name: "server, legacy docker", serverHost: true, defaultRuntime: "docker", want: ""},
+		{name: "server, flat docker instance", serverHost: true, instances: []config.V1RuntimeBrokerInstanceConfig{k8s, docker}, defaultRuntime: "kubernetes", want: ""},
+		{name: "server, legacy kubernetes", serverHost: true, defaultRuntime: "kubernetes", want: "this broker's agents do not run as containers on this host"},
+		{name: "server, flat kubernetes only", serverHost: true, instances: []config.V1RuntimeBrokerInstanceConfig{k8s}, defaultRuntime: "docker", want: "this broker's agents do not run as containers on this host"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := doctorInotifyNotJudged(c.serverHost, c.instances, c.defaultRuntime); got != c.want {
+				t.Fatalf("doctorInotifyNotJudged = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestCheckDoctorInotifyLimits(t *testing.T) {
 	proc := fstest.MapFS{
 		"10/status":   {Data: []byte("Name:\tnode\nUid:\t1000\t1000\t1000\t1000\n")},

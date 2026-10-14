@@ -57,25 +57,37 @@ func brokerAgentsShareHostUser(instances []config.V1RuntimeBrokerInstanceConfig,
 }
 
 // checkDoctorInotifyLimitsHere runs checkDoctorInotifyLimits for this host:
-// judged only on a host configured as a server (detectDoctorServerHost)
-// whose broker's agents share the host user, read from the global
-// settings (flat instances, else the default runtime).
+// it reads whether this host is configured as a server
+// (detectDoctorServerHost) and, if so, its broker's flat instances and
+// default runtime from the global settings; doctorInotifyNotJudged decides.
 func checkDoctorInotifyLimitsHere() scionruntime.CheckResult {
-	notJudged := "not a broker host"
+	serverHost := false
+	var instances []config.V1RuntimeBrokerInstanceConfig
+	defaultRuntime := ""
 	if globalDir, err := config.GetGlobalDir(); err == nil && detectDoctorServerHost(globalDir).configured {
-		instances, _ := config.LoadRuntimeBrokerInstances("")
-		defaultRuntime := ""
+		serverHost = true
+		instances, _ = config.LoadRuntimeBrokerInstances("")
 		if vs, _, err := config.LoadGlobalSettings(); err == nil && vs != nil {
 			if _, rtType, err := vs.ResolveRuntime(""); err == nil {
 				defaultRuntime = rtType
 			}
 		}
-		notJudged = ""
-		if !brokerAgentsShareHostUser(instances, defaultRuntime) {
-			notJudged = "this broker's agents do not run as containers on this host"
-		}
 	}
-	return checkDoctorInotifyLimits(notJudged, hostlimits.DefaultReader(), os.Geteuid())
+	return checkDoctorInotifyLimits(doctorInotifyNotJudged(serverHost, instances, defaultRuntime), hostlimits.DefaultReader(), os.Geteuid())
+}
+
+// doctorInotifyNotJudged returns why doctor shows the inotify limits
+// without judging them, or "" when it judges them: only on a host
+// configured as a server whose broker's agents share the host user
+// (brokerAgentsShareHostUser).
+func doctorInotifyNotJudged(serverHost bool, instances []config.V1RuntimeBrokerInstanceConfig, defaultRuntime string) string {
+	switch {
+	case !serverHost:
+		return "not a broker host"
+	case !brokerAgentsShareHostUser(instances, defaultRuntime):
+		return "this broker's agents do not run as containers on this host"
+	}
+	return ""
 }
 
 // checkDoctorInotifyLimits performs D12: the per-user inotify limits of
