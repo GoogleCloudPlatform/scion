@@ -110,7 +110,7 @@ func TestCLIPrivateRepoInstallAfterReload(t *testing.T) {
 	if got.Files[0].Content != nil {
 		t.Fatal("expected a content-less disk hit")
 	}
-	if dl := gitHubDownloadToken(ctx, got); dl != credential {
+	if dl := gitHubDownloadToken(ctx, got).token; dl != credential {
 		t.Fatalf("install download credential = %q, want %q", dl, credential)
 	}
 	if GitHubTokenFromContext(ctx) != credential {
