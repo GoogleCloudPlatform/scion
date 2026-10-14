@@ -247,6 +247,18 @@ func RuntimeBrokerPresentationConformance(t *testing.T, factory Factory) {
 		_, err = f.s.SetRuntimeBrokerPresentation(ctx, f.flat.ID, f.flat.RuntimeTarget.ID, nil, "h", 1, 1, f.at(0))
 		assert.Error(t, err, "a nil presentation is refused")
 		assert.Nil(t, f.row(t).PresentationEpoch)
+
+		// An empty reported type is refused even against a flat row whose
+		// stored type is empty too.
+		untypedID := uuid.NewString()
+		untyped := &store.RuntimeBroker{ID: untypedID, Name: "untyped-" + untypedID[:8], Slug: "untyped-" + untypedID[:8],
+			RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-" + untypedID}}
+		require.NoError(t, f.s.CreateRuntimeBroker(ctx, untyped))
+		_, err = f.s.SetRuntimeBrokerPresentation(ctx, untypedID, "rt-"+untypedID, noTarget, "h", 1, 1, f.at(0))
+		assert.ErrorIs(t, err, store.ErrRuntimeTargetChanged, "an empty reported type is never accepted")
+		got, err := f.s.GetRuntimeBroker(ctx, untypedID)
+		require.NoError(t, err)
+		assert.Nil(t, got.RuntimeTargetPresentation)
 	})
 
 	t.Run("StaleCopyUpdateRuntimeBrokerKeepsPresentation", func(t *testing.T) {

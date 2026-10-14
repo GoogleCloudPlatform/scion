@@ -86,7 +86,7 @@ func (s *ProjectStore) SetRuntimeBrokerPresentation(ctx context.Context, brokerI
 		if p.Target != nil {
 			reportedType = p.Target.Type
 		}
-		if reportedType != cur.RuntimeTargetType {
+		if reportedType == "" || reportedType != cur.RuntimeTargetType {
 			return "", fmt.Errorf("%w: reported runtime target type %q, stored %q",
 				store.ErrRuntimeTargetChanged, reportedType, cur.RuntimeTargetType)
 		}
