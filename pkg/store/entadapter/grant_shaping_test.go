@@ -523,3 +523,48 @@ func TestGrantShaping_StampedRoleBoundByPersonIsFrozen(t *testing.T) {
 	_, err = e.cs.UpdateRoleDefinition(e.humanCtx, role)
 	assert.NoError(t, err)
 }
+
+// Upstream's visitor binding window update (forward merge): under grant
+// shaping an admin-kind identity changes the window only of a visitor
+// binding it made, and the window still ends no later than the identity; a
+// visitor binding a person made is refused. A person's update is the
+// control.
+func TestGrantShaping_VisitorWindowUpdate(t *testing.T) {
+	e := newGSEnv(t, store.UserKindTestSuperAdmin)
+	ctx := context.Background()
+	noMembership := false
+	_, err := e.cs.CreateRoleDefinition(ctx, &store.RoleDefinition{Name: store.ProjectRoleVisitor, ScopeType: store.RoleScopeProject,
+		Permissions: []string{"agent.read"}, System: true, ConfersMembership: &noMembership})
+	require.NoError(t, err)
+	projectID := uuid.NewString()
+	fed := func() *store.User {
+		u := newFederatedUser("https://issuer.example", "v-"+uuid.NewString()[:8]+"@corp.com", store.UserStatusActive)
+		require.NoError(t, e.cs.CreateFederatedUser(ctx, u))
+		return u
+	}
+	bind := func(c context.Context, u *store.User, createdBy string) *store.RoleBinding {
+		b, err := e.cs.CreateVisitorRoleBinding(c, &store.RoleBinding{PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: u.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: createdBy})
+		require.NoError(t, err)
+		return b
+	}
+	later := time.Now().Add(48 * time.Hour)
+
+	personMade := bind(e.humanCtx, fed(), e.human.ID)
+	_, err = e.cs.UpdateVisitorRoleBindingWindow(e.shaped, personMade.ID, nil, &later)
+	assert.ErrorIs(t, err, store.ErrTestAdminGrantRefused, "a visitor binding a person made")
+
+	own := bind(e.shaped, fed(), e.admin.ID)
+	require.NotNil(t, own.IssuanceID)
+	got, err := e.cs.UpdateVisitorRoleBindingWindow(e.shaped, own.ID, nil, &later)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt)
+	assert.True(t, got.ExpiresAt.Equal(testAdminExpiry(*e.admin.ExpiresAt)), "clamped: %v", got.ExpiresAt)
+	got, err = e.cs.UpdateVisitorRoleBindingWindow(e.shaped, own.ID, nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt, "no unbounded window under shaping")
+
+	got, err = e.cs.UpdateVisitorRoleBindingWindow(e.humanCtx, personMade.ID, nil, &later)
+	require.NoError(t, err, "control: a person changes the window")
+	assert.True(t, got.ExpiresAt.Equal(later.UTC()) || got.ExpiresAt.Sub(later).Abs() < time.Second)
+}

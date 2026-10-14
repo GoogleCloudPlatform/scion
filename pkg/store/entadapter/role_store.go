@@ -690,6 +690,20 @@ func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id strin
 	if existing.RoleDefinitionID == nil || *existing.RoleDefinitionID != rd.ID {
 		return nil, store.ErrVisitorBindingRefused
 	}
+	// Grant shaping (admin tier A3): an admin-kind test identity changes the
+	// window only of a visitor binding it made (the same issuance), and the
+	// window still ends no later than the identity; any other change could
+	// not be bounded by its expiry.
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil {
+		if !shapedByIssuance(shaping, existing.IssuanceID) {
+			return nil, store.ErrTestAdminGrantRefused
+		}
+		expiresAt = shaping.ClampExpiry(expiresAt)
+	}
 	update := r.client.RoleBinding.UpdateOneID(uid)
 	if notBefore != nil {
 		update.SetNotBefore(*notBefore)

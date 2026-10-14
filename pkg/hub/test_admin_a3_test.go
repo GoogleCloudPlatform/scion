@@ -1135,7 +1135,8 @@ func TestTestAdminA3_KindReadFailClosedRealWiring(t *testing.T) {
 	f.arm(human.ID)
 	rec := doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
 	t.Logf("HTTP purge route, kind unreadable: status=%d body=%s", rec.Code, rec.Body.String())
-	assert.GreaterOrEqual(t, rec.Code, 400, "refused over HTTP")
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "refused over HTTP: the JWT row block cannot verify the user")
+	assert.Contains(t, rec.Body.String(), `"code":"store_error"`, "the row block's fail-closed answer")
 	assert.NotContains(t, rec.Body.String(), `"identityId"`, "no purge report: the request never reached the handler")
 
 	d := srv.authzService.Decide(ctx, req)

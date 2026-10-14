@@ -261,6 +261,7 @@ func TestGrantShapingBuilderCensus(t *testing.T) {
 		"pkg/store/entadapter/role_store.go:createRoleBinding",
 		"pkg/store/entadapter/role_store.go:CreateRoleDefinition",
 		"pkg/store/entadapter/role_store.go:updateRoleDefinition",
+		"pkg/store/entadapter/role_store.go:UpdateVisitorRoleBindingWindow",
 		"pkg/store/entadapter/role_store.go:UpdateSystemRoleDefinitionPermissions",
 		"pkg/store/entadapter/group_store.go:AddGroupMember",
 		"pkg/store/entadapter/group_store.go:UpdateGroupMemberRole",
