@@ -143,6 +143,29 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 	if isManagedAgentRuntime(agent.Runtime) {
 		return s.managedPTYPath(ctx, identity, agent)
 	}
+	// Flat placement check (requirePinnedPlacement), before either path is
+	// chosen: a pinned agent whose saved placement is inconsistent is
+	// refused with its own 409 before any upgrade, on the preflight and the
+	// WebSocket alike, whether the attach would take the broker path or the
+	// agent's conduit session. An unpinned agent with no Runtime Broker
+	// keeps the 422 below, and one whose row cannot be read keeps today's
+	// decision.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		var refusal *RuntimeTargetRefusal
+		if errors.As(err, &refusal) {
+			return ptyRefusal(refusal.Status, refusal.Code, refusal.Message, "")
+		}
+		if agent.IsPinned() {
+			// The check could not read the pinned agent's Runtime Broker: a
+			// temporary failure, so retryable (503 registry_unavailable),
+			// not a 500.
+			slog.Warn("PTY: agent placement check failed", "agent_id", agent.ID, "error", err)
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+		}
+		// An unpinned agent whose Runtime Broker row cannot be read keeps
+		// today's decision below, which fails open for an unreadable row.
+	}
 	if agent.RuntimeBrokerID == "" {
 		return ptyRefusal(http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
 			"Agent has no runtime broker", "")
@@ -484,6 +507,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			SessionID: res.Record.SessionID,
 			StreamID:  st.ID(),
 			Close:     u.closeWithCode,
+			Renew:     conduitStreamRenewal(res, st.ID()),
 		})
 		return nil
 	})

@@ -216,6 +216,32 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
 	assert.False(t, notifs[0].Dispatched, "a failed delivery must not be marked dispatched")
+	assert.Equal(t, 1, notifs[0].DispatchAttempts, "the failed attempt must be counted (ptone/scion#4800)")
+	assert.Empty(t, notifs[0].DispatchOutcome, "a failed attempt that will be retried has no outcome yet")
+}
+
+// A delivered primary dispatch stores the delivered outcome and its one
+// attempt (ptone/scion#4800).
+func TestNotificationDispatcher_DeliveredRecordsOutcomeAndAttempt(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+	// Stop waits for the dispatcher goroutine, so the stored state is
+	// settled afterwards (the deferred Stop is a no-op).
+	env.nd.Stop()
+
+	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.True(t, notifs[0].Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, notifs[0].DispatchOutcome)
+	assert.Equal(t, 1, notifs[0].DispatchAttempts)
 }
 
 func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
@@ -742,8 +768,9 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	// A real, started broker proxy (see UserSubscriberInboxWithBroker).
 	bus := env.startRealBrokerProxy(t)
 
-	// Also set up a recording channel — should also receive the notification
-	// as a fallback for deployments without broker plugins.
+	// Also set up a recording channel. The registry is only a fallback for
+	// deployments without a broker, so it must not receive a second copy
+	// (ptone/scion#2752).
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
@@ -765,8 +792,9 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
 	assert.Equal(t, "COMPLETED", publishes[0].Status)
 
-	// Channel registry should also be called as a fallback.
-	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")
+	// settledUserRows stopped the dispatcher, so dispatch has finished: the
+	// broker delivered once and the channel registry was skipped.
+	assert.Empty(t, ch.getDeliveries(), "channel registry must not be called when a broker is set")
 }
 
 func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {

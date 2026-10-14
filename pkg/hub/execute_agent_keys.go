@@ -423,6 +423,25 @@ func (s *Server) admitAndDispatchAgentKeys(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Flat placement pre-check on the agent row already held, before the
+	// dispatch target is built and before the admission audit: a pinned
+	// agent whose saved placement is inconsistent is refused with its own
+	// 409, and nothing is dispatched (requirePinnedPlacement).
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, target); err != nil {
+		var refusal *RuntimeTargetRefusal
+		if errors.As(err, &refusal) {
+			s.logAgentKeysInternalErrorAudit(r, operationID, audit, refusal.Code, inputBytes, route)
+			details := map[string]interface{}{"operation_id": operationID}
+			for k, v := range refusal.Details {
+				details[k] = v
+			}
+			writeError(w, refusal.Status, refusal.Code, refusal.Message, details)
+			return
+		}
+		s.finishAgentKeysInternalError(w, r, operationID, audit, inputBytes, err, route)
+		return
+	}
+
 	dispatchTarget := agentkeys.Target{
 		RuntimeBrokerID: target.RuntimeBrokerID,
 		AgentID:         target.ID,

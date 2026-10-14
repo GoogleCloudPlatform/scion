@@ -368,6 +368,11 @@ func (s *Server) purgeFixtureAgent(ctx context.Context, listed *store.Agent, req
 		hard:         true,
 		requestedBy:  requestedBy,
 	})
+	if _, refused := placementRefusalOf(err); refused {
+		// The claim's placement pre-check refused the agent: its saved
+		// placement is inconsistent, and nothing was written.
+		return notDone("failed", "placement_conflict")
+	}
 	if err != nil {
 		return notDone("failed", "store_error")
 	}

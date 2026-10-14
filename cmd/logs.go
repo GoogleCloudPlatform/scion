@@ -50,13 +50,13 @@ var logsCmd = &cobra.Command{
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 		if hubCtx != nil {
 			if logsFollow {
-				return fmt.Errorf("--follow is not supported in hub mode")
+				return fmt.Errorf("--follow is not supported for agents on a hub")
 			}
 			return getHubLogs(cmd.Context(), hubCtx, agentName)
 		}

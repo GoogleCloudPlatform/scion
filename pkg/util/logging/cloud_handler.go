@@ -234,9 +234,7 @@ func (h *CloudHandler) Handle(_ context.Context, r slog.Record) error {
 	labels := map[string]string{
 		"component": h.component,
 	}
-	if h.hubName != "" {
-		labels["hub"] = h.hubName
-	}
+	addHubLabel(labels, h.hubName)
 	if h.hubID != "" {
 		labels["hub_id"] = h.hubID
 	}

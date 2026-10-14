@@ -39,7 +39,6 @@
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.gcs_links:boolean",
-        "experiments.web.terminal_workspace:boolean",
         "experiments:object"
       ]
     },

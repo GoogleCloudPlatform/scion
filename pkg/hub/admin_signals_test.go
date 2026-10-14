@@ -71,3 +71,42 @@ func TestAdminSignalChannel(t *testing.T) {
 		t.Errorf("channel name: got %q, want %q", adminSignalChannel, "scion_integration_admin")
 	}
 }
+
+func TestMarshalAdminSignal_AcceptsIdentifierOnlySignals(t *testing.T) {
+	for _, signal := range []AdminSignal{
+		{Integration: "discord", Kind: "config"},
+		{Integration: "telegram", Kind: "update", ID: "550e8400-e29b-41d4-a716-446655440000"},
+	} {
+		payload, err := marshalAdminSignal(signal)
+		if err != nil {
+			t.Fatalf("marshalAdminSignal(%+v): %v", signal, err)
+		}
+		var decoded AdminSignal
+		if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+			t.Fatalf("Unmarshal: %v", err)
+		}
+		if decoded != signal {
+			t.Errorf("round trip: got %+v, want %+v", decoded, signal)
+		}
+	}
+}
+
+func TestMarshalAdminSignal_RejectsNonIdentifierValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		signal AdminSignal
+	}{
+		{"update with free-form id", AdminSignal{Integration: "discord", Kind: "update", ID: "free form text"}},
+		{"update with non-canonical uuid", AdminSignal{Integration: "discord", Kind: "update", ID: "550E8400-E29B-41D4-A716-446655440000"}},
+		{"update without id", AdminSignal{Integration: "discord", Kind: "update"}},
+		{"config with id", AdminSignal{Integration: "discord", Kind: "config", ID: "550e8400-e29b-41d4-a716-446655440000"}},
+		{"unknown kind", AdminSignal{Integration: "discord", Kind: "other"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if payload, err := marshalAdminSignal(tt.signal); err == nil {
+				t.Errorf("marshalAdminSignal(%+v) = %q, want an error", tt.signal, payload)
+			}
+		})
+	}
+}

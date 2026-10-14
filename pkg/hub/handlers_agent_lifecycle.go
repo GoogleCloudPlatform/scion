@@ -604,6 +604,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Flat placement pre-check for stop and suspend (requirePinnedPlacement),
+	// before the stop intent, the offline-stop queue (queueOfflineStop) and
+	// any dispatch: a refused stop writes nothing, so no stop_queued state
+	// is recorded and the agent's capacity is untouched.
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
+		if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+	}
+
 	// The start claim a stop supersedes: the one held when the stop is
 	// recorded. It is released once the stop's dispatch succeeds.
 	stopSupersedes := agent.StartClaimID
@@ -1402,6 +1415,10 @@ func startInFlightPhase(phase string) bool {
 // allows any project member: holders of agent.stop_all on the project
 // (project owners/admins, hub admins) stop all agents; other members, by
 // active direct or group-derived role binding, stop only their own.
+//
+// A user access token is admitted with the agent:stop_all selector: the
+// global form on a hub boundary only, the project form on a hub boundary
+// or a boundary for that project.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -1432,7 +1449,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// against the project-scoped agent collection for a project, so
 	// project-owner and project-admin role bindings count. This is the
 	// same resource the project's stop_all scope capability is computed on.
-	resource := Resource{Type: "agent", ID: "hub"}
+	// The hub target carries an explicit system parent, so it resolves to
+	// the hub for a token's boundary check.
+	resource := hubScopedResource("agent", "hub")
 	if projectID != "" {
 		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
 	}
@@ -1579,6 +1598,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			res := stopAllResult{
 				ID:   agent.ID,
 				Name: agent.Name,
+			}
+
+			// Flat placement pre-check, as for a single stop: before the
+			// stop intent, so a refused agent is left exactly as it is.
+			if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+				res.Status = "error"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
 			}
 
 			supersedes := agent.StartClaimID

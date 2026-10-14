@@ -1984,7 +1984,7 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		"email", user.Email(),
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRedeemed, user.Email(), invite.ID, user.ID(), user.Email(), nil)
-	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID, invite.CodePrefix)
+	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID)
 	s.events.PublishAllowListChanged(r.Context(), "added", user.Email())
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

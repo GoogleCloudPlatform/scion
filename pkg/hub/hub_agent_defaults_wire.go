@@ -22,8 +22,9 @@ import (
 )
 
 // remoteHubAgentDefaults converts the hub's operational agent_defaults section
-// into the wire form sent to a runtime broker, or nil when the hub has no
-// limit/resource or auto-expose defaults to send.
+// into the wire form sent to a runtime broker. It returns nil only when none
+// of its inputs is set: no limit/resource default, no auto-expose default, no
+// enabled dispatch experiment and no telemetry default.
 //
 // Only the four limit/resource fields cross here. default_template and
 // default_harness_config are resolved hub-side (they need ID/hash stamping) and
@@ -39,7 +40,8 @@ import (
 // snapshot is empty in file mode, the four limit/resource fields are zero
 // there, so the broker-side limit rung never fires — no file-mode branch
 // needed anywhere. That is rejected alternative A7. With no auto-expose
-// default either, this returns nil and the wire field is omitted.
+// default, experiment or telemetry default either, this returns nil and the
+// wire field is omitted.
 //
 // autoExposePorts is the hub's auto-expose-ports default. Unlike the four
 // limit/resource fields it is sent in file mode too: no broker reads it from
@@ -83,21 +85,18 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 
 // startHubAgentDefaults is the hub-defaults wire value for a start or restart
 // dispatch, built by remoteHubAgentDefaults like the create wire so the two
-// cannot drift. Which hub defaults ride each wire is listed here:
+// cannot drift: start and restart carry the same hub defaults as create (the
+// limits, resources, the auto-expose default, the dispatch experiments, and
+// the hub telemetry default for a templateTiers broker).
 //
-//   - create: the limits (max turns, model calls, duration), resources,
-//     the auto-expose default, the dispatch experiments, and the hub
-//     telemetry default for a templateTiers broker.
-//   - start/restart: resources, the auto-expose default, the dispatch
-//     experiments, and the hub telemetry default for a templateTiers broker.
-//     The broker no longer persists hub resources into the agent config
-//     (ptone/scion#4561) and applies them and the telemetry default per
-//     start, so they are sent on every start. The limits stay create-only:
-//     Start does not read them from the request.
+// The broker applies the limits and resources per start, below the agent's
+// own (template or explicit) values, and does not persist them into the agent
+// config (ptone/scion#4561, ptone/scion#623), so a change to the hub
+// agent_defaults reaches an agent at its next start or restart.
 //
 // It returns nil when there is nothing to send.
 func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
-	return remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{DefaultResources: d.DefaultResources}, autoExposePorts, experiments, telemetry)
+	return remoteHubAgentDefaults(d, autoExposePorts, experiments, telemetry)
 }
 
 // hubAgentDefaults returns the hub's operational agent_defaults, or the zero

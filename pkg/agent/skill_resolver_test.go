@@ -178,7 +178,7 @@ func TestInstallResolvedSkills_Success(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestInstallResolvedSkills_HashMismatch(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for hash mismatch")
 	}
@@ -278,7 +278,7 @@ func TestInstallResolvedSkills_PathTraversal(t *testing.T) {
 		},
 	}
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for path traversal")
 	}
@@ -330,7 +330,7 @@ func TestInstallResolvedSkills_DuplicateDestination(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("expected success after collision resolution, got error: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestInstallResolvedSkills_WithAsRename(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -601,7 +601,7 @@ func TestInstallResolvedSkills_NestedFiles(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestInstallResolvedSkills_BundleHashMismatch(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for bundle hash mismatch")
 	}
@@ -726,7 +726,7 @@ func TestInstallResolvedSkills_OverridesExistingLocalSkill(t *testing.T) {
 	http.DefaultTransport = srv.Client().Transport
 	defer func() { http.DefaultTransport = origTransport }()
 
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -745,7 +745,7 @@ func TestInstallResolvedSkills_EmptySkillsList(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), nil, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), nil, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills(nil) error: %v", err)
 	}
@@ -1054,7 +1054,7 @@ func TestDeduplicateByDestName_CollisionRecordedInRecord(t *testing.T) {
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 
-	record, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	record, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err != nil {
 		t.Fatalf("installResolvedSkills() error: %v", err)
 	}
@@ -1182,7 +1182,7 @@ func TestDeduplicateByDestName_DestNameErrorPassthrough(t *testing.T) {
 	// Verify installResolvedSkills surfaces the error for the invalid skill.
 	agentHome := t.TempDir()
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
-	_, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	if err == nil {
 		t.Fatal("expected error for skill with invalid DestName")
 	}

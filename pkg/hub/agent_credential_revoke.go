@@ -107,7 +107,7 @@ func revokeAgentCredentials(ctx context.Context, credStore store.AgentCredential
 // case: the prior credential may still be in active use by a container the
 // Hub has simply lost contact with (e.g. a k8s pod partitioned from the Hub),
 // and the start/resume retry path's existing container-name-conflict handling
-// (handlers_agent_create_helpers.go isContainerNameConflict) exists precisely
+// (the broker's 409 conflict, relayed by relayBrokerRefusal) exists precisely
 // because that container can still be there.
 //
 // Every other LaunchError value — including a broker-confirmed crash (exit
@@ -186,6 +186,27 @@ var errStartBrokerNotConnected = errors.New("broker not connected")
 // errors.Is reason as errStartBrokerNotConnected above.
 var errStartRequestNotSent = errors.New("request not sent")
 
+// Broker error codes that answer a create, start or restart whose run ID
+// the Runtime Broker has already seen: run_in_progress (a request with that
+// run ID is still being started) and run_already_started (a run with that
+// ID has already begun). The Hub mints a fresh run ID per dispatch, so
+// either one means a duplicate delivery of this very dispatch, and the
+// original may be acting on it.
+const (
+	brokerErrorCodeRunInProgress     = "run_in_progress"
+	brokerErrorCodeRunAlreadyStarted = "run_already_started"
+)
+
+// brokerAmbiguousStartCodes are the broker error codes that are never a
+// confirmed rejection, whatever their status: the outcome of the start is
+// unknown, exactly as after a response timeout. So no credential revoke,
+// no run revert (shouldRevertRun), the start claim kept unconfirmed
+// (startOutcomeOf), and the capacity hold rolled back as on a timeout.
+var brokerAmbiguousStartCodes = map[string]bool{
+	brokerErrorCodeRunInProgress:     true,
+	brokerErrorCodeRunAlreadyStarted: true,
+}
+
 // isConfirmedBrokerRejection reports whether a *brokerStatusError means the
 // broker itself explicitly rejected the start request, as opposed to a
 // proxy or load balancer in front of it returning a gateway-level error
@@ -198,9 +219,14 @@ var errStartRequestNotSent = errors.New("request not sent")
 // any other body, and every status above 500 regardless of body, is left
 // unconfirmed, since a reverse proxy or load balancer can return those
 // after it has already forwarded the request, so they say nothing about
-// whether the broker acted on it. A nil e is not a confirmed rejection.
+// whether the broker acted on it. A broker answer carrying one of
+// brokerAmbiguousStartCodes is never a confirmed rejection. A nil e is not
+// a confirmed rejection.
 func isConfirmedBrokerRejection(e *brokerStatusError) bool {
 	if e == nil {
+		return false
+	}
+	if brokerAmbiguousStartCodes[e.brokerErrorCode()] {
 		return false
 	}
 	if e.StatusCode < 500 {
