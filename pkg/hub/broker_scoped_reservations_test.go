@@ -33,9 +33,10 @@ import (
 // The broker-scoped reservation views and the broker-quota reconcile read
 // every broker's reservations with one store query (ptone/scion#2314). These
 // tests pin the result set those views had with the former one-query-per-
-// broker loop: only listed brokers contribute (a reservation whose scope ID is
-// not a runtime broker, for example a deleted broker, is left out), and rows
-// are in broker-list order (newest broker first), created_at ascending
+// broker loop: only listed brokers count (a reservation whose scope ID is
+// not a listed runtime broker, for example a deleted broker, is not counted;
+// usage-by-limit shows it after the listed rows, flagged scopeUnlisted), and
+// rows are in broker-list order (newest broker first), created_at ascending
 // within a broker.
 
 type brokerScopedFixture struct {
@@ -113,10 +114,16 @@ func TestGetUsageByLimit_MaxAgentsPerBroker_ListedBrokersOnlyInBrokerOrder(t *te
 	assert.Equal(t, len(f.wantOrder), resp.TotalActive, "a reservation whose scope ID is not a listed broker is not counted")
 
 	got := make([]string, len(resp.Reservations))
+	var unlisted []string
 	for i, r := range resp.Reservations {
 		got[i] = r.ResourceID
+		if r.ScopeUnlisted {
+			unlisted = append(unlisted, r.ResourceID)
+		}
 	}
-	assert.Equal(t, f.wantOrder, got, "newest broker first, created_at ascending within a broker")
+	assert.Equal(t, append(append([]string(nil), f.wantOrder...), f.unlistedRows...), got,
+		"newest broker first, created_at ascending within a broker, then the unlisted rows")
+	assert.Equal(t, f.unlistedRows, unlisted, "only the unlisted rows are flagged scopeUnlisted")
 }
 
 func TestGetUsageSummary_MaxAgentsPerBroker_ListedBrokersOnly(t *testing.T) {
@@ -152,11 +159,12 @@ func TestListAndCountBrokerScopedActiveReservations_Agree(t *testing.T) {
 	assert.Equal(t, len(rows), n)
 }
 
-// TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation pins that the
-// reconcile only visits listed brokers: a reservation scoped to an ID that is
-// not a runtime broker stays active even though its agent does not exist,
-// while a listed broker's reservation for a missing agent is released.
-func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
+// TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted
+// pins how the reconcile treats an unlisted scope: a reservation scoped to
+// an ID that is not a runtime broker is released only because a point
+// lookup confirms no broker has that ID (the deregistered-scope pass), and a
+// listed broker's reservation for a missing agent is released as before.
+func TestBrokerQuota_ReconcileReleasesUnlistedScopeOnlyWhenConfirmedDeleted(t *testing.T) {
 	srv, s := testServer(t)
 	f := seedBrokerScopedFixture(t, s)
 	ctx := context.Background()
@@ -166,12 +174,12 @@ func TestBrokerQuota_ReconcileLeavesUnlistedScopeReservation(t *testing.T) {
 
 	srv.ReconcileStaleBrokerQuotaReservations(ctx)
 
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, f.unlistedID),
-		"reservation scoped to an unlisted ID must not be touched")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.unlistedID),
+		"a reservation on a scope confirmed deregistered is released")
 	for _, id := range f.unlistedRows {
 		has, err := s.HasActiveReservation(ctx, f.def.ID, id)
 		require.NoError(t, err)
-		assert.True(t, has)
+		assert.False(t, has)
 	}
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, f.olderBroker.ID),
 		"listed broker's reservations for missing agents are released")

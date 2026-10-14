@@ -185,13 +185,15 @@ func queuedStopStillIntended(a *store.Agent) bool {
 
 // queuedStopAppliedElsewhere reports whether after shows the queued stop
 // recorded at intentAt being applied, or applied, by the drain rather than
-// superseded: run intent is still stopped at exactly intentAt, no start-kind
-// claim is held (a stop-kind claim is the drain's), and no delete holds or
-// removed the row.
+// superseded: run intent is still stopped at exactly intentAt, no delete
+// holds or removed the row, and either the drain's stop-kind claim is held
+// or the container status is already stopped. The same intent with no claim
+// and a container not recorded stopped keeps the backstop re-assert, so a
+// container that may still run is not left uncounted.
 func queuedStopAppliedElsewhere(after *store.Agent, intentAt *time.Time) bool {
 	return after.RunIntent == store.RunIntentStopped && sameTime(after.RunIntentAt, intentAt) &&
-		(after.StartClaimID == "" || after.StartClaimKind == store.StartClaimStop) &&
-		after.DeletedAt.IsZero() && !deletionActive(after)
+		after.DeletedAt.IsZero() && !deletionActive(after) &&
+		((after.StartClaimID != "" && after.StartClaimKind == store.StartClaimStop) || after.ContainerStatus == "stopped")
 }
 
 // settleTarget is the inventory target a queued stop of a is settled on:

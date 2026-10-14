@@ -2603,6 +2603,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetQuotaScopeConflictMetrics(conflictRec)
 	}
 
+	if capacityRec, err := hub.NewOTelQuotaCapacityMetrics(mp); err != nil {
+		log.Printf("WARNING: hub quota capacity metrics disabled: %v", err)
+	} else {
+		hubSrv.SetQuotaCapacityMetrics(capacityRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {
