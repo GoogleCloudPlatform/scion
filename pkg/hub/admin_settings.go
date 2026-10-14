@@ -706,7 +706,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server.broker.instances is kept unless the body set it explicitly.
 	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
-	applySettingsUpdatesFromBody(raw, &req, rawServer)
+	applySettingsUpdatesFromBody(raw, &req, rawBody)
 	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
@@ -893,10 +893,11 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 	applySettingsUpdatesFromBody(raw, req, nil)
 }
 
-// applySettingsUpdatesFromBody is applySettingsUpdates with the request's
-// raw "server" JSON object, which tells mergeServerSettings which server
-// fields the client sent. A nil rawServer derives that from req.Server.
-func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawServer json.RawMessage) {
+// applySettingsUpdatesFromBody is applySettingsUpdates with the raw PUT
+// body, whose "server" and "telemetry" objects tell mergeServerSettings
+// and mergeSettingsSection which fields the client sent. A nil rawBody
+// derives that from req.Server and req.Telemetry.
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -909,10 +910,13 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
-		mergeServerSettings(raw, req.Server, rawServer)
+		mergeServerSettings(raw, req.Server, rawServerObject(rawBody))
 	}
+	// telemetry is deep-merged, as in DB mode (ptone/scion#4047): clients
+	// send only part of it (the settings page leaves out filter, resource
+	// and cloud headers, tls and batch), and the rest must be kept.
 	if req.Telemetry != nil {
-		raw["telemetry"] = marshalToMap(req.Telemetry)
+		mergeSettingsSection(raw, "telemetry", req.Telemetry, rawRequestObject(rawBody, "Telemetry"))
 	}
 	if req.Runtimes != nil {
 		raw["runtimes"] = marshalToMap(req.Runtimes)
