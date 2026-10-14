@@ -63,6 +63,9 @@ type GCPHandler struct {
 	version   string
 	preAttrs  []slog.Attr // tracked for label promotion
 	groups    []gcpGroup  // open groups, outermost first
+	// replaceAttr is the composed ReplaceAttr of the JSON handler, used to
+	// drop With attrs that would render nothing inside a group.
+	replaceAttr func(groups []string, a slog.Attr) slog.Attr
 }
 
 // gcpGroup is a group opened with WithGroup and the attrs added inside it.
@@ -113,12 +116,13 @@ func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName st
 	jsonHandler := slog.NewJSONHandler(w, opts)
 
 	return &GCPHandler{
-		handler:   jsonHandler,
-		component: component,
-		hubName:   hubName,
-		hostname:  hostname,
-		projectID: projectID,
-		version:   version.Short(),
+		handler:     jsonHandler,
+		component:   component,
+		hubName:     hubName,
+		hostname:    hostname,
+		projectID:   projectID,
+		version:     version.Short(),
+		replaceAttr: opts.ReplaceAttr,
 	}
 }
 
@@ -231,19 +235,57 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		nh.handler = h.handler.WithAttrs(attrs)
 		return nh
 	}
-	// Inside a group: keep the attrs with the innermost group. Their
-	// top-level LogValuers are resolved now; nested values are resolved, and
-	// ReplaceAttr is applied, on each record rather than once.
+	// Inside a group: keep the attrs with the innermost group, minus those
+	// that would render nothing (see pruneEmpty). LogValuers are resolved
+	// now; ReplaceAttr is applied again on each record.
 	last := len(nh.groups) - 1
-	g := nh.groups[last]
-	groupAttrs := make([]slog.Attr, len(g.attrs), len(g.attrs)+len(attrs))
-	copy(groupAttrs, g.attrs)
-	for _, a := range attrs {
-		a.Value = a.Value.Resolve()
-		groupAttrs = append(groupAttrs, a)
+	path := make([]string, len(nh.groups))
+	for i, g := range nh.groups {
+		path[i] = g.name
 	}
+	g := nh.groups[last]
+	kept := h.pruneEmpty(path, attrs)
+	groupAttrs := make([]slog.Attr, len(g.attrs), len(g.attrs)+len(kept))
+	copy(groupAttrs, g.attrs)
+	groupAttrs = append(groupAttrs, kept...)
 	nh.groups[last] = gcpGroup{name: g.name, attrs: groupAttrs}
 	return nh
+}
+
+// pruneEmpty returns attrs, with LogValuers resolved, minus those slog's
+// JSON handler would render as nothing under the group path groups: zero
+// Attrs, attrs that ReplaceAttr deletes, and groups whose members are all
+// dropped. slog drops these once when it preformats With attrs. Here they
+// are rendered per record, where an empty group followed by a sibling
+// would lose its separator and break the JSON, so they are dropped now.
+func (h *GCPHandler) pruneEmpty(groups []string, attrs []slog.Attr) []slog.Attr {
+	kept := make([]slog.Attr, 0, len(attrs))
+	for _, a := range attrs {
+		a.Value = a.Value.Resolve()
+		if a.Value.Kind() == slog.KindGroup {
+			path := groups
+			if a.Key != "" {
+				path = append(groups[:len(groups):len(groups)], a.Key)
+			}
+			members := h.pruneEmpty(path, a.Value.Group())
+			if len(members) == 0 {
+				continue
+			}
+			kept = append(kept, slog.Attr{Key: a.Key, Value: slog.GroupValue(members...)})
+			continue
+		}
+		r := a
+		if h.replaceAttr != nil {
+			r = h.replaceAttr(groups, r)
+			r.Value = r.Value.Resolve()
+		}
+		// slog elides an Attr whose key and value are both zero.
+		if r.Key == "" && r.Value.Kind() == slog.KindAny && r.Value.Any() == nil {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	return kept
 }
 
 func (h *GCPHandler) WithGroup(name string) slog.Handler {

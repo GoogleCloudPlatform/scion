@@ -91,12 +91,37 @@ func TestGCPHandler_GroupsKeepSpecialFieldsTopLevel(t *testing.T) {
 		{"empty record group attr", func(l *slog.Logger) {
 			l.WithGroup("g").WithGroup("h").Info("m", slog.Group("r"))
 		}},
+		// User groups passed to With inside a group that render empty,
+		// followed by a sibling (review R3).
+		{"empty user group in With, zero attr", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1, slog.Group("r", slog.Attr{})).Info("m", "x", 2)
+		}},
+		{"empty user group in With, ReplaceAttr", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1, slog.Group("r", "drop", 1)).Info("m", "x", 2)
+		}},
+		{"empty nested user group in With", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1, slog.Group("r", slog.Group("s", "drop", 1))).Info("m", "x", 2)
+		}},
+		{"partly dropped user group in With", func(l *slog.Logger) {
+			l.WithGroup("g").With(slog.Group("r", "drop", 1, "k", 2)).Info("m", "x", 2)
+		}},
+	}
+	// The same caller ReplaceAttr on both handlers: it deletes key "drop".
+	dropDrop := func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == "drop" {
+			return slog.Attr{}
+		}
+		return a
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var gcpBuf, stdBuf bytes.Buffer
-			tc.log(slog.New(NewGCPHandler(&gcpBuf, nil, "test-component", "hub-a")))
-			tc.log(slog.New(slog.NewJSONHandler(&stdBuf, nil)))
+			tc.log(slog.New(NewGCPHandler(&gcpBuf, &slog.HandlerOptions{ReplaceAttr: dropDrop}, "test-component", "hub-a")))
+			tc.log(slog.New(slog.NewJSONHandler(&stdBuf, &slog.HandlerOptions{ReplaceAttr: dropDrop})))
+
+			if !json.Valid(bytes.TrimSpace(gcpBuf.Bytes())) {
+				t.Fatalf("invalid JSON entry: %s", gcpBuf.Bytes())
+			}
 
 			got := decodeLine(t, gcpBuf.Bytes())
 			want := decodeLine(t, stdBuf.Bytes())
@@ -188,6 +213,9 @@ func TestGCPHandler_GroupedDroppedAttrsValidJSON(t *testing.T) {
 		{"inner group dropped", func(l *slog.Logger) {
 			l.WithGroup("g").With("a", 1).WithGroup("h").Info("m", AttrTraceID, "")
 		}, map[string]any{"a": float64(1)}, true},
+		{"user group in With dropped", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1, slog.Group("r", AttrTraceID, "")).Info("m", "x", 2)
+		}, map[string]any{"a": float64(1), "x": float64(2)}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
