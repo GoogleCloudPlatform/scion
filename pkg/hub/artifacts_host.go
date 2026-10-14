@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -648,9 +649,10 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // project, or none for two users; a topic its project), must pass the
 // token's self-scope check, and a DM with an agent also needs agent:read on
 // that agent. A message of a conversation that belongs to a project (a
-// group's project, or the peer agent's project of a direct message) also
-// needs project:read on that project through the token (canReadProject),
-// the rule the AttachmentStore download route applies to a project's file.
+// group's project, or the project of an agent of a direct message,
+// whoever the caller is: attachmentConversationProjects) also needs
+// project:read on that project through the token (canReadProject), the
+// rule the AttachmentStore download route applies to a project's file.
 // Every lookup failure answers false.
 func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
 	s := h.server
@@ -692,21 +694,58 @@ func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUse
 		return false
 	}
 	// A message whose conversation belongs to a project (a group's project,
-	// or the peer agent's project of a direct message with an agent) also
-	// needs project:read on that project through the token, as the
+	// or the project of an agent of a direct message) also needs
+	// project:read on that project through the token, as the
 	// AttachmentStore download route requires for a project's file. This
 	// applies before the native and addressee checks, so a participant's or
 	// an addressee's token reads no more than the token reads of the
 	// project. A direct message between users has no project.
-	projectID, _, err := s.conversationProject(ctx, conv, token.Type(), token.ID())
+	projects, err := h.attachmentConversationProjects(ctx, conv)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: attachment token project lookup failed", "message", msg.ID, "error", err)
 		return false
 	}
-	if projectID != "" {
-		return s.canReadProject(ctx, token, projectID)
+	for _, projectID := range projects {
+		if !s.canReadProject(ctx, token, projectID) {
+			return false
+		}
 	}
 	return true
+}
+
+// attachmentConversationProjects returns the projects whose project:read a
+// user access token needs to read an attachment of a message of conv. It
+// does not depend on the caller: a group's project, or the project of each
+// agent named in a direct conversation's key. A direct conversation between
+// users has none. An agent of the key that cannot be found (deleted, for
+// example), an agent without a project and any lookup failure answer an
+// error, so the token is refused.
+func (h *artifactHost) attachmentConversationProjects(ctx context.Context, conv *store.Conversation) ([]string, error) {
+	if conv.Kind != "direct" {
+		if conv.ProjectID == nil || *conv.ProjectID == "" {
+			return nil, nil
+		}
+		return []string{*conv.ProjectID}, nil
+	}
+	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
+	if err != nil {
+		return nil, err
+	}
+	var projects []string
+	for _, slot := range [][2]string{{kindA, idA}, {kindB, idB}} {
+		if slot[0] != "agent" {
+			continue
+		}
+		agent, err := h.server.store.GetAgent(ctx, slot[1])
+		if err != nil {
+			return nil, err
+		}
+		if agent == nil || agent.ProjectID == "" {
+			return nil, errors.New("direct message agent has no project")
+		}
+		projects = append(projects, agent.ProjectID)
+	}
+	return projects, nil
 }
 
 // PermitsMessageRead implements artifacts.MessageScopeHost: whether the

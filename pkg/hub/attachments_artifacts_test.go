@@ -612,6 +612,88 @@ func TestAttachmentArtifacts_TokenAgentDMNeedsProjectRead(t *testing.T) {
 	assert.Equal(t, "users only", got.body)
 }
 
+// The project a token needs for a direct message with an agent does not
+// depend on who calls: it is the agent's project for a participant, for an
+// addressee who is not a participant, and on a stored direct conversation
+// (the production path). A direct message whose agent no longer exists is
+// refused to every token; sessions keep their rules.
+func TestAttachmentArtifacts_TokenAgentDMProjectIndependentOfCaller(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+	convID := uuid.NewString()
+	now := time.Now().UTC()
+	require.NoError(t, f.st.CreateConversation(ctx, &store.Conversation{
+		ID: convID, Kind: "direct", Surface: "native", ExternalRef: dm,
+		DriftState: "active", LastActivityAt: now, CreatedAt: now,
+	}))
+	for _, p := range []struct{ kind, id string }{{"user", f.ua.ID}, {"agent", f.aa.ID}} {
+		require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{
+			ID: uuid.NewString(), ConversationID: convID, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: now,
+		}))
+	}
+	msgID := f.seedMessage(t, f.projA.ID, dm, convID, "for the agent, stored conversation")
+	id := f.uploadAs(t, f.ua, f.projA.ID, "stored.txt", "stored dm")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	// bob, of project B, is an addressee of the message, not a participant.
+	require.NoError(t, f.st.AddAddressee(ctx, &store.MessageAddressee{ID: uuid.NewString(), MessageID: msgID,
+		PrincipalKind: "user", PrincipalID: f.ub.ID, Via: "explicit", DeliveryState: "delivered"}))
+
+	missing := f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+
+	// The addressee: his session reads it; his tokens need project:read on
+	// the agent's project, which he cannot hold.
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "addressee token, inbox:read")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id), "addressee token, all three")
+	require.Equal(t, http.StatusOK, f.download(t, f.ub, id).status, "addressee session")
+
+	// The participant, on the stored conversation.
+	require.Equal(t, http.StatusOK, f.download(t, f.ua, id).status, "participant session")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), id), "participant token without project:read")
+	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, "stored dm", got.body)
+
+	// A direct message whose agent no longer exists: no token reads it,
+	// whatever it carries; the participant's session still does.
+	goneDM := dmKeyFor(t, "user", f.ua.ID, "agent", uuid.NewString())
+	goneMsg := f.seedMessage(t, f.projA.ID, goneDM, "", "for an agent that is gone")
+	goneFile := f.uploadAs(t, f.ua, f.projA.ID, "gone.txt", "agent gone")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, goneFile, artifacts.PrincipalKindUser, f.ua.ID, goneMsg))
+	require.Equal(t, http.StatusOK, f.download(t, f.ua, goneFile).status, "participant session, agent gone")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), goneFile), "token, agent gone")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), goneFile), "token with all three, agent gone")
+}
+
+// A group without a project has no project to check: a participant's
+// hub-boundary token with inbox:read reads its attachment, a
+// project-boundary token reads nothing of it, and a non-participant's token
+// reads nothing either.
+func TestAttachmentArtifacts_TokenProjectlessGroup(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	conv, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "group", Surface: "native", ExternalRef: "group:none:" + uuid.NewString(), DriftState: "active",
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{ID: uuid.NewString(),
+		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.ua.ID, Role: "member", JoinedAt: time.Now()}))
+	msgID := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
+	id := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+
+	missing := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), id)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, "projectless group", got.body)
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read"), id), "project-boundary token")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "non-participant token")
+}
+
 // With the experiment on, uploads go to the artifact service only for a
 // caller it can own as a user principal: a session or a user access token.
 // A federated user, which the artifact service does not serve, uploads to
