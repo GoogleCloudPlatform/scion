@@ -124,8 +124,8 @@ type HealthSummaryHub struct {
 	// Read-only, like TestIdentitiesEnabled.
 	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
 	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
-	// kind is on (--test-mode=super-admin). This binary refuses that level
-	// at startup, so it is always false here.
+	// kind is on (--test-mode=super-admin, which starts only when the
+	// test-admin policy classification is complete). Read-only.
 	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
 	// TestMode is the resolved --test-mode level: off, member, admin or
 	// super-admin. The three booleans above are derived from it.

@@ -311,7 +311,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	// delegation (ptone/scion#4240, X3b) reaches only the member-tier
 	// identities it issued itself (canManageTestIdentity,
 	// workloadWebCodeAdmitted).
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u))) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !s.canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u))) {
 		NotFound(w, "test identity")
 		return
 	}

@@ -384,8 +384,8 @@ type ServerConfig struct {
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.
-	// It is accepted only while EnableTestIdentities is true; it is never
-	// writable through the API.
+	// It is accepted only while EnableTestIdentities is true
+	// (--test-mode=member or above); it is never writable through the API.
 	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
@@ -2699,6 +2699,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	setAuthzTestAdminTier(srv.authzService,
 		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 		func() time.Time { return srv.testIdentities.clock() })
+	// The test-admin policy refusals decide makes are written to the test
+	// admin audit sink.
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, class, subject string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, class, subject)
+	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -4001,6 +4006,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if ops != nil {
+		// Every section write and delete asks the test-admin policy first.
+		ops.setWriteGuard(s.testAdminSettingsWriteGuard)
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -7117,6 +7126,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Test admin audit (ptone/scion#4240): runs right after authentication,
+	// so every request an admin-kind test identity makes is written to the
+	// test admin audit sink before anything else handles it.
+	h = s.testAdminRequestAuditMiddleware(h)
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens

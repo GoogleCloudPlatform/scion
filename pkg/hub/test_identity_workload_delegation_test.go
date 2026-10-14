@@ -960,7 +960,7 @@ func TestWorkloadDelegation_ManagementScopedToDelegation(t *testing.T) {
 	// A workload credential context without its state manages nothing.
 	ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: CredentialKindWorkloadDelegation, ID: d1.ID})
 	issued := grantor.ID
-	assert.False(t, canManageTestIdentity(ctx, NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api"),
+	assert.False(t, e.srv.canManageTestIdentity(ctx, NewAuthenticatedUser(grantor.ID, grantor.Email, "", "member", "api"),
 		&store.User{IssuedBy: &issued, IssuerDelegationID: &d1.ID}))
 }
 
