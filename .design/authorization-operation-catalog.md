@@ -1488,7 +1488,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.add`
+- **Event Type:** `project_member_add`
 - **Context Fields:** actor_id, project_id
 - **After Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1546,7 +1546,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.update`
+- **Event Type:** `project_member_role_change`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, old_role
 - **After Fields:** new_role
@@ -1599,7 +1599,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.remove`
+- **Event Type:** `project_member_remove`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1690,7 +1690,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.transfer`
+- **Event Type:** `project_ownership_transfer`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** old_owner_id
 - **After Fields:** new_owner_id, old_owner_role, new_owner_role
@@ -6457,7 +6457,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.create`
+- **Event Type:** `role_binding_create`
 - **Context Fields:** actor_id
 - **After Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -6501,7 +6501,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.delete`
+- **Event Type:** `role_binding_delete`
 - **Context Fields:** actor_id
 - **Before Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -6543,7 +6543,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.add`
+- **Event Type:** `group_member_add`
 - **Context Fields:** actor_id, group_id
 - **After Fields:** member_principal_id
 - **Atomic:** Yes
@@ -6585,7 +6585,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.remove`
+- **Event Type:** `group_member_remove`
 - **Context Fields:** actor_id, group_id
 - **Before Fields:** member_principal_id
 - **Atomic:** Yes
