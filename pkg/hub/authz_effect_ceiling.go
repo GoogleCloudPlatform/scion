@@ -83,7 +83,6 @@ var nonSelfOperationPermissionIDs = []string{
 	"project.secret_read",
 	"secret.use",
 	"agent.identity_token",
-	"agent.set_message_mode",
 }
 
 var selfOperationSet = toPermissionSet(selfOperationPermissionIDs)

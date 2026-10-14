@@ -147,10 +147,11 @@ var ProjectTargetApplicability = map[string]bool{
 	"test_identity.issue":       false,
 	"test_identity.issue_admin": false, "test_identity.issue_super_admin": false,
 
-	// quota.* — every live route (handlers_quota.go) authorizes against
-	// Resource{Type:"quota", ID:"hub"}, matching this family's own
-	// CollectionTargetClasses (HubResource for all four). Reviewed false: no
-	// project target exists for these permissions today.
+	// quota.* — every live check (the quota route guard, handlers_quota.go
+	// and broker_settings_handlers.go) authorizes against the hub-scoped
+	// quota target hubScopedResource("quota", "hub"), matching this family's
+	// own CollectionTargetClasses (HubResource for all four). False: no
+	// project target exists for these permissions.
 	"quota.read": false, "quota.create": false, "quota.update": false, "quota.delete": false,
 
 	// role.* — role DEFINITIONS are hub-wide, never project-scoped.
@@ -218,6 +219,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.list": {BoundaryKindProject, BoundaryKindHub}, "agent.delete": {BoundaryKindProject, BoundaryKindHub},
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
+	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
@@ -283,6 +285,11 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
 	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
 	"hub.audit.read": {BoundaryKindHub},
+
+	// quota.* administer hub-wide limits, entitlements and usage, so their
+	// selectors are hub-only.
+	"quota.read": {BoundaryKindHub}, "quota.create": {BoundaryKindHub},
+	"quota.update": {BoundaryKindHub}, "quota.delete": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -364,6 +371,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.list": {TargetClassKindProjectScoped}, "agent.delete": {TargetClassKindProjectScoped},
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
+	"agent.update": {TargetClassKindProjectScoped}, "agent.set_message_mode": {TargetClassKindProjectScoped},
+	// agent.stop_all targets a project's agents (project form) or every
+	// agent on the hub (hub form, hubScopedResource("agent", "hub")).
+	"agent.stop_all": {TargetClassKindProjectScoped, TargetClassKindHubResource},
 
 	// project.* — read/update/manage/set_messaging_policy target an existing
 	// project; clone is a hub-level collection action (false in
@@ -469,6 +480,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
 	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.audit.read": {TargetClassKindHubResource},
+
+	// quota.* target the hub-wide quota records.
+	"quota.read": {TargetClassKindHubResource}, "quota.create": {TargetClassKindHubResource},
+	"quota.update": {TargetClassKindHubResource}, "quota.delete": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

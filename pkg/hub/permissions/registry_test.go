@@ -137,6 +137,17 @@ var expectedSelectorRegistry = map[string][]string{
 	"role_binding:read":      {"role_binding.read"},
 	"access_constraint:read": {"access_constraint.read"},
 	"hub_audit:read":         {"hub.audit.read"},
+
+	// agent selectors outside the agent:manage alias.
+	"agent:set_message_mode": {"agent.set_message_mode"},
+	"agent:stop_all":         {"agent.stop_all"},
+	"agent:update":           {"agent.update"},
+
+	// quota selectors (hub-wide limit, entitlement and usage administration).
+	"quota:create": {"quota.create"},
+	"quota:delete": {"quota.delete"},
+	"quota:read":   {"quota.read"},
+	"quota:update": {"quota.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

@@ -476,6 +476,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
+	nd.recordAttempt(ctx, notif.ID)
 	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
@@ -501,9 +502,14 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		nd.messageLog.Debug("notification message dispatched", logAttrs...)
 	}
 
+	// setOutcome also sets dispatched=true; MarkNotificationDispatched is kept
+	// because it is what broadcasts the dispatched event to other replicas. It
+	// must run before setOutcome: it broadcasts only when its CAS on
+	// dispatched=false wins, and setOutcome would already have set the flag.
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
 }
 
 // notificationMessageType returns the structured message type for a notification status.

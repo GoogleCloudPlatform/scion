@@ -250,7 +250,10 @@ func mapDecisionEnvelope(ctx context.Context, rec *store.DecisionAuditRecord) (a
 	if rec.ResourceType != "project" && rec.ResourceType != "agent" {
 		return zero, decisionAuditExcludedResource
 	}
-	if rec.ResourceParentType != "" || rec.ResourceParentID != "" || rec.ResourceAncestryLen != 0 ||
+	// A hub-scoped target (hubScopedResource: an explicit system parent with
+	// no parent ID) is unparented, the same as one with no parent at all.
+	parentedType := rec.ResourceParentType != "" && rec.ResourceParentType != "system"
+	if parentedType || rec.ResourceParentID != "" || rec.ResourceAncestryLen != 0 ||
 		rec.ResourceScopeKind != "" || rec.ResourceScopeUserIDSet {
 		return zero, decisionAuditExcludedScope
 	}
