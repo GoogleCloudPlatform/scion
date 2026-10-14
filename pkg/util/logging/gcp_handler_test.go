@@ -323,6 +323,12 @@ func TestGCPHandler_GroupRendersEmptyValidJSON(t *testing.T) {
 		{"empty_trace_ID_in_group", func(l *slog.Logger) {
 			l.WithGroup("g").Info("m", AttrTraceID, "")
 		}, withBaseKeys()},
+		// A With stack_trace whose group value renders empty is pruned, so
+		// it does not break the separator before the next top-level field,
+		// and the generated stack_trace replaces it.
+		{"lifted_With_group_renders_empty", func(l *slog.Logger) {
+			l.WithGroup("g").With(slog.Group(gcpKeyStackTrace, "drop", 1)).Error("boom", "a", 1)
+		}, withBaseKeys(gcpKeyStackTrace, gcpKeyType, "g")},
 	}
 	dropDrop := func(_ []string, a slog.Attr) slog.Attr {
 		if a.Key == "drop" {
@@ -339,7 +345,7 @@ func TestGCPHandler_GroupRendersEmptyValidJSON(t *testing.T) {
 				t.Fatalf("got %d lines, want 1: %s", n, buf.Bytes())
 			}
 			if !json.Valid(bytes.TrimSpace(buf.Bytes())) {
-				t.Fatalf("invalid JSON entry: %s", buf.Bytes())
+				t.Fatalf("invalid JSON for an entry whose group renders empty: %s", buf.Bytes())
 			}
 			assertKeys(t, buf.Bytes(), tc.want...)
 		})
@@ -389,9 +395,11 @@ func TestGCPHandler_GroupedDroppedAttrsValidJSON(t *testing.T) {
 		{"inner group dropped", func(l *slog.Logger) {
 			l.WithGroup("g").With("a", 1).WithGroup("h").Info("m", AttrTraceID, "")
 		}, map[string]any{"a": float64(1)}, true},
-		{"user group in With dropped", func(l *slog.Logger) {
+		// A trace_id inside a caller's group value is not the trace field:
+		// it is kept as is, even when empty (ptone/scion#4996).
+		{"user group in With keeps nested trace_id", func(l *slog.Logger) {
 			l.WithGroup("g").With("a", 1, slog.Group("r", AttrTraceID, "")).Info("m", "x", 2)
-		}, map[string]any{"a": float64(1), "x": float64(2)}, true},
+		}, map[string]any{"a": float64(1), "r": map[string]any{AttrTraceID: ""}, "x": float64(2)}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,4 +430,137 @@ func stripKeys(m map[string]any, keys ...string) map[string]any {
 		delete(out, k)
 	}
 	return out
+}
+
+// TestGCPHandler_ExplicitGroupTraceIDNotRenamed checks that a trace_id
+// inside a caller's group value is left as is: not renamed to the trace
+// field, and not promoted to the trace field or label (ptone/scion#4996).
+func TestGCPHandler_ExplicitGroupTraceIDNotRenamed(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	req := map[string]any{AttrTraceID: traceID}
+	cases := []struct {
+		name string
+		log  func(l *slog.Logger)
+		key  string
+		want any
+	}{
+		{"inline_group", func(l *slog.Logger) {
+			l.Info("m", slog.Group("req", AttrTraceID, traceID))
+		}, "req", req},
+		{"inline_group_in_WithGroup", func(l *slog.Logger) {
+			l.WithGroup("g").Info("m", slog.Group("req", AttrTraceID, traceID))
+		}, "g", map[string]any{"req": req}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(tc.key)...)
+			data := decodeLine(t, buf.Bytes())
+			if !reflect.DeepEqual(data[tc.key], tc.want) {
+				t.Errorf("explicit group %s = %v, want %v", tc.key, data[tc.key], tc.want)
+			}
+			labels, _ := data[GCPKeyLabels].(map[string]any)
+			if _, ok := labels[gcpTraceIDLabelKey]; ok {
+				t.Errorf("trace label set from a nested trace_id: %v", labels)
+			}
+		})
+	}
+}
+
+// TestGCPHandler_GroupSiblingsIndependentLifted checks that handlers derived
+// from one grouped handler do not share the attrs written at the top level.
+// The parent's lifted slice has spare capacity after three With calls, so an
+// append that aliased it would let the second sibling overwrite the first.
+func TestGCPHandler_GroupSiblingsIndependentLifted(t *testing.T) {
+	t.Setenv(EnvGCPProjectID, "test-proj")
+	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const idB = "0af7651916cd43dd8448eb211c80319c"
+	var buf bytes.Buffer
+	base := slog.New(NewGCPHandler(&buf, nil, "test-component", "")).WithGroup("g").
+		With(gcpKeyStackTrace, "s1").With(gcpKeyStackTrace, "s2").With(gcpKeyType, "t")
+	a := base.With(AttrTraceID, idA)
+	b := base.With(AttrTraceID, idB)
+
+	for _, tc := range []struct {
+		name string
+		l    *slog.Logger
+		want string
+	}{
+		{"a", a, idA},
+		{"b", b, idB},
+	} {
+		buf.Reset()
+		tc.l.Info("m")
+		assertKeys(t, buf.Bytes(), withBaseKeys(gcpKeyStackTrace, gcpKeyType, GCPKeyTrace)...)
+		data := decodeLine(t, buf.Bytes())
+		if got, want := data[GCPKeyTrace], "projects/test-proj/traces/"+tc.want; got != want {
+			t.Errorf("sibling %s: trace field = %v, want %s", tc.name, got, want)
+		}
+		if data[gcpKeyStackTrace] != "s2" || data[gcpKeyType] != "t" {
+			t.Errorf("sibling %s: stack_trace = %v, @type = %v, want s2, t", tc.name, data[gcpKeyStackTrace], data[gcpKeyType])
+		}
+	}
+	buf.Reset()
+	base.Info("m")
+	assertKeys(t, buf.Bytes(), withBaseKeys(gcpKeyStackTrace, gcpKeyType)...)
+}
+
+// TestGCPHandler_LiftedFieldOnePerKey checks that stack_trace, @type and
+// trace_id given more than once, by With (before or after WithGroup) and on
+// the record, are written once each at the top level, the record's value
+// winning over With and a later With over an earlier one (ptone/scion#4998).
+func TestGCPHandler_LiftedFieldOnePerKey(t *testing.T) {
+	t.Setenv(EnvGCPProjectID, "test-proj")
+	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const idB = "0af7651916cd43dd8448eb211c80319c"
+	cases := []struct {
+		name  string
+		log   func(l *slog.Logger)
+		keys  []string
+		trace string // want trace ID, "" = no trace field
+		st    string // want stack_trace, "" = not checked
+	}{
+		{"With_and_record", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", AttrTraceID, idB)
+		}, []string{GCPKeyTrace}, idB, ""},
+		{"With_before_group_and_record", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).WithGroup("g").Info("m", AttrTraceID, idB, "a", 1)
+		}, []string{GCPKeyTrace, "g"}, idB, ""},
+		{"With_in_group_and_record", func(l *slog.Logger) {
+			l.WithGroup("g").With(AttrTraceID, idA).Info("m", AttrTraceID, idB)
+		}, []string{GCPKeyTrace}, idB, ""},
+		{"With_before_and_in_group", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).WithGroup("g").With(AttrTraceID, idB).Info("m")
+		}, []string{GCPKeyTrace}, idB, ""},
+		{"error_fields_With_and_record", func(l *slog.Logger) {
+			l.With(gcpKeyStackTrace, "s1", gcpKeyType, "t1").WithGroup("g").
+				Error("boom", gcpKeyStackTrace, "s2", gcpKeyType, "t2")
+		}, []string{gcpKeyStackTrace, gcpKeyType}, "", "s2"},
+		{"error_fields_ungrouped", func(l *slog.Logger) {
+			l.With(gcpKeyStackTrace, "s1").Error("boom", gcpKeyStackTrace, "s2")
+		}, []string{gcpKeyStackTrace, gcpKeyType}, "", "s2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(tc.keys...)...)
+			data := decodeLine(t, buf.Bytes())
+			if tc.trace != "" {
+				if got, want := data[GCPKeyTrace], "projects/test-proj/traces/"+tc.trace; got != want {
+					t.Errorf("one-per-key trace field = %v, want %s", got, want)
+				}
+				labels, _ := data[GCPKeyLabels].(map[string]any)
+				if labels[gcpTraceIDLabelKey] != tc.trace {
+					t.Errorf("trace label = %v, want %s", labels[gcpTraceIDLabelKey], tc.trace)
+				}
+			}
+			if tc.st != "" && data[gcpKeyStackTrace] != tc.st {
+				t.Errorf("one-per-key stack_trace = %v, want %s", data[gcpKeyStackTrace], tc.st)
+			}
+		})
+	}
 }

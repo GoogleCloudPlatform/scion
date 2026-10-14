@@ -187,6 +187,7 @@ func TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity(t *testing.T) {
 		{"With", func(l *slog.Logger) { l.With("level", slog.LevelWarn).Info("msg") }},
 		{"With_before_group", func(l *slog.Logger) { l.With("level", slog.LevelWarn).WithGroup("g").Info("msg") }},
 		{"LogValuer", func(l *slog.Logger) { l.Info("msg", "level", levelValuer(slog.LevelWarn)) }},
+		{"inline_empty_key_group", func(l *slog.Logger) { l.Info("msg", slog.Group("", "level", slog.LevelWarn)) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

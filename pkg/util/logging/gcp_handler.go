@@ -64,10 +64,10 @@ func levelToSeverity(level slog.Level) string {
 	return severityNames[slogLevelToSeverity(level)]
 }
 
-// liftedKey reports whether an attr with this key, added while a group is
-// open, is written at the top level of the entry instead of in the group.
-// These are the fields Cloud Logging and Error Reporting read only from the
-// top level; ungrouped, they are top-level attrs already.
+// liftedKey reports whether an attr with this key, from With or the record,
+// is written at the top level of the entry, once per entry, even when a
+// group is open. These are the fields Cloud Logging and Error Reporting
+// read only from the top level.
 func liftedKey(key string) bool {
 	return key == gcpKeyStackTrace || key == gcpKeyType || key == AttrTraceID
 }
@@ -78,8 +78,7 @@ func liftedKey(key string) bool {
 // JSON handler, so the Cloud Logging special fields (labels, source location
 // and serviceContext) stay at the top level of each entry while user
 // attributes nest inside their groups. stack_trace, @type and trace_id
-// attributes added inside a group are written at the top level too (see
-// liftedKey).
+// attributes are written at the top level too, once each (see liftedKey).
 type GCPHandler struct {
 	handler   slog.Handler // ungrouped; carries attrs added before the first group
 	component string
@@ -89,8 +88,8 @@ type GCPHandler struct {
 	version   string
 	preAttrs  []slog.Attr // tracked for label promotion
 	groups    []gcpGroup  // open groups, outermost first
-	// lifted holds the attrs added inside a group that are written at the
-	// top level instead (see liftedKey).
+	// lifted holds the With attrs written at the top level by Handle (see
+	// liftedKey), resolved and pruned, oldest first.
 	lifted []slog.Attr
 	// replaceAttr is the composed ReplaceAttr of the JSON handler, used to
 	// drop With attrs that would render nothing inside a group.
@@ -137,6 +136,11 @@ func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName st
 		case slog.TimeKey:
 			return slog.Attr{Key: GCPKeyTimestamp, Value: a.Value}
 		case AttrTraceID:
+			// Only a top-level trace ID becomes the trace field. One
+			// inside a caller's group value is left as is.
+			if len(groups) != 0 {
+				return a
+			}
 			traceID := NormalizeTraceID(a.Value.String())
 			if traceID == "" {
 				return slog.Attr{}
@@ -207,7 +211,7 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= slog.LevelError {
 		hasST := false
 		hasType := false
-		for _, a := range h.preAttrs {
+		for _, a := range h.lifted {
 			if a.Key == gcpKeyStackTrace {
 				hasST = true
 			}
@@ -233,37 +237,53 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 		}
 	}
 
+	// stack_trace, @type and trace_id (see liftedKey) from With and from the
+	// record are written top-level once each, the record's value winning
+	// over With and a later With over an earlier one (see lastPerKey). The
+	// record's other attrs go top-level when no group is open, else in the
+	// open groups. In a group, the special fields go first: if every attr in
+	// a group is dropped (zero Attr, ReplaceAttr deletion), the JSON handler
+	// truncates the group without restoring its separator, so nothing may
+	// follow it.
 	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
-	if len(h.groups) == 0 {
-		r.Attrs(func(a slog.Attr) bool {
-			out.AddAttrs(plainLevelAttr(a))
-			return true
-		})
-		out.AddAttrs(top...)
-		out.AddAttrs(errAttrs...)
-		return h.handler.Handle(ctx, out)
-	}
-
-	// Grouped: nest the record attrs in the open groups ourselves, and keep
-	// the special fields top-level, including stack_trace, @type and
-	// trace_id (see liftedKey) from the record, from With and from
-	// errAttrs. The special fields go first: if every attr in a group is
-	// dropped (zero Attr, ReplaceAttr deletion), the JSON handler truncates
-	// the group without restoring its separator, so nothing may follow it.
-	out.AddAttrs(top...)
-	out.AddAttrs(h.lifted...)
-	inner := make([]slog.Attr, 0, r.NumAttrs())
+	ungrouped := len(h.groups) == 0
+	special := h.lifted[:len(h.lifted):len(h.lifted)] // append copies
+	var inner []slog.Attr
 	r.Attrs(func(a slog.Attr) bool {
-		if liftedKey(a.Key) {
-			out.AddAttrs(a)
-		} else {
+		switch {
+		case liftedKey(a.Key):
+			special = append(special, a)
+		case ungrouped:
+			out.AddAttrs(plainLevelAttr(a))
+		default:
 			inner = append(inner, a)
 		}
 		return true
 	})
+	out.AddAttrs(top...)
+	out.AddAttrs(lastPerKey(special)...)
 	out.AddAttrs(errAttrs...)
-	out.AddAttrs(nestInGroups(h.groups, inner)...)
+	if !ungrouped {
+		out.AddAttrs(nestInGroups(h.groups, inner)...)
+	}
 	return h.handler.Handle(ctx, out)
+}
+
+// lastPerKey returns one attr per key of attrs: the last one with that key,
+// at the position of the first.
+func lastPerKey(attrs []slog.Attr) []slog.Attr {
+	out := make([]slog.Attr, 0, len(attrs))
+next:
+	for _, a := range attrs {
+		for i := range out {
+			if out[i].Key == a.Key {
+				out[i] = a
+				continue next
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -275,39 +295,44 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	copy(newPreAttrs[len(h.preAttrs):], attrs)
 	nh := h.clone()
 	nh.preAttrs = newPreAttrs
-	if len(h.groups) == 0 {
-		plain := make([]slog.Attr, len(attrs))
-		for i, a := range attrs {
-			plain[i] = plainLevelAttr(a)
-		}
-		nh.handler = h.handler.WithAttrs(plain)
-		return nh
-	}
-	// Inside a group: stack_trace, @type and trace_id go to the top level
-	// (see liftedKey). Keep the other attrs with the innermost group, minus
-	// those that would render nothing (see pruneEmpty). LogValuers are
-	// resolved now; ReplaceAttr is applied again on each record.
-	var lifted, grouped []slog.Attr
+	// stack_trace, @type and trace_id are kept apart, with or without a
+	// group, and written top-level by Handle (see liftedKey). They are
+	// resolved and pruned now as at the top level, where they render.
+	var lifted, rest []slog.Attr
 	for _, a := range attrs {
 		if liftedKey(a.Key) {
-			a.Value = a.Value.Resolve()
 			lifted = append(lifted, a)
 		} else {
-			grouped = append(grouped, a)
+			rest = append(rest, a)
 		}
 	}
+	lifted = h.pruneEmpty(nil, lifted)
 	if len(lifted) > 0 {
 		nh.lifted = make([]slog.Attr, len(h.lifted), len(h.lifted)+len(lifted))
 		copy(nh.lifted, h.lifted)
 		nh.lifted = append(nh.lifted, lifted...)
 	}
+	if len(rest) == 0 {
+		return nh
+	}
+	if len(h.groups) == 0 {
+		plain := make([]slog.Attr, len(rest))
+		for i, a := range rest {
+			plain[i] = plainLevelAttr(a)
+		}
+		nh.handler = h.handler.WithAttrs(plain)
+		return nh
+	}
+	// Inside a group: keep the other attrs with the innermost group, minus
+	// those that would render nothing (see pruneEmpty). LogValuers are
+	// resolved now; ReplaceAttr is applied again on each record.
 	last := len(nh.groups) - 1
 	path := make([]string, len(nh.groups))
 	for i, g := range nh.groups {
 		path[i] = g.name
 	}
 	g := nh.groups[last]
-	kept := h.pruneEmpty(path, grouped)
+	kept := h.pruneEmpty(path, rest)
 	groupAttrs := make([]slog.Attr, len(g.attrs), len(g.attrs)+len(kept))
 	copy(groupAttrs, g.attrs)
 	groupAttrs = append(groupAttrs, kept...)
@@ -316,16 +341,26 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 }
 
 // plainLevelAttr returns a, except that a slog.Level value under the key
-// "level" is replaced by its name. The JSON output is the same, but the
-// ReplaceAttr installed by NewGCPHandler, which cannot tell such an attr
-// from the record's own level, no longer turns it into a second severity
-// key. Only used for top-level attrs; grouped ones are left as is there.
+// "level", directly or in a group value with an empty key (which the JSON
+// handler inlines), is replaced by its name. The JSON output is the same,
+// but the ReplaceAttr installed by NewGCPHandler, which cannot tell such an
+// attr from the record's own level, no longer turns it into a second
+// severity key. Only used for top-level attrs; grouped ones are left as is
+// there.
 func plainLevelAttr(a slog.Attr) slog.Attr {
-	if a.Key != slog.LevelKey {
-		return a
+	v := a.Value.Resolve()
+	if a.Key == "" && v.Kind() == slog.KindGroup {
+		members := v.Group()
+		plain := make([]slog.Attr, len(members))
+		for i, m := range members {
+			plain[i] = plainLevelAttr(m)
+		}
+		return slog.Attr{Value: slog.GroupValue(plain...)}
 	}
-	if level, ok := a.Value.Resolve().Any().(slog.Level); ok {
-		return slog.String(a.Key, level.String())
+	if a.Key == slog.LevelKey {
+		if level, ok := v.Any().(slog.Level); ok {
+			return slog.String(a.Key, level.String())
+		}
 	}
 	return a
 }
