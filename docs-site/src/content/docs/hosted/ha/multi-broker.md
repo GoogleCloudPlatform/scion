@@ -104,7 +104,7 @@ A flat instance never uses Runtime Broker Profiles: not the active profile, and 
 
 Each default keeps its usual precedence. An agent's own Kubernetes setting still wins over it, and an unset field falls back to the same global setting as before. An agent keeps the storage backends it recorded at its first start. See [the runtime target fields](/scion/reference/server-config/#flat-instance-runtime-target-serverbrokerinstancesruntime_target) for every field.
 
-A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
+An entry may also set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
 
 #### Inconsistent agent placement
 

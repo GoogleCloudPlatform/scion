@@ -476,6 +476,29 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"ad ho valid":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {image_pull_policy: Never, auth_selected_type: api-key}}}}"), true},
 		"ad num env":        {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {env: {A: 1}}}}}"), false},
 		"unknown target":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, bogus: 1}}"), false},
+		// A present null on a string or mapping runtime_target field is
+		// refused by both, as the schema allows null only for safe_to_evict.
+		"k8s null display":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, display_name: null}}"), false},
+		"k8s null namespace":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, namespace: null}}"), false},
+		"k8s null kubeconfig": {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubeconfig: null}}"), false},
+		"k8s null block sa":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_block_service_account: null}}"), false},
+		"k8s null sd size":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_size: null}}"), false},
+		"k8s null priority":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, priority_class_name: null}}"), false},
+		"k8s null backend":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_backend: null}}"), false},
+		"k8s null home":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, home_storage_backend: null}}"), false},
+		"k8s null leaf":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, home_storage_leaf: null}}"), false},
+		"k8s null mappings":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: null}}"), false},
+		"k8s null backends":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_backends: null}}"), false},
+		"k8s list mappings":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: [a]}}"), false},
+		"docker null display": {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, display_name: null}}"), false},
+		// agent_defaults volume and secret declarations.
+		"ad volume valid":     {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {volumes: [{source: /a, target: /b, type: local}]}}"), true},
+		"ad volume bad type":  {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {volumes: [{source: /a, target: /b, type: bogus}]}}"), false},
+		"ad volume no target": {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {volumes: [{source: /a}]}}"), false},
+		"ad volume ho type":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {volumes: [{target: /b, type: bogus}]}}}}"), false},
+		"ad secret valid":     {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {secrets: [{key: API_KEY, type: environment, description: d}]}}"), true},
+		"ad secret bad type":  {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {secrets: [{key: API_KEY, type: vault}]}}"), false},
+		"ad secret no key":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {secrets: [{description: d}]}}"), false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -592,5 +615,31 @@ func TestRuntimeBrokerInstances_KubernetesIdentityPolicyRoundTrips(t *testing.T)
 	global[0].RuntimeTarget.KubernetesServiceAccountMappings["other@proj.iam.gserviceaccount.com"] = "x"
 	if len(in[0].RuntimeTarget.KubernetesServiceAccountMappings) != 1 || len(back[0].RuntimeTarget.KubernetesServiceAccountMappings) != 1 {
 		t.Fatal("the mapping is shared between the converted copies")
+	}
+}
+
+// A present null on a runtime_target string or mapping field is a strict
+// load error naming its path, and a non-string service-account mapping value
+// is named in the validator's mappings[<email>] form.
+func TestRuntimeBrokerInstances_StrictLoaderRefusesNullAndNamesMappingValue(t *testing.T) {
+	p := "server.broker.instances[0].runtime_target."
+	for line, want := range map[string]string{
+		"kubeconfig: null":                          p + "kubeconfig must be a string",
+		"context: null":                             p + "context must be a string",
+		"home_storage_leaf: null":                   p + "home_storage_leaf must be a string",
+		"kubernetes_service_account_mappings: null": p + "kubernetes_service_account_mappings must be a mapping",
+		"shared_dir_storage_backends: null":         p + "shared_dir_storage_backends must be a mapping",
+		"kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: 7}": p +
+			"kubernetes_service_account_mappings[agent@proj.iam.gserviceaccount.com] must be a string",
+	} {
+		t.Run(line, func(t *testing.T) {
+			global := flatTestHome(t)
+			writeFlatTestFile(t, filepath.Join(global, "settings.yaml"),
+				strings.Replace(k8sSharedDirInstanceYAML, "          namespace: agents\n", "          namespace: agents\n          "+line+"\n", 1))
+			_, err := LoadRuntimeBrokerInstances("")
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("got %v, want an error containing %q", err, want)
+			}
+		})
 	}
 }
