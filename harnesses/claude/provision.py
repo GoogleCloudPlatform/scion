@@ -445,6 +445,11 @@ _PLUGIN_PLACEHOLDER_RE = re.compile(r"\$\{PLUGIN_(ROOT|DATA)\}")
 # kept too: stdio commands live there (./bin/x), and Claude appends a
 # plugin's bin/ to the PATH of its Bash tool (append only, so it cannot
 # shadow existing commands).
+# A bundle's root SKILL.md (a dual-packaged bundle for skills-only
+# harnesses) is also not installed: spec 1.0.0 skills live under skills/,
+# and in an owned dir a root SKILL.md must always mean "a skill moved in".
+ROOT_SKILL_FILE = "SKILL.md"
+
 CLAUDE_STRIPPED_PATHS = (
     ".mcp.json", ".lsp.json", "hooks", "commands", "agents", "monitors",
     "output-styles", "workflows", "themes", "settings.json",
@@ -677,11 +682,13 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
     @staticmethod
     def _has_root_skill(path: str) -> bool:
-        """A regular root SKILL.md: a skill, never part of an Agent Plugins
-        bundle (bundles keep skills under skills/)."""
-        skill_md = os.path.join(path, "SKILL.md")
+        """Any root SKILL.md entry (a symlink counts: this predicate protects
+        skill content, so it errs toward "is a skill"). Scion never installs
+        one (install strips a bundle's root SKILL.md), so in an owned dir it
+        is always a skill that arrived later: merged in by Go from a
+        template skill, or written at runtime."""
         return (os.path.isdir(path) and not os.path.islink(path)
-                and os.path.isfile(skill_md) and not os.path.islink(skill_md))
+                and os.path.lexists(os.path.join(path, ROOT_SKILL_FILE)))
 
     def _has_generated_manifest(self, path: str) -> bool:
         return (
@@ -695,7 +702,8 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
     def release_stale(self) -> None:
         """Stale ownership (design 2.5): a plugin Scion installed now shares
         its name with a skill (a template added one, and Go merged it into
-        the plugin's directory on re-provision). Remove the generated
+        the plugin's directory on re-provision; or a SKILL.md appeared in the
+        dir otherwise). Remove the generated
         .claude-plugin/ so Claude treats the directory as that skill again
         (and the root plugin.json when it is the bundle's own, so the Go
         skills-dir skips do not hide the skill), drop the plugin from the
@@ -703,7 +711,14 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         reconcile_agent_plugins, which then reports the conflict."""
         recorded = self._recorded_plugins()
         self._sweep_leftovers(recorded)
-        stale = sorted(n for n in self.conflicts if n in recorded)
+        # Stale: Go flags the conflict, or an owned dir holds a root
+        # SKILL.md that Go did not flag (the plugin was dropped in the same
+        # edit that added the skill, or the file was written at runtime).
+        stale = sorted(
+            n for n in recorded
+            if scion_harness.valid_agent_plugin_name(n)
+            and (n in self.conflicts or self._has_root_skill(self.target(n)))
+        )
         if not stale:
             return
         for name in stale:
@@ -834,6 +849,12 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 if os.path.lexists(path):
                     _remove_path(path)
                     self.ctx.warn(f"agent plugin {name}: ignored claude-specific {rel} in bundle")
+            root_skill = os.path.join(tmp, ROOT_SKILL_FILE)
+            if os.path.lexists(root_skill):
+                _remove_path(root_skill)
+                self.ctx.warn(
+                    f"agent plugin {name}: ignored root {ROOT_SKILL_FILE} in bundle "
+                    "(Agent Plugins skills live under skills/)")
             gen = os.path.join(tmp, CLAUDE_PLUGIN_MANIFEST_DIR)
             os.makedirs(gen)
             scion_harness.atomic_write_json(os.path.join(gen, AGENT_PLUGIN_MANIFEST), manifest)

@@ -1263,10 +1263,12 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
         self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")), "other stray files stay (R6)")
         self.assertEqual(self.state(), {})
-        self.assertEqual(self.status()["removed"], ["p"])
+        # release_stale hands the dir back before reconcile (record dropped
+        # there), so reconcile has nothing left to remove.
+        self.assertEqual(self.status()["removed"], [])
         self.assertEqual(warnings, [
-            "agent plugin p: removed; a skill named p shares its directory, so only the generated "
-            ".claude-plugin manifest was removed and claude loads it as that skill",
+            "agent plugin p: a skill named p now shares its directory; removed the generated "
+            ".claude-plugin manifest, so claude loads it as that skill",
         ])
 
     def test_stale_ownership_after_manifest_change(self) -> None:
@@ -1312,15 +1314,95 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
         self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
         self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
+        not_owned = (f"agent plugin p: install failed (plugin p not installed for claude: {target} exists "
+                     "and was not installed by Scion); will retry next start")
         self.assertEqual(warnings, [
-            f"agent plugin p: install failed (plugin p not installed for claude: {target} holds a skill "
-            "(SKILL.md); left it to that skill); will retry next start",
+            "agent plugin p: a skill named p now shares its directory; removed the generated "
+            ".claude-plugin manifest, so claude loads it as that skill",
+            not_owned,
         ])
+        # Review round 4, finding 3: the record is dropped at the hand-back,
+        # so later starts neither repeat the hand-back nor own the dir.
+        self.assertEqual(self.state(), {})
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [not_owned])
+        os.unlink(os.path.join(target, "SKILL.md"))
+        self.reconcile()
+        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")), "no longer owned: never swapped")
+        with open(os.path.join(target, "SKILL.md"), "w") as f:
+            f.write("written at runtime")
         # Dropping the plugin later leaves the skill alone.
         self.stage({})
         self.reconcile()
         self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
         self.assertEqual(self.state(), {})
+
+    def _stage_root_skill_bundle(self, digest: str, skill: str) -> None:
+        self.stage({"p": {"digest": digest, "skill": skill}})
+        with open(os.path.join(self.inputs, "plugins", "p", "SKILL.md"), "w") as f:
+            f.write("dual-packaged root skill " + skill)
+
+    def test_bundle_root_skill_md_install_update_remove(self) -> None:
+        # Review round 4, finding 1: a bundle shipping its own root SKILL.md
+        # (dual-packaged for skills-only harnesses) is installed without it,
+        # so it never trips the hand-back and stays updatable and removable.
+        stripped = ("agent plugin p: ignored root SKILL.md in bundle "
+                    "(Agent Plugins skills live under skills/)")
+        target = os.path.join(self.skills, "p")
+        self._stage_root_skill_bundle("d1", "PLUM-7")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        self.assertFalse(os.path.lexists(os.path.join(target, "SKILL.md")))
+        self.assertTrue(os.path.isfile(os.path.join(target, ".claude-plugin", "plugin.json")))
+        # Same digest, data dir deleted: reinstalled, not released.
+        shutil.rmtree(os.path.join(self.root, "data", "p"))
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        self.assertIn("p", self.state())
+        # Digest change: replaced at d2.
+        self._stage_root_skill_bundle("d2", "PLUM-8")
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertFalse(os.path.lexists(os.path.join(target, "SKILL.md")))
+        self.assertTrue(os.path.isfile(os.path.join(target, ".claude-plugin", "plugin.json")))
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+        # Removal: the dir goes.
+        self.stage({})
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertFalse(os.path.exists(target))
+        self.assertEqual(self.state(), {})
+        self.assertEqual(self.status()["removed"], ["p"])
+
+    def test_symlinked_root_skill_counts_as_skill(self) -> None:
+        # Review round 4, finding 2: a symlinked SKILL.md protects the dir
+        # like a regular one; the link itself is never followed or removed.
+        self.stage({"p": {}})
+        self.reconcile()
+        target = os.path.join(self.skills, "p")
+        outside = os.path.join(self.home, "elsewhere.md")
+        with open(outside, "w") as f:
+            f.write("linked skill")
+        os.symlink(outside, os.path.join(target, "SKILL.md"))
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertTrue(os.path.islink(os.path.join(target, "SKILL.md")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")), "dir not removed")
+        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
+        self.assertEqual(self.state(), {})
+        with open(outside) as f:
+            self.assertEqual(f.read(), "linked skill")
+        self.assertEqual(warnings, [
+            "agent plugin p: a skill named p now shares its directory; removed the generated "
+            ".claude-plugin manifest, so claude loads it as that skill",
+        ])
 
     def test_removal_after_manual_manifest_removal(self) -> None:
         self.stage({"p": {}})
