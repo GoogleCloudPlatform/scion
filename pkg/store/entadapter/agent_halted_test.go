@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 // Halted phase store tests (ptone/scion#4853). Like the rest of the
 // entadapter suite they run against SQLite, and against Postgres in the
 // Postgres CI job (make test-store-postgres-entadapter).
