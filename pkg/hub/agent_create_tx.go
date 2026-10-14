@@ -342,7 +342,7 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		}, "compensation", true); err != nil {
+		}, "compensation"); err != nil {
 			return err
 		}
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
