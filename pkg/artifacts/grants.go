@@ -62,8 +62,8 @@ import (
 const CodeReviewReplacesAccess = "review_replaces_access"
 
 // reviewReplacesAccessMessage is the text of a CodeReviewReplacesAccess
-// refusal on the review path (putReviewGrant); the manager path in
-// handlePutGrant sends the same text.
+// refusal, on the manager path (handlePutGrant, with 400) and the review
+// path (putReviewGrant, with 403).
 const reviewReplacesAccessMessage = "a review grant cannot replace a user's read, write or admin grant"
 
 // CodeReviewSubjectCannotRead is the error code of a review grant refused
@@ -331,8 +331,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
 		return
 	case errors.Is(err, ErrReviewReplacesAccess):
-		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess,
-			"a review grant cannot replace a user's read, write or admin grant")
+		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",

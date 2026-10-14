@@ -464,6 +464,37 @@ func TestReviewGrantSubjectCannotRead(t *testing.T) {
 	}
 }
 
+// TestReviewGrantSubjectCannotReadDespiteOtherGrants: a non-reader is told it
+// cannot read even when the artifact holds principal grants that a review
+// grant would not replace: another user's read grant (the refusal must not
+// hint at it), or the subject's own review grant (which is no read).
+func TestReviewGrantSubjectCannotReadDespiteOtherGrants(t *testing.T) {
+	const stranger = "user:stranger"
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fixture, id string)
+	}{
+		{"another user holds a read grant", func(f *fixture, id string) { f.grantPrincipal(id, reviewer) }},
+		{"subject holds a review grant only", func(f *fixture, id string) {
+			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
+				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			tc.setup(f, id)
+			records := captureRefusalLogs(t)
+			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, stranger, GrantReview)),
+				CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
+			if got := records(); len(got) != 1 || got[0]["reason"] != "subject_unreadable" || got[0]["grantee"] != stranger {
+				t.Errorf("refusal records: %v", got)
+			}
+		})
+	}
+}
+
 // TestReviewGrantRefusalLogged: every 403 on the review-access path logs
 // exactly one record with its reason, the artifact id and, when the body
 // named a well-formed user, the grantee; a granted request logs none.
