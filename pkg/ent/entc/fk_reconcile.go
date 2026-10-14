@@ -110,14 +110,19 @@ type FKRepairGroup struct {
 	// Rows is the number of orphaned rows.
 	Rows int
 	// Orphans is a digest of which rows are orphaned: their sorted rowids,
-	// the count of rows without one, and their key column values. Two sets
-	// of orphans with the same count can be told apart, including a row
-	// that reuses the rowid of an earlier, deleted orphan.
+	// the count of rows without one, and their foreign key column values.
+	// Two sets of orphans with the same count can be told apart, including
+	// a row that reuses the rowid of an earlier, deleted orphan with a
+	// different key value. Orphans with the same rowids and the same key
+	// values give the same digest: the reconcile then makes the same change
+	// to the same rows (by rowid and key), so reusing a snapshot taken for
+	// that change is harmless. Columns outside the key are not compared.
 	Orphans string
 }
 
 // orphanDigest returns a stable hex digest of the violating rows of fk:
-// their rowids and the values of their key columns (one SELECT).
+// their rowids and the values of fk's columns (one SELECT); see
+// FKRepairGroup.Orphans for what it does and does not tell apart.
 func orphanDigest(ctx context.Context, q sqlQuerier, fk fkInfo, r *fkViolatingRows) (string, error) {
 	ids := make([]int64, 0, len(r.rowids))
 	for id := range r.rowids {

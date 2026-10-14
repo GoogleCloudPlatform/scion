@@ -36,12 +36,15 @@ import (
 const fkReconcileSnapshotLabelPrefix = "pre-fk-reconcile"
 
 // fkReconcileSnapshotLabel names the snapshot after a fingerprint of the
-// repairs, including which rows are orphaned. SnapshotSQLite reuses an
-// existing snapshot with the same label, so a boot that retries the same
-// reconcile (after it failed, or the hub stopped before the migration)
-// reuses the snapshot instead of writing another copy, while any later,
-// different set of orphaned rows gets its own snapshot instead of an older
-// one, even with the same counts.
+// repairs, including which rows are orphaned (entc.FKRepairGroup.Orphans:
+// rowids and foreign key values). SnapshotSQLite reuses an existing
+// snapshot with the same label, so a boot that retries the same reconcile
+// (after it failed, or the hub stopped before the migration) reuses the
+// snapshot instead of writing another copy, while a later set of orphaned
+// rows that differs in rowids or key values gets its own snapshot, even
+// with the same counts. Orphans that match on both get the same label;
+// the reconcile then makes the same change to the same rows, so the reuse
+// is harmless.
 func fkReconcileSnapshotLabel(groups []entc.FKRepairGroup) string {
 	h := sha256.New()
 	for _, g := range groups {
