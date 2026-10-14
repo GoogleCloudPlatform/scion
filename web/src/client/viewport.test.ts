@@ -158,6 +158,32 @@ describe('installViewportFrame: keyboard state', () => {
     expect(root().dataset['keyboard']).toBeUndefined();
   });
 
+  it('follows a rotation with the keyboard open, and clears when the keyboard closes after it', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+
+    // Portrait to landscape: both viewports change and the window resizes.
+    win.innerHeight = 375;
+    emit(win, 'resize', { height: 160 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('160px');
+    expect(root().dataset['keyboard']).toBe('open');
+
+    emit(vv, 'resize', { height: 375 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('does not count a rotation with no keyboard as a keyboard', () => {
+    install();
+    win.innerHeight = 375;
+    emit(win, 'resize', { height: 375 });
+    win.innerHeight = LAYOUT_HEIGHT;
+    emit(win, 'resize', { height: LAYOUT_HEIGHT });
+
+    expect(root().hasAttribute('style')).toBe(false);
+    expect(root().hasAttribute('data-keyboard')).toBe(false);
+  });
+
   it('does nothing while pinch-zoomed, even with a large inset', () => {
     install();
     emit(vv, 'resize', { scale: 2, height: 400 });

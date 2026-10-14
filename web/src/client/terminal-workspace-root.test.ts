@@ -2012,6 +2012,63 @@ describe('show() frame-mode ref counting', () => {
     expect(_appFrameRefCountForTests()).toBe(start);
   });
 });
+
+describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
+  let root: TerminalWorkspaceRoot;
+
+  beforeEach(() => {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  });
+
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-keyboard');
+    root.show(false);
+    root.dispose();
+    root.element.remove();
+  });
+
+  function part(selector: string): HTMLElement {
+    const el = root.element.querySelector<HTMLElement>(selector);
+    if (!el) throw new Error(`No ${selector} in the workspace`);
+    return el;
+  }
+
+  /** The workspace parts that are not terminal panes. */
+  function chrome(): Record<string, HTMLElement> {
+    return {
+      banner: part('.terminal-test-hub-banner'),
+      header: part('scion-header'),
+      rail: part('.terminal-rail'),
+      layoutBar: part('.terminal-layout-bar'),
+    };
+  }
+
+  function display(el: HTMLElement): string {
+    return getComputedStyle(el).display;
+  }
+
+  it('shows the chrome while no keyboard is up', () => {
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+
+  it('hides the header, banner, Open terminals rail and Layout bar while the keyboard is up', () => {
+    document.documentElement.dataset['keyboard'] = 'open';
+
+    for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
+    // The terminal panes stay: the pane area takes the whole frame.
+    expect(display(part('.terminal-pane-area'))).not.toBe('none');
+    expect(display(part('.terminal-pane-host'))).not.toBe('none');
+  });
+
+  it('brings the chrome back when the keyboard closes', () => {
+    document.documentElement.dataset['keyboard'] = 'open';
+    delete document.documentElement.dataset['keyboard'];
+
+    for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+});
 // ────────────────────────────────────────────────────────────────────────────
 // "Jump to agent" palette
 // ────────────────────────────────────────────────────────────────────────────
