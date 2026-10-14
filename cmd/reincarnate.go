@@ -240,14 +240,10 @@ run these broker checks.`,
 			handoff = string(data)
 		}
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("agent migration requires hub mode")
-		}
-
 		return reincarnateAgentViaHub(hubCtx, agentName, handoff, isSelf)
 	},
 }

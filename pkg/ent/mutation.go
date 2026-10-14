@@ -4617,6 +4617,7 @@ type AgentMutation struct {
 	addlaunch_seq              *int64
 	launch_step                *string
 	launch_error               *string
+	launch_cause               *string
 	deletion_state             *string
 	deletion_claim             *int64
 	adddeletion_claim          *int64
@@ -7911,6 +7912,55 @@ func (m *AgentMutation) ResetLaunchError() {
 	delete(m.clearedFields, agent.FieldLaunchError)
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (m *AgentMutation) SetLaunchCause(s string) {
+	m.launch_cause = &s
+}
+
+// LaunchCause returns the value of the "launch_cause" field in the mutation.
+func (m *AgentMutation) LaunchCause() (r string, exists bool) {
+	v := m.launch_cause
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchCause returns the old "launch_cause" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchCause(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchCause is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchCause requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchCause: %w", err)
+	}
+	return oldValue.LaunchCause, nil
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (m *AgentMutation) ClearLaunchCause() {
+	m.launch_cause = nil
+	m.clearedFields[agent.FieldLaunchCause] = struct{}{}
+}
+
+// LaunchCauseCleared returns if the "launch_cause" field was cleared in this mutation.
+func (m *AgentMutation) LaunchCauseCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLaunchCause]
+	return ok
+}
+
+// ResetLaunchCause resets all changes to the "launch_cause" field.
+func (m *AgentMutation) ResetLaunchCause() {
+	m.launch_cause = nil
+	delete(m.clearedFields, agent.FieldLaunchCause)
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (m *AgentMutation) SetDeletionState(s string) {
 	m.deletion_state = &s
@@ -9322,7 +9372,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 88)
+	fields := make([]string, 0, 89)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9517,6 +9567,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.launch_error != nil {
 		fields = append(fields, agent.FieldLaunchError)
+	}
+	if m.launch_cause != nil {
+		fields = append(fields, agent.FieldLaunchCause)
 	}
 	if m.deletion_state != nil {
 		fields = append(fields, agent.FieldDeletionState)
@@ -9725,6 +9778,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchStep()
 	case agent.FieldLaunchError:
 		return m.LaunchError()
+	case agent.FieldLaunchCause:
+		return m.LaunchCause()
 	case agent.FieldDeletionState:
 		return m.DeletionState()
 	case agent.FieldDeletionClaim:
@@ -9910,6 +9965,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchStep(ctx)
 	case agent.FieldLaunchError:
 		return m.OldLaunchError(ctx)
+	case agent.FieldLaunchCause:
+		return m.OldLaunchCause(ctx)
 	case agent.FieldDeletionState:
 		return m.OldDeletionState(ctx)
 	case agent.FieldDeletionClaim:
@@ -10420,6 +10477,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLaunchError(v)
 		return nil
+	case agent.FieldLaunchCause:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchCause(v)
+		return nil
 	case agent.FieldDeletionState:
 		v, ok := value.(string)
 		if !ok {
@@ -10845,6 +10909,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldLaunchError) {
 		fields = append(fields, agent.FieldLaunchError)
 	}
+	if m.FieldCleared(agent.FieldLaunchCause) {
+		fields = append(fields, agent.FieldLaunchCause)
+	}
 	if m.FieldCleared(agent.FieldDeletionState) {
 		fields = append(fields, agent.FieldDeletionState)
 	}
@@ -11071,6 +11138,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ClearLaunchError()
+		return nil
+	case agent.FieldLaunchCause:
+		m.ClearLaunchCause()
 		return nil
 	case agent.FieldDeletionState:
 		m.ClearDeletionState()
@@ -11340,6 +11410,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ResetLaunchError()
+		return nil
+	case agent.FieldLaunchCause:
+		m.ResetLaunchCause()
 		return nil
 	case agent.FieldDeletionState:
 		m.ResetDeletionState()

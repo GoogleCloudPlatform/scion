@@ -742,8 +742,9 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	// A real, started broker proxy (see UserSubscriberInboxWithBroker).
 	bus := env.startRealBrokerProxy(t)
 
-	// Also set up a recording channel — should also receive the notification
-	// as a fallback for deployments without broker plugins.
+	// Also set up a recording channel. The registry is only a fallback for
+	// deployments without a broker, so it must not receive a second copy
+	// (ptone/scion#2752).
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
 		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
@@ -765,8 +766,9 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
 	assert.Equal(t, "COMPLETED", publishes[0].Status)
 
-	// Channel registry should also be called as a fallback.
-	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")
+	// settledUserRows stopped the dispatcher, so dispatch has finished: the
+	// broker delivered once and the channel registry was skipped.
+	assert.Empty(t, ch.getDeliveries(), "channel registry must not be called when a broker is set")
 }
 
 func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {

@@ -59,6 +59,10 @@
     "harness_configs": [
       "harness_configs"
     ],
+    "hub_observability": [
+      "server.hub.observability.metrics_enabled",
+      "server.hub.observability.tracing_enabled"
+    ],
     "lifecycle": [
       "server.hub.auto_suspend_stalled",
       "server.hub.stalled_threshold",

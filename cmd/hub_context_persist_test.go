@@ -40,55 +40,6 @@ func settingsEndpoint(t *testing.T, dir string) string {
 	return s.Hub.Endpoint
 }
 
-// TestPersistHubFlagEndpoint covers the shared write path of hub enable and
-// hub link: a hub from the current context is never written, at project or
-// global scope, and an explicit --hub still is.
-func TestPersistHubFlagEndpoint(t *testing.T) {
-	for _, scope := range []string{"project", "global"} {
-		t.Run(scope+": a context hub is not written", func(t *testing.T) {
-			setupContextTest(t)
-			writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
-			saveTestContext(t, ctxTestHub, ctxTestProjectID)
-			root := makeDirProject(t, "")
-			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
-			projectDir := filepath.Join(root, ".scion")
-			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
-			require.Equal(t, targetSourceContext, hubSource)
-			require.Equal(t, ctxTestHub, hubEndpoint)
-			require.Empty(t, hubFlagEndpoint())
-
-			globalBefore := readFileT(t, filepath.Join(globalDir, "settings.yaml"))
-			projectBefore := readFileT(t, filepath.Join(projectDir, "settings.yaml"))
-			target, isGlobal := projectDir, false
-			if scope == "global" {
-				target, isGlobal = globalDir, true
-			}
-			require.NoError(t, persistHubFlagEndpoint(target, isGlobal))
-			assert.Equal(t, globalBefore, readFileT(t, filepath.Join(globalDir, "settings.yaml")), "global settings unchanged")
-			assert.Equal(t, projectBefore, readFileT(t, filepath.Join(projectDir, "settings.yaml")), "project settings unchanged")
-		})
-
-		t.Run(scope+": the --hub flag is written", func(t *testing.T) {
-			setupContextTest(t)
-			writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
-			saveTestContext(t, ctxTestHub, ctxTestProjectID)
-			root := makeDirProject(t, "")
-			globalDir := filepath.Join(os.Getenv("HOME"), ".scion")
-			projectDir := filepath.Join(root, ".scion")
-			hubEndpoint = "https://flag.example.com"
-			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "link"), ModeHuman))
-			require.Equal(t, "https://flag.example.com", hubFlagEndpoint())
-
-			target, isGlobal := projectDir, false
-			if scope == "global" {
-				target, isGlobal = globalDir, true
-			}
-			require.NoError(t, persistHubFlagEndpoint(target, isGlobal))
-			assert.Equal(t, "https://flag.example.com", settingsEndpoint(t, target))
-		})
-	}
-}
-
 // healthOnlyHub is a fake hub that answers only the health check.
 func healthOnlyHub(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -104,14 +55,14 @@ func healthOnlyHub(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestHubEnable_EndpointSource: 'scion hub enable' outside any project
-// enables hub mode in the global settings (its own write) but writes the
-// endpoint only when it came from --hub, never from the current context.
+// TestHubEnable_EndpointSource: 'scion hub enable' was removed with
+// local-only mode. It fails with guidance and writes nothing, so neither the
+// hub from the current context nor a --hub endpoint is written to settings.
 func TestHubEnable_EndpointSource(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		flag bool
-	}{{name: "context hub is not written"}, {name: "--hub is written", flag: true}} {
+	}{{name: "context hub is not written"}, {name: "--hub is not written either", flag: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupContextTest(t)
 			srv := healthOnlyHub(t)
@@ -124,14 +75,12 @@ func TestHubEnable_EndpointSource(t *testing.T) {
 			enable := findCommand(t, "hub", "enable")
 			require.NoError(t, resolveInvocationTarget(enable, ModeHuman))
 			require.Equal(t, srv.URL, hubEndpoint)
-			_ = captureStdout(t, func() { require.NoError(t, runHubEnable(enable, nil)) })
+			var err error
+			_ = captureStdout(t, func() { err = runHubEnable(enable, nil) })
+			require.ErrorIs(t, err, errHubEnableRemoved)
 
-			got := settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion"))
-			if tc.flag {
-				assert.Equal(t, srv.URL, got)
-			} else {
-				assert.Empty(t, got, "the context hub must not be written to the global hub.endpoint")
-			}
+			assert.Empty(t, settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion")),
+				"the removed hub enable writes no hub.endpoint")
 		})
 	}
 }
@@ -177,12 +126,12 @@ func TestHubLink_EndpointSource(t *testing.T) {
 	}
 }
 
-// TestCheckHubAvailability_ContextHubDoesNotRelink: in a directory project
+// TestRequireHub_ContextHubDoesNotRelink: in a directory project
 // already linked to a hub (hub.projectId) and without an endpoint of its
 // own, the hub selected with 'scion use' does not link or register the
 // project: the command gets the existing not-linked error, the hub gets no
 // write request, and the project's settings are unchanged.
-func TestCheckHubAvailability_ContextHubDoesNotRelink(t *testing.T) {
+func TestRequireHub_ContextHubDoesNotRelink(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	var writes atomic.Int32
@@ -214,11 +163,48 @@ func TestCheckHubAvailability_ContextHubDoesNotRelink(t *testing.T) {
 	require.Equal(t, targetSourceContext, hubSource)
 	require.Empty(t, projectPath, "a directory project is not replaced by the context project")
 
-	_, err := CheckHubAvailability(projectPath)
+	_, err := requireHub(projectPath)
 	require.Error(t, err)
 	assert.Equal(t, "project must be linked to Hub to perform this operation\n\n"+
 		"Link this project: scion hub link\n"+
-		"Or use local-only mode: scion --no-hub <command>", err.Error())
+		"If it is linked to another hub, pass --hub <name>, or run 'scion hub link --hub <name>' once so this directory stays on that hub.", err.Error())
 	assert.Zero(t, writes.Load(), "no register or create request")
 	assert.Equal(t, before, readFileT(t, settingsFile), "project settings unchanged")
+}
+
+// TestRequireHub_ContextHubAutoLinksNeverLinkedProject pins phase 3's
+// auto-link through the hub selected with 'scion use' (the hub 'scion server
+// start' registers): a directory project that was never linked, with the v1
+// settings 'scion init' writes (its own local ID as hub.project_id), is
+// linked to the local workstation hub without a prompt by any requireHub
+// command, here 'scion list'.
+func TestRequireHub_ContextHubAutoLinksNeverLinkedProject(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	srv, registers := unregisteredLinkHub(t)
+	saveTestContext(t, srv.URL, "")
+	root := t.TempDir()
+	settingsFile := filepath.Join(root, ".scion", "settings.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(settingsFile), 0o755))
+	require.NoError(t, os.WriteFile(settingsFile,
+		[]byte("schema_version: \"1\"\nhub:\n  project_id: dir-project-id\n"), 0o644))
+	t.Chdir(root)
+	origYes, origNI := autoConfirm, nonInteractive
+	t.Cleanup(func() { autoConfirm, nonInteractive = origYes, origNI })
+	autoConfirm, nonInteractive = false, false
+
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+	require.Equal(t, targetSourceContext, hubSource)
+	require.Empty(t, projectPath, "the directory project is used")
+
+	// No terminal and no --yes: a link prompt would decline, so one
+	// register call shows the project was linked without one. (The
+	// "Linking project" line goes to hubsync's prompt writer, which is
+	// pinned in hubsync's TestEnsureHubReady_HubFromContextV1Settings.)
+	var ctx *HubContext
+	var err error
+	captureStdIO(t, func() { ctx, err = requireHub(projectPath) })
+	require.NoError(t, err)
+	require.NotNil(t, ctx)
+	assert.EqualValues(t, 1, registers.Load(), "linked without a prompt (no terminal, no --yes)")
 }

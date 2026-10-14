@@ -316,9 +316,13 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 }
 
 // isLocalWaitAgentSet reports whether the local agent-info.json holds a
-// waiting_for_input that the agent set itself (no notification marker).
+// waiting_for_input that the agent set itself: with no notification marker,
+// or recorded as the parent's own question inside a wait that sub-agents
+// hold (parentWaitAgent). Either way the Hub already shows the agent's own
+// message, which a later waiting_for_input must not replace.
 func (h *HubHandler) isLocalWaitAgentSet() bool {
-	return isAgentSetWaiting(readLocalAgentInfo())
+	info := readLocalAgentInfo()
+	return isAgentSetWaiting(info) || (isNotificationWaiting(info) && parentWaitOf(info) == parentWaitAgent)
 }
 
 // isLocalSubagentEndRelease reports whether the local agent-info.json holds
