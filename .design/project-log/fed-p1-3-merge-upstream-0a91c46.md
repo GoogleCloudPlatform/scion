@@ -30,3 +30,7 @@ Date: 2026-10-13. Branch: scion/mmr-fed-p1-3.
 - Upstream did not change `seed.go`; the hub-admin revision 8 from this branch stands.
 - New hubclient and store interface methods have no new implementers upstream that lack this
   branch's methods.
+- 2026-10-14: merged upstream main again at 5d15cbd8fadd. Only the operation catalog report
+  (count 223: upstream 219 plus the four `project.visitors.*` operations) and the shared
+  experiment loop in `authzop_sqlite_helpers_test.go` (upstream's text, which already enables
+  `federation.project_visitors`) needed a hand resolution.
