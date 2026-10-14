@@ -62,8 +62,8 @@ project, or you do not have access to it, the command fails with an error that n
 
 **Commands that need no project.** Commands that act on the Hub connection, a login, this machine's
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
-`scion use`, `scion hub status`, `scion hub enable`, `scion hub disable`, `scion hub add`,
-`scion hub list`, `scion hub rename`, `scion hub remove`, the `scion hub auth` commands,
+`scion use`, `scion hub status`, `scion hub add`, `scion hub list`, `scion hub rename`,
+`scion hub remove`, the `scion hub auth` commands,
 `scion runtime-broker register`, `deregister`, `start`, `stop`, `restart`, `status`, `hubs` and
 `join`, and the `server`, `admin` and `project` commands. Outside a project, the `scion hub`
 connection commands read and write the global settings, as with `--global`. The hub list
