@@ -111,20 +111,6 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			resources[i] = brokerResource(&result.Items[i])
 		}
 		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
-		// The dispatch capability follows the dispatch rule: for a
-		// project-filtered listing, the project-aware rule agent creation
-		// uses; otherwise the project-independent one.
-		var project *store.Project
-		if projectID != "" {
-			if p, err := s.store.GetProject(ctx, projectID); err == nil {
-				project = p
-			}
-		}
-		for i := range result.Items {
-			if i < len(caps) {
-				s.reportBrokerDispatchCapability(ctx, caps[i], &result.Items[i], project)
-			}
-		}
 	}
 
 	// If filtering by projectId, include project-specific provider data (like localPath)
@@ -142,6 +128,13 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			brokerLocalPaths[p.BrokerID] = p.LocalPath
 		}
 
+		// The dispatch capability of a project-filtered listing follows the
+		// project-aware rule agent creation uses.
+		var project *store.Project
+		if p, err := s.store.GetProject(ctx, projectID); err == nil {
+			project = p
+		}
+
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
 		for i, broker := range result.Items {
@@ -154,6 +147,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			}
 			if caps != nil && i < len(caps) {
 				eb.Cap = caps[i]
+				s.reportBrokerDispatchCapability(ctx, eb.Cap, &result.Items[i], project)
 			}
 			extendedBrokers = append(extendedBrokers, eb)
 		}
@@ -185,6 +179,8 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: broker}
 		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
+			// Without a project, the project-independent dispatch rule.
+			s.reportBrokerDispatchCapability(ctx, resp.Cap, &result.Items[i], nil)
 		}
 		// Capacity fields carry no visibility check beyond the ActionRead
 		// filter above: whoever can already see this broker row sees its
@@ -1004,7 +1000,7 @@ func (s *Server) authorizeBrokerHeartbeatUser(w http.ResponseWriter, r *http.Req
 	resource := Resource{Type: permissions.ResourceBroker, ID: id}
 	user, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonHostOperations)
 	if !ok {
-		logAuthzDenial(r, GetIdentityFromContext(ctx), resource, ActionUpdate, "heartbeat user path requires a session credential")
+		logAuthzDenial(r, GetIdentityFromContext(ctx), resource, ActionUpdate, "heartbeat user path refused")
 		return false
 	}
 	decision := s.authzService.CheckAccess(ctx, user, resource, ActionUpdate)

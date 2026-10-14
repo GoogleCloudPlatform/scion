@@ -153,7 +153,7 @@ var brokerOperations = []OperationSpec{
 	{
 		ID:          "broker.heartbeat",
 		Domain:      "broker",
-		Description: "Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker",
+		Description: "Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/heartbeat", Method: "POST"},
 		},

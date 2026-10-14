@@ -2240,10 +2240,13 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 // writes no HTTP response.
 //
 // Dispatch authority is checked first: a user or dev caller holding
-// broker.dispatch on the broker passes. For a user access token that denial
-// is final, so the broker's auto-provide setting never admits a token. Every
-// other caller is then decided by canDispatchToBroker, the shared-broker
-// rule agent creation uses. Agent creation itself keeps canUseBrokerForProject.
+// broker.dispatch on the broker passes. A user or dev caller whose
+// credential is not an interactive session or dev credential
+// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
+// setting never admits a user access token or any other non-session
+// credential. Every other caller is decided by canDispatchToBroker, the
+// shared-broker rule agent creation uses. Agent creation itself keeps
+// canUseBrokerForProject.
 func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) || broker == nil {
@@ -2253,7 +2256,7 @@ func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.Runtime
 		if s.userHoldsBrokerDispatch(ctx, user, broker) {
 			return true
 		}
-		if IsScopedUserIdentity(user) || GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT {
+		if !sessionCredentialAllowed(ctx) {
 			return false
 		}
 	}
