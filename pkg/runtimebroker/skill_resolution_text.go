@@ -61,10 +61,6 @@ func skillResolutionPhrase(code string) string {
 	return skillResolutionDefaultPhrase
 }
 
-// unparseableSkillRef stands in for an http(s) skill reference that does
-// not parse as a URL.
-const unparseableSkillRef = "(unparseable skill URL)"
-
 // maxPublicSkillRefLen bounds the skill reference shown to the user, as
 // quoted in the text (without the quotes) and as the skill detail, so the
 // correlation id at the end of the text survives the hub's cut of a stored
@@ -72,24 +68,17 @@ const unparseableSkillRef = "(unparseable skill URL)"
 const maxPublicSkillRefLen = 200
 
 // redactSkillRef returns the declared skill reference uri for user-visible
-// text. An http(s) reference loses its userinfo, query and fragment, and
-// its path is redacted by logging.RedactURL where that applies; any other
+// text and the server-side log. An http(s) reference (see urlStartPattern)
+// gets the same decision as a URL in free text (see redactURLRun), applied
+// to the whole reference: one holding an "@", "?", "#", whitespace or a
+// second scheme becomes "(redacted URL)" after its scheme. Any other
 // reference (gh://, a registry name) is kept.
 func redactSkillRef(uri string) string {
-	lower := strings.ToLower(uri)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+	loc := urlStartPattern.FindStringIndex(uri)
+	if loc == nil || loc[0] != 0 {
 		return uri
 	}
-	u, err := url.Parse(uri)
-	if err != nil {
-		return unparseableSkillRef
-	}
-	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	u.RawFragment = ""
-	return logging.RedactURL(u)
+	return redactURLRun(normalisedScheme(uri[:loc[1]]), uri[loc[1]:])
 }
 
 // publicSkillRef returns redactSkillRef(uri) cut to maxPublicSkillRefLen
@@ -174,110 +163,106 @@ func skillResolutionCorrelationID(runID string) string {
 	return hex.EncodeToString(b[:])
 }
 
-// urlStartPattern matches the start of an http(s) URL inside free text.
-var urlStartPattern = regexp.MustCompile(`(?i)https?://`)
+// urlStartPattern matches the start of an http(s) URL: the scheme, its
+// colon and any run of "/" or "\" after it, in any case, so "https:h",
+// "https:/h" and "https:\\h" count as URLs too.
+var urlStartPattern = regexp.MustCompile(`(?i)https?:[/\\]*`)
 
-// urlTrailingPunct is punctuation that, at the end of a URL with no query
-// or fragment, is taken to belong to the surrounding text, not to the URL.
+// normalisedScheme returns "https://" or "http://" for a urlStartPattern
+// match.
+func normalisedScheme(match string) string {
+	if len(match) >= len("https") && strings.EqualFold(match[:len("https")], "https") {
+		return "https://"
+	}
+	return "http://"
+}
+
+// urlTrailingPunct is punctuation that, at the end of a URL that is kept,
+// is taken to belong to the surrounding text, not to the URL.
 const urlTrailingPunct = `.,;:!)]}"'<>`
 
-// redactedLogValue replaces a query or fragment in a logged URL.
-const redactedLogValue = "REDACTED"
+// redactedURL replaces a URL, after its scheme, that may carry a
+// credential.
+const redactedURL = "(redacted URL)"
+
+// unparseableURL replaces a URL, after its scheme, that does not parse.
+const unparseableURL = "(unparseable URL)"
 
 // redactURLsInText returns s with every http(s) URL in it redacted for the
-// server-side log. Each URL runs from its "http://" or "https://" to the
-// next whitespace or the next "http://" or "https://", so two URLs joined
-// with no separator are redacted one by one, and a URL holding a raw quote
-// or angle bracket is redacted whole. In each URL:
-//   - A URL holding an "@" anywhere (userinfo, or an "@" in its path, query
-//     or fragment) becomes "(redacted URL)" after its scheme, and nothing
-//     else of it is kept. This loses the host from the log line, which is
-//     accepted: it is the one rule that never keeps userinfo.
-//   - Otherwise, everything after the first "?" up to the next whitespace
-//     (the query, any fragment and any closing punctuation) becomes
-//     "?REDACTED", and a fragment with no query becomes "#REDACTED". For
-//     example, Get "https://h/x?q=v": EOF  becomes
-//     Get "https://h/x?REDACTED EOF
-//   - An artifact path becomes logging.RedactedArtifactPath.
-//   - A URL that does not parse after this becomes "(unparseable URL)"
-//     after its scheme.
+// server-side log. A URL starts at a urlStartPattern match and runs to the
+// next whitespace only; a later scheme inside the run does not start a new
+// URL. Each run is decided by redactURLRun, with its scheme written as
+// "http://" or "https://" in lower case. For example,
+// Get "https://h/x?q=v": EOF  becomes  Get "https://(redacted URL) EOF
+// and two URLs joined with no whitespace become one "(redacted URL)".
+// A scheme with nothing after it (as in "net/http: ...") is kept as it is.
+// The rest of s is unchanged.
 //
-// Punctuation ending a URL with no query or fragment (see
-// urlTrailingPunct; "]" only when the URL has no "[", as in an IPv6 host)
-// is kept as text. The rest of s is unchanged.
+// Whitespace is the only boundary in free text: a URL holding a raw space
+// ends at the space, and the text after it is kept as plain text. For
+// example, "https://u:p w@h/x" becomes "https://(unparseable URL) w@h/x".
+// The skill reference itself is decided as a whole (see redactSkillRef).
 //
 // Only http and https are handled. URLs with other schemes (gs://, s3://,
 // ftp://, ssh://, or scp-style git@host:path) are out of scope and logged
 // as they are.
 func redactURLsInText(s string) string {
-	starts := urlStartPattern.FindAllStringIndex(s, -1)
-	if len(starts) == 0 {
+	matches := urlStartPattern.FindAllStringIndex(s, -1)
+	if len(matches) == 0 {
 		return s
 	}
 	var b strings.Builder
 	prev := 0
-	for i, loc := range starts {
-		b.WriteString(s[prev:loc[0]])
-		end := len(s)
-		if i+1 < len(starts) {
-			end = starts[i+1][0]
+	for _, loc := range matches {
+		if loc[0] < prev {
+			// Inside the previous run, which redactURLRun has decided.
+			continue
 		}
-		if ws := strings.IndexFunc(s[loc[0]:end], unicode.IsSpace); ws >= 0 {
+		end := len(s)
+		if ws := strings.IndexFunc(s[loc[0]:], unicode.IsSpace); ws >= 0 {
 			end = loc[0] + ws
 		}
-		b.WriteString(redactURLToken(s[loc[0]:end], loc[1]-loc[0]))
+		b.WriteString(s[prev:loc[0]])
+		if rest := s[loc[1]:end]; rest == "" {
+			b.WriteString(s[loc[0]:end])
+		} else {
+			b.WriteString(redactURLRun(normalisedScheme(s[loc[0]:loc[1]]), rest))
+		}
 		prev = end
 	}
 	b.WriteString(s[prev:])
 	return b.String()
 }
 
-// redactURLToken redacts one URL found by redactURLsInText. schemeLen is
-// the length of its "http://" or "https://".
-func redactURLToken(token string, schemeLen int) string {
-	scheme := strings.ToLower(token[:schemeLen])
-	rest := token[schemeLen:]
-	q := strings.IndexAny(rest, "?#")
-	if strings.Contains(rest, "@") {
-		trailing := ""
-		if q < 0 {
-			_, trailing = trimURLTrailing(rest)
-		}
-		return scheme + redactedURL + trailing
+// redactURLRun decides one URL: scheme is its normalised scheme and rest
+// the text after the urlStartPattern match. When rest holds an "@", "?" or
+// "#" anywhere, whitespace, or a second scheme, the URL may carry userinfo,
+// a query or a fragment, and the result is scheme + "(redacted URL)" with
+// nothing else of it kept. Otherwise the URL is kept, with the punctuation
+// that ends it (see urlTrailingPunct; "]" only when the URL has no "[", as
+// in an IPv6 host) kept as text, an artifact path replaced by
+// logging.RedactedArtifactPath, and scheme + "(unparseable URL)" for a URL
+// that does not parse.
+func redactURLRun(scheme, rest string) string {
+	if strings.ContainsAny(rest, "@?#") || strings.IndexFunc(rest, unicode.IsSpace) >= 0 || urlStartPattern.MatchString(rest) {
+		return scheme + redactedURL
 	}
-	var suffix, trailing string
-	if q >= 0 {
-		if rest[q] == '?' {
-			suffix = "?" + redactedLogValue
-		} else {
-			suffix = "#" + redactedLogValue
-		}
-		rest = rest[:q]
-	} else {
-		rest, trailing = trimURLTrailing(rest)
-	}
+	rest, trailing := trimURLTrailing(rest)
 	authority, path := rest, ""
 	if j := strings.IndexByte(rest, '/'); j >= 0 {
 		authority, path = rest[:j], rest[j:]
 	}
-	// A URL with an "@" was replaced above, so u.User is always nil here;
-	// the check is a defence in case that rule changes.
+	// rest holds no "@", so u.User is always nil here; the check is a
+	// defence in case that rule changes.
 	u, err := url.Parse(scheme + authority + path)
 	if err != nil || u.User != nil {
-		return scheme + unparseableURL + suffix + trailing
+		return scheme + unparseableURL + trailing
 	}
 	if logging.IsCredentialURL(u) {
 		path = logging.RedactedArtifactPath
 	}
-	return scheme + authority + path + suffix + trailing
+	return scheme + authority + path + trailing
 }
-
-// redactedURL replaces a logged URL, after its scheme, that holds an "@".
-const redactedURL = "(redacted URL)"
-
-// unparseableURL replaces a logged URL, after its scheme, that does not
-// parse once its query and fragment are removed.
-const unparseableURL = "(unparseable URL)"
 
 // trimURLTrailing splits rest, a URL after its scheme with no query or
 // fragment, into the URL and the punctuation that ends it (see
@@ -293,13 +278,14 @@ func trimURLTrailing(rest string) (head, trailing string) {
 	return rest[:end], rest[end:]
 }
 
-// skillResolutionLogError returns the text of err for the server-side log,
+// skillLogText returns the full text of e for the server-side log, built
+// from its parts: the reference as redactSkillRef gives it, and the message
 // with its URLs redacted (see redactURLsInText).
-func skillResolutionLogError(err error) string {
-	if err == nil {
-		return ""
-	}
-	return redactURLsInText(err.Error())
+func skillLogText(e *agent.SkillResolutionError) string {
+	redacted := *e
+	redacted.URI = redactSkillRef(e.URI)
+	redacted.Message = redactURLsInText(e.Message)
+	return redacted.Error()
 }
 
 // skillFailure is a skill resolution failure in a create or start error,
@@ -351,13 +337,13 @@ func runtimeCauseLogAttrs(err error, f *skillFailure) []any {
 	return runtimeFailureLogAttrs(err)
 }
 
-// spanErrorText returns err's text for a trace span status: for a skill
-// resolution failure, the text with its URLs redacted (see
-// redactURLsInText); for any other error, err's text unchanged.
+// spanErrorText returns err's text for a trace span status: for an error
+// holding a skill resolution failure, the failure's redacted log text (see
+// skillLogText); for any other error, err's text unchanged.
 func spanErrorText(err error) string {
 	var skillErr *agent.SkillResolutionError
 	if errors.As(err, &skillErr) {
-		return skillResolutionLogError(err)
+		return skillLogText(skillErr)
 	}
 	return err.Error()
 }
@@ -372,8 +358,8 @@ const skillFailureLogMsg = "Required skill failed"
 func (s *Server) logSkillResolutionFailure(f *skillFailure, attrs ...any) {
 	s.agentLifecycleLog.Warn(skillFailureLogMsg, append(attrs,
 		"correlation_id", f.ref,
-		"skill_uri", redactURLsInText(f.err.URI),
+		"skill_uri", redactSkillRef(f.err.URI),
 		"code", f.err.Code,
 		"status", f.err.Status,
-		"error", skillResolutionLogError(f.err))...)
+		"error", skillLogText(f.err))...)
 }

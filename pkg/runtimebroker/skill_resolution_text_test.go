@@ -81,15 +81,40 @@ func TestSkillResolutionPublicText_InstallUnchangedFromError(t *testing.T) {
 func TestPublicSkillRef(t *testing.T) {
 	tests := map[string]string{
 		"gh://o/r/s@v": "gh://o/r/s@v",
-		"https://user:pw@skills.example.test/a/b.tar.gz?sig=1&x=2#frag": "https://skills.example.test/a/b.tar.gz",
-		"HTTP://skills.example.test/a?token=t":                          "http://skills.example.test/a",
-		"https://skills.example.test/%zz":                               unparseableSkillRef,
+		"https://user:pw@skills.example.test/a/b.tar.gz?sig=1&x=2#frag": "https://(redacted URL)",
+		"https://skills.example.test/a/b.tar.gz?v=1":                    "https://(redacted URL)",
+		"https://skills.example.test/a/b.tar.gz#frag":                   "https://(redacted URL)",
+		"https://alice:p w-1@skills.example.test/x":                     "https://(redacted URL)",
+		"https://skills.example.test/a b.tar.gz":                        "https://(redacted URL)",
+		"HTTP://skills.example.test/a?token=t":                          "http://(redacted URL)",
+		"HTTP://skills.example.test/a":                                  "http://skills.example.test/a",
+		"https:skills.example.test/a":                                   "https://skills.example.test/a",
+		"https://skills.example.test/%zz":                               "https://(unparseable URL)",
 		"my-registry-skill":                                             "my-registry-skill",
 	}
 	for in, want := range tests {
 		if got := publicSkillRef(in); got != want {
 			t.Errorf("publicSkillRef(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestSkillLogText_RefWithRawSpaceInPassword checks the skill reference is
+// decided as a whole in the log text and in the user-visible text, so a raw
+// space in its password does not leave the rest of it as plain text.
+func TestSkillLogText_RefWithRawSpaceInPassword(t *testing.T) {
+	e := &agent.SkillResolutionError{
+		URI: "https://alice:p w-1@skills.example.test/x", Code: agent.SkillErrCodeResolveFailed,
+		Message: "boom at https://h.example.test/x?k=qv-1",
+	}
+	if got, want := skillLogText(e), `required skill "https://(redacted URL)" could not be resolved: boom at https://(redacted URL)`; got != want {
+		t.Errorf("skillLogText = %q, want %q", got, want)
+	}
+	if got, want := skillResolutionPublicText(e, "r"), `required skill "https://(redacted URL)" could not be resolved: resolver error (ref r)`; got != want {
+		t.Errorf("public text = %q, want %q", got, want)
+	}
+	if got := spanErrorText(fmt.Errorf("provision: %w", e)); strings.Contains(got, "w-1") || strings.Contains(got, "qv-1") {
+		t.Errorf("span text %q carries the password or the query value", got)
 	}
 }
 
@@ -108,35 +133,47 @@ func TestRedactURLsInText_Forms(t *testing.T) {
 		name, in, want string
 	}{
 		{"query part with no =",
-			"see https://h.example.test/p?qv-1 now", "see https://h.example.test/p?REDACTED now"},
+			"see https://h.example.test/p?qv-1 now", "see https://(redacted URL) now"},
 		{"fragment only",
-			"see https://h.example.test/p#k=qv-1 now", "see https://h.example.test/p#REDACTED now"},
+			"see https://h.example.test/p#k=qv-1 now", "see https://(redacted URL) now"},
 		{"query and fragment",
-			"see https://h.example.test/p?a=qv-1#qv-2", "see https://h.example.test/p?REDACTED"},
+			"see https://h.example.test/p?a=qv-1#qv-2", "see https://(redacted URL)"},
 		{"empty query parts",
-			"see https://h.example.test/p?a=qv-1&&b", "see https://h.example.test/p?REDACTED"},
+			"see https://h.example.test/p?a=qv-1&&b", "see https://(redacted URL)"},
 		{"userinfo",
-			"see https://u:pw-1@h.example.test/p.", "see https://(redacted URL)."},
+			"see https://u:pw-1@h.example.test/p.", "see https://(redacted URL)"},
 		{"two URLs joined with a comma",
-			"https://a.example.test/p,https://u:pw-1@b.example.test/x?qv-1",
-			"https://a.example.test/p,https://(redacted URL)"},
+			"https://a.example.test/p,https://u:pw-1@b.example.test/x?qv-1", "https://(redacted URL)"},
 		{"two URLs joined with no separator",
-			"https://a.example.test/p?qv-1https://u:pw-1@b.example.test/x",
-			"https://a.example.test/p?REDACTEDhttps://(redacted URL)"},
+			"https://a.example.test/p?qv-1https://u:pw-1@b.example.test/x", "https://(redacted URL)"},
+		{"two URLs joined with no query or @",
+			"https://a.example.test/p,https://b.example.test/x", "https://(redacted URL)"},
+		{"nested URL in a query, with userinfo",
+			"see https://u:pw-1@h.example.test/x?next=https://o.example.test/y&k=qv-2 now", "see https://(redacted URL) now"},
+		{"nested URL in a query",
+			"see https://h.example.test/x?next=https://o.example.test/y&k=qv-2 now", "see https://(redacted URL) now"},
+		{"nested URL in a fragment",
+			"see https://h.example.test/x#https://o.example.test/y&k=qv-2 now", "see https://(redacted URL) now"},
+		{"nested scheme before an @",
+			"see https://u:12/x-https://@h.example.test/ now", "see https://(redacted URL) now"},
 		{"raw quote inside the query",
-			`see https://h.example.test/p?a="qv-1"&b=qv-2 now`, "see https://h.example.test/p?REDACTED now"},
+			`see https://h.example.test/p?a="qv-1"&b=qv-2 now`, "see https://(redacted URL) now"},
 		{"raw angle brackets inside the query",
-			"see https://h.example.test/p?a=<qv-1>&b=qv-2 now", "see https://h.example.test/p?REDACTED now"},
+			"see https://h.example.test/p?a=<qv-1>&b=qv-2 now", "see https://(redacted URL) now"},
 		{"raw quote inside the userinfo",
 			`see https://u:p"w-1@h.example.test/p now`, "see https://(redacted URL) now"},
 		{"space inside the query ends the URL",
-			"see https://h.example.test/p?a=qv-1 b=c", "see https://h.example.test/p?REDACTED b=c"},
+			"see https://h.example.test/p?a=qv-1 b=c", "see https://(redacted URL) b=c"},
+		{"raw space in the password ends the URL (free-text limit)",
+			"see https://alice:p w-1@h.example.test/x now", "see https://(unparseable URL) w-1@h.example.test/x now"},
 		{"trailing punctuation in a query value",
-			"see https://h.example.test/p?a=qv-1).", "see https://h.example.test/p?REDACTED"},
+			"see https://h.example.test/p?a=qv-1).", "see https://(redacted URL)"},
 		{"trailing punctuation in a fragment",
-			"see https://h.example.test/p#qv-1,", "see https://h.example.test/p#REDACTED"},
+			"see https://h.example.test/p#qv-1,", "see https://(redacted URL)"},
 		{"trailing punctuation after a path",
 			`(at "https://h.example.test/p").`, `(at "https://h.example.test/p").`},
+		{"trailing punctuation after an @",
+			"(see https://u:pw-1@h.example.test/p).", "(see https://(redacted URL)"},
 		{"IPv6 host",
 			"see https://[::1] now", "see https://[::1] now"},
 		{"IPv6 host with port in parentheses",
@@ -144,7 +181,19 @@ func TestRedactURLsInText_Forms(t *testing.T) {
 		{"bracket closing prose",
 			"[see https://h.example.test/p]", "[see https://h.example.test/p]"},
 		{"upper-case scheme",
-			"HTTPS://h.example.test/p?qv-1", "https://h.example.test/p?REDACTED"},
+			"HTTPS://h.example.test/p now", "https://h.example.test/p now"},
+		{"upper-case scheme with a query",
+			"HTTPS://h.example.test/p?qv-1", "https://(redacted URL)"},
+		{"no // after the scheme",
+			"see https:u:pw-1@h.example.test/x now", "see https://(redacted URL) now"},
+		{"one / after the scheme",
+			"see https:/u:pw-1@h.example.test/x now", "see https://(redacted URL) now"},
+		{"no // and nothing to redact",
+			"see http:h.example.test/p now", "see http://h.example.test/p now"},
+		{"backslashes after the scheme",
+			`see https:\\u:pw-1@h.example.test/x now`, "see https://(redacted URL) now"},
+		{"scheme with nothing after it",
+			"net/http: request canceled; see https:// now", "net/http: request canceled; see https:// now"},
 		{"artifact path",
 			"https://h.example.test/api/v1/artifacts/tok-1/x", "https://h.example.test" + logging.RedactedArtifactPath},
 		{"# in the userinfo",
@@ -159,12 +208,8 @@ func TestRedactURLsInText_Forms(t *testing.T) {
 			"see https://h.example.test/x?e=qv-1@b.example.test now", "see https://(redacted URL) now"},
 		{"@ in a fragment only",
 			"see https://h.example.test/x#qv-1@b now", "see https://(redacted URL) now"},
-		{"@ in the query of a single-label host",
-			"see http://hub/x?e=qv-1@b.example.test now", "see http://(redacted URL) now"},
 		{"@ in a path",
 			"see https://h.example.test/o/r/s@main now", "see https://(redacted URL) now"},
-		{"@ with trailing punctuation and no query",
-			"(see https://u:pw-1@h.example.test/p).", "(see https://(redacted URL))."},
 		{"userinfo and an @ in a query value",
 			"see https://u:pw-1@h.example.test/x?e=qv-1@b.example.test&k=qv-2 now", "see https://(redacted URL) now"},
 		{"@ in a path and in a query value",
@@ -233,14 +278,15 @@ func TestSkillResolutionPublicText_LongRefKeepsCorrelationID(t *testing.T) {
 }
 
 // TestSkillResolutionPublicText_InstallHTTPRefRedacted pins the install
-// failure text for an http(s) reference: the reference is shown without its
-// userinfo, query or fragment, and the reason is kept.
+// failure text for an http(s) reference with userinfo, a query and a
+// fragment: the reference is shown as a redacted URL, and the reason is
+// kept.
 func TestSkillResolutionPublicText_InstallHTTPRefRedacted(t *testing.T) {
 	e := &agent.SkillResolutionError{
 		URI:  "https://user:pw-1@skills.example.test/s.tar.gz?sig=qv-1#qv-2",
 		Code: agent.SkillErrCodeInstallFailed, Message: "download failed with status 404",
 	}
-	want := `required skill "https://skills.example.test/s.tar.gz" could not be installed: download failed with status 404`
+	want := `required skill "https://(redacted URL)" could not be installed: download failed with status 404`
 	if got := skillResolutionPublicText(e, "r"); got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -266,11 +312,11 @@ func TestSkillResolutionFailed_FixedReasonPhrase(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := `Failed to provision agent: required skill "https://skills.example.test/s.tar.gz" could not be resolved: skill source unavailable (status 503) (ref run-7)`
+	want := `Failed to provision agent: required skill "https://(redacted URL)" could not be resolved: skill source unavailable (status 503) (ref run-7)`
 	if resp.Error.Message != want {
 		t.Errorf("message = %q, want %q", resp.Error.Message, want)
 	}
-	if resp.Error.Details["skill"] != "https://skills.example.test/s.tar.gz" {
+	if resp.Error.Details["skill"] != "https://(redacted URL)" {
 		t.Errorf("details.skill = %v, want the redacted reference", resp.Error.Details["skill"])
 	}
 	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") || strings.Contains(w.Body.String(), "qv-1") {

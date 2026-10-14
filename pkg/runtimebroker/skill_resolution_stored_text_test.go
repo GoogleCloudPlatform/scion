@@ -187,7 +187,7 @@ func TestAsyncLaunch_SkillInstallError_TextUnchanged(t *testing.T) {
 }
 
 // TestAsyncLaunch_SkillResolverError_HTTPRefRedacted checks an http(s)
-// skill reference is stored without its userinfo or query string.
+// skill reference with userinfo and a query is stored as a redacted URL.
 func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 	skillErr := &agent.SkillResolutionError{
 		URI:     "https://user:pw-1@skills.example.test/packs/my-skill.tar.gz?sig=qv-2&token=qv-3",
@@ -195,7 +195,7 @@ func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 		Message: "not found: " + resolverTestBody,
 	}
 	report, logs := asyncCreateFailure(t, "skill-resolver-http-ref", skillErr)
-	want := `required skill "https://skills.example.test/packs/my-skill.tar.gz" could not be resolved: skill not found (ref ` + startErrTextRunID + `)`
+	want := `required skill "https://(redacted URL)" could not be resolved: skill not found (ref ` + startErrTextRunID + `)`
 	if report.Message != want {
 		t.Errorf("stored message = %q, want %q", report.Message, want)
 	}
