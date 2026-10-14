@@ -447,8 +447,8 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 // When the hub gains a configured list of test driver principals
 // (GoogleCloudPlatform/scion#3535), its emails belong in this check too,
 // passed in FederationAuthOptions like PlatformAuthSA. A peer hub's own
-// list is not known here; extractHubUserClaims refuses any Google service
-// account email on a peer hub user access credential.
+// list is not known here; extractHubUserClaims refuses any email in the
+// gserviceaccount.com domain on a peer hub user access credential.
 func federationPrincipalRefusal(identity FederatedIdentity, opts FederationAuthOptions) string {
 	var email string
 	switch id := identity.(type) {
@@ -509,11 +509,11 @@ func hasHubAgentClaims(claims *federationClaims) bool {
 // extractHubUserClaims builds the FederatedUserIdentity for a user access
 // credential (scion_token_kind "user") from a hub issuer that accepts them.
 // The credential must carry a subject, an email with email_verified true,
-// and no agent claim; the email must not be a Google service account, and
-// must pass the issuer's allowed_emails and allowed_domains (exact,
-// case-insensitive domain match). The identity gets no scopes: the issuer's
-// default_scopes are agent scopes. Its role is "viewer", as for a user
-// issuer without a default_role.
+// and no agent claim; the email must not be in the gserviceaccount.com
+// domain (isServiceAccountDomainEmail), and must pass the issuer's
+// allowed_emails and allowed_domains (exact, case-insensitive domain match).
+// The identity gets no scopes: the issuer's default_scopes are agent scopes.
+// Its role is "viewer", as for a user issuer without a default_role.
 func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssuerConfig) (FederatedIdentity, error) {
 	if hasHubAgentClaims(claims) {
 		return nil, fmt.Errorf("federation: user access credential carries agent claims")
@@ -527,9 +527,9 @@ func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssu
 	if claims.EmailVerified == nil || !*claims.EmailVerified {
 		return nil, fmt.Errorf("federation: user access credential email is not verified")
 	}
-	// A user access credential is for a person: a Google service account
-	// email (isGoogleServiceAccount) is refused, whatever hub issued it.
-	if isGoogleServiceAccount(claims.Email) {
+	// A user access credential is for a person: an email in the
+	// gserviceaccount.com domain is refused, whatever hub issued it.
+	if isServiceAccountDomainEmail(claims.Email) {
 		return nil, fmt.Errorf("federation: user access credential names a service account")
 	}
 	if len(issuerCfg.AllowedEmails) > 0 && !matchesAllowedEmails(issuerCfg.AllowedEmails, claims.Email) {
@@ -544,6 +544,25 @@ func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssu
 	return NewFederatedUserIdentity(
 		claims.Issuer, claims.Subject, claims.Email, claims.Name, "viewer", nil,
 	), nil
+}
+
+// serviceAccountEmailDomain is the domain of Google service account emails.
+const serviceAccountEmailDomain = "gserviceaccount.com"
+
+// isServiceAccountDomainEmail reports whether email is in the
+// gserviceaccount.com domain or any subdomain of it. The match is the one
+// used for the reserved test identity domains: lower-cased, trimmed, a
+// trailing dot ignored, and exact domain or subdomain suffix (not a
+// substring). It is deliberately broader than isGoogleServiceAccount, which
+// the Google credential validator uses and which lists only some subdomains.
+func isServiceAccountDomainEmail(email string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return false
+	}
+	d := strings.TrimSuffix(e[at+1:], ".")
+	return d == serviceAccountEmailDomain || strings.HasSuffix(d, "."+serviceAccountEmailDomain)
 }
 
 // extractHubClaims extracts Scion hub agent claims. This is the existing

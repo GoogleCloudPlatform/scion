@@ -131,22 +131,38 @@ func TestFederationPrincipalRefusal(t *testing.T) {
 	}
 }
 
-// A user access credential from a peer hub naming a Google service account
-// is refused, for every service account email shape; a normal domain email
-// is accepted. issuer_type user issuers are not affected.
+// A user access credential from a peer hub naming an email in the
+// gserviceaccount.com domain or any subdomain of it is refused (exact domain
+// or subdomain suffix, trailing dot ignored); a normal domain email and
+// look-alike domains are accepted. issuer_type user issuers are not
+// affected.
 func TestFederationPrincipalCheck_ServiceAccountUserTokenRefused(t *testing.T) {
 	f := newPeerTokFixture(t, nil)
 	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
 
 	for name, email := range map[string]string{
-		"iam":        "driver@proj.iam.gserviceaccount.com",
-		"appspot":    "proj@appspot.gserviceaccount.com",
-		"developer":  "123-compute@developer.gserviceaccount.com",
-		"system":     "svc@system.gserviceaccount.com",
-		"mixed case": "Driver@Proj.IAM.GServiceAccount.com",
+		"iam":           "driver@proj.iam.gserviceaccount.com",
+		"appspot":       "proj@appspot.gserviceaccount.com",
+		"developer":     "123-compute@developer.gserviceaccount.com",
+		"system":        "svc@system.gserviceaccount.com",
+		"mixed case":    "Driver@Proj.IAM.GServiceAccount.com",
+		"cloudservices": "123456789@cloudservices.gserviceaccount.com",
+		"cloudbuild":    "123456789@cloudbuild.gserviceaccount.com",
+		"other managed": "service-123@gcp-sa-example.iam.gserviceaccount.com",
+		"bare domain":   "svc@gserviceaccount.com",
+		"trailing dot":  "driver@proj.iam.gserviceaccount.com.",
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)))
+		})
+	}
+
+	for name, email := range map[string]string{
+		"look-alike prefix": "a@xgserviceaccount.com",
+		"look-alike suffix": "b@proj.iam.gserviceaccount.com.example.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)), "sub-"+name, email)
 		})
 	}
 
