@@ -101,7 +101,9 @@ func TestVerifyRenewal_Refusals(t *testing.T) {
 		{name: "other subject", claims: func(c *RenewalClaims) { c.Subject = "user:u2" }, want: ErrSubject},
 		{name: "other stream id", claims: func(c *RenewalClaims) { c.StreamID = 5 }, want: ErrStreamBinding},
 		{name: "other open jti", claims: func(c *RenewalClaims) { c.OpenJTI = "open-jti-2" }, want: ErrStreamBinding},
-		{name: "other stream kind", claims: func(c *RenewalClaims) { c.Stream = StreamHeader{Kind: StreamKindPTY} }, want: ErrStream},
+		// The tunnel origin carries pty, so the renewal differs from the
+		// expectation in its stream first (Stream is compared before Via).
+		{name: "other stream kind", claims: func(c *RenewalClaims) { c.Stream, c.Via = StreamHeader{Kind: StreamKindPTY}, ViaTunnel }, want: ErrStream},
 		{name: "other via", claims: func(c *RenewalClaims) { c.Via = ViaTunnel }, want: ErrVia},
 		{name: "other stream params", claims: func(c *RenewalClaims) {
 			c.Stream = StreamHeader{Kind: StreamKindTCP, Params: map[string]string{ParamHost: "127.0.0.1", ParamPort: "9090"}}
@@ -223,23 +225,31 @@ func TestVerifyRenewal_Keys(t *testing.T) {
 
 func TestMintRenewal_RejectsInvalidClaims(t *testing.T) {
 	f := newFixture(t)
-	tests := map[string]func(*RenewalClaims){
-		"missing stream id":      func(c *RenewalClaims) { c.StreamID = 0 },
-		"missing open jti":       func(c *RenewalClaims) { c.OpenJTI = "" },
-		"missing stream":         func(c *RenewalClaims) { c.Stream = StreamHeader{} },
-		"missing via":            func(c *RenewalClaims) { c.Via = "" },
-		"unknown via":            func(c *RenewalClaims) { c.Via = "elsewhere" },
-		"missing authz_until":    func(c *RenewalClaims) { c.AuthzUntil = time.Time{} },
-		"authz_until before nbf": func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) },
-		"validity over 60s":      func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) },
-		"incomplete target":      func(c *RenewalClaims) { c.Target.SessionID = "" },
+	// Each row names the error and the validation message it must fail
+	// with, so a row cannot pass on an earlier, unrelated check.
+	tests := map[string]struct {
+		mut  func(*RenewalClaims)
+		want error
+		msg  string
+	}{
+		"missing stream id":      {func(c *RenewalClaims) { c.StreamID = 0 }, ErrInvalidClaims, "missing stream_id"},
+		"missing open jti":       {func(c *RenewalClaims) { c.OpenJTI = "" }, ErrInvalidClaims, "missing open_jti"},
+		"missing stream":         {func(c *RenewalClaims) { c.Stream = StreamHeader{} }, ErrInvalidClaims, "missing or unknown stream kind"},
+		"missing via":            {func(c *RenewalClaims) { c.Via = "" }, ErrInvalidClaims, "missing or unknown via"},
+		"unknown via":            {func(c *RenewalClaims) { c.Via = "elsewhere" }, ErrInvalidClaims, "missing or unknown via"},
+		"proxy via, pty stream":  {func(c *RenewalClaims) { c.Stream = StreamHeader{Kind: StreamKindPTY} }, ErrVia, "does not carry stream kind"},
+		"missing authz_until":    {func(c *RenewalClaims) { c.AuthzUntil = time.Time{} }, ErrInvalidClaims, "missing nbf, exp or authz_until"},
+		"authz_until before nbf": {func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) }, ErrInvalidClaims, "authz_until must be after nbf"},
+		"validity over 60s":      {func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) }, ErrValidityWindow, "exp-nbf"},
+		"incomplete target":      {func(c *RenewalClaims) { c.Target.SessionID = "" }, ErrInvalidClaims, "incomplete target"},
 	}
-	for name, mut := range tests {
+	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			c := baseRenewal()
-			mut(&c)
-			if _, err := MintRenewal(f.signer, c); err == nil {
-				t.Fatal("MintRenewal accepted invalid claims")
+			tt.mut(&c)
+			_, err := MintRenewal(f.signer, c)
+			if !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.msg) {
+				t.Fatalf("MintRenewal: %v, want %v (%q)", err, tt.want, tt.msg)
 			}
 		})
 	}
