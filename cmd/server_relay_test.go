@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/spf13/pflag"
@@ -77,6 +78,42 @@ func TestValidateRelayRoleConfig(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
 			assert.NotContains(t, err.Error(), relayRoleTestPeerSecret)
+		})
+	}
+
+	// A peer_secret that is only a newline, loaded from settings.yaml or
+	// from either env spelling, is unset: --role relay and external relay
+	// mode both refuse to start, naming the key.
+	for _, source := range []string{"file", "SCION_SERVER_HUB_CONDUIT_PEERSECRET", "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"} {
+		t.Run("newline-only peer secret from "+source, func(t *testing.T) {
+			// No inherited server setting may reach the load.
+			for _, kv := range os.Environ() {
+				if k, v, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "SCION_SERVER_") {
+					t.Setenv(k, v) // registers the restore
+					require.NoError(t, os.Unsetenv(k))
+				}
+			}
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, ".scion", "settings.yaml")
+			require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+			settings := "schema_version: \"1\"\n"
+			if source == "file" {
+				settings += "server:\n  hub:\n    conduit:\n      peer_secret: \"\\n\"\n"
+			} else {
+				t.Setenv(source, "\n")
+			}
+			require.NoError(t, os.WriteFile(path, []byte(settings), 0o600))
+			loaded, err := config.LoadGlobalConfig(path)
+			require.NoError(t, err)
+
+			cfg := relayRoleTestConfig()
+			cfg.Hub.Conduit.PeerSecret = loaded.Hub.Conduit.PeerSecret
+			assert.ErrorContains(t, validateRelayRoleConfig(cfg), "server.hub.conduit.peer_secret is required on --role relay")
+
+			external := loaded.Hub.Conduit
+			external.RelayMode = config.ConduitRelayModeExternal
+			assert.ErrorContains(t, validateConduitPeerSecret(external, false, ""), "server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 		})
 	}
 }

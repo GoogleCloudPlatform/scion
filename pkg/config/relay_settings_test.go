@@ -80,6 +80,13 @@ func TestRelaySettingCasesCoverAliases(t *testing.T) {
 	assert.ElementsMatch(t, aliases, cases)
 }
 
+// envRestOf returns a settings path's env name after SCION_SERVER_, in the
+// underscored spelling lookupServerEnvPathAlias accepts (the path without
+// "server.", dots as underscores).
+func envRestOf(path string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(path, "server."), ".", "_")
+}
+
 // TestServerEnvPathAliasesBindBothSpellings: the canonical and the
 // underscored env spelling of each aliased key reach the same field in the
 // opsettings env layer, GlobalConfig and VersionedSettings. The seed
@@ -87,7 +94,7 @@ func TestRelaySettingCasesCoverAliases(t *testing.T) {
 // Layer 0.
 func TestServerEnvPathAliasesBindBothSpellings(t *testing.T) {
 	for _, c := range relaySettingCases {
-		a, ok := lookupServerEnvPathAlias(strings.TrimPrefix(c.path, "server."))
+		a, ok := lookupServerEnvPathAlias(envRestOf(c.path))
 		require.True(t, ok, c.path)
 		canonical, underscored := a.envSpellings()
 		for _, spelling := range []string{canonical, underscored} {
@@ -121,7 +128,8 @@ func TestServerEnvPathAliasesBindBothSpellings(t *testing.T) {
 // that require it).
 func TestServerEnvPathAliasesEmptyIsUnset(t *testing.T) {
 	for _, c := range relaySettingCases {
-		a, _ := lookupServerEnvPathAlias(strings.TrimPrefix(c.path, "server."))
+		a, ok := lookupServerEnvPathAlias(envRestOf(c.path))
+		require.True(t, ok, c.path)
 		canonical, underscored := a.envSpellings()
 		for _, spelling := range []string{canonical, underscored} {
 			env := "SCION_SERVER_" + strings.ToUpper(spelling)
@@ -341,33 +349,37 @@ func TestPeerSecretFileValueSurvivesEmptyEnv(t *testing.T) {
 }
 
 // TestPeerSecretOnlyNewlineIsUnset: a peer_secret that is only a newline,
-// from the file or the environment, normalizes to empty and counts as
-// unset.
+// from the file or the environment, counts as unset: one trailing newline
+// is trimmed from the raw value (design §3.9), which leaves it empty. The
+// test checks that outcome, the same for every source, and not the form
+// the loader keeps internally (the settings.yaml path re-encodes the
+// server section, so the raw newline need not survive there).
 func TestPeerSecretOnlyNewlineIsUnset(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, ".scion", "settings.yaml")
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 
-	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      peer_secret: \"\\n\"\n"), 0o600))
-	gc, err := LoadGlobalConfig(path)
-	require.NoError(t, err)
-	assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret, "file")
-	assert.Empty(t, gc.Hub.Conduit.PeerSecretValue(), "file")
-	assert.NoError(t, gc.Hub.Conduit.Validate())
+	assertUnset := func(t *testing.T) {
+		t.Helper()
+		gc, err := LoadGlobalConfig(path)
+		require.NoError(t, err)
+		assert.Empty(t, gc.Hub.Conduit.PeerSecretValue(), "GlobalConfig")
+		assert.NoError(t, gc.Hub.Conduit.Validate(), "an unset secret is not a weak one")
+		vs, err := LoadVersionedSettings("")
+		require.NoError(t, err)
+		assert.Empty(t, NormalizePeerSecret(vsConduit(vs).PeerSecret), "VersionedSettings")
+	}
 
-	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\n"), 0o600))
+	t.Run("file", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      peer_secret: \"\\n\"\n"), 0o600))
+		assertUnset(t)
+	})
 	for _, env := range []string{"SCION_SERVER_HUB_CONDUIT_PEERSECRET", "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"} {
 		t.Run(env, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\n"), 0o600))
 			t.Setenv(env, "\n")
-			gc, err := LoadGlobalConfig(path)
-			require.NoError(t, err)
-			assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret)
-			assert.Empty(t, gc.Hub.Conduit.PeerSecretValue())
-			assert.NoError(t, gc.Hub.Conduit.Validate())
-			vs, err := LoadVersionedSettings("")
-			require.NoError(t, err)
-			assert.Empty(t, NormalizePeerSecret(vsConduit(vs).PeerSecret), "VersionedSettings")
+			assertUnset(t)
 		})
 	}
 }
