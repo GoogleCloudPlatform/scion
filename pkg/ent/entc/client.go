@@ -330,7 +330,10 @@ func applyKeepalives(params map[string]string) {
 // rows are removed explicitly after schema migration succeeds. Other data is
 // preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
 // ("relation already exists") is silently skipped so that new tables are
-// created alongside pre-existing ones.
+// created alongside pre-existing ones. On SQLite, rows orphaned while foreign
+// keys were not enforced first get their key's declared ON DELETE action
+// (see reconcileSQLiteForeignKeys); orphans that cannot be repaired that way
+// are reported, and attached to the error if the migration fails.
 //
 // AutoMigrate is safe for concurrent use within one process: calls are
 // serialized by autoMigrateSem, because ent's schema migration mutates the
@@ -361,7 +364,21 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 			entschema.WithApplyHook(skipExistingRelations),
 		)
 	}
+	// On SQLite, apply the declared ON DELETE action to rows orphaned while
+	// foreign keys were not enforced; see reconcileSQLiteForeignKeys.
+	var fkResult fkReconcileResult
+	if client.Driver().Dialect() == dialect.SQLite {
+		if drv, ok := client.Driver().(*entsql.Driver); ok {
+			var err error
+			if fkResult, err = reconcileSQLiteForeignKeys(ctx, drv.DB()); err != nil {
+				return err
+			}
+		}
+	}
 	if err := client.Schema.Create(ctx, migrateOpts...); err != nil {
+		if d := fkResult.diagnostic(); d != "" {
+			return fmt.Errorf("%w\nthe migration may have failed because of %s", err, d)
+		}
 		return err
 	}
 	return dropDecisionAuditTable(ctx, client)

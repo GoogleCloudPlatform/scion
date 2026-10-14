@@ -1343,16 +1343,6 @@ func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
 
-// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run
-// calls neither RunConfig.Checkpoint nor RunConfig.OnResourceCreated, so an
-// async launch could not be stopped before the sandbox is started, and an
-// aborted launch would leave the sandbox running. The broker therefore
-// creates agents on this runtime synchronously. Remove this opt-out once
-// Run calls both hooks.
-func (r *CloudRunSandboxRuntime) AsyncLaunchUnsupported() bool { return true }
-
-var _ AsyncLaunchUnsupportedRuntime = (*CloudRunSandboxRuntime)(nil)
-
 // Run launches an agent inside a sandbox. See brief §Deliverable 2.
 // waitForSandboxLiveness polls with backoff until probe returns nil or ctx is
 // cancelled. Returns nil on success, ctx.Err() on cancellation, or the last

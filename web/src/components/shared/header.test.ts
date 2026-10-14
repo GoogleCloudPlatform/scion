@@ -1092,7 +1092,7 @@ describe('view mode shortcuts', () => {
   });
 
   it('passes the key through when its mode is not offered', async () => {
-    window.__SCION_FEATURES__ = { 'web.native_chat': false, 'web.terminal_workspace': true };
+    window.__SCION_FEATURES__ = { 'web.native_chat': false };
     await mountHeader({ currentPath: '/projects/p1' });
     const { input, seen } = focusedInput();
 

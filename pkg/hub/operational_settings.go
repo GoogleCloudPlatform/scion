@@ -255,6 +255,12 @@ type OperationalSettings struct {
 	// to tell whether the seed layer gave a key its bootstrap value.
 	// Guarded by mu.
 	unseededKoanf *koanf.Koanf
+	// aboveSeedKoanf is the bootstrap merge with only the layers above
+	// SCION_SEED_* (settings files and SCION_SERVER_*), without the coded
+	// defaults (SetAboveSeedBootstrap), nil when unset. computeSupersededKeys
+	// uses it to tell a coded default from a value set in those layers.
+	// Guarded by mu.
+	aboveSeedKoanf *koanf.Koanf
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -318,6 +324,22 @@ func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	o.unseededKoanf = k
 	o.unseededPublicURL = k.String(config.PublicURLKey)
 	o.hasUnseededPublicURL = true
+}
+
+// SetAboveSeedBootstrap records the bootstrap merge with only the layers
+// above SCION_SEED_*, without the coded defaults
+// (config.LoadAboveSeedBootstrapKoanfWithConfigPath). With it and the
+// unseeded bootstrap set, the admin view attributes a superseded key that
+// none of those layers sets to the seed layer when a seed value exists,
+// else to the coded defaults (ptone/scion#4983). Without it (tests,
+// embedded servers) such a key is attributed to settings.yaml.
+func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.aboveSeedKoanf = k
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions

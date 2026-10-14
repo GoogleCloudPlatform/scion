@@ -9,7 +9,7 @@ root [`GLOSSARY.md`](../GLOSSARY.md) — the single source of truth for terminol
 The site is **not** organized by persona. Instead, readers self-select by the
 deployment target they are running:
 
-> **Local → Workstation → Single-node hosted → HA hosted**
+> **Workstation → Single-node hosted → HA hosted**
 
 This spine is a ladder of increasing infrastructure, separated by two orthogonal
 dimensions:
@@ -21,7 +21,6 @@ dimensions:
 
 | Mode | Control plane | State & durability | Tenancy |
 | :--- | :--- | :--- | :--- |
-| **Local** | None (CLI only) | Local machine; git-worktree isolation | Single-user |
 | **Workstation** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite | Single-user |
 | **Single-node hosted** | One networked Hub on a single node | Embedded SQLite; non-HA | Single- or multi-user |
 | **HA hosted** | Hub replicated behind a load balancer | External Postgres + object storage; HA | Single- or multi-user |
@@ -31,7 +30,6 @@ dimensions:
 Inside each mode, content forks into a **user** and an **admin** track. The depth of
 the fork scales with the mode's complexity:
 
-- **Local** — single audience, no admin.
 - **Workstation** — single audience; "admin" tasks (start the combo server, pick a
   runtime, network bridge) are light and self-served.
 - **Single-node hosted** — moderate user/admin split.
@@ -50,9 +48,10 @@ The sidebar (`astro.config.mjs`) reflects the mode axis directly:
    Mode, Core Concepts, Philosophy, Supported Harnesses, Glossary, Release Notes.
 2. **Getting Started (Workstation)** — Install, the Onboarding Wizard, first-agent
    Tutorial.
-3. **Local Mode** — *Single audience.* CLI-only usage: agent lifecycle, workspaces &
-   sharing modes, templates, credentials, custom images, tmux, completions, local
-   configuration.
+3. **Agents on Your Machine** — *Single audience.* Day-to-day agent work from the CLI
+   against the workstation hub: agent lifecycle, workspaces & sharing modes, templates,
+   credentials, custom images, tmux, completions, local configuration. (Directory
+   `local/`, kept for stable URLs.)
 4. **Workstation Mode** — *Single audience; the hosted experience locally.* The combo
    server, the Web Dashboard, Hub-managed vs Linked projects.
 5. **Hosted — Single-node** — *Cheap networked Hub.* User Guide + Admin Guide (one
@@ -74,7 +73,7 @@ Content directories mirror the mode axis:
 src/content/docs/
 ├── (foundations pages at root: overview, choosing-a-mode, concepts, …)
 ├── getting-started/     (install, onboarding, tutorial)
-├── local/               (Local Mode)
+├── local/               (Agents on Your Machine)
 ├── workstation/         (Workstation Mode)
 ├── hosted/
 │   ├── user/            (shared hosted user journey)
@@ -91,7 +90,7 @@ Use current terminology from the root `GLOSSARY.md`. **Do not** use deprecated t
 | Deprecated | Use instead |
 | :--- | :--- |
 | Grove | Project |
-| Solo mode | Local mode |
+| Solo mode, Local mode | Workstation mode (the local-only CLI mode was removed; mention it only as history) |
 | "Mode 3" (numeric) | HA hosted |
 | bare "Broker" | Runtime Broker (a *service*), or a specific broker type (Node-Bound / Proxy / Embedded / Hosted) |
 | "two workspace strategies" | the three sharing modes: Shared-plain, Worktree-per-agent, Clone-per-agent |

@@ -565,6 +565,22 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 	}
 
+	// Limits (ptone/scion#623): the agent's own max_turns, max_model_calls
+	// and max_duration (template or requester values) are read from
+	// scion-agent.json on disk, for the same reason as ownEnv above, with
+	// any set by this start's inline config on top. The hub agent_defaults
+	// on ctx and the current settings defaults then fill what the agent
+	// leaves unset, so a changed default reaches the agent on this start.
+	// ownLimits is what the scion-agent.json rewrites below persist.
+	ownLimits := limitsOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentLimits(agentDir); ok {
+		ownLimits = persisted.overlay(limitsOf(startInlineConfig))
+	}
+	if finalScionCfg != nil {
+		finalScionCfg = withLimits(finalScionCfg, ownLimits)
+		applyDefaultLimits(ctx, finalScionCfg, settings)
+	}
+
 	// Telemetry tiers applied per start: broker settings telemetry < hub
 	// default (ptone/scion#4218) < the agent's own config telemetry
 	// (requester inline telemetry from older hubs, and the stored config).
@@ -1512,7 +1528,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1523,7 +1539,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -1955,7 +1971,7 @@ authDone:
 			if startGlobalSettings != nil {
 				return checkHomeStorageLoaded(startGlobalSettings)
 			}
-			return loadHomeStorageSettings()
+			return loadHomeStorageSettings(ctx)
 		},
 	})
 	if err != nil {

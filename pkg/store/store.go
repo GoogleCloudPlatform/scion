@@ -34,6 +34,14 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrActiveReservationExists is returned by CreateUsageReservation when
+	// the resource already holds an active (released_at IS NULL)
+	// reservation for the same limit definition: the unique active
+	// (limit_definition_id, resource_id) index refused the insert. It wraps
+	// ErrAlreadyExists. A caller that loses this race reads the winner with
+	// GetActiveReservation to tell a retry from a conflict.
+	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -185,6 +193,17 @@ type Store interface {
 	// purged. It is a Store method rather than an AgentStore one because the
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
+
+	// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents
+	// in ids: only those still soft-deleted before cutoff when the purge
+	// runs are removed (a restore in between wins), with the same cascade.
+	// Unknown or malformed IDs are skipped. Returns the number purged.
+	PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error)
+
+	// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents
+	// with deleted_at before cutoff and an ID after afterID ("" for the
+	// first page), in ascending ID order.
+	ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*Agent, error)
 
 	// CreateTestAdminUser creates an admin-kind test identity and its one
 	// system role binding, in one transaction (the caller's, when called
@@ -3895,7 +3914,9 @@ type QuotaStore interface {
 	DeleteEntitlementBinding(ctx context.Context, id string) error
 
 	// Usage reservations
-	// CreateUsageReservation creates a new usage reservation.
+	// CreateUsageReservation creates a new usage reservation. When the
+	// resource already holds an active reservation for the same limit
+	// definition, it returns ErrActiveReservationExists and writes nothing.
 	CreateUsageReservation(ctx context.Context, reservation *UsageReservation) (*UsageReservation, error)
 
 	// CountActiveReservations counts non-released reservations for a specific
@@ -3905,6 +3926,13 @@ type QuotaStore interface {
 	// ReleaseReservation releases a reservation by setting released_at.
 	// The record is retained for auditing. Matches on limit_definition_id and resource_id.
 	ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error
+
+	// ReleaseReservationByID releases one reservation by its ID, in a
+	// single conditional write: only while that row is still active. It
+	// returns ErrNotFound when the row is missing or already released, so a
+	// caller acting on an earlier read never releases a newer reservation
+	// of the same resource.
+	ReleaseReservationByID(ctx context.Context, reservationID string) error
 
 	// ReleaseReservationsByResource releases all reservations for a given resource ID.
 	ReleaseReservationsByResource(ctx context.Context, resourceID string) error
@@ -3931,6 +3959,12 @@ type QuotaStore interface {
 	// re-reserving on agent start/resume must not create a second active
 	// reservation for an agent that already holds one.
 	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
+
+	// GetActiveReservation returns resourceID's non-released reservation
+	// for the given limit, whatever its scope, or ErrNotFound when there is
+	// none. At most one exists (the unique active (limit_definition_id,
+	// resource_id) index). Released reservations are never returned.
+	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
 }
 
 // =============================================================================
