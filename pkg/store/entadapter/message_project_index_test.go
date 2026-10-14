@@ -78,16 +78,16 @@ func TestMessagesProjectCreatedIDIndex_AutoMigrate(t *testing.T) {
 	client := enttest.NewClient(t)
 	want := []string{"project_id", "created", "id"}
 
-	require.Equal(t, want, messageIndexColumns(t, client, messageProjectCreatedIDIndex),
-		"a migrated database must have the project keyset index")
+	fresh := messageIndexColumns(t, client, messageProjectCreatedIDIndex)
+	require.Equal(t, want, fresh, "a migrated database must have the project keyset index")
 
 	// Upgrade: a database created before the index existed must acquire it
 	// through the normal startup AutoMigrate.
 	require.NoError(t, client.Driver().Exec(ctx, "DROP INDEX "+messageProjectCreatedIDIndex, []any{}, nil))
 	require.Empty(t, messageIndexColumns(t, client, messageProjectCreatedIDIndex))
 	require.NoError(t, entc.AutoMigrate(ctx, client))
-	require.Equal(t, want, messageIndexColumns(t, client, messageProjectCreatedIDIndex),
-		"AutoMigrate must add the project keyset index to an existing database")
+	upgraded := messageIndexColumns(t, client, messageProjectCreatedIDIndex)
+	require.Equal(t, want, upgraded, "AutoMigrate must add the project keyset index to an existing database")
 }
 
 // TestListMessages_ProjectPageUsesIndexOrder pins that a project-scoped
