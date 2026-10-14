@@ -197,10 +197,10 @@ skills:
   - uri: "gh://my-org/skills/linting"           # federated GitHub source
     as: lint-rules                              # mount under a different name
   - uri: "skill://scion/user/alice/scratch"
-    optional: true                              # don't fail provisioning if unresolved
+    optional: true                              # skip (with a warning) if it can't be resolved or installed
 ```
 
-Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
+Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved or installed; the skipped skill is logged as a warning). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::tip
 A skill supplied by a template always takes precedence over a **platform skill** (one embedded in the Scion binary and injected automatically) of the same name.

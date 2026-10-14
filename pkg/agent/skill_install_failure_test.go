@@ -503,3 +503,43 @@ func TestInstallResolvedSkills_TransportErrorScrubsURL(t *testing.T) {
 		t.Errorf("transport scrub: logged error leaks the URL: %q", logged)
 	}
 }
+
+// TestInstallResolvedSkills_MalformedRedirectScrubsLocation checks that a
+// redirect with a malformed Location, which net/http quotes in its error,
+// reaches neither the user-facing text nor the logged error.
+func TestInstallResolvedSkills_MalformedRedirectScrubsLocation(t *testing.T) {
+	const secret = "SECRETLOC"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/x%zz?sig="+secret) // %zz: invalid escape
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+	records := captureSlog(t)
+	skills := []ResolvedSkill{{
+		Name: "redirect-skill", URI: "skill://scion/core/redirect-skill@1.0", Version: "1.0.0",
+		Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/SKILL.md"}},
+	}}
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("redirect scrub: expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	const want = "failed to download SKILL.md: download failed: invalid redirect Location"
+	if skillErr.Message != want {
+		t.Errorf("redirect scrub: message = %q, want %q", skillErr.Message, want)
+	}
+	for _, r := range *records {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" && strings.Contains(a.Value.String(), secret) {
+				t.Errorf("redirect scrub: logged error leaks the Location: %q", a.Value.String())
+			}
+			return true
+		})
+	}
+}

@@ -411,6 +411,10 @@ type SkillCollisionEntry struct {
 // DestName(), the skill with the higher scope rank wins. On equal scope,
 // the later entry wins (last-writer-wins, consistent with mergeSkillRefs).
 //
+// A required loser makes the winner required (Optional is cleared), so an
+// optional winner that then fails to install fails the install instead of
+// silently dropping the required declaration.
+//
 // Returns the deduplicated list (preserving winner order of first appearance)
 // and a slice of collision entries for diagnostics.
 func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]ResolvedSkill, []SkillCollisionEntry) {
@@ -968,8 +972,14 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		if !errors.As(err, &ue) {
 			return newSkillInstallError("download failed", fmt.Errorf("download from %s failed", parsed.Host))
 		}
-		public := "download failed: " + ue.Err.Error()
-		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %w", parsed.Host, ue.Err))
+		cause := ue.Err.Error()
+		if strings.Contains(cause, "Location header") {
+			// net/http quotes a malformed redirect Location, which may be
+			// signed too.
+			cause = "invalid redirect Location"
+		}
+		public := "download failed: " + cause
+		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", parsed.Host, cause))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
