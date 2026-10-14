@@ -29,19 +29,18 @@ import (
 	yamlv3 "gopkg.in/yaml.v3"
 )
 
-// rawServerObject returns the server member of a PUT body, or nil when
-// the body has none, or it is not a JSON object. The top-level key is
-// resolved by sentStructFields over ServerConfigUpdateRequest, the same
-// rule the request decode and the server sections use, so "Server" or
-// "SERVER" select the same value as "server".
+// rawServerObject is rawRequestObject for the Server field.
 func rawServerObject(rawBody []byte) json.RawMessage {
 	return rawRequestObject(rawBody, "Server")
 }
 
 // rawRequestObject returns the member of a PUT body that decodes into the
-// ServerConfigUpdateRequest field named field, or nil when the body has
-// none, or it is not a JSON object. Keys are resolved as in
-// rawServerObject.
+// ServerConfigUpdateRequest field named field (for example "Server" or
+// "Telemetry"), or nil when the body has none, or it is not a JSON object.
+// The top-level key is resolved by sentStructFields over
+// ServerConfigUpdateRequest, the same rule the request decode and the
+// server sections use, so "Server" or "SERVER" select the same value as
+// "server".
 func rawRequestObject(rawBody []byte, field string) json.RawMessage {
 	sent, ok := sentStructFields(reflect.TypeOf(ServerConfigUpdateRequest{}), rawBody)
 	if !ok {

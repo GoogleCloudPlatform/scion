@@ -54,9 +54,10 @@ telemetry:
     team: core
 `
 
-// putFileTelemetry seeds settings.yaml, sends body to the file-mode
-// server-config PUT and returns the stored telemetry section.
-func putFileTelemetry(t *testing.T, seed, body string) *config.V1TelemetryConfig {
+// putFileSettings seeds settings.yaml, sends body to the file-mode
+// server-config PUT and returns settings.yaml as written, decoded as a
+// generic document.
+func putFileSettings(t *testing.T, seed, body string) map[string]interface{} {
 	t.Helper()
 	settingsPath := setTempScionHome(t)
 	require.NoError(t, os.WriteFile(settingsPath, []byte(seed), 0600))
@@ -66,10 +67,19 @@ func putFileTelemetry(t *testing.T, seed, body string) *config.V1TelemetryConfig
 
 	data, err := os.ReadFile(settingsPath)
 	require.NoError(t, err)
-	var vs config.VersionedSettings
-	require.NoError(t, yamlv3.Unmarshal(data, &vs))
-	require.NotNil(t, vs.Telemetry)
-	return vs.Telemetry
+	var doc map[string]interface{}
+	require.NoError(t, yamlv3.Unmarshal(data, &doc))
+	return doc
+}
+
+// putFileTelemetry is putFileSettings returning the stored telemetry
+// section, which must be present.
+func putFileTelemetry(t *testing.T, seed, body string) *config.V1TelemetryConfig {
+	t.Helper()
+	tel, err := telemetryConfigFromRaw(putFileSettings(t, seed, body))
+	require.NoError(t, err)
+	require.NotNil(t, tel)
+	return tel
 }
 
 // A file-mode telemetry save keeps the nested keys it omits, as the DB
@@ -160,4 +170,41 @@ func TestPutServerConfig_FileMode_TelemetrySaveWithNoStoredSection(t *testing.T)
 	assert.Equal(t, "otel.example.com:4317", tel.Cloud.Endpoint)
 	assert.Nil(t, tel.Filter)
 	assert.Nil(t, tel.Resource)
+}
+
+// A save that leaves nothing in telemetry removes the section.
+func TestPutServerConfig_FileMode_TelemetryEmptyResultRemovesSection(t *testing.T) {
+	doc := putFileSettings(t, "schema_version: \"1\"\ntelemetry:\n  cloud:\n    endpoint: otel.example.com:4317\n",
+		`{"telemetry":{"cloud":null}}`)
+	assert.NotContains(t, doc, "telemetry")
+}
+
+// A body without telemetry, or with telemetry null, leaves the stored
+// section as it is.
+func TestPutServerConfig_FileMode_TelemetryNotSentUnchanged(t *testing.T) {
+	var seedDoc map[string]interface{}
+	require.NoError(t, yamlv3.Unmarshal([]byte(fileTelemetrySeed), &seedDoc))
+	for _, tc := range []struct{ name, body string }{
+		{"no telemetry key", `{"image_registry":"registry.example.com"}`},
+		{"telemetry null", `{"telemetry":null,"image_registry":"registry.example.com"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := putFileSettings(t, fileTelemetrySeed, tc.body)
+			assert.Equal(t, seedDoc["telemetry"], doc["telemetry"])
+			assert.Equal(t, "registry.example.com", doc["image_registry"])
+		})
+	}
+}
+
+// A case-variant top-level key ("Telemetry") selects the telemetry object
+// for the merge, as it does for the request decode.
+func TestPutServerConfig_FileMode_TelemetryCaseVariantKeyMerges(t *testing.T) {
+	tel := putFileTelemetry(t, fileTelemetrySeed, `{"Telemetry":{"cloud":{"protocol":"http"}}}`)
+
+	require.NotNil(t, tel.Cloud)
+	assert.Equal(t, "http", tel.Cloud.Protocol)
+	assert.Equal(t, "otel.example.com:4317", tel.Cloud.Endpoint)
+	require.NotNil(t, tel.Cloud.TLS)
+	assert.Equal(t, "/etc/ssl/ca.pem", tel.Cloud.TLS.CAFile)
+	assert.Equal(t, map[string]string{"team": "core"}, tel.Resource)
 }
