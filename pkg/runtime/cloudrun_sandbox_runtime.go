@@ -235,6 +235,16 @@ func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
 	if entries == nil {
 		entries = make(map[string]*sandboxStateEntry)
 	}
+	// A key stored as JSON null decodes to a nil entry. It is treated as
+	// absent: dropped here, so no reader dereferences it, and left out of
+	// the file by the next write (ptone/scion#4819).
+	for name, e := range entries {
+		if e == nil {
+			runtimeLog().Warn("sandbox state file holds a null entry; treating it as absent",
+				"path", path, "name", name)
+			delete(entries, name)
+		}
+	}
 	return entries, nil
 }
 
@@ -242,7 +252,9 @@ func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
 // writes a unique temporary file in the same directory (0600, audit M1)
 // and renames it over path (audit M2). There is no fsync, as before (the
 // default path is under /tmp). A crash between the create and the rename
-// leaves a "<name>.tmp-*" file behind; it is never read.
+// leaves a "<name>.tmp-*" file behind; it is never read, and load removes
+// it once it is older than sandboxStateTempMaxAge
+// (removeStaleSandboxStateTemps).
 func writeSandboxStateFile(path string, entries map[string]*sandboxStateEntry) error {
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
@@ -471,10 +483,54 @@ func (s *sandboxStateStore) refreshKeys(names []string) (map[string]*sandboxStat
 	return out, nil
 }
 
-// load fills the cache from the file. An unreadable file leaves the cache
-// empty (and is never written over: every write re-reads the file).
+// sandboxStateTempMaxAge is the age past which load removes a temporary
+// file of an interrupted state write. Writes in this process hold the file
+// mutex, which load also holds; the age covers a write in another process
+// on the host (a `scion` CLI), which is not fenced (ptone/scion#3951). A
+// variable so tests can change it.
+var sandboxStateTempMaxAge = time.Minute
+
+// removeStaleSandboxStateTemps removes the temporary files that
+// writeSandboxStateFile leaves next to path when it is interrupted between
+// the create and the rename ("<base>.tmp-*"), if older than
+// sandboxStateTempMaxAge. Names are matched by prefix, not as a glob, so a
+// state path with glob characters matches only its own files. The caller
+// holds the file mutex. Errors are logged and otherwise ignored.
+func removeStaleSandboxStateTemps(path string) {
+	dir := filepath.Dir(path)
+	prefix := filepath.Base(path) + ".tmp-"
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			runtimeLog().Warn("cannot list the sandbox state dir for stale temp files", "dir", dir, "error", err)
+		}
+		return
+	}
+	cutoff := time.Now().Add(-sandboxStateTempMaxAge)
+	for _, de := range dirEntries {
+		if !de.Type().IsRegular() || !strings.HasPrefix(de.Name(), prefix) {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		tmp := filepath.Join(dir, de.Name())
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			runtimeLog().Warn("cannot remove a stale sandbox state temp file", "path", tmp, "error", err)
+			continue
+		}
+		runtimeLog().Info("removed a stale sandbox state temp file", "path", tmp)
+	}
+}
+
+// load removes stale temporary files of interrupted state writes
+// (removeStaleSandboxStateTemps), then fills the cache from the file. An
+// unreadable file leaves the cache empty (and is never written over: every
+// write re-reads the file).
 func (s *sandboxStateStore) load() {
 	unlock := lockStateFile(s.path)
+	removeStaleSandboxStateTemps(s.path)
 	entries, err := readSandboxStateFile(s.path)
 	unlock()
 	if err != nil {
@@ -1317,8 +1373,13 @@ type CloudRunSandboxRuntime struct {
 	rootDir       string             // /scion by default; overridable for testing
 	deleteTimeout time.Duration      // timeout for sandbox delete --force; 0 = default
 
-	watchMu      sync.Mutex                    // guards watchCancels
+	watchMu      sync.Mutex                    // guards watchCancels, watchTokens and watchSeq
 	watchCancels map[string]context.CancelFunc // per-sandbox watcher cancel functions
+	// watchTokens holds the token of the watcher whose cancel is in
+	// watchCancels for each name (installWatcher), so a watcher removes
+	// only its own cancel. Created on first use.
+	watchTokens map[string]uint64
+	watchSeq    uint64 // last token issued
 }
 
 // NewCloudRunSandboxRuntime returns a new CloudRunSandboxRuntime.
@@ -2215,11 +2276,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// the exit in the state store when the sandbox terminates.
 	// The context is cancelled by deleteOrWorkaround to unblock the watcher
 	// when the sandbox is force-deleted.
-	watchCtx, watchCancel := context.WithCancel(context.Background())
-	r.watchMu.Lock()
-	r.watchCancels[slug] = watchCancel
-	r.watchMu.Unlock()
-	go r.watchSandbox(watchCtx, slug, nonce)
+	watchCtx, watchToken := r.installWatcher(slug)
+	go r.watchSandbox(watchCtx, slug, nonce, watchToken)
 	go r.tailEntrypointLog(watchCtx, slug, cfg.Name, cfg.Project, paths, entrypointLogOffset)
 
 	return slug, nil
@@ -2314,6 +2372,39 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 	return r.deletePlain(ctx, id, obs)
 }
 
+// installWatcher registers a new exit watcher for the sandbox name and
+// returns its context and token. Any watcher this instance already has for
+// the name is cancelled first (ptone/scion#4819): it watches an older
+// entry, and left running it would keep a `sandbox wait` and a log tailer
+// alive with no cancel in the map. A cancelled watcher returns without
+// touching the state or the map.
+func (r *CloudRunSandboxRuntime) installWatcher(name string) (context.Context, uint64) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if prev, ok := r.watchCancels[name]; ok {
+		prev()
+	}
+	if r.watchTokens == nil {
+		r.watchTokens = make(map[string]uint64)
+	}
+	r.watchSeq++
+	r.watchCancels[name] = cancel
+	r.watchTokens[name] = r.watchSeq
+	return ctx, r.watchSeq
+}
+
+// releaseWatcher removes the watcher with token from the map for name, if
+// it is still the registered one: a newer watcher for the name stays.
+func (r *CloudRunSandboxRuntime) releaseWatcher(name string, token uint64) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if tok, ok := r.watchTokens[name]; ok && tok == token {
+		delete(r.watchCancels, name)
+		delete(r.watchTokens, name)
+	}
+}
+
 // cancelWatcher cancels this instance's exit watcher for the sandbox id,
 // if any, so `sandbox wait` doesn't hang after the sandbox is deleted.
 func (r *CloudRunSandboxRuntime) cancelWatcher(id string) {
@@ -2323,6 +2414,7 @@ func (r *CloudRunSandboxRuntime) cancelWatcher(id string) {
 		cancel()
 		delete(r.watchCancels, id)
 	}
+	delete(r.watchTokens, id)
 }
 
 // classifiedDelete runs `sandbox delete --force id` on the path the
@@ -2709,8 +2801,8 @@ func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string
 // cancel the watcher when the sandbox is force-deleted. nonce is the
 // nonce of the entry this watcher watches: the exit is recorded only if
 // the key still holds that entry, so a late watcher never marks a newer
-// run's entry stopped.
-func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, nonce sandboxNonce) {
+// run's entry stopped. token is the watcher's token from installWatcher.
+func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, nonce sandboxNonce, token uint64) {
 	// sandbox wait blocks until the sandbox exits.
 	cmd := exec.CommandContext(ctx, r.bin, "wait", name)
 	out, err := cmd.CombinedOutput()
@@ -2773,14 +2865,11 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, 
 		}
 	}
 
-	// Clean up the cancel function from the map, unless the entry changed
-	// since this watcher started: the map may then hold a newer run's
-	// cancel for the name, which must stay.
-	if !errors.Is(markErr, errStateChanged) {
-		r.watchMu.Lock()
-		delete(r.watchCancels, name)
-		r.watchMu.Unlock()
-	}
+	// Clean up this watcher's cancel function from the map. A newer
+	// watcher for the name may have been installed since this one marked
+	// the entry (or failed to): its cancel must stay, so the removal is
+	// by token (ptone/scion#4819).
+	r.releaseWatcher(name, token)
 }
 
 // -----------------------------------------------------------------------
