@@ -1601,11 +1601,11 @@ authDone:
 	// through the template fill (demoted on a per-start copy; scion-agent.json
 	// is not rewritten).
 	//
-	// The harness-config's auth-candidate keys are suppressed for the
-	// template env fallback (RunConfig.SuppressedFallbackKeys), so a
-	// template never takes part in auth; a demoted key among them is
-	// reported, never dropped silently.
-	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
+	// Every env key the harness-config's auth metadata lists, for any auth
+	// type, is suppressed for the template env fallback
+	// (RunConfig.SuppressedFallbackKeys), so a template never takes part in
+	// auth; a demoted key among them is reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(templateFallbackSuppressedKeys(authMeta))
 	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
 	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
 	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
@@ -3465,6 +3465,38 @@ func configAuthEnvKeySet(authMeta *config.HarnessAuthMetadata) map[string]struct
 				keys[k] = struct{}{}
 			}
 		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
+// templateFallbackSuppressedKeys returns every env key a harness-config's
+// auth metadata lists, for any auth type: required_env any_of keys,
+// required_files alternative_env_keys and autodetect env keys. None of them
+// is ever filled from template env (RunConfig.SuppressedFallbackKeys), so a
+// template never supplies or selects a credential (ptone/scion#4968).
+//
+// It is deliberately wider than configAuthEnvKeySet, which drives Start's
+// auth-env filtering and must not change with it.
+func templateFallbackSuppressedKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
+	if authMeta == nil {
+		return nil
+	}
+	keys := make(map[string]struct{})
+	for k := range configAuthEnvKeySet(authMeta) {
+		keys[k] = struct{}{}
+	}
+	for _, authType := range authMeta.Types {
+		for _, req := range authType.RequiredFiles {
+			for _, k := range req.AlternativeEnvKeys {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range authMeta.Autodetect.Env {
+		keys[k] = struct{}{}
 	}
 	if len(keys) == 0 {
 		return nil
