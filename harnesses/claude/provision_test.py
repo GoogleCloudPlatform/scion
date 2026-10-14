@@ -19,6 +19,7 @@ Run with:  python3 -m unittest provision_test -v
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -960,7 +961,9 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
                                  "args": [*WRAP, R, R + "/bin/srv"],
                                  "env": {"PLUGIN_ROOT": R, "PLUGIN_DATA": data}}},
         })
-        self.assertEqual(self.state()["scion-smoke"]["native_ref"], {"path": target})
+        with open(os.path.join(target, "plugin.json"), "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        self.assertEqual(self.state()["scion-smoke"]["native_ref"], {"path": target, "manifest_sha256": sha})
         self.assertEqual(self.status()["installed"], ["scion-smoke"])
         self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [], "no tmp/old left behind")
 
@@ -1161,13 +1164,17 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
             "agents-cwd": {"type": "stdio", "command": "x", "cwd": "./agents"},
             "root-cwd": {"type": "stdio", "command": "x", "cwd": "${PLUGIN_ROOT}/commands/sub"},
             "dot": {"type": "stdio", "command": "./.mcp.json"},
-            "ok": {"type": "stdio", "command": "./bin/hooks", "cwd": "./lib/agents"},
+            "root-arg": {"type": "stdio", "command": "node", "args": ["${PLUGIN_ROOT}/hooks/x.js"]},
+            "ok": {"type": "stdio", "command": "./bin/hooks", "cwd": "./lib/agents",
+                   "args": ["./hooks/relative-to-cwd", "${PLUGIN_ROOT}/lib/hooks"]},
         }
         got = provision.translate_mcp_servers(ctx, _plugin(servers=servers), "/d")
         self.assertEqual(sorted(got), ["ok"])
         self.assertIn("agent plugin acme.tools: mcp server hook-cmd skipped for claude: "
                       "it uses hooks, which is not installed for claude", warnings.messages)
-        self.assertEqual(len(warnings.messages), 4)
+        self.assertIn("agent plugin acme.tools: mcp server root-arg skipped for claude: "
+                      "it uses hooks, which is not installed for claude", warnings.messages)
+        self.assertEqual(len(warnings.messages), 5)
 
     def test_old_copy_removal_failure_is_a_warning(self) -> None:
         # Review round 1, finding 2: nothing after the swap fails the
@@ -1231,6 +1238,57 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.reconcile()
         self.assertEqual(self.cli.calls, [["claude", "--version"]])
         self.assertTrue(os.path.isdir(os.path.join(self.root, "data", "p")))
+
+    def test_uninstall_hands_merged_skill_back(self) -> None:
+        # Review round 2, finding 1: the template drops the plugin and adds
+        # skill p in the same edit; Go merged p/SKILL.md into the plugin dir.
+        # Removal must not delete the skill.
+        self.stage({"p": {}})
+        self.reconcile()
+        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
+            f.write("template skill")
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        target = os.path.join(self.skills, "p")
+        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
+        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
+        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")), "other stray files stay (R6)")
+        self.assertEqual(self.state(), {})
+        self.assertEqual(self.status()["removed"], ["p"])
+        self.assertEqual(warnings, [
+            "agent plugin p: removed; a skill named p shares its directory, so only the generated "
+            ".claude-plugin manifest was removed and claude loads it as that skill",
+        ])
+
+    def test_stale_ownership_after_manifest_change(self) -> None:
+        # Review round 2, finding 2: the edit that adds the skill also bumps
+        # the plugin's version, so the staged plugin.json differs from the
+        # installed one; the recorded sha still identifies Scion's copy.
+        self.stage({"p": {}})
+        self.reconcile()
+        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
+            f.write("template skill")
+        self.stage({"p": {"conflict": True, "digest": "d2"}})
+        with open(os.path.join(self.inputs, "plugins", "p", "plugin.json"), "w") as f:
+            json.dump({"name": "p", "version": "0.2.0"}, f)
+        self.reconcile()
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "plugin.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", ".claude-plugin")))
+        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
+
+    def test_leftovers_swept_on_fast_path(self) -> None:
+        # Review round 2, finding 3.
+        self.stage({"p": {}})
+        self.reconcile()
+        for leftover in (".p.old", ".p.tmp"):
+            os.makedirs(os.path.join(self.skills, leftover, ".claude-plugin"))
+        os.makedirs(os.path.join(self.skills, ".other.old"))  # not an owned name
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+        self.assertEqual(sorted(e for e in os.listdir(self.skills) if e.startswith(".")), [".other.old"])
 
     def test_uninstall_only_owned_generated_dirs(self) -> None:
         self.stage({"a": {}, "b": {}})

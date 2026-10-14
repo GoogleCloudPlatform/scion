@@ -56,6 +56,7 @@ Design references below (section N, Dn) are to
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -478,12 +479,13 @@ def _translate_cwd(cwd: str | None, root: str, data: str) -> str:
     return _expand_plugin_placeholders(cwd, root, data)
 
 
-def _stripped_ref(path: str | None) -> str | None:
+def _stripped_ref(path: str | None, args_only: bool = False) -> str | None:
     """The stripped top-level entry a plugin-relative path ("./x/...",
-    "${PLUGIN_ROOT}/x/...") points into, or None."""
+    "${PLUGIN_ROOT}/x/...") points into, or None. For an args element only
+    the ${PLUGIN_ROOT}/ form is plugin-relative ("./" is relative to cwd)."""
     if not path:
         return None
-    for prefix in ("./", "${PLUGIN_ROOT}/"):
+    for prefix in (("${PLUGIN_ROOT}/",) if args_only else ("./", "${PLUGIN_ROOT}/")):
         if path.startswith(prefix):
             first = os.path.normpath(path[len(prefix):]).split("/", 1)[0]
             if first in CLAUDE_STRIPPED_PATHS or first == CLAUDE_PLUGIN_MANIFEST_DIR:
@@ -514,7 +516,11 @@ def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any
             or (cwd is not None and _has_foreign_placeholder(cwd, True))
         ):
             raise McpServerSkipped("placeholder")
-        stripped = _stripped_ref(command) or (_stripped_ref(cwd) if cwd else None)
+        stripped = (
+            _stripped_ref(command)
+            or (_stripped_ref(cwd) if cwd else None)
+            or next((r for r in (_stripped_ref(a, args_only=True) for a in args) if r), None)
+        )
         if stripped:
             raise McpServerSkipped(f"it uses {stripped}, which is not installed for claude")
         if command.startswith("./"):
@@ -684,19 +690,18 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         state file, and warn. Runs before
         reconcile_agent_plugins, which then reports the conflict."""
         recorded = self._recorded_plugins()
+        self._sweep_leftovers(recorded)
         stale = sorted(n for n in self.conflicts if n in recorded)
         if not stale:
             return
         for name in stale:
-            target = self.target(name)
-            gen = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
-            if os.path.lexists(gen) and not os.path.islink(target):
-                try:
-                    _remove_path(gen)
-                    self._remove_stray_manifest(name)
-                except OSError as exc:
-                    self.ctx.warn(f"agent plugin {name}: cannot remove {gen}: {exc}")
-                    continue
+            rec = recorded.get(name)
+            ref = rec.get("native_ref") if isinstance(rec, dict) else None
+            try:
+                self._release_dir(name, ref if isinstance(ref, dict) else {})
+            except OSError as exc:
+                self.ctx.warn(f"agent plugin {name}: cannot release {self.target(name)}: {exc}")
+                continue
             recorded.pop(name, None)
             self.owned.discard(name)
             self.ctx.warn(
@@ -709,22 +714,56 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             "plugins": recorded,
         })
 
-    def _remove_stray_manifest(self, name: str) -> None:
-        """Remove the root plugin.json left in a released dir when it is
-        byte-identical to the staged bundle's. Otherwise the Go skills-dir
-        skips (design 2.7) would keep treating the template skill that now
-        owns the dir as a plugin dir."""
-        stray = os.path.join(self.target(name), AGENT_PLUGIN_MANIFEST)
+    def _sweep_leftovers(self, recorded: dict[str, Any]) -> None:
+        """Remove .<n>.tmp / .<n>.old left by an interrupted install of an
+        owned plugin. Runs on every start, so the fast path cleans up too
+        (claude skips hidden skills-dir entries, so they never load)."""
+        for name in sorted(set(recorded) | self.owned):
+            if not scion_harness.valid_agent_plugin_name(name):
+                continue
+            for leftover in (f".{name}.tmp", f".{name}.old"):
+                path = os.path.join(self.skills_dir, leftover)
+                if os.path.lexists(path):
+                    try:
+                        _remove_path(path)
+                    except OSError as exc:
+                        self.ctx.warn(f"agent plugin {name}: cannot remove leftover {path}: {exc}")
+
+    def _release_dir(self, name: str, native_ref: dict[str, Any]) -> None:
+        """Hand a plugin dir that now also holds a skill back to that skill:
+        remove the generated .claude-plugin/ and the bundle's own root
+        plugin.json (so the Go skills-dir skips of design 2.7 do not hide
+        the skill). Every other file stays (R6)."""
+        target = self.target(name)
+        if os.path.islink(target) or not os.path.isdir(target):
+            return
+        gen = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
+        if os.path.lexists(gen):
+            _remove_path(gen)
+        stray = os.path.join(target, AGENT_PLUGIN_MANIFEST)
+        if not os.path.islink(stray) and os.path.isfile(stray) and self._is_bundle_manifest(name, stray, native_ref):
+            os.unlink(stray)
+
+    def _is_bundle_manifest(self, name: str, path: str, native_ref: dict[str, Any]) -> bool:
+        """Whether path is the root plugin.json Scion installed: its sha256
+        matches the one recorded at install time. Records from before the
+        sha was kept fall back to the staged bundle's bytes."""
+        try:
+            with open(path, "rb") as f:
+                got = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            return False
+        want = native_ref.get("manifest_sha256")
+        if isinstance(want, str) and want:
+            return got == want
         staged = os.path.join(self.ctx.inputs_dir, "plugins", name, AGENT_PLUGIN_MANIFEST)
         try:
-            if os.path.islink(stray) or os.path.islink(staged):
-                return
-            with open(stray, "rb") as a, open(staged, "rb") as b:
-                same = a.read() == b.read()
+            if os.path.islink(staged):
+                return False
+            with open(staged, "rb") as f:
+                return got == hashlib.sha256(f.read()).hexdigest()
         except OSError:
-            return
-        if same:
-            os.unlink(stray)
+            return False
 
     def detect_version(self) -> tuple[int, int, int] | None:
         if self._claude_version is None:
@@ -794,7 +833,13 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         except OSError as exc:
             self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
         self.owned.add(name)
-        return {"path": target}
+        ref: dict[str, Any] = {"path": target}
+        try:
+            with open(os.path.join(target, AGENT_PLUGIN_MANIFEST), "rb") as f:
+                ref["manifest_sha256"] = hashlib.sha256(f.read()).hexdigest()
+        except OSError:
+            pass
+        return ref
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
         """Remove the plugin dir when it still carries both the root
@@ -803,6 +848,22 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         (spec 9.1 makes deletion optional). Success is judged by the
         result: the generated plugin must be gone."""
         target = self.target(name)
+        skill_md = os.path.join(target, "SKILL.md")
+        if self._has_generated_manifest(target) and os.path.isfile(skill_md) and not os.path.islink(skill_md):
+            # A skill was merged into the plugin dir (a template added skill
+            # <name> in the same edit that dropped the plugin). An Agent
+            # Plugins bundle keeps its skills under skills/, so a root
+            # SKILL.md is not ours: hand the dir to the skill, never rmtree.
+            try:
+                self._release_dir(name, native_ref)
+            except OSError as exc:
+                raise scion_harness.PluginInstallError(f"cannot release {target}: {exc}") from None
+            self.ctx.warn(
+                f"agent plugin {name}: removed; a skill named {name} shares its directory, so only the "
+                "generated .claude-plugin manifest was removed and claude loads it as that skill"
+            )
+            self.owned.discard(name)
+            return
         if self._has_generated_manifest(target):
             try:
                 shutil.rmtree(target)
