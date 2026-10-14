@@ -131,7 +131,9 @@ type launchCtx struct {
 	mgr             agent.Manager
 	key             launchKey
 	sharedWorkspace bool
-	supersededDone  <-chan struct{}
+	// owned is the flat instance's ownership mirror for this run, handed
+	// over when the launch was accepted (nil on a legacy Runtime Broker).
+	owned *ownedStart
 	// downloadWorkspaceFromGCS, when set, replaces Server.downloadWorkspaceFromGCS
 	// for this launch. Always nil in production (beginAsyncLaunch never sets
 	// it); tests use it to control how long the download step takes without
@@ -151,6 +153,17 @@ type launchCtx struct {
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
 // (beginAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
+	// A flat instance's ownership mirror, handed over when the launch was
+	// accepted, is released when the launch ends, on every return before
+	// Start (for example claim errors and local cancels, gate and keepalive
+	// aborts, the superseded wait's timeout, and marker and download
+	// failures). Start's own completion consumes the mirror first
+	// (completeOwnedStart), which makes this a no-op, and every path that
+	// started Start waits for it to return before runLaunch does. Only this
+	// launch's own mirror is released, never one a later start installed
+	// under the same run ID. Deferred first so it runs after every other
+	// deferred step.
+	defer s.releaseOwnedMirror(lc.opts.RunID, lc.owned)
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
 	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
@@ -167,7 +180,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	defer sender.WaitKeepaliveStopped()
 	defer sender.StopKeepalive()
 
-	currentStep := "claim"
+	currentStep := api.LaunchStepClaim
 
 	// Step 1: claim, synchronous, before anything touches the runtime. The
 	// keepalive is already running (started above), so its answers can end
@@ -179,7 +192,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.handleKeepaliveAbort(sender, rec, lc)
 			return
 		case errors.Is(claimErr, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke the
 			// blocked claim, not a real deadline. The Hub already knows (or
 			// will independently learn) this launch is over, so this is not
 			// "hub unreachable" and gets no terminal.
@@ -187,7 +200,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		default:
 			// ctx' expired without any answer: follow the failure rule
 			// (step 7) with failed{hub_unreachable}.
-			s.failLaunch(ctx, sender, rec, lc, false, currentStep, "hub_unreachable", "claim: hub unreachable")
+			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable", "")
 			return
 		}
 	}
@@ -214,30 +227,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	// The claim has been applied: any failure from here on is reported
-	// under the launching step (design §3.9), including a ctx' deadline
-	// reached while still waiting on a superseded launch below.
-	currentStep = "launching"
+	// under the launching step (design §3.9).
+	currentStep = api.LaunchStepLaunching
 
-	// Step 2, F5: wait for a superseded record's cleanup before writing the
-	// shared marker, then write it (create launches only).
-	WaitSuperseded(ctx, lc.supersededDone)
-	if err := ctx.Err(); err != nil {
-		switch {
-		case errors.Is(err, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
-			// wait, not a real ctx' deadline. Same rule as the claim's
-			// local-cancel case: the Hub already knows, or will
-			// independently learn, this launch is over, so no terminal.
-			return
-		default:
-			// context.DeadlineExceeded: ctx' ran out while waiting on the
-			// predecessor. The marker has not been written yet, so fail
-			// directly rather than writing it only to immediately treat
-			// the launch as timed out.
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "launch_timeout", "launch timed out waiting for a superseded launch to finish")
-			return
-		}
-	}
+	// Step 2: write the shared marker (create launches only). There is no
+	// superseded launch to wait for here: the create already registered
+	// under the name and waited for any earlier start of it before
+	// buildStartContext, and the launch took that registration over
+	// (createAgent, beginAsyncLaunch; ptone/scion#2632).
 	if rec.Kind == store.LaunchKindCreate && lc.opts.ProjectPath != "" {
 		if err := writeLaunchMarker(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID); err != nil {
 			// A marker write failure silently disables file cleanup for this
@@ -250,7 +247,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
 				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", runtimeOpError("write launch marker", err).Error())
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
 			return
 		}
 	}
@@ -279,7 +276,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// too: admission (beginAsyncLaunch) normally answers those with the
 		// sync 400/422, and one only found here reports the same text,
 		// under runtime_error.
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "runtime_error", dlMessage)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, dlMessage, "")
 		return
 	}
 	lc.opts = opts
@@ -290,6 +287,15 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// buildStartContext) runs first.
 	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
 	lc.opts.OnResourceCreated = rec.AddHandle
+	// The non-blocking step hook (design wave 3 §3 E-b): the runtime
+	// records each step it reaches, and the progress poster reports the
+	// latest one to the Hub at most once per progressInterval.
+	lc.opts.Progress = sender.Progress
+	sender.StartProgress(ctx)
+	// Deferred after the keepalive's stop/wait pair, so it runs before
+	// them: StopKeepalive closes the channel the poster also exits on.
+	defer sender.WaitProgressStopped()
+	defer sender.StopKeepalive()
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
 		return
@@ -343,11 +349,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 	if sr.err != nil {
 		if locallyCancelled(ctx) {
-			// A local stop/delete (launchRegistry.CancelLocal) woke Start
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke Start
 			// via ctx' cancellation, not a real deadline (the
 			// launch_timeout case is context.DeadlineExceeded, handled by
-			// classifyStartError below). Same rule as the claim's and
-			// WaitSuperseded's local-cancel cases: the Hub already knows,
+			// classifyStartError below). Same rule as the claim's
+			// local-cancel case: the Hub already knows,
 			// or will independently learn, this launch is over, so no
 			// terminal. Keyed on ctx' rather than on sr.err: the
 			// exec-based runtimes (docker, podman, apple) return the killed
@@ -366,7 +372,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			}
 			return
 		}
-		code, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName)
+		// Only now, after the keepalive/progress abort checks above and the
+		// local-cancel check, is the error classified: a stop, delete or
+		// superseding start that removed the pod must never be reported as
+		// pod_disrupted (each cancels ctx' before deleting anything, and
+		// the Hub's own answer arrives as an abort).
+		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
@@ -375,9 +386,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
-			code, message = "hub_unreachable", "checkpoint: hub unreachable"
+			code, message = api.LaunchCodeHubUnreachable, "checkpoint: hub unreachable"
 		}
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message)
+		// Computed from the final code: only a runtime_error carries a
+		// cause, so the hub_unreachable override above carries none.
+		cause := launchFailureCause(code, sr.err)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, step, code, message, cause)
 		return
 	}
 
@@ -405,10 +419,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			ContainerStatus: sr.info.ContainerStatus,
 			RunID:           sr.info.RunID,
 
-			WorkspacePlacement: sr.info.WorkspacePlacement,
+			HarnessConfigSource: sr.info.HarnessConfigSource,
+			WorkspacePlacement:  sr.info.WorkspacePlacement,
 		}
 	}
-	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)
+	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
 		// failed report, design §3.8.2 step 7).
@@ -432,7 +447,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 // locallyCancelled reports whether ctx' was cancelled rather than having
 // reached its deadline. Once the keepalive-abort paths have returned, the only
 // remaining source of that cancellation is a local stop/delete
-// (launchRegistry.CancelLocal): runLaunch itself cancels ctx' only on the
+// (launchRegistry.CancelLocalFor): runLaunch itself cancels ctx' only on the
 // KeepaliveAborted branch, which returns, and in its deferred cleanup.
 func locallyCancelled(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)
@@ -455,8 +470,10 @@ func (s *Server) handleKeepaliveAbort(sender *launchSender, rec *launchRecord, l
 // clean up only if the Hub confirms the agent never ran"). alreadyCompleted
 // skips the report entirely, per "if an earlier gate or keepalive already
 // answered completed, send nothing and do not clean up". step records which
-// generic step (claim/launching) the launch was in (design §3.9).
-func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted bool, step, errorCode, message string) {
+// generic step (claim/launching) the launch was in (design §3.9). cause is
+// the fixed runtime cause code for a runtime_error (launchFailureCause), or
+// "".
+func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted bool, step, errorCode, message, cause string) {
 	if alreadyCompleted || sender.IsCompleted() {
 		return
 	}
@@ -467,7 +484,7 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 	terminalCtx, cancel := terminalContext(rec.Deadline)
 	defer cancel()
 
-	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, nil)
+	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, cause, nil)
 	if err != nil {
 		// No definitive answer by the TTL: the Hub has reaped the record by
 		// then, and `scion delete` removes the resources. No cleanup here.
@@ -521,7 +538,7 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 // cleanupLaunchResources deletes the runtime resources the launch recorded
 // (design §3.8.4), on a fresh context: ctx' may already be done.
 func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), scionrt.AsyncLaunchCleanupBudget)
 	defer cancel()
 	handles := rec.HandlesSnapshot()
 	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
@@ -536,12 +553,26 @@ func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 	s.finishCleanedRun(key, handles)
 }
 
+// launchFailureCause returns the cause code a failed launch report carries
+// for a Manager.Start error classified as code (ptone/scion#4666): the
+// fixed details.cause code a synchronous create's runtime_error answer
+// would carry (runtimeFailureCause, writeCreateRuntimeError), and only for a
+// runtime_error, which is the code a cause qualifies. Never the error's
+// text.
+func launchFailureCause(code string, err error) string {
+	if code != ErrCodeRuntimeError {
+		return ""
+	}
+	_, cause, _ := runtimeFailureCause(err)
+	return cause
+}
+
 // terminalContext returns a fresh context bounded at deadline + 10 min
 // (design §3.8.5's terminal TTL), never ctx' — a launch that timed out must
 // still be able to retry its failed{launch_timeout} report after ctx' itself
 // has expired.
 func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
-	ttl := time.Until(deadline.Add(10 * time.Minute))
+	ttl := time.Until(deadline.Add(scionrt.AsyncLaunchReportTTL))
 	if ttl < 0 {
 		ttl = 0
 	}
@@ -553,25 +584,96 @@ func terminalContext(deadline time.Time) (context.Context, context.CancelFunc) {
 const (
 	// LaunchErrCodeHarnessConfigPolicy: the harness-config policy refused
 	// the launch (the synchronous paths answer 403 forbidden).
-	LaunchErrCodeHarnessConfigPolicy = "harness_config_policy"
+	LaunchErrCodeHarnessConfigPolicy = api.LaunchCodeHarnessConfigPolicy
 	// LaunchErrCodeAgentStateUnavailable: the agent's broker-side state
 	// directory is unavailable (config.ErrAgentStateDirUnavailable).
-	LaunchErrCodeAgentStateUnavailable = "agent_state_unavailable"
+	LaunchErrCodeAgentStateUnavailable = api.LaunchCodeAgentStateUnavailable
 	// LaunchErrCodeAgentStateConflict: the agent's broker-side state exists
 	// but cannot be used as recorded, e.g. an unusable image provenance
 	// record (config.ErrAgentStateConflict).
-	LaunchErrCodeAgentStateConflict = "agent_state_conflict"
+	LaunchErrCodeAgentStateConflict = api.LaunchCodeAgentStateConflict
 )
 
-// classifyStartError maps a Manager.Start failure to a launch error code
-// (design §3.9; full progress/error-code detail is P3 scope). ctx having
-// already expired (DeadlineExceeded) takes precedence: that is ctx', so it
-// means the launch ran out of its budget, which is launch_timeout regardless
-// of the error Start happened to return when it unwound.
-func classifyStartError(ctx context.Context, err error, templateSlug string) (code, message string) {
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return "launch_timeout", "launch timed out before the agent started"
+// launchFailureText is the fixed report text for each launch code a
+// runtime.LaunchFailure can carry (design wave 3 §3 E-d). classifyStartError
+// appends only the runtime's reason enum, never the error's own text, which
+// names the image reference, pod and namespace (ptone/scion#3113).
+var launchFailureText = map[string]string{
+	api.LaunchCodeImagePullFailed:     "the agent image could not be pulled",
+	api.LaunchCodeInvalidImage:        "the agent image reference is not valid",
+	api.LaunchCodeContainerConfig:     "the agent container could not be configured",
+	api.LaunchCodeCrashLoop:           "the agent container keeps crashing on start",
+	api.LaunchCodeInitContainerFailed: "an init container of the agent pod failed",
+	api.LaunchCodeUnschedulable:       "the agent pod cannot be scheduled",
+	api.LaunchCodePodDisrupted:        "the agent pod was preempted, evicted or deleted while starting",
+	api.LaunchCodeLaunchTimeout:       "launch timed out waiting for the agent pod to be ready",
+}
+
+// maxLaunchReasonLen bounds the runtime reason a failure message carries.
+const maxLaunchReasonLen = 64
+
+// launchReasonEnum returns reason when it looks like a runtime reason enum
+// (ASCII letters and digits, e.g. "ImagePullBackOff"), else "": anything else
+// may be free text and is never reported.
+func launchReasonEnum(reason string) string {
+	if reason == "" || len(reason) > maxLaunchReasonLen {
+		return ""
 	}
+	for _, c := range reason {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return ""
+		}
+	}
+	return reason
+}
+
+// classifyStartError maps a Manager.Start failure to a launch error code,
+// the step the launch failed in, and the report text (design §3.9; wave 3
+// §3 E-d). lastStep is the latest step the launch reached
+// (launchSender.LastStep); the step is a typed failure's own step, else
+// lastStep, else launching. ctx having already expired (DeadlineExceeded)
+// takes precedence: that is ctx', so it means the launch ran out of its
+// budget, which is launch_timeout regardless of the error Start happened to
+// return when it unwound.
+func classifyStartError(ctx context.Context, err error, templateSlug, lastStep string) (code, step, message string) {
+	step = lastStep
+	if step == "" {
+		step = api.LaunchStepLaunching
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if step == api.LaunchStepAwaitingCapacity {
+			// A GKE launch still waiting for node capacity (OQ-E2).
+			return api.LaunchCodeLaunchTimeout, step, "timed out waiting for node capacity"
+		}
+		return api.LaunchCodeLaunchTimeout, step, "launch timed out before the agent started"
+	}
+	code, message = classifyStartErrorCode(err, templateSlug)
+	if code != "" {
+		return code, step, message
+	}
+	var lf *scionrt.LaunchFailure
+	if errors.As(err, &lf) {
+		if text, ok := launchFailureText[lf.Code]; ok {
+			if lf.Step != "" {
+				step = lf.Step
+			}
+			if reason := launchReasonEnum(lf.Reason); reason != "" {
+				text += " (" + reason + ")"
+			}
+			return lf.Code, step, text
+		}
+	}
+	// The same fixed text the synchronous create returns for a
+	// Manager.Start failure (runtimeOpError): the raw error routinely
+	// embeds a container ID, pod name, namespace, image reference or file
+	// path. The full error is logged by runLaunch.
+	return api.LaunchCodeRuntimeError, step, runtimeOpError(opCreateAgent, err).Error()
+}
+
+// classifyStartErrorCode is classifyStartError's cases that do not depend on
+// the launch step or a runtime-typed failure. It returns "" when none
+// matches.
+func classifyStartErrorCode(err error, templateSlug string) (code, message string) {
 	if d, ok := harnessPolicyRefusalFrom(err); ok {
 		return LaunchErrCodeHarnessConfigPolicy, d.Message
 	}
@@ -584,12 +686,12 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// Fixed text, as on the synchronous create, start and restart
 		// paths: a wrapped error can carry runtime detail (container name,
 		// backend message) the client has no entitlement to see.
-		return "name_in_use", agent.ErrContainerNameInUse.Error()
+		return api.LaunchCodeNameInUse, agent.ErrContainerNameInUse.Error()
 	case isRunNameConflict(err):
 		// Another live run holds the agent name, and the runtime deleted
 		// nothing of it (ptone/scion#2550). Fixed text: the wrapped error
 		// names the namespace, object and the other run's ID.
-		return "name_in_use", scionrt.ErrRunConflict.Error()
+		return api.LaunchCodeNameInUse, scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
 		// synchronous create or start returns, with the error naming the
@@ -601,16 +703,12 @@ func classifyStartError(ctx context.Context, err error, templateSlug string) (co
 		// but not err's own text, which can name broker filesystem paths
 		// or a content hash (ptone/scion#3113; see notFoundResourceText).
 		// The full error is logged by runLaunch.
-		return "template_not_found", notFoundMessage(opCreateAgent, err, templateSlug)
+		return api.LaunchCodeTemplateNotFound, notFoundMessage(opCreateAgent, err, templateSlug)
 	case errors.Is(err, config.ErrAgentStateDirUnavailable):
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
 	default:
-		// The same fixed text the synchronous create returns for a
-		// Manager.Start failure (runtimeOpError): the raw error routinely
-		// embeds a container ID, pod name, namespace, image reference or
-		// file path. The full error is logged by runLaunch.
-		return "runtime_error", runtimeOpError(opCreateAgent, err).Error()
+		return "", ""
 	}
 }

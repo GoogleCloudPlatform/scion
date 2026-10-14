@@ -273,8 +273,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	// read access was checked; the artifact service verifies the
 	// capability on every request and never uses a session here.
 	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service; a federated caller is refused on PUT (requireProfileWriter)", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service; a federated caller is refused (requireProfileWriter)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/verify", Kind: ExemptionAuthenticationOnly, Reason: "Account linking verification, self-service; a federated caller is refused (requireProfileWriter)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
@@ -289,7 +287,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/admin/delegation-adoption", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption status; hub system admin on a session or local development credential only (route guard plus handler check). No registered permission, so it cannot be delegated.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/previews", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption preview; read-only planning, hub system admin on a session or local development credential only.", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/admin/delegation-adoption/commits", Kind: ExemptionHubAdmin, Reason: "Delegation-provenance adoption commit (adopt or revert); hub system admin on a session or local development credential only, rechecked in the commit transaction; per-hop mutation audit. Operation contract deferred, as for the other hub-admin exemptions.", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/usage/me", Kind: ExemptionAuthenticationOnly, Reason: "Own usage statistics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/experiments", Kind: ExemptionAuthenticationOnly, Reason: "Resolved experiments map for signed-in callers, no resource-level authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/profiling", Kind: ExemptionAuthenticationOnly, Reason: "Profiling switches for signed-in callers (one boolean), no resource-level authorization", Owner: "route_metadata.go"},
 
@@ -333,8 +330,8 @@ var EntryPointExemptions = []EntryPointExemption{
 	// enforcement. Exemptions removed; see Catalog OperationSpec entries.
 
 	// Access constraint preview endpoints — hub-admin, access_constraint.admin permission
-	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; PR #1445 B5 governance", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/access-constraint-previews", Kind: ExemptionHubAdmin, Reason: "Access constraint previews, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/admin/access-constraint-previews/", Kind: ExemptionHubAdmin, Reason: "Access constraint preview by ID, hub-admin with access_constraint.admin; a preview precedes each governed boundary commit", Owner: "route_metadata.go"},
 	{Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", Kind: ExemptionAuthenticationOnly, Reason: "Live access-constraint history, inline resource-scoped hub.audit.read check with privacy-preserving not-found denial", Owner: "handlers_access_constraints.go"},
 	{Pattern: "/api/v1/admin/effective-access", Kind: ExemptionAuthenticationOnly, Reason: "Admin effective-access composition, inline hub.audit.read check", Owner: "route_metadata.go"},
 }
@@ -361,15 +358,15 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_agent_delegation_manage.go", Function: "agentDelegatedCredentialPurgeHandler", Symbol: "PurgeAgentDelegatedCredentials", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled deletion of delegated credential rows whose expiry is more than the retention period in the past; such a credential is already refused at use, so the deletion changes no authorization outcome", Scope: "pkg/hub/handlers_agent_delegation_manage.go"}},
 	// -----------------------------------------------------------------------
 	// Project visitor grants (ptone/scion#4603): the grant routes, and first
-	// contact in the auth middleware's visitor lookup.
+	// contact in the auth middleware's visitor lookup. The revoke route's
+	// delete, and its exclusion of a visitor from the rule that bound them,
+	// are in the membership service (RemoveVisitor), below.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_project_visitors.go", Function: "grantProjectVisitor", Symbol: "CreateVisitorRoleBinding", OperationID: "project.visitors.add"},
 	{File: "pkg/hub/handlers_project_visitors.go", Function: "handleUpdateProjectVisitor", Symbol: "UpdateVisitorRoleBindingWindow", OperationID: "project.visitors.update"},
-	{File: "pkg/hub/handlers_project_visitors.go", Function: "handleRemoveProjectVisitor", Symbol: "DeleteRoleBinding", OperationID: "project.visitors.remove"},
 	{File: "pkg/hub/federation_visitor.go", Function: "linkPendingVisitor", Symbol: "LinkPendingFederatedUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "First contact during federated authentication: a verified issuer token for a user of an issuer that allows visitor grants, with a present and (where the issuer sends it) verified email, links its subject to the pending federated account a project owner granted that email, or to a new account when a project owner's visitor rule matches the email's domain, and activates it; the visitor_linked audit record is written in the same transaction. The link itself adds no grant", Scope: "pkg/hub/federation_visitor.go"}},
 	{File: "pkg/hub/federation_visitor.go", Function: "bindVisitorRules", Symbol: "CreateVisitorRoleBinding", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Visitor rule binding during federated authentication: for a verified issuer token for a user of an issuer that allows visitor grants, with a present and (where the issuer sends it) verified email that passes the issuer's allowed_emails and allowed_domains, it binds the linked federated account to the project-visitor role on each project whose active visitor rule (added by a holder of project.manage_visitors under project.visitors.rules.add) names that issuer and exactly the email's domain, unless the account has an exclusion from the rule or already has a visitor binding there other than an inactive visitor grant by email. The store refuses a rule that is missing or not active when the binding is written, and gives the binding the rule's ID and its window as read in the same transaction; a visitor_linked audit record naming the rule is written in the same transaction. It grants nothing the rule did not", Scope: "pkg/hub/federation_visitor.go"}},
 	{File: "pkg/hub/federation_visitor.go", Function: "bindVisitorRules", Symbol: "DeleteInactiveVisitorGrant", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Visitor rule binding during federated authentication: when the linked federated account's only visitor binding on the rule's project is a visitor grant by email whose window does not contain the current time (expired or not started), that grant is deleted, after the store re-reads and re-checks it in the same transaction, and replaced by the rule's binding; the visitor_linked audit record names the replaced binding. An active grant by email is never deleted, and the transaction rolls back if the rule binding is then refused, so no access is lost", Scope: "pkg/hub/federation_visitor.go"}},
-	{File: "pkg/hub/handlers_project_visitors.go", Function: "handleRemoveProjectVisitor", Symbol: "CreateProjectVisitorExclusion", OperationID: "project.visitors.remove"},
 	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleAddProjectVisitorRule", Symbol: "CreateProjectVisitorRule", OperationID: "project.visitors.rules.add"},
 	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleUpdateProjectVisitorRule", Symbol: "UpdateProjectVisitorRuleWindow", OperationID: "project.visitors.rules.update"},
 	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleRemoveProjectVisitorRule", Symbol: "DeleteProjectVisitorRule", OperationID: "project.visitors.rules.remove"},
@@ -382,6 +379,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_membership_service.go", Function: "UpdateMemberRole", Symbol: "CreateRoleBinding", OperationID: "project.membership.update"},
 	{File: "pkg/hub/project_membership_service.go", Function: "UpdateMemberRole", Symbol: "DeleteRoleBinding", OperationID: "project.membership.update"},
 	{File: "pkg/hub/project_membership_service.go", Function: "RemoveMember", Symbol: "DeleteRoleBinding", OperationID: "project.membership.remove"},
+	{File: "pkg/hub/project_membership_service.go", Function: "RemoveVisitor", Symbol: "DeleteRoleBinding", OperationID: "project.visitors.remove"},
+	{File: "pkg/hub/project_membership_service.go", Function: "RemoveVisitor", Symbol: "CreateProjectVisitorExclusion", OperationID: "project.visitors.remove"},
 	{File: "pkg/hub/project_membership_service.go", Function: "TransferOwnership", Symbol: "CreateRoleBinding", OperationID: "project.membership.transfer"},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement used by AddMember/UpdateMemberRole/TransferOwnership; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement cleanup; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
@@ -421,7 +420,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_roles.go", Function: "deleteRoleDefinition", Symbol: "DeleteRoleDefinition", OperationID: "role.definition.delete"},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/access_constraint_governance*.go — B5 transactional governance
+	// pkg/hub/access_constraint_governance*.go — transactional governance
 	// PR #1445 moved store mutations from handlers to the governance layer.
 	// Audited creates run in the dedicated transactional helper; updates,
 	// deletes, compensations, and role-binding changes remain in the core file.
@@ -432,9 +431,8 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "CreateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "UpdateAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
 	{File: "pkg/hub/access_constraint_governance.go", Function: "compensateAuditFailure", Symbol: "DeleteAccessConstraint", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Governance compensating action: restores constraint after audit failure", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "B5 §5 atomic role binding replacement; exported GovernanceService method reachable only from access_constraint.admin-guarded handler paths; enforces lockout invariant independently on admin-role downgrades", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "B5 §5 atomic role binding replacement; exported GovernanceService method reachable only from access_constraint.admin-guarded handler paths; enforces lockout invariant independently on admin-role downgrades", Scope: "pkg/hub/access_constraint_governance.go"}},
-	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "B5 §5 atomic role binding replacement compensating delete: rolls back newly created binding when old-binding deletion fails, preventing dual-active-binding inconsistency", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
+	{File: "pkg/hub/access_constraint_governance.go", Function: "ReplaceRoleBinding", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "role binding replacement in one transaction; exported GovernanceService method with no non-test caller, so a route that wires it must guard it with access_constraint.admin; when the replace removes or moves an admin binding it runs the lockout check under the admin-guard lock", Scope: "pkg/hub/access_constraint_governance.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/access_constraint_recovery.go — constraint recovery operations

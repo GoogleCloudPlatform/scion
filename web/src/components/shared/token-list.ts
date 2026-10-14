@@ -210,6 +210,27 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'agent:set_message_mode',
+    label: 'agent:set_message_mode',
+    description: 'Change agent message mode',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:stop_all',
+    label: 'agent:stop_all',
+    description: 'Stop all agents',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:update',
+    label: 'agent:update',
+    description: 'Update agents (metadata, configuration, status, workspace sync)',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
     value: 'artifact:create',
     label: 'artifact:create',
     description: 'Publish artifacts',
@@ -249,6 +270,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'broker:read',
     description: 'Read brokers',
     resource: 'broker',
+    isAlias: false,
+  },
+  {
+    value: 'federation_token:mint',
+    label: 'federation_token:mint',
+    description:
+      'Obtain a short-lived user access credential for yourself to present to a peer hub',
+    resource: 'federation_token',
     isAlias: false,
   },
   {
@@ -481,7 +510,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:
-      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)',
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)',
     resource: 'test_identity',
     isAlias: false,
   },
@@ -489,7 +518,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue_admin',
     label: 'test_identity:issue_admin',
     description:
-      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with the test admin gate); held only by super-admin',
+      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin); held only by super-admin',
     resource: 'test_identity',
     isAlias: false,
   },
@@ -591,6 +620,34 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'project:set_messaging_policy',
     description: 'Set project cross-project messaging policy (owner/admin only)',
     resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'quota:create',
+    label: 'quota:create',
+    description: 'Create limit definitions and entitlement bindings',
+    resource: 'quota',
+    isAlias: false,
+  },
+  {
+    value: 'quota:delete',
+    label: 'quota:delete',
+    description: 'Delete limit definitions and entitlement bindings',
+    resource: 'quota',
+    isAlias: false,
+  },
+  {
+    value: 'quota:read',
+    label: 'quota:read',
+    description: 'Read limit definitions, entitlements, and usage',
+    resource: 'quota',
+    isAlias: false,
+  },
+  {
+    value: 'quota:update',
+    label: 'quota:update',
+    description: 'Update limit definitions, entitlement bindings and broker settings',
+    resource: 'quota',
     isAlias: false,
   },
   {

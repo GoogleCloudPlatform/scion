@@ -42,12 +42,12 @@ import (
 //
 // Every path that posts an agent's message into a group conversation calls
 // agentGroupPostDecision, and every path that writes an agent participant
-// row into a group conversation calls groupAgentJoinAllowed. A future
-// delivery path for agent posts (for example, delivery to a thread's
-// default agent) must call both: agentGroupPostDecision for the sender
-// before anything is written, then the pairwise authorizeAgentMessage for
-// each delivered agent, and groupAgentJoinAllowed before registering any
-// of them as a participant.
+// row into a group conversation calls groupAgentJoinAllowed. Every
+// delivery path for agent posts (mention fan-out, and delivery to the
+// conversation's default agent in wakeGroupDefaultAgent) calls both:
+// agentGroupPostDecision for the sender before anything is written, then
+// the pairwise authorizeAgentMessage for each delivered agent, and
+// groupAgentJoinAllowed before registering any of them as a participant.
 
 // groupPostDecision is the result of agentGroupPostDecision.
 type groupPostDecision struct {

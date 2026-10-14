@@ -35,7 +35,7 @@
  * what the hub dispatches, one case per tier (template, project, hub).
  */
 
-import type { AgentResourceSpec, TemplateConfig } from './types.js';
+import type { AgentResourceSpec, TemplateAgentConfig } from './types.js';
 
 /** An inherited value shown as a placeholder, with where it comes from. */
 export interface AgentConfigPlaceholder {
@@ -83,7 +83,7 @@ export interface HubPublicDefaults {
 /** What the overlay reads: only values the page fetched. */
 export interface InheritedSources {
   /** The chosen template, as the template list returns it. */
-  template?: { image?: string | undefined; config?: TemplateConfig | undefined } | null | undefined;
+  template?: { agentConfig?: TemplateAgentConfig | undefined } | null | undefined;
   projectSettings?: ProjectCreateDefaults | null | undefined;
   hubSettings?: HubPublicDefaults | null | undefined;
 }
@@ -111,31 +111,36 @@ const RESOURCE_KEYS: ReadonlyArray<{
  * The order per field follows the hub's create path
  * (pkg/hub/handlers_agent_create_helpers.go, project_settings_handlers.go,
  * hub_agent_defaults.go):
- * - model: project, then hub, then template (the hub's SCION_MODEL).
+ * - model: project, then template, then hub (the hub's SCION_MODEL). The
+ *   template's model is its agentConfig snapshot's (ptone/scion#4222).
  * - thinking level, harness auth, limits, resources: project. The
  *   template's and the hub's values for these are not readable here.
  * - agent role: the project default, capped by the project maximum, as the
  *   hub caps it (see inheritedAgentRole).
- * - image, message mode: template (the image is resolved by the broker, with
- *   the template ahead of the harness config).
+ * - message mode: the template's agentConfig message_mode. The row's
+ *   config is not read: the hub backfills the snapshot for every template.
  * - telemetry: the project setting is an override, applied even over a value
- *   set here; otherwise the template's. The hub-wide public telemetry
- *   setting is not applied at create, so it is not shown.
- * - auto-expose ports: project, then the template's env, then the hub
- *   default (a harness config's env, not readable here, sits between the
- *   template and the hub).
+ *   set here. A template sets no telemetry (ptone/scion#4524), and the
+ *   hub-wide public telemetry setting is not the hub's dispatched telemetry
+ *   config, so neither is shown.
+ * - auto-expose ports: project, then the hub default (a harness config's
+ *   env, not readable here, sits between them). A template's
+ *   SCION_AUTO_EXPOSE_PORTS is a reserved key and is ignored.
+ * - image: not shown. A template image is an environment key the agent
+ *   ignores; the broker resolves the image from settings and the harness
+ *   config.
  */
 export function resolveInheritedPlaceholders(
   sources: InheritedSources
 ): Record<string, AgentConfigPlaceholder> {
   const out: Record<string, AgentConfigPlaceholder> = {};
-  const tc = sources.template?.config;
+  const tc = sources.template?.agentConfig;
   const ps = sources.projectSettings ?? {};
   const hub = sources.hubSettings ?? {};
 
   if (ps.defaultModel) out['config.model'] = { value: ps.defaultModel, source: FROM_PROJECT };
-  else if (hub.defaultModel) out['config.model'] = { value: hub.defaultModel, source: FROM_HUB };
   else if (tc?.model) out['config.model'] = { value: tc.model, source: FROM_TEMPLATE };
+  else if (hub.defaultModel) out['config.model'] = { value: hub.defaultModel, source: FROM_HUB };
 
   if (typeof ps.defaultThinkingLevel === 'number') {
     out['config.thinking_level'] = { value: String(ps.defaultThinkingLevel), source: FROM_PROJECT };
@@ -164,9 +169,7 @@ export function resolveInheritedPlaceholders(
   const role = inheritedAgentRole(ps.defaultAgentRole, ps.maxAgentRole);
   if (role) out.agentRole = { value: role, source: FROM_PROJECT };
 
-  const image = tc?.image || sources.template?.image;
-  if (image) out['config.image'] = { value: image, source: FROM_TEMPLATE };
-  if (tc?.messageMode) out.messageMode = { value: tc.messageMode, source: FROM_TEMPLATE };
+  if (tc?.message_mode) out.messageMode = { value: tc.message_mode, source: FROM_TEMPLATE };
 
   if (typeof ps.telemetryEnabled === 'boolean') {
     out['config.telemetry'] = {
@@ -174,15 +177,10 @@ export function resolveInheritedPlaceholders(
       source: PROJECT_OVERRIDE,
       override: true,
     };
-  } else if (typeof tc?.telemetry?.enabled === 'boolean') {
-    out['config.telemetry'] = { value: String(tc.telemetry.enabled), source: FROM_TEMPLATE };
   }
 
-  const templateAutoExpose = tc?.env?.SCION_AUTO_EXPOSE_PORTS;
   if (typeof ps.autoExposePortsEnabled === 'boolean') {
     out.autoExpose = { value: String(ps.autoExposePortsEnabled), source: FROM_PROJECT };
-  } else if (templateAutoExpose === 'true' || templateAutoExpose === 'false') {
-    out.autoExpose = { value: templateAutoExpose, source: FROM_TEMPLATE };
   } else if (typeof hub.autoExposePortsEnabled === 'boolean') {
     out.autoExpose = {
       value: String(hub.autoExposePortsEnabled),

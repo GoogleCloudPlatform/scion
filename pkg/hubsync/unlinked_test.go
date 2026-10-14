@@ -97,8 +97,6 @@ func TestEnsureHubReady_UnlinkedProjectRefuses(t *testing.T) {
 
 			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 				EndpointOverride: server.URL,
-				SkipSync:         true,
-				AutoLinkLocal:    true,
 				AutoConfirm:      true,
 			})
 			if !errors.Is(err, ErrProjectUnlinked) {
@@ -132,7 +130,7 @@ func TestEnsureHubReady_UnlinkRelinkRoundTrip(t *testing.T) {
 	setupUnregisteredGlobalProject(t, home, projectID)
 	globalDir := filepath.Join(home, ".scion")
 	withPromptIO(t, strings.NewReader(""), false)
-	opts := EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true, AutoLinkLocal: true}
+	opts := EnsureHubReadyOptions{EndpointOverride: server.URL}
 
 	// Linked: works.
 	if err := config.UpdateSetting(globalDir, "hub.linked", "true", true); err != nil {
@@ -171,7 +169,7 @@ func TestEnsureHubReady_UnlinkedSkippedInHubContainer(t *testing.T) {
 	unlinkGlobalProject(t, filepath.Join(home, ".scion"))
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 
-	if _, err := EnsureHubReady("", EnsureHubReadyOptions{SkipSync: true}); errors.Is(err, ErrProjectUnlinked) {
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{}); errors.Is(err, ErrProjectUnlinked) {
 		t.Fatalf("hub-connected container got ErrProjectUnlinked")
 	}
 }
@@ -292,8 +290,6 @@ func TestEnsureHubReady_UnlinkedSplitStorageProject(t *testing.T) {
 
 	_, err := EnsureHubReady("", EnsureHubReadyOptions{
 		EndpointOverride: server.URL,
-		SkipSync:         true,
-		AutoLinkLocal:    true,
 		AutoConfirm:      true,
 	})
 	if !errors.Is(err, ErrProjectUnlinked) {
@@ -310,7 +306,7 @@ func TestEnsureHubReady_UnlinkedSplitStorageProject(t *testing.T) {
 	if err := config.UpdateSetting(scionDir, "hub.linked", "true", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true, AutoLinkLocal: true}); err != nil {
+	if _, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL}); err != nil {
 		t.Fatalf("after re-link: %v", err)
 	}
 }
@@ -350,10 +346,11 @@ func registerTestHubCtx(t *testing.T, projectDir, projectID string) *HubContext 
 	return &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID, ProjectPath: projectDir}
 }
 
-// TestRegisterProject_RecordsLink checks that registration records
-// hub.linked=true, as 'scion hub link' does, so 'scion hub unlink' works
-// for projects linked by the preflight.
-func TestRegisterProject_RecordsLink(t *testing.T) {
+// TestFinishAutoLink_RecordsLink checks that a link made by the preflight
+// records hub.linked=true, as 'scion hub link' does, so 'scion hub unlink'
+// works for it. registerProject itself leaves it to finishAutoLink, so a
+// deferred import is retried.
+func TestFinishAutoLink_RecordsLink(t *testing.T) {
 	clearHubCredentialEnv(t)
 	projectDir := filepath.Join(t.TempDir(), "proj", ".scion")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
@@ -365,15 +362,19 @@ func TestRegisterProject_RecordsLink(t *testing.T) {
 	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
 		t.Fatalf("registerProject: %v", err)
 	}
+	if linked := ProjectLinkedSetting(projectDir, false); linked != nil {
+		t.Fatalf("registerProject wrote hub.linked = %v; finishAutoLink records it", *linked)
+	}
+	finishAutoLink(hubCtx, true)
 	linked := ProjectLinkedSetting(projectDir, false)
 	if linked == nil || !*linked {
 		t.Fatalf("hub.linked = %v, want true", linked)
 	}
 }
 
-// TestRegisterProject_LinkWriteFailureWarns checks that a failure to record
-// hub.linked is a warning: registration still succeeds.
-func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
+// TestFinishAutoLink_LinkWriteFailureWarns checks that a failure to record
+// hub.linked is a warning, not an error.
+func TestFinishAutoLink_LinkWriteFailureWarns(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
 	}
@@ -382,7 +383,7 @@ func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out := withPromptIO(t, strings.NewReader(""), false)
+	_, warn := captureImportOutput(t)
 	hubCtx := registerTestHubCtx(t, projectDir, "register-fail-id")
 	// A read-only project directory makes the settings write fail.
 	if err := os.Chmod(projectDir, 0o555); err != nil {
@@ -390,13 +391,8 @@ func TestRegisterProject_LinkWriteFailureWarns(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
 
-	if err := registerProject(context.Background(), hubCtx, "proj", false); err != nil {
-		t.Fatalf("registerProject must succeed when only the linked write fails: %v", err)
-	}
-	if !strings.Contains(out.String(), "Warning: failed to save linked state") {
-		t.Errorf("missing warning; output:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "Linked to existing project") {
-		t.Errorf("registration output missing; output:\n%s", out.String())
+	finishAutoLink(hubCtx, true)
+	if !strings.Contains(warn.String(), "failed to record the hub link") {
+		t.Errorf("missing warning; output:\n%s", warn.String())
 	}
 }

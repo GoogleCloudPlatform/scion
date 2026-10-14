@@ -25,8 +25,73 @@ import (
 // of the current environment variables. It warns to stderr if a variable is unset.
 // It returns the expanded string and a boolean indicating if any warning was printed.
 func ExpandEnv(s string) (string, bool) {
-	warned := false
-	expanded := os.Expand(s, func(key string) string {
+	expanded, warned, _ := ExpandEnvRefusing(s, nil)
+	return expanded, warned
+}
+
+// serverEnvPrefix is the env prefix reserved for server (hub, broker, web)
+// configuration. Every server credential lives under it.
+const serverEnvPrefix = "SCION_SERVER_"
+
+// legacyServerSecretEnvNames are server credential names that predate
+// serverEnvPrefix and are still read by the server.
+var legacyServerSecretEnvNames = map[string]bool{
+	"SESSION_SECRET": true,
+}
+
+// IsServerSecretEnvName reports whether name is reserved for the server
+// process: any SCION_SERVER_ name, or a legacy server credential name. Values
+// of these names are never copied from the host env into an agent.
+func IsServerSecretEnvName(name string) bool {
+	return strings.HasPrefix(name, serverEnvPrefix) || legacyServerSecretEnvNames[name]
+}
+
+// hostCredentialEnvNames are env names holding this process's own hub
+// credentials. An agent receives its own token through its start options and
+// token file, never from this process's env.
+var hostCredentialEnvNames = map[string]bool{
+	"SCION_DEV_TOKEN":  true,
+	"SCION_AUTH_TOKEN": true,
+}
+
+// IsAgentRefusedHostEnvName reports whether the host env value of name must
+// never reach anything an agent can see (its env, its mount paths): every
+// server-reserved name (IsServerSecretEnvName) and this process's own hub
+// credentials. It is the single predicate for every host-to-agent path.
+func IsAgentRefusedHostEnvName(name string) bool {
+	return IsServerSecretEnvName(name) || hostCredentialEnvNames[name]
+}
+
+// EnvWithoutAgentRefusedNames returns env (KEY=VALUE entries, as from
+// os.Environ) without the entries whose name IsAgentRefusedHostEnvName
+// refuses, for a child process that must not inherit them.
+func EnvWithoutAgentRefusedNames(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if IsAgentRefusedHostEnvName(name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// ExpandEnvRefusing is ExpandEnv, except that every variable for which refuse
+// reports true expands to the empty string without reading the environment.
+// Refused names are returned (deduplicated, in first-seen order) so callers
+// can log them; values are never returned or logged. A refused name does not
+// count as unset, so it sets no warning.
+func ExpandEnvRefusing(s string, refuse func(string) bool) (expanded string, warned bool, refused []string) {
+	seen := map[string]bool{}
+	expanded = os.Expand(s, func(key string) string {
+		if refuse != nil && refuse(key) {
+			if !seen[key] {
+				seen[key] = true
+				refused = append(refused, key)
+			}
+			return ""
+		}
 		val, ok := os.LookupEnv(key)
 		if !ok {
 			fmt.Fprintf(os.Stderr, "Warning: environment variable %q is not set\n", key)
@@ -35,7 +100,7 @@ func ExpandEnv(s string) (string, bool) {
 		}
 		return val
 	})
-	return expanded, warned
+	return expanded, warned, refused
 }
 
 // FirstNonEmpty returns the first non-empty string from the given slice.

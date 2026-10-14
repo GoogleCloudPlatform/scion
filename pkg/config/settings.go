@@ -17,6 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,12 +294,28 @@ func expandEnvMap(m map[string]string) map[string]string {
 	}
 	expanded := make(map[string]string)
 	for k, v := range m {
-		ek, _ := util.ExpandEnv(k)
+		// These maps become agent env, so names refused for agents
+		// (util.IsAgentRefusedHostEnvName) expand to empty.
+		ek, _, refusedInKey := util.ExpandEnvRefusing(k, util.IsAgentRefusedHostEnvName)
+		val, _, refusedInValue := util.ExpandEnvRefusing(v, util.IsAgentRefusedHostEnvName)
+		for _, name := range append(refusedInKey, refusedInValue...) {
+			slog.Warn("settings env: host environment variable is reserved for the server and is not expanded", "variable", name)
+		}
 		if ek == "" {
 			continue
 		}
-		val, _ := util.ExpandEnv(v)
 		expanded[ek] = val
+	}
+	return expanded
+}
+
+// expandAgentVisiblePath expands ${VAR} references in a path an agent can see,
+// with names refused for agents (util.IsAgentRefusedHostEnvName) expanding to
+// empty and logged by name.
+func expandAgentVisiblePath(path string) string {
+	expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
+	for _, name := range refused {
+		slog.Warn("settings volume: host environment variable is reserved and is not expanded", "variable", name)
 	}
 	return expanded
 }
@@ -309,8 +326,10 @@ func expandVolumeMounts(volumes []api.VolumeMount) []api.VolumeMount {
 	}
 	expanded := make([]api.VolumeMount, len(volumes))
 	for i, v := range volumes {
-		s, _ := util.ExpandEnv(v.Source)
-		t, _ := util.ExpandEnv(v.Target)
+		// Mount paths are visible to the agent, so names refused for
+		// agents expand to empty.
+		s := expandAgentVisiblePath(v.Source)
+		t := expandAgentVisiblePath(v.Target)
 		expanded[i] = api.VolumeMount{
 			Source:   s,
 			Target:   t,
@@ -814,25 +833,18 @@ func (s *Settings) IsHubConfigured() bool {
 	return s.Hub != nil && s.Hub.Endpoint != ""
 }
 
-// IsHubEnabled returns true if Hub integration is enabled.
-// Hub is considered enabled when:
-//  1. Hub credentials (token or apiKey) AND an endpoint are present.
-//     Credentials imply intent to use the hub and override any
-//     hub.enabled setting from config files. OR
-//  2. hub.enabled is explicitly set to true (without credentials).
-//
-// This allows users with SCION_HUB_TOKEN and SCION_HUB_ENDPOINT env vars
-// to interact with the hub without requiring an explicit hub.enabled=true,
-// even if a stale hub.enabled=false exists in a settings file.
+// IsHubEnabled reports the legacy hub.enabled switch: credentials plus an
+// endpoint, or hub.enabled=true. Deprecated: the CLI no longer reads it (a
+// configured endpoint is what counts); it remains only for the agent
+// manager's non-broker start path, which is removed with the local-mode
+// engine cleanup.
 func (s *Settings) IsHubEnabled() bool {
 	if s.Hub == nil {
 		return false
 	}
-	// Credentials + endpoint present: always enabled (env vars override config)
 	if s.Hub.Endpoint != "" && (s.Hub.Token != "" || s.Hub.APIKey != "") {
 		return true
 	}
-	// Fall back to explicit hub.enabled setting
 	return s.Hub.Enabled != nil && *s.Hub.Enabled
 }
 
@@ -846,12 +858,6 @@ func (s *Settings) IsHubLinked() bool {
 // Returns false if not configured (nil) or enabled.
 func (s *Settings) IsHubExplicitlyDisabled() bool {
 	return s.Hub != nil && s.Hub.Enabled != nil && !*s.Hub.Enabled
-}
-
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-// When true, Hub sync checks will error with guidance to use --no-hub.
-func (s *Settings) IsHubLocalOnly() bool {
-	return s.Hub != nil && s.Hub.LocalOnly != nil && *s.Hub.LocalOnly
 }
 
 // DeleteHubConnection removes a hub connection entry from settings at the specified scope.

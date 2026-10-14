@@ -435,6 +435,23 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"k8s bad ksa":       {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: Bad_KSA}}}"), false},
 		"docker block sa":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_block_service_account: zero-priv}}"), false},
 		"docker mappings":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, kubernetes_service_account_mappings: {agent@proj.iam.gserviceaccount.com: ksa-agent}}}"), false},
+		"k8s shared dir":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_class: rwx, shared_dir_size: 40Gi}}"), true},
+		"k8s bad size":      {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_size: 40GB}}"), false},
+		"k8s numeric size":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_size: 40}}"), false},
+		"docker sd class":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, shared_dir_storage_class: rwx}}"), false},
+		"docker sd size":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, shared_dir_size: 40Gi}}"), false},
+		"reserved target":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, gke: true}}"), false},
+		"agent defaults":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: r, clone_depth: full}}"), true},
+		"ad int depth":      {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {clone_depth: 5}}"), true},
+		"ad bad depth":      {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {clone_depth: shallow}}"), false},
+		"ad unknown key":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {template: t}}"), false},
+		"ad ho unknown":     {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {imag: i}}}}"), false},
+		"ad num registry":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: 5}}"), false},
+		"ad ho bad policy":  {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {image_pull_policy: Sometimes}}}}"), false},
+		"ad ho bad auth":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {auth_selected_type: magic}}}}"), false},
+		"ad ho valid":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {image_pull_policy: Never, auth_selected_type: api-key}}}}"), true},
+		"ad num env":        {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {env: {A: 1}}}}}"), false},
+		"unknown target":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, bogus: 1}}"), false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

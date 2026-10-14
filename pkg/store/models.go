@@ -168,6 +168,9 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -582,7 +585,11 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). The input is never mutated.
+// ResponseView/MarshalJSON above). ClearedFields is dropped for every
+// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// entries name env keys a viewer without attach access must not learn, and
+// leaving it out means a GET echoed back into a PATCH never carries it. The
+// input is never mutated.
 //
 // This redaction lives here, in the response-view copy, and deliberately
 // not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
@@ -601,6 +608,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		return nil
 	}
 	copied := *cfg
+	copied.ClearedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -1128,6 +1136,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): the hub telemetry default in
+	// HubAgentDefaults.Telemetry and the project telemetry policy in
+	// TelemetryPolicy on create, start and restart. Only for such a broker
+	// does the hub stop writing those values into InlineConfig
+	// (ptone/scion#4222). Refreshed by every heartbeat.
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1370,8 +1385,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"
@@ -2071,7 +2089,27 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent. Rows
+	// stored before attempts were recorded read 0.
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is NotificationOutcomeDelivered, NotificationOutcomeFailed,
+	// or empty when no outcome is recorded (pending, in flight, or a row
+	// stored before outcomes were recorded, whose Dispatched flag keeps its
+	// old meaning).
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
+
+// Notification.DispatchOutcome values.
+const (
+	// NotificationOutcomeDelivered: the notification was delivered to its
+	// subscriber agent.
+	NotificationOutcomeDelivered = "delivered"
+	// NotificationOutcomeFailed: dispatch gave up without delivering, either
+	// because retries were exhausted (notificationRetryMaxAge in pkg/hub) or
+	// because the subscription, subscriber or watched agent is gone. The row
+	// stays dispatched so the sweep does not retry it.
+	NotificationOutcomeFailed = "failed"
+)
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {

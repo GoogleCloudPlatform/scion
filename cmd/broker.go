@@ -534,7 +534,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// The global directory is a local pseudo-project: never offer to link
 	// it, which would create a hub project named "global" (ptone/scion#3534).
-	if !projectLinked && !settings.IsHubEnabled() && !isGlobal {
+	if !projectLinked && !hubConfigured(settings) && !isGlobal {
 		// Project not linked - offer to link first
 		if hubsync.ShowLinkBeforeRegisterPrompt(projectName, autoConfirm) {
 			// Run the link flow
@@ -650,14 +650,16 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// --global register (or one resolved to the global directory) skips this
 	// step instead of offering, and creating, a hub project named "global"
 	// (ptone/scion#3534).
-	if shouldOfferProjectProvider(projectID, settings.IsHubEnabled(), isGlobal) {
+	if shouldOfferProjectProvider(projectID, hubConfigured(settings), isGlobal) {
 		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
+			gitRemote := util.GetGitRemote()
 			req := &hubclient.RegisterProjectRequest{
 				ID:        projectID,
 				Name:      projectName,
 				Path:      resolvedPath,
 				BrokerID:  brokerID,
-				GitRemote: util.NormalizeGitRemote(util.GetGitRemote()),
+				GitRemote: util.NormalizeGitRemote(gitRemote),
+				Labels:    hubsync.LinkedProjectLabels(endpoint, gitRemote),
 			}
 
 			resp, err := client.Projects().Register(ctx, req)

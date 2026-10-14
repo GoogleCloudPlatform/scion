@@ -392,17 +392,23 @@ func (s *Server) visitorGrantNonAmplification(w http.ResponseWriter, ctx context
 }
 
 // actorHoldsVisitorPermissions reports whether actor holds every
-// permission of the project-visitor role on projectID. An unscoped local
-// platform admin does, as in CanDelegate.
+// permission of the project-visitor role on projectID, decided by
+// CanDelegate for a binding of that role at the project's scope. The
+// descriptor names no grantee: CanDelegate refuses a federated grantee on
+// the paths it gates, and the visitor routes are the path that binds one.
 func (s *Server) actorHoldsVisitorPermissions(ctx context.Context, actor UserIdentity, projectID string) (bool, error) {
-	if IsUnscopedLocalPlatformAdmin(actor) {
-		return true, nil
-	}
 	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
 	if err != nil {
 		return false, err
 	}
-	return s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID).Allowed, nil
+	decision := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:             GrantTypeRoleBinding,
+		RoleDefinitionID: rd.ID,
+		RolePermissions:  rd.Permissions,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	return decision.Allowed, nil
 }
 
 // visitorWindowExtends reports whether the window (newNotBefore,
@@ -440,7 +446,11 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	var out ProjectVisitor
+	var (
+		out      ProjectVisitor
+		updated  *store.RoleBinding
+		narrowed bool
+	)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		u, before, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
 		if err != nil {
@@ -452,7 +462,10 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
 			return errVisitorWindowNotAmplifiable
 		}
-		updated, err := tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
+		// The old window admits a time the new one does not: a later or
+		// added start, or an earlier or added expiry.
+		narrowed = visitorWindowExtends(req.NotBefore, req.ExpiresAt, before.NotBefore, before.ExpiresAt)
+		updated, err = tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
 		}
@@ -479,43 +492,31 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeVisitorItemError(w, err)
 		return
 	}
+	// A narrower window can end the visitor's authorization, so once the
+	// change has committed the visitor's conduit streams on the project
+	// are re-checked. A window that only widens ends nothing.
+	if narrowed {
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(updated))
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. Revoking
-// a binding a visitor rule created also records an exclusion of the
-// visitor from that rule, in the same transaction, so the rule does not
-// create the binding again; the rule's other visitors are unchanged. When
-// the rule no longer exists the binding is removed with no exclusion.
+// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. The
+// membership service revokes the grant, and for a binding a visitor rule
+// created also excludes the visitor from that rule in the same
+// transaction; once that has committed, the conduit streams of the
+// visitor on the project are re-checked.
 func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, actor UserIdentity, visitorID string) {
-	ctx := r.Context()
-	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		u, rb, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
-		if err != nil {
-			return err
-		}
-		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
-			return err
-		}
-		if rb.SourceRuleID != nil {
-			// A binding whose rule no longer exists is still removed;
-			// with no rule there is nothing to exclude the visitor from.
-			err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actor.ID())
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return err
-			}
-		}
-		subject, err := federationSubjectOf(ctx, tx, u.ID)
-		if err != nil {
-			return err
-		}
-		return writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRevoke, project.ID,
-			visitorAuditSummary(u, rb, subject), nil)
-	})
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+	removed, err := s.membershipService.RemoveVisitor(r.Context(), project.ID, visitorID, actor.ID())
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(removed))
 	w.WriteHeader(http.StatusNoContent)
 }
 

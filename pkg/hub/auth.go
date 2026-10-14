@@ -127,7 +127,7 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
-	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
+	// TestIdentitiesEnabled mirrors --test-mode (member or above). The JWT arm's
 	// per-request user-row block refuses every test-fixture row while it is
 	// false, and an expired one while it is true (testFixtureRejection).
 	// When it is true a UserStore is required: without one the row block
@@ -212,6 +212,10 @@ func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
 // body. Infrastructure failures remain unchanged.
 type constraintAuditAuthFailureWriter struct {
 	http.ResponseWriter
+	// header is the response header map as it was when the writer was
+	// wrapped. A normalized response carries exactly these headers plus
+	// the not-found response's own.
+	header     http.Header
 	normalized bool
 }
 
@@ -222,6 +226,11 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 	switch statusCode {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
 		w.normalized = true
+		h := w.Header()
+		clear(h)
+		for k, v := range w.header {
+			h[k] = v
+		}
 		NotFound(w.ResponseWriter, "Access Constraint")
 		return
 	}
@@ -237,7 +246,7 @@ func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
 
 func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
 	if isConstraintAuditAuthFailureRoute(r) {
-		return &constraintAuditAuthFailureWriter{ResponseWriter: w}
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w, header: w.Header().Clone()}
 	}
 	return w
 }
@@ -328,7 +337,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						var refusal agentTokenRefusal
 						ctx, refusal = verifyAgentTokenCredential(ctx, cfg, log, claims, runScopeRequestFrom(r), runScopeSourceHTTP)
 						if refusal != agentTokenAccepted {
-							writeAgentTokenRefusal(w, refusal)
+							writeAgentTokenRefusal(ctx, w, log, refusal, claims.Subject)
 							return
 						}
 
@@ -345,8 +354,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
 						// Agent token header was present but invalid
-						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-							"invalid agent token: "+err.Error(), nil)
+						refuseAgentToken(ctx, w, log, agentTokenCauseInvalidToken, "error", err)
 						return
 					}
 				}

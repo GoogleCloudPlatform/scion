@@ -47,7 +47,8 @@ Use `~/.grok/auth.json` produced by `grok login --device-auth`:
 ### Vertex AI
 
 Use GCP Vertex AI authentication by providing `GOOGLE_CLOUD_PROJECT` and a
-region (`GOOGLE_CLOUD_REGION` / `CLOUD_ML_REGION` / `GOOGLE_CLOUD_LOCATION`),
+region (`GOOGLE_CLOUD_LOCATION` / `GOOGLE_CLOUD_REGION` / `CLOUD_ML_REGION`,
+first set one wins),
 plus Application Default Credentials (ADC).
 
 | Mode | Credential | Setup |

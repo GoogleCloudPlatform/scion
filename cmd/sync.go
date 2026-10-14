@@ -127,14 +127,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 // runProjectSync performs project-level workspace sync against the Hub's WebDAV endpoint.
 func runProjectSync(direction projectsync.Direction) error {
 	// Check Hub availability (project-level sync requires a hub)
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("project-level sync requires a Hub connection.\nUse 'scion sync to/from <agent>' for agent-level sync in solo mode")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID
@@ -242,7 +238,7 @@ func runAgentSync(args []string) error {
 	}
 
 	// Check if Hub should be used
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}

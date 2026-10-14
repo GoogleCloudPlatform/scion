@@ -8,7 +8,7 @@ Most stuck agents are recoverable without recreation. Always start with `scion l
 |---|---|---|
 | Transient API error in log | LLM provider rate-limit or timeout | `scion message <agent> "continue"` — do NOT recreate |
 | `LIMITS_EXCEEDED` state | Context/rate limit hit | `scion message <agent> "continue"` |
-| `failed to verify token: error in cryptographic primitive` | Hub regenerated signing keys on restart, or multi-replica key mismatch | `scion message <agent> "continue"` — message delivery does not depend on the agent's own token. If looping between `login` and `session_expired`, escalate to an operator: the hub needs `SharedSigningSecret` (`SESSION_SECRET`) pinned in deployment config so keys survive restarts |
+| `failed to verify token: error in cryptographic primitive` | Hub regenerated signing keys on restart, or multi-replica key mismatch | `scion message <agent> "continue"` — message delivery does not depend on the agent's own token. If looping between `login` and `session_expired`, escalate to an operator: the hub needs `SharedSigningSecret` (`SCION_SERVER_SESSION_SECRET`) pinned in deployment config so keys survive restarts |
 | `Token refresh failed … 401` repeating every 30s | Token expired; refresh deadlocked | `scion message <agent> "continue"` — if no effect, recreate |
 | Container exit 255 / status `Exited` | Container crash | Recreate the agent |
 | Phase `created`, lastSeen zero, persists 5+ min | Agent creation timed out | Wait a few minutes; if stuck, delete and recreate. **If recurring:** system is under load — reduce concurrent agent count rather than retrying |

@@ -201,6 +201,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/scopes", RouteID: "auth.scopes",
 		Classification: RouteAuthenticated,
 	},
+	// User access credential for a peer hub: the handler admits an
+	// interactive session or a hub-boundary user access token carrying
+	// federation_token:mint (handlers_federation_token.go).
+	"POST /api/v1/auth/federation-token": {
+		Pattern: "POST /api/v1/auth/federation-token", RouteID: "auth.federationToken",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/metrics/session/": {
 		Pattern: "/api/v1/metrics/session/", RouteID: "metrics.session",
 		Classification: RouteAuthenticated,
@@ -267,6 +274,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/conversations/resolve": {
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups": {
+		Pattern: "/api/v1/thread-groups", RouteID: "threadGroups.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups/": {
+		Pattern: "/api/v1/thread-groups/", RouteID: "threadGroups.byId",
 		Classification: RouteAuthenticated,
 	},
 
@@ -885,26 +900,31 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/limits", RouteID: "admin.limits",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/limits/": {
 		Pattern: "/api/v1/admin/limits/", RouteID: "admin.limits.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/entitlements/": {
 		Pattern: "/api/v1/admin/entitlements/", RouteID: "admin.entitlements.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/usage": {
 		Pattern: "/api/v1/admin/usage", RouteID: "admin.usage",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/usage/": {
 		Pattern: "/api/v1/admin/usage/", RouteID: "admin.usage.byLimit",
 		Classification: RouteHubAdmin,
 		Permission:     "quota.read", Resource: "quota", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1052,7 +1072,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
 	// scope, admitting a hub-boundary token carrying test_identity:issue.
 	// The handlers return 404 unless the hub runs with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	// -------------------------------------------------------------------------
 	"POST /api/v1/test-identities": {
 		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
@@ -1072,9 +1092,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
-	// The handler further limits the code to the identity's issuer or an
-	// unscoped platform admin session (canManageTestIdentity) and to hubs
-	// where test identity web sessions are available.
+	// The handler further limits the code to the identity's issuer, a
+	// workload delegation for the member-tier identities it issued, or an
+	// unscoped platform admin session (canManageTestIdentity,
+	// workloadWebCodeAdmitted) and to hubs where test identity web sessions
+	// are available.
 	"POST /api/v1/test-identities/{id}/web-login-code": {
 		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
 		Classification: RouteHubAdmin,
@@ -1206,6 +1228,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/identity": {
 		Pattern: "/api/v1/system/identity", RouteID: "system.identity",
 		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/status": {
 		Pattern: "/api/v1/system/status", RouteID: "system.status",
@@ -1242,6 +1265,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/workstation-settings": {
 		Pattern: "/api/v1/system/workstation-settings", RouteID: "system.workstationSettings",
 		Classification: RouteWorkstation,
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/fs/list": {
 		Pattern: "/api/v1/system/fs/list", RouteID: "system.fs.list",
@@ -1346,6 +1370,33 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 	return routePermissionDecisionResult{outcome: routePermissionAllowed, identity: identity, target: target}
 }
 
+// enforceRoutePermission reports whether the request may proceed, writing the
+// refusal when it may not.
+func (s *Server) enforceRoutePermission(w http.ResponseWriter, r *http.Request, meta RouteMetadata) bool {
+	d := s.routePermissionDecision(r, meta)
+	switch d.outcome {
+	case routePermissionAllowed:
+		return true
+	case routePermissionMisconfigured:
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, d.message, nil)
+	case routePermissionUnauthenticated:
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+	case routePermissionSessionOnly:
+		logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+		writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
+	default:
+		if d.nonUser {
+			// No target was resolved; label the log with the route's
+			// resource type only.
+			logAuthzDenial(r, d.identity, Resource{Type: meta.Resource}, Action(meta.Action), d.reason)
+		} else {
+			logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
+		}
+		writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
+	}
+	return false
+}
+
 // guarded looks up the route metadata for a pattern and wraps the handler with
 // the declarative route guard. If the pattern has no entry in routeMetadataTable,
 // it returns a handler that fails closed with 500.
@@ -1412,28 +1463,7 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" {
-				d := s.routePermissionDecision(r, meta)
-				switch d.outcome {
-				case routePermissionAllowed:
-				case routePermissionMisconfigured:
-					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, d.message, nil)
-					return
-				case routePermissionUnauthenticated:
-					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-					return
-				case routePermissionSessionOnly:
-					logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
-					writeSessionOnlyDenial(w, ErrCodeForbidden, "Insufficient permissions", meta.SessionOnly)
-					return
-				default:
-					if d.nonUser {
-						// No target was resolved; label the log with the
-						// route's resource type only.
-						logAuthzDenial(r, d.identity, Resource{Type: meta.Resource}, Action(meta.Action), d.reason)
-					} else {
-						logAuthzDenial(r, d.identity, d.target, Action(meta.Action), d.reason)
-					}
-					writeForbiddenStructured(w, "", meta.Resource, Action(meta.Action))
+				if !s.enforceRoutePermission(w, r, meta) {
 					return
 				}
 				next(w, r)
@@ -1447,8 +1477,16 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				next(w, r)
 			}
 		case RouteWorkstation:
-			// Delegate to existing requireWorkstation check
-			s.requireWorkstation(http.HandlerFunc(next)).ServeHTTP(w, r)
+			if !s.workstation {
+				http.NotFound(w, r)
+				return
+			}
+			if meta.Permission != "" {
+				if !s.enforceRoutePermission(w, r, meta) {
+					return
+				}
+			}
+			next(w, r)
 		case RouteBrokerHMAC:
 			// Broker routes are already wrapped with broker auth middleware — pass through
 			next(w, r)

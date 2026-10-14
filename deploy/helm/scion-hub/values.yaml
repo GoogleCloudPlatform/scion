@@ -205,11 +205,23 @@ hub:
   # conduit relay id, each taking it over from the others.
   extraEnv: []
 
+  # Deploy-time class of this hub, rendered as server.hub.class. Only "" (the
+  # default: not a test hub) and "test" are accepted. Required, as "test", by
+  # hub.testIdentities.enabled. The class is never writable through the hub API.
+  hubClass: ""
+
   # Hub-issued test identities (POST /api/v1/test-identities), for test hubs
-  # only. Off by default. When true the chart renders exactly the
-  # --enable-test-identities flag and nothing else; the binary's own
-  # default-off startup gate stays the only switch. The flag itself is
-  # refused in hub.args, so this value is the one way to set it here.
+  # only. Off by default. When true the chart renders exactly
+  # --test-mode=member:<hub.hubId> and nothing else; no chart value renders an
+  # admin level. --test-mode itself is refused in hub.args, so this value is
+  # the one way to set it here.
+  #
+  # The member level is refused at startup unless every precondition holds:
+  # server.hub.class is test (set hub.hubClass: test; the render fails without
+  # it), the database carries a test infrastructure marker for this hub id, the
+  # hub id binding matches (the chart renders hub.hubId), and the hub does not
+  # run with --production. The marker is written offline by an operator with
+  # `scion server test-infra mark`, never by the chart or an agent.
   testIdentities:
     enabled: false
 

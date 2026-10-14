@@ -60,6 +60,24 @@ func TestExternalEffectCallSiteClassification(t *testing.T) {
 		classified[k] = true
 	}
 
+	// Paired sites must share a classification.
+	classOf := make(map[effectCallSiteKey]string)
+	for _, e := range effectCallSiteClassifications {
+		classOf[effectCallSiteKey{e.file, e.function, e.symbol}] = e.class
+	}
+	for _, p := range sharedClassificationSites {
+		got, ok := classOf[p.site]
+		want, wantOK := classOf[p.sameAs]
+		if !ok || !wantOK {
+			t.Errorf("sharedClassificationSites pair %v / %v: both must be in effectCallSiteClassifications", p.site, p.sameAs)
+			continue
+		}
+		if got != want {
+			t.Errorf("classification mismatch: %s:%s is %q but %s:%s is %q; the two sites must be classified together",
+				p.site.file, p.site.function, got, p.sameAs.file, p.sameAs.function, want)
+		}
+	}
+
 	// Discover all call sites in production code.
 	discovered := discoverEffectCallSites(t)
 
@@ -119,6 +137,8 @@ func discoverEffectCallSites(t *testing.T) []effectCallSite {
 	// recursive walk already includes pkg/hub/apierr.
 	// pkgmove:scan-covers pkg/hub/internal/principal
 	// recursive walk already includes pkg/hub/internal/principal.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (skips only testdata and vendor).
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

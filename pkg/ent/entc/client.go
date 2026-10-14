@@ -120,10 +120,9 @@ func withUTCTimezone(dsn string) string {
 // Location back to the caller. See tz-refactor design §2.1.2.
 //
 // Registered by OpenSQLite, OpenSQLiteReadOnly and openPostgres. Exported so
-// a caller that builds an *ent.Client around some other driver — for example
-// a test harness that must keep working under the "no_sqlite" build tag,
-// where modernc (and so OpenSQLite's "_timezone" option) is unavailable —
-// can still register it directly with client.Use(entc.UTCTimeHook).
+// a caller that builds an *ent.Client around its own *sql.DB, rather than
+// through those openers, can register it directly with
+// client.Use(entc.UTCTimeHook). No caller in this module does so today.
 //
 // What it does not cover, because a mutation hook never sees these:
 //   - predicate arguments, e.g. a bare time.Now() passed to a generated
@@ -331,8 +330,30 @@ func applyKeepalives(params map[string]string) {
 // rows are removed explicitly after schema migration succeeds. Other data is
 // preserved. On Postgres, any DDL statement that fails with SQLSTATE 42P07
 // ("relation already exists") is silently skipped so that new tables are
-// created alongside pre-existing ones.
+// created alongside pre-existing ones. On SQLite, rows orphaned while foreign
+// keys were not enforced first get their key's declared ON DELETE action
+// (see reconcileSQLiteForeignKeys); orphans that cannot be repaired that way
+// are reported, and attached to the error if the migration fails.
+//
+// AutoMigrate is safe for concurrent use within one process: calls are
+// serialized by autoMigrateSem, because ent's schema migration mutates the
+// package-level tables in pkg/ent/migrate (Atlas setupTables writes each
+// table's column map), and two unserialized calls can crash the process with
+// "fatal error: concurrent map writes". The lock is process-local and is held
+// for the whole call. A caller whose ctx ends while it waits for the lock
+// returns ctx.Err() without migrating. The lock does not coordinate separate
+// processes or Hub replicas sharing one database; on Postgres that is the job
+// of the advisory lock taken by entadapter.CompositeStore.MigrateWithSchemaLock
+// (ptone/scion#1078). Code that calls client.Schema.Create directly bypasses
+// this lock.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
+	select {
+	case autoMigrateSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-autoMigrateSem }()
+
 	migrateOpts := []entschema.MigrateOption{
 		migrate.WithDropColumn(false),
 		migrate.WithDropIndex(false),
@@ -343,11 +364,30 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 			entschema.WithApplyHook(skipExistingRelations),
 		)
 	}
+	// On SQLite, apply the declared ON DELETE action to rows orphaned while
+	// foreign keys were not enforced; see reconcileSQLiteForeignKeys.
+	var fkResult fkReconcileResult
+	if client.Driver().Dialect() == dialect.SQLite {
+		if drv, ok := client.Driver().(*entsql.Driver); ok {
+			var err error
+			if fkResult, err = reconcileSQLiteForeignKeys(ctx, drv.DB()); err != nil {
+				return err
+			}
+		}
+	}
 	if err := client.Schema.Create(ctx, migrateOpts...); err != nil {
+		if d := fkResult.diagnostic(); d != "" {
+			return fmt.Errorf("%w\nthe migration may have failed because of %s", err, d)
+		}
 		return err
 	}
 	return dropDecisionAuditTable(ctx, client)
 }
+
+// autoMigrateSem is a one-slot semaphore that serializes AutoMigrate within
+// the process; see AutoMigrate. A channel rather than a sync.Mutex so that the
+// wait can end when the caller's context does.
+var autoMigrateSem = make(chan struct{}, 1)
 
 // skipExistingRelations is an Ent schema ApplyHook that makes DDL
 // idempotent on Postgres by skipping any statement that fails with

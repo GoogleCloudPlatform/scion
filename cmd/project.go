@@ -15,11 +15,10 @@
 package cmd
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"bufio"
 	"strings"
@@ -27,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
@@ -217,151 +215,31 @@ With --global, it initializes in the user's home folder.`,
 	},
 }
 
-// promptHubRegistration checks if Hub is configured and prompts to register the project.
+// promptHubRegistration links the newly initialised project to the hub,
+// through requireHub: on the local workstation hub it links without a
+// prompt, on a remote hub it asks first. When no hub is configured or the
+// local server is not running, it returns a note-level error (the caller
+// prints it as "Note: ..."): the project links on first use once a hub is
+// up, so init itself does not fail.
 func promptHubRegistration(isGlobal bool) error {
-	// Skip if --no-hub is set
-	if noHub {
-		return nil
-	}
-
-	// Resolve project path
 	var gp string
 	if isGlobal {
 		gp = "global"
 	}
-	resolvedPath, _, err := config.ResolveProjectPath(gp)
-	if err != nil {
-		return nil // Silently skip if we can't resolve path
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return nil // Silently skip if we can't load settings
-	}
-
-	// Only prompt if Hub is explicitly enabled (not just configured with an endpoint)
-	if !settings.IsHubEnabled() {
-		return nil
-	}
-
-	// Step 1: Prompt to link project to Hub
-	if !hubsync.ShowInitLinkPrompt(autoConfirm) {
-		return nil
-	}
-
-	// Create Hub client
-	client, err := getHubClient(settings)
-	if err != nil {
-		return fmt.Errorf("failed to create Hub client: %w", err)
-	}
-
-	// Check health first
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := client.Health(ctx); err != nil {
-		return fmt.Errorf("hub is not responding: %w", err)
-	}
-
-	// Get project info
-	var projectName string
-	var gitRemote string
-	projectID := settings.ProjectID
-
-	if isGlobal {
-		projectName = "global"
-	} else {
-		gitRemote = util.GetGitRemote()
-		if gitRemote != "" {
-			projectName = util.ExtractRepoName(gitRemote)
-		} else {
-			projectName = config.GetProjectName(resolvedPath)
+	if _, err := requireHub(gp); err != nil {
+		var notConfigured *hubsync.HubNotConfiguredError
+		if errors.As(err, &notConfigured) {
+			return errors.New("no hub is configured yet; this project links on first use. " +
+				"Start the local hub with 'scion server start' (first run opens setup), " +
+				"or set a remote one with 'scion config set hub.endpoint <url>'")
 		}
-	}
-
-	// Register project without broker info first
-	req := &hubclient.RegisterProjectRequest{
-		ID:        projectID,
-		Name:      projectName,
-		GitRemote: util.NormalizeGitRemote(gitRemote),
-		Path:      resolvedPath,
-	}
-
-	ctxReg, cancelReg := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelReg()
-
-	resp, err := client.Projects().Register(ctxReg, req)
-	if err != nil {
-		return fmt.Errorf("registration failed: %w", err)
-	}
-
-	// Enable Hub integration
-	_ = config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal)
-
-	if resp.Created {
-		fmt.Printf("Created new project on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
-	} else {
-		fmt.Printf("Linked to existing project on Hub: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
-	}
-	// Store the hub project ID separately if it differs from the local project_id
-	if resp.Project.ID != projectID {
-		if err := config.UpdateSetting(resolvedPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
-			fmt.Printf("Warning: failed to save hub project ID: %v\n", err)
+		var notRunning *hubsync.LocalServerNotRunningError
+		if errors.As(err, &notRunning) {
+			return errors.New("the local scion server is not running; this project links on first use. " +
+				"Start it with 'scion server start'")
 		}
+		return err
 	}
-
-	// Show any auto-provided brokers
-	ctxProviders, cancelProviders := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelProviders()
-
-	providersResp, err := client.Projects().ListProviders(ctxProviders, resp.Project.ID)
-	if err == nil && providersResp != nil && len(providersResp.Providers) > 0 {
-		fmt.Println()
-		fmt.Println("Brokers providing for this project:")
-		for _, p := range providersResp.Providers {
-			autoTag := ""
-			if p.Status == "online" {
-				autoTag = " (online)"
-			}
-			fmt.Printf("  - %s%s\n", p.BrokerName, autoTag)
-		}
-	}
-
-	// Step 2: Check if this host is a registered broker and offer to add as provider
-	localBrokerID, localBrokerName := getLocalBrokerInfo(settings)
-	if localBrokerID != "" {
-		// Check if this broker is already a provider
-		alreadyProvider := false
-		if providersResp != nil {
-			for _, p := range providersResp.Providers {
-				if p.BrokerID == localBrokerID {
-					alreadyProvider = true
-					break
-				}
-			}
-		}
-
-		if !alreadyProvider {
-			fmt.Println()
-			if hubsync.ShowInitProvidePrompt(localBrokerName, resp.Project.Name, autoConfirm) {
-				// Add this broker as a provider
-				ctxAdd, cancelAdd := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancelAdd()
-
-				addReq := &hubclient.AddProviderRequest{
-					BrokerID:  localBrokerID,
-					LocalPath: resolvedPath,
-				}
-
-				_, err := client.Projects().AddProvider(ctxAdd, resp.Project.ID, addReq)
-				if err != nil {
-					fmt.Printf("Warning: failed to add broker as provider: %v\n", err)
-				} else {
-					fmt.Printf("Host registered as provider: %s\n", localBrokerName)
-				}
-			}
-		}
-	}
-
 	return nil
 }
 
