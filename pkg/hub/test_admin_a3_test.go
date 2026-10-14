@@ -945,3 +945,40 @@ func TestTestAdminA3_StampedRoleBoundByPersonKept(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, roles[store.ProjectRoleOwner], "the person's own grants stay")
 }
+
+// Review N1, at the place the refusal happens: the route guard
+// (enforceRoutePermission) answers every refusal on the test identity
+// routes with the generic structured 403, whatever the decision's cause.
+// When a person's kind cannot be read (the authorization service's user
+// reads fail; authentication reads the real store), the person gets exactly
+// that neutral body: no test-identity wording, no reason, no denied_by.
+func TestTestAdminA3_UnverifiedKindGuardAnswerIsNeutral(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuerRole, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{ID: generateID(), Name: "a3-uk-issuer-" + generateID()[:8],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssue}})
+	require.NoError(t, err)
+	human := taUser(t, s, "a3-uk-human", store.SystemRoleHubMember)
+	_, err = s.CreateRoleBinding(context.Background(), &store.RoleBinding{RoleDefinitionID: issuerRole.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	// Control: with readable kinds the person passes the guard.
+	rec := doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "control: the guard admits the person: %s", rec.Body.String())
+
+	saved := srv.authzService
+	srv.authzService = NewAuthzService(kindErrStore{Store: s}, saved.logger)
+	t.Cleanup(func() { srv.authzService = saved })
+	rec = doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var body struct {
+		Error struct {
+			Code    string            `json:"code"`
+			Message string            `json:"message"`
+			Details map[string]string `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	assert.Equal(t, ErrCodeForbidden, body.Error.Code)
+	assert.Equal(t, "Insufficient permissions", body.Error.Message, "the generic message")
+	assert.Equal(t, map[string]string{"resource_type": "test_identity", "denied_action": "issue"}, body.Error.Details, "no reason, no denied_by")
+}
