@@ -27,6 +27,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
+import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -142,6 +145,81 @@ interface ResetAuthAllResult {
   failed_by_code?: Record<string, number>;
 }
 
+/** One agent's outcome in a bulk scope re-issue. */
+interface ScopeReissueAgent {
+  id: string;
+  name: string;
+  project_id?: string;
+  depth?: number;
+  /** changed | noop | refused | push_failed */
+  outcome: string;
+  cause?: string;
+  added?: string[] | null;
+  removed?: string[] | null;
+  role_before?: string;
+  role_after?: string;
+  op_id?: string;
+  dispatch_error?: string;
+}
+
+/** An agent named in one of the bulk scope re-issue result lists. */
+interface ScopeReissueRef {
+  id: string;
+  name: string;
+  cause?: string;
+}
+
+/**
+ * Result of POST /api/v1/admin/agents/reset-auth-all with
+ * {"reissue_scopes": true}. The hub sends null for an empty list.
+ */
+interface ScopeReissueAllResult {
+  batch_op_id: string;
+  dry_run: boolean;
+  total: number;
+  succeeded: ScopeReissueRef[] | null;
+  noop: ScopeReissueRef[] | null;
+  refused: ScopeReissueRef[] | null;
+  push_failed: ScopeReissueRef[] | null;
+  agents: ScopeReissueAgent[] | null;
+  depth_unresolved: string[] | null;
+  batch_audit_recorded: boolean;
+}
+
+/** The counts line of a scope re-issue result, worded as the CLI does. */
+function scopeReissueSummary(r: ScopeReissueAllResult): string {
+  const verb = r.dry_run ? 'would change' : 'changed';
+  return (
+    `${r.total} agents: ${r.succeeded?.length ?? 0} ${verb}, ` +
+    `${r.noop?.length ?? 0} unchanged, ${r.refused?.length ?? 0} refused, ` +
+    `${r.push_failed?.length ?? 0} token not delivered`
+  );
+}
+
+/** Per-agent lines for every agent whose outcome is not noop. */
+function scopeReissueAgentLines(r: ScopeReissueAllResult): string {
+  const lines: string[] = [];
+  for (const a of r.agents ?? []) {
+    if (a.outcome === 'noop') continue;
+    lines.push(`${a.name || a.id} (${a.id}) ${a.outcome}${a.cause ? `: ${a.cause}` : ''}`);
+    if (a.role_after && a.role_before !== a.role_after) {
+      lines.push(`  role:     ${a.role_before ?? ''} -> ${a.role_after}`);
+    }
+    if (a.added?.length) lines.push(`  added:    ${a.added.join(', ')}`);
+    if (a.removed?.length) lines.push(`  removed:  ${a.removed.join(', ')}`);
+    if (a.dispatch_error) lines.push(`  token not delivered: ${a.dispatch_error}`);
+  }
+  return lines.join('\n');
+}
+
+/** The note for agents the bulk run could not order by delegation depth. */
+function unresolvedNote(n: number): string {
+  return (
+    `${n} agents could not be ordered (their delegation record could not be read); ` +
+    'see their results below.'
+  );
+}
+
 /** Display labels for reset-auth-all failure codes. */
 const RESET_AUTH_CODE_LABELS: Record<string, string> = {
   delegation_creator_missing: 'Creator delegation missing',
@@ -253,6 +331,29 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Result of the last bulk reset-auth request. */
   @state()
   private resetAuthAllResult: ResetAuthAllResult | null = null;
+
+  /**
+   * Whether the scope re-issue controls are shown: the user is a
+   * super-admin per the shared admin status. The hub stays the authority.
+   */
+  @state()
+  private canReissueScopes = false;
+
+  /** Whether a scope re-issue request (dry run or apply) is in-flight. */
+  @state()
+  private reissueLoading = false;
+
+  /** Result of the last scope re-issue request. */
+  @state()
+  private reissueResult: ScopeReissueAllResult | null = null;
+
+  /** Error of the last scope re-issue request. */
+  @state()
+  private reissueError: string | null = null;
+
+  /** Whether the apply confirmation dialog is open. */
+  @state()
+  private reissueConfirmOpen = false;
 
   /** Deployment tier: "binary" or "source" (default). */
   @state()
@@ -478,6 +579,22 @@ export class ScionPageAdminMaintenance extends LitElement {
       align-items: center;
       justify-content: space-between;
       margin-top: 0.75rem;
+    }
+
+    .reissue-scopes {
+      margin-top: 1rem;
+      padding-top: 0.75rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .reissue-scopes .card-footer {
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+    }
+
+    .reissue-actions {
+      display: inline-flex;
+      gap: 0.5rem;
     }
 
     /* -- Result log ------------------------------------------------------- */
@@ -788,6 +905,16 @@ export class ScionPageAdminMaintenance extends LitElement {
     void this.loadData();
     void this.fetchMaintenanceState();
     void this.fetchUpdateAvailable();
+    void this.loadReissueCapability();
+  }
+
+  private async loadReissueCapability(): Promise<void> {
+    try {
+      const status = await loadAdminStatus(stateManager.getCurrentUserId());
+      this.canReissueScopes = canReissueAllScopes(status);
+    } catch {
+      this.canReissueScopes = false;
+    }
   }
 
   override disconnectedCallback(): void {
@@ -1170,6 +1297,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           ? this.renderError()
           : this.renderContent()}
       ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
+      ${this.renderReissueConfirmDialog()}
     `;
   }
 
@@ -1316,10 +1444,191 @@ export class ScionPageAdminMaintenance extends LitElement {
                     : nothing}
                 `
               : nothing}
+            ${this.canReissueScopes ? this.renderReissueScopes() : nothing}
           </div>
         </div>
       </div>
     `;
+  }
+
+  private renderReissueScopes() {
+    return html`
+      <div class="reissue-scopes">
+        <div class="card-footer">
+          <span class="card-title">Re-issue scopes</span>
+          <span class="reissue-actions">
+            <sl-button
+              class="reissue-dry-run"
+              size="small"
+              ?disabled=${this.reissueLoading}
+              ?loading=${this.reissueLoading && !this.reissueConfirmOpen}
+              @click=${() => this.handleReissueDryRun()}
+            >
+              <sl-icon slot="prefix" name="shield-check"></sl-icon>
+              Dry Run
+            </sl-button>
+            ${this.reissueResult?.dry_run
+              ? html`
+                  <sl-button
+                    class="reissue-apply"
+                    variant="warning"
+                    size="small"
+                    ?disabled=${this.reissueLoading}
+                    @click=${() => this.openReissueConfirm()}
+                  >
+                    <sl-icon slot="prefix" name="key"></sl-icon>
+                    Apply
+                  </sl-button>
+                `
+              : nothing}
+          </span>
+        </div>
+        <div class="card-description">
+          Re-issue every agent's role scopes from its delegator's current authority, the same as
+          scion reset-auth --all --reissue-scopes. A dry run shows what would change; nothing
+          changes until you apply it.
+        </div>
+        ${this.reissueError
+          ? html`<div class="result-log result-error reissue-error">${this.reissueError}</div>`
+          : nothing}
+        ${this.reissueResult ? this.renderReissueResult(this.reissueResult) : nothing}
+      </div>
+    `;
+  }
+
+  private renderReissueResult(r: ScopeReissueAllResult) {
+    const lines = scopeReissueAgentLines(r);
+    const unresolved = r.depth_unresolved?.length ?? 0;
+    const pushFailed = r.push_failed?.length ?? 0;
+    const warnings: string[] = [];
+    if (!r.batch_audit_recorded) {
+      warnings.push(
+        `The hub could not record the batch audit entry (batch ${r.batch_op_id}); ` +
+          'the per-agent results stand.'
+      );
+    }
+    if (pushFailed > 0) {
+      warnings.push(
+        `${pushFailed} agents did not receive their new token; run reset-auth for each.`
+      );
+    }
+    return html`
+      <div class="card-meta reissue-summary">
+        <span>${scopeReissueSummary(r)}</span>
+      </div>
+      ${r.dry_run
+        ? html`
+            <div class="card-meta reissue-dry-run-note">
+              <span>Dry run: nothing was changed. Apply to make these changes.</span>
+            </div>
+          `
+        : nothing}
+      ${unresolved > 0
+        ? html`
+            <div class="card-meta reissue-unresolved">
+              <span>${unresolvedNote(unresolved)}</span>
+            </div>
+          `
+        : nothing}
+      ${lines ? html`<div class="result-log reissue-agents">${lines}</div>` : nothing}
+      ${warnings.length > 0
+        ? html`<div class="result-log result-error reissue-warnings">${warnings.join('\n')}</div>`
+        : nothing}
+    `;
+  }
+
+  private renderReissueConfirmDialog() {
+    if (!this.reissueConfirmOpen) return nothing;
+    const r = this.reissueResult;
+    return html`
+      <sl-dialog
+        class="reissue-confirm"
+        label="Apply Scope Re-issue"
+        open
+        @sl-request-close=${(e: Event) => this.closeReissueConfirm(e)}
+      >
+        <div class="dialog-body">
+          <p>Re-issue role scopes for every agent on the hub?</p>
+          ${r ? html`<p>Last dry run: ${scopeReissueSummary(r)}.</p>` : nothing}
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            Changed agents get new tokens with their re-issued scopes. The result may differ from
+            the dry run if agents changed since.
+          </p>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="reissue-cancel"
+          ?disabled=${this.reissueLoading}
+          @click=${() => this.closeReissueConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="reissue-confirm-apply"
+          ?loading=${this.reissueLoading}
+          @click=${() => this.handleReissueApply()}
+        >
+          <sl-icon slot="prefix" name="key"></sl-icon>
+          Apply
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  private openReissueConfirm(): void {
+    if (this.reissueResult?.dry_run) this.reissueConfirmOpen = true;
+  }
+
+  /**
+   * Closes the apply confirmation. While a request is in flight the dialog
+   * stays open: the sl-request-close event is cancelled so it is not hidden.
+   */
+  private closeReissueConfirm(e?: Event): void {
+    if (this.reissueLoading) {
+      e?.preventDefault();
+      return;
+    }
+    this.reissueConfirmOpen = false;
+  }
+
+  /** Runs the bulk scope re-issue as a dry run and shows its result. */
+  private async handleReissueDryRun(): Promise<void> {
+    await this.runReissue(true);
+  }
+
+  /**
+   * Applies the bulk scope re-issue; reached only from the confirm dialog.
+   * A click while a request is in flight sends nothing.
+   */
+  private async handleReissueApply(): Promise<void> {
+    if (!this.reissueConfirmOpen || this.reissueLoading) return;
+    await this.runReissue(false);
+    this.reissueConfirmOpen = false;
+  }
+
+  private async runReissue(dryRun: boolean): Promise<void> {
+    this.reissueLoading = true;
+    this.reissueError = null;
+    this.reissueResult = null;
+    try {
+      const response = await apiFetch('/api/v1/admin/agents/reset-auth-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reissue_scopes: true, dry_run: dryRun }),
+        suppressAccessDeniedToast: true,
+      });
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      this.reissueResult = (await response.json()) as ScopeReissueAllResult;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to re-issue scopes';
+      this.reissueError = `${dryRun ? 'Dry run' : 'Apply'} failed: ${msg}`;
+    } finally {
+      this.reissueLoading = false;
+    }
   }
 
   private async handleResetAuthAll() {

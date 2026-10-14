@@ -508,8 +508,9 @@ var validInvariantKinds = map[InvariantKind]bool{
 
 // AuditObligation specifies audit requirements for an operation.
 type AuditObligation struct {
-	// EventType is the audit event type (e.g., "membership.add",
-	// "constraint.relax").
+	// EventType is the audit event type: the mutation type the hub
+	// writes on the audit record (e.g., "group_member_add",
+	// "role_binding_create").
 	EventType string
 
 	// ContextFields lists context fields always required in the

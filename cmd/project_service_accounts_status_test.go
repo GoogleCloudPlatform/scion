@@ -72,6 +72,7 @@ func saPathHub(t *testing.T, body string) *string {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 	return seen
 }
 
@@ -228,6 +229,7 @@ func TestProjectSAShow_NotFoundHintsAtOlderHub(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectPath, "settings.json"), data, 0644))
+	useHubForTest(t, srv.URL)
 
 	err = runSAShow(nil, []string{"sa-1"})
 	require.Error(t, err)

@@ -138,3 +138,113 @@ func TestGCPHandler_SeverityMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestGCPHandler_CustomLevelSeverity verifies that a level between or
+// beyond the standard ones maps to the nearest lower standard severity
+// (ptone/scion#4998).
+func TestGCPHandler_CustomLevelSeverity(t *testing.T) {
+	tests := []struct {
+		name  string
+		level slog.Level
+		want  string
+	}{
+		{"below_debug", slog.LevelDebug - 4, "DEBUG"},
+		{"debug_plus_1", slog.LevelDebug + 1, "DEBUG"},
+		{"info_minus_1", slog.LevelInfo - 1, "DEBUG"},
+		{"info_plus_1", slog.LevelInfo + 1, "INFO"},
+		{"warn_minus_1", slog.LevelWarn - 1, "INFO"},
+		{"warn_plus_1", slog.LevelWarn + 1, "WARNING"},
+		{"error_minus_1", slog.LevelError - 1, "WARNING"},
+		{"above_error", slog.LevelError + 4, "ERROR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			opts := &slog.HandlerOptions{Level: slog.LevelDebug - 4}
+			slog.New(NewGCPHandler(&buf, opts, "test-component", "")).Log(t.Context(), tt.level, "msg")
+
+			want := withBaseKeys()
+			if tt.level >= slog.LevelError {
+				want = withBaseKeys(gcpKeyStackTrace, gcpKeyType)
+			}
+			assertKeys(t, buf.Bytes(), want...)
+			if got := decodeLine(t, buf.Bytes())[GCPKeySeverity]; got != tt.want {
+				t.Errorf("custom level %d: severity = %v, want %s", int(tt.level), got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity verifies that a
+// top-level caller attr keyed "level" holding a slog.Level is logged as
+// its name and does not add a second severity key (ptone/scion#4998).
+func TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity(t *testing.T) {
+	tests := []struct {
+		name  string
+		logFn func(*slog.Logger)
+	}{
+		{"record", func(l *slog.Logger) { l.Info("msg", "level", slog.LevelWarn) }},
+		{"With", func(l *slog.Logger) { l.With("level", slog.LevelWarn).Info("msg") }},
+		{"With_before_group", func(l *slog.Logger) { l.With("level", slog.LevelWarn).WithGroup("g").Info("msg") }},
+		{"LogValuer", func(l *slog.Logger) { l.Info("msg", "level", levelValuer(slog.LevelWarn)) }},
+		{"inline_empty_key_group", func(l *slog.Logger) { l.Info("msg", slog.Group("", "level", slog.LevelWarn)) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tt.logFn(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(slog.LevelKey)...)
+			data := decodeLine(t, buf.Bytes())
+			if got := data[GCPKeySeverity]; got != "INFO" {
+				t.Errorf("severity = %v, want INFO", got)
+			}
+			if got := data[slog.LevelKey]; got != "WARN" {
+				t.Errorf("level attr = %v, want WARN", got)
+			}
+		})
+	}
+}
+
+// levelValuer is a slog.LogValuer that resolves to a slog.Level.
+type levelValuer slog.Level
+
+func (v levelValuer) LogValue() slog.Value { return slog.AnyValue(slog.Level(v)) }
+
+// countingValuer is a slog.LogValuer that counts its LogValue calls.
+type countingValuer struct{ n *int }
+
+func (v countingValuer) LogValue() slog.Value {
+	*v.n++
+	return slog.StringValue("v")
+}
+
+// TestGCPHandler_LogValuerResolvedOnce verifies that a top-level LogValuer
+// attr, on the record or with With, is resolved once per entry, also under
+// the key "level" when it does not resolve to a slog.Level.
+func TestGCPHandler_LogValuerResolvedOnce(t *testing.T) {
+	tests := []struct {
+		name  string
+		logFn func(*slog.Logger, slog.LogValuer)
+		key   string
+	}{
+		{"record", func(l *slog.Logger, v slog.LogValuer) { l.Info("msg", "k", v) }, "k"},
+		{"record_level_key", func(l *slog.Logger, v slog.LogValuer) { l.Info("msg", "level", v) }, "level"},
+		{"With", func(l *slog.Logger, v slog.LogValuer) { l.With("k", v).Info("msg") }, "k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			n := 0
+			tt.logFn(slog.New(NewGCPHandler(&buf, nil, "test-component", "")), countingValuer{&n})
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(tt.key)...)
+			if got := decodeLine(t, buf.Bytes())[tt.key]; got != "v" {
+				t.Errorf("%s = %v, want v", tt.key, got)
+			}
+			if n != 1 {
+				t.Errorf("LogValue called %d times, want 1", n)
+			}
+		})
+	}
+}

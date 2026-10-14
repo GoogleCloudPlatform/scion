@@ -85,6 +85,14 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var repoRoot string
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
+	// ownWorktreePaths lists the paths where this agent's own worktree may
+	// be registered. Only these entries are removed from git's worktree
+	// list; other worktrees' entries are never touched (ptone/scion#5060).
+	var ownWorktreePaths []string
+	// sharedBaseWorktree is the agent's path under the worktree-per-agent
+	// shared base. It is added to ownWorktreePaths only once the sharer
+	// check below has shown that no other agent still uses it.
+	var sharedBaseWorktree string
 	var globalWorkspaceDir string
 	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
 	// captured here (rather than only inside the block below) so the
@@ -125,6 +133,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if _, statErr := os.Stat(filepath.Join(sharedBase, ".git")); statErr == nil {
 			repoRoot = sharedBase
 			wtPath := filepath.Join(sharedBase, "worktrees", agentName)
+			sharedBaseWorktree = wtPath
 			if _, statErr := os.Stat(wtPath); statErr == nil {
 				worktreeDir = wtPath
 			}
@@ -177,6 +186,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// but not structurally excluded. Acceptable for single-node local mode
 	// which has no advisory locker.
 	refcountHandled := false
+	// sharersRemain is set when other agents still share this agent's
+	// worktree; its entry then belongs to them and is left alone.
+	sharersRemain := false
 	if repoRoot != "" {
 		// Do NOT silently swallow registry errors and fall through to the legacy
 		// path — that path could delete the shared worktree out from under live
@@ -251,9 +263,17 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				}
 			} else {
 				util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
+				sharersRemain = true
+			}
+			if len(remaining) == 0 && wtPath != "" {
+				ownWorktreePaths = append(ownWorktreePaths, wtPath)
 			}
 			refcountHandled = true
 		}
+	}
+
+	if sharedBaseWorktree != "" && !sharersRemain {
+		ownWorktreePaths = append(ownWorktreePaths, sharedBaseWorktree)
 	}
 
 	// Worktree-per-agent: remove the agent's worktree from the shared base.
@@ -282,11 +302,14 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 	for _, dir := range agentsDirs {
 		agentDir := filepath.Join(dir, agentName)
+		agentWorkspace := filepath.Join(agentDir, "workspace")
+		if !sharersRemain {
+			ownWorktreePaths = append(ownWorktreePaths, agentWorkspace)
+		}
 		if _, err := os.Stat(agentDir); err != nil {
 			continue
 		}
 
-		agentWorkspace := filepath.Join(agentDir, "workspace")
 		// Check if it's a worktree before trying to remove it.
 		// Skip when the refcount path already handled removal/detach —
 		// the shared worktree must not be removed while other sharers remain.
@@ -317,14 +340,20 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		}
 	}
 
-	// Prune stale worktree records from the repo. This handles cases where the
-	// workspace directory was removed (e.g. by os.RemoveAll above, or a previous
-	// incomplete cleanup) but the git worktree record was not properly unregistered.
+	// Remove stale records of this agent's own worktree. This handles cases
+	// where the workspace directory was removed (e.g. by the fallback removal
+	// above, or a previous incomplete cleanup) but its git worktree record
+	// was not unregistered. Only this agent's paths are targeted, and an
+	// entry whose directory still exists is left alone. There is no
+	// repository-wide prune: it would also drop the entries of other
+	// worktrees whose directories are missing or unreadable from this
+	// process (ptone/scion#5060).
 	if repoRoot != "" {
-		util.Debugf("delete: pruning stale worktrees in %s", repoRoot)
-		pruneStart := time.Now()
-		_ = util.PruneWorktreesIn(repoRoot)
-		util.Debugf("delete: prune completed in %v", time.Since(pruneStart))
+		for _, p := range ownWorktreePaths {
+			if err := util.RemoveWorktreeEntryIn(repoRoot, p); err != nil {
+				slog.Warn("delete: could not remove the worktree entry", "agent_id", agentName, "path", p, "error", err)
+			}
+		}
 
 		// If the branch wasn't already deleted via RemoveWorktree (e.g. because
 		// the workspace .git file didn't exist), try to delete it by name.

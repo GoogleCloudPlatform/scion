@@ -225,6 +225,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
 	resp.Server.Hub.TestIdentities = nil
+	// Likewise the proxy driver settings (WS2).
+	hideNeverAPIWritableProxyKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -909,6 +911,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
+	// Test identities with admin roles write no settings (test-admin
+	// policy), in DB and workstation mode alike.
+	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1267,7 +1274,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if gcpIAMNext == gcpIAMCur {
 			delete(sectionDocs, gcpIAMSection)
 		} else {
-			if !requireGCPIAMHubAdmin(w, r.Context()) {
+			if !s.requireGCPIAMHubAdmin(w, r.Context()) {
 				return
 			}
 			pendingAssign := false
