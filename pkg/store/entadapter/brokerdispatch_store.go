@@ -353,6 +353,32 @@ func (s *BrokerDispatchStore) CountStuckPendingMessages(ctx context.Context, bef
 	return n, nil
 }
 
+// ListStuckPendingMessageIDs returns the IDs of up to limit messages matched
+// by CountStuckPendingMessages, oldest first. A non-positive limit returns
+// no IDs without querying.
+func (s *BrokerDispatchStore) ListStuckPendingMessageIDs(ctx context.Context, before time.Time, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ids, err := s.client.Message.Query().
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchPending),
+			message.CreatedLT(before),
+			message.RecipientHasPrefix("agent:"),
+		).
+		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
+		Limit(limit).
+		IDs(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+	return out, nil
+}
+
 // ExpireStuckPendingMessages transitions messages stuck in pending state past
 // the given cutoff to failed, recording the reason. Returns the number
 // expired. Scoped to agent recipients only — see CountStuckPendingMessages.

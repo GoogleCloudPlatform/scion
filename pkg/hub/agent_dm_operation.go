@@ -525,6 +525,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusInternalServerError,
 		}
 	}
+	s.logMessageEnteredPending(pendingPathAgentDM, storeMsg)
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
 	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
