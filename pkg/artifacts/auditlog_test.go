@@ -420,7 +420,7 @@ func TestRouteTemplate(t *testing.T) {
 		"/api/v1/artifacts/" + id + "/versions/3/secret-segment": "/api/v1/artifacts/{id}/unknown",
 		"/api/v1/artifacts/shared/TOKEN-SECRET/files/x.md":       "/api/v1/artifacts/shared/{token}",
 		"/api/v1/artifacts/view/CAP-SECRET/x.html":               "/api/v1/artifacts/view/{capability}",
-		"/elsewhere/x":                                           "unknown",
+		"/elsewhere/x": "unknown",
 	} {
 		r := httptest.NewRequest(http.MethodGet, target, nil)
 		if got := routeTemplate(r); got != want {
