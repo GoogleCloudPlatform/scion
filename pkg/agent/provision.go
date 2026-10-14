@@ -2027,14 +2027,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if ref == nil || !ref.Optional {
 					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
 				}
-				util.Debugf("provision: optional skill %q skipped: %s", re.URI, re.Message)
+				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
+					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
 			}
 
 			// S1: verify every requested URI has an outcome
 			for uri, ref := range requestedURIs {
 				if !resolvedURIs[uri] && !errorURIs[uri] {
 					if ref.Optional {
-						util.Debugf("provision: optional skill %q missing from resolver response, skipping", uri)
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", uri, "reason", "missing from resolver response")
 					} else {
 						return "", "", nil, fmt.Errorf(
 							"required skill %q missing from resolver response — S1 fail-closed", uri)
@@ -2053,8 +2055,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
 				}
 				skillsDest := filepath.Join(agentHome, skillsDir)
-				record, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
 				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return "", "", nil, skillErr
+					}
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
