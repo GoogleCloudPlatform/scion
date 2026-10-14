@@ -218,7 +218,7 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "group.delete",
+			EventType:     "group_delete",
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"group_id", "group_name"},
 			Atomic:        true,

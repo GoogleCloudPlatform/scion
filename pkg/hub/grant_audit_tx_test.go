@@ -171,3 +171,64 @@ func TestRoleBindingSummaryIsJSON(t *testing.T) {
 	summary = roleBindingSummary(b)
 	assert.True(t, json.Valid([]byte(summary)), summary)
 }
+
+// groupDeleteFixture creates a group with one user member on the raw store
+// and returns the group, the member's ID, and the group's delete path.
+func groupDeleteFixture(t *testing.T, s store.Store, name string) (*store.Group, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	group := &store.Group{ID: tid(name + "-group"), Name: name + " group", Slug: name, GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, group))
+	userID := tid(name + "-user")
+	seedRolesTestUser(t, s, userID, name+"@test.com")
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: group.ID, MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: store.GroupMemberRoleMember,
+	}))
+	return group, userID, "/api/v1/groups/" + group.ID
+}
+
+// Group delete writes its audit record in the same transaction; an
+// injected audit failure answers 500 and leaves the group and its
+// membership in place. The fault store is installed before any setup and
+// never swapped.
+func TestGroupDeleteAuditFailureRollsBack(t *testing.T) {
+	srv, real := testServer(t)
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *createTxFaultStore {
+		return &createTxFaultStore{Store: inner, auditErrFor: "group_delete"}
+	})
+	ctx := context.Background()
+	group, userID, path := groupDeleteFixture(t, real, "gd-audit-fault")
+
+	rec := doRequest(t, srv, http.MethodDelete, path, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	_, err := real.GetGroup(ctx, group.ID)
+	require.NoError(t, err, "group kept after the audit failure")
+	_, err = real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	require.NoError(t, err, "membership kept after the audit failure")
+	assert.Empty(t, grantAudits(t, real, "group_delete", group.ID))
+}
+
+// A group delete writes exactly one group_delete record, synchronously,
+// attributed to the request actor and naming the deleted group.
+func TestGroupDeleteWritesAudit(t *testing.T) {
+	srv, real := testServer(t)
+	ctx := context.Background()
+	group, userID, path := groupDeleteFixture(t, real, "gd-audit-ok")
+
+	rec := doRequest(t, srv, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	_, err := real.GetGroup(ctx, group.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	audits := grantAudits(t, real, "group_delete", group.ID)
+	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
+	assert.Equal(t, "group", audits[0].TargetType)
+	assert.Equal(t, DevUserID, audits[0].ActorPrincipalID)
+	var before map[string]string
+	require.NoError(t, json.Unmarshal([]byte(audits[0].BeforeSummary), &before))
+	assert.Equal(t, group.ID, before["group_id"])
+	assert.Equal(t, group.Name, before["group_name"])
+	assert.Equal(t, group.Slug, before["slug"])
+}
