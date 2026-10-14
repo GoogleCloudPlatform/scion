@@ -335,6 +335,12 @@ type pendlogManagedBackend struct {
 	createAtDeadline bool
 	createCtxErr     error
 	created          bool
+	// cancelDeadline is the deadline CancelInteraction saw.
+	cancelDeadline time.Time
+	// createDeadline is the deadline CreateInteraction saw.
+	createDeadline time.Time
+	// calls records the order in which the cancel returned and the create ran.
+	calls []string
 }
 
 func (b *pendlogManagedBackend) Name() string { return "pendlog-test" }
@@ -343,6 +349,8 @@ func (b *pendlogManagedBackend) CreateAgent(context.Context, managedagent.Create
 }
 func (b *pendlogManagedBackend) DeleteAgent(context.Context, string) error { return nil }
 func (b *pendlogManagedBackend) CreateInteraction(ctx context.Context, _ managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
+	b.createDeadline, _ = ctx.Deadline()
+	b.calls = append(b.calls, "create")
 	if b.createAtDeadline {
 		<-ctx.Done()
 	} else if err := ctx.Err(); err != nil {
@@ -356,6 +364,8 @@ func (b *pendlogManagedBackend) GetInteraction(context.Context, string) (*manage
 	return nil, errors.New("not used")
 }
 func (b *pendlogManagedBackend) CancelInteraction(ctx context.Context, _ string) error {
+	b.cancelDeadline, _ = ctx.Deadline()
+	defer func() { b.calls = append(b.calls, "cancel-returned") }()
 	if b.slowCancel {
 		<-ctx.Done()
 		return ctx.Err()
@@ -364,19 +374,6 @@ func (b *pendlogManagedBackend) CancelInteraction(ctx context.Context, _ string)
 }
 func (b *pendlogManagedBackend) StreamInteraction(context.Context, string, string) (io.ReadCloser, error) {
 	return nil, errors.New("not used")
-}
-
-func usePendlogManagedBackend(t *testing.T, b managedagent.ManagedAgentBackend) {
-	t.Helper()
-	managedBackendMu.Lock()
-	prev := managedBackendInst
-	managedBackendInst = b
-	managedBackendMu.Unlock()
-	t.Cleanup(func() {
-		managedBackendMu.Lock()
-		managedBackendInst = prev
-		managedBackendMu.Unlock()
-	})
 }
 
 // TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget pins that the
@@ -389,7 +386,7 @@ func TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget(t *testing.T) {
 	managedInterruptCancelTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { managedInterruptCancelTimeout = prevCancel })
 	b := &pendlogManagedBackend{slowCancel: true}
-	usePendlogManagedBackend(t, b)
+	useManagedBackend(t, b)
 	if target.Annotations == nil {
 		target.Annotations = map[string]string{}
 	}
@@ -400,6 +397,8 @@ func TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget(t *testing.T) {
 	err := srv.managedAgentMessage(ctx, target, "interrupt-4827", true)
 	require.NoError(t, err, "a slow cancel must not fail the send")
 	assert.True(t, b.created, "the create must run with budget left")
+	assert.Equal(t, []string{"cancel-returned", "create"}, b.calls, "the create runs after the bounded cancel returned")
+	assert.True(t, b.cancelDeadline.Before(b.createDeadline), "the cancel's deadline must come before the create's")
 }
 
 // TestManagedAgentMessage_AnnotationSurvivesDeadline pins that the
@@ -408,7 +407,7 @@ func TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget(t *testing.T) {
 func TestManagedAgentMessage_AnnotationSurvivesDeadline(t *testing.T) {
 	srv, s, _, _, target, _, _ := deliverySetup(t)
 	b := &pendlogManagedBackend{createAtDeadline: true}
-	usePendlogManagedBackend(t, b)
+	useManagedBackend(t, b)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

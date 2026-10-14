@@ -137,7 +137,8 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 // managedInterruptCancelTimeout bounds the best-effort cancel of the running
 // interaction before an interrupt send. ExecuteAgentDM gives the whole
 // managed send agentDMDispatchTimeout (30s); 5s is ample for one small cancel
-// call and leaves the create at least 25s. A variable so tests can shrink it.
+// call, and with no shorter caller deadline it leaves the create at least
+// 25s. A variable so tests can shrink it.
 var managedInterruptCancelTimeout = 5 * time.Second
 
 // managedAgentMessage sends a message to a managed agent by creating a new interaction.
