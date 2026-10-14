@@ -313,6 +313,22 @@ func TestStartLaunch_EndsClearMemory(t *testing.T) {
 		})
 	}
 
+	// Q3(a) with a non-failed report: the launch still ends failed, so the
+	// start-kind rule applies (a restart ends stopped).
+	t.Run("active error end/non-failed report/restart", func(t *testing.T) {
+		s, projectID := newTestAgentStore(t)
+		a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "end-err-nf", store.LaunchKindRestart, "running", "")
+		setRowPhaseAndMemory(t, ctx, s, a.ID, "error", "")
+		_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+			LaunchID: launchID, InstanceID: "i1", Seq: 1, State: store.LaunchReportStateProgress,
+		})
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
+		assert.Equal(t, "stopped", got.Phase)
+	})
+
 	// Q3(b): a wind-down reap writes no phase; it clears the memory unless
 	// the row is in error, where the prior's memory applies.
 	for _, tc := range []struct {
@@ -361,6 +377,42 @@ func TestStartLaunch_LateFailedAfterStoppedReapRefines(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", got.Phase)
 	assert.Equal(t, "image_pull_failed", got.LaunchError)
+}
+
+// TestStartLaunch_LateFailedAfterWindDownErrorRefines pins that a broker's
+// failed report after a wind-down reap ended a start-kind launch on a row
+// another writer had moved to error is applied (and refines the error), as
+// it is for a create launch, even when the launch's own failure phase is
+// stopped (a restart, or a start from stopped).
+func TestStartLaunch_LateFailedAfterWindDownErrorRefines(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct{ kind, prior string }{
+		{store.LaunchKindRestart, "running"},
+		{store.LaunchKindStart, "stopped"},
+	} {
+		t.Run(tc.kind+"/prior="+tc.prior, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "late-wd", tc.kind, tc.prior, "")
+			setRowPhaseAndMemory(t, ctx, s, a.ID, "error", "")
+			_, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
+			require.NoError(t, err)
+			setLaunchReaperArmedSince(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
+			setAgentLastReportAt(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
+			res, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
+			require.NoError(t, err)
+			require.Len(t, res.Reaped, 1)
+			require.Equal(t, "error", res.Reaped[0].Phase, "a wind-down reap leaves the error phase")
+
+			answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+				LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed, ErrorCode: "image_pull_failed",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, store.LaunchReportResultApplied, answer.Result, "the late failed report is applied, as for a create")
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "image_pull_failed", got.LaunchError)
+		})
+	}
 }
 
 // --- Resume-memory clearing hook (D-T12 e) ----------------------------------
@@ -514,9 +566,15 @@ func TestEntClientConstructorsRegisterResumeHook(t *testing.T) {
 				if end > len(lines) {
 					end = len(lines)
 				}
-				window := strings.Join(lines[i:end], "\n")
-				assert.Contains(t, window, "ClearLaunchResumePhaseHook",
-					"%s:%d builds an *ent.Client without registering ClearLaunchResumePhaseHook", f, i+1)
+				registered := false
+				for _, l := range lines[i:end] {
+					code := strings.TrimSpace(l)
+					if !strings.HasPrefix(code, "//") && strings.Contains(code, ".Use(") && strings.Contains(code, "ClearLaunchResumePhaseHook") {
+						registered = true
+					}
+				}
+				assert.True(t, registered,
+					"%s:%d builds an *ent.Client without a .Use(... ClearLaunchResumePhaseHook ...) call in the next lines", f, i+1)
 			}
 		}
 	}

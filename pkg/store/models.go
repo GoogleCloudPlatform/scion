@@ -343,10 +343,10 @@ func (a *Agent) IsIncompleteCreate() bool {
 }
 
 // EffectiveRestingPhase returns the phase the Hub's branch selectors read
-// to choose how to start a (ptone/scion#4669): the resume memory
+// to choose how to start agent a (ptone/scion#4669): the resume memory
 // LaunchResumePhase when the stored phase is error, the memory is set and
 // no launch is active on the row, and otherwise the stored phase. A failed
-// async start from suspended, created, provisioning or halted leaves the row
+// async start from suspended, created or provisioning leaves the row
 // in error with the memory set, so a later plain start or resume behaves
 // as it would have before the failed attempt. Callers keep the result in
 // a local variable and never write it back to a.Phase, which whole-row

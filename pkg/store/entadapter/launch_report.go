@@ -201,11 +201,15 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 		// Refine: a failed report when the stored reason is timed_out/lost
 		// and the phase is error (the reaper got there first) — the Hub has
 		// just confirmed the agent never ran, so the broker must clean up.
-		// For a start-kind launch the reaper's failure phase can also be
-		// stopped (failureEndPhase; ptone/scion#4669).
+		// For a start-kind launch the reaper can leave either phase: a
+		// deadline or staleness reap writes its failure phase
+		// (failureEndPhase, stopped for a restart or a stopped prior), and a
+		// wind-down reap leaves an error row in error (ptone/scion#4669).
+		// For a create launch both are error.
+		phase := state.Phase(current.Phase)
 		if r.State == store.LaunchReportStateFailed &&
 			(current.LaunchEndReason == store.LaunchEndReasonTimedOut || current.LaunchEndReason == store.LaunchEndReasonLost) &&
-			state.Phase(current.Phase) == failureEndPhase(current) {
+			(phase == state.PhaseError || phase == failureEndPhase(current)) {
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {

@@ -79,11 +79,12 @@ func withStartFailureEnd(u *ent.AgentUpdateOne, row *ent.Agent) *ent.AgentUpdate
 }
 
 // withStartEndClearsMemory adds to u, a non-failure end of row's current
-// launch (succeeded, running_observed, stopped during launch, or a
-// wind-down end), the explicit clear of the resume memory for a start-kind
-// launch. The ent hook also clears it whenever such a write sets a phase
-// other than starting or error, but these ends do not all write a phase,
-// so the end clears it itself. For a create launch it returns u unchanged.
+// launch (succeeded, running_observed or stopped during launch), the
+// explicit clear of the resume memory for a start-kind launch. The ent
+// hook also clears it whenever such a write sets a phase other than
+// starting or error, but these ends do not all write a phase, so the end
+// clears it itself. The wind-down reap writes the memory inline. For a
+// create launch it returns u unchanged.
 func withStartEndClearsMemory(u *ent.AgentUpdateOne, row *ent.Agent) *ent.AgentUpdateOne {
 	if !isStartKindLaunch(row) {
 		return u

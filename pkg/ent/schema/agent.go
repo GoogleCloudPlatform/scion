@@ -392,8 +392,8 @@ func (Agent) Fields() []ent.Field {
 		field.Bool("launch_revoke_on_fail").
 			Default(false),
 		// launch_resume_phase is the resume memory of a failed start
-		// (ptone/scion#4669): the resting phase (suspended, created,
-		// provisioning or halted) a start-kind launch began from when its
+		// (ptone/scion#4669): the resting phase (suspended, created or
+		// provisioning) a start-kind launch began from when its
 		// failure left the row in phase error, or "". Every launch-ending
 		// write of a start-kind launch writes it, and the
 		// ClearLaunchResumePhaseHook clears it on any write of a phase other
