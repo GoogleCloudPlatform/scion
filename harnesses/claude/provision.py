@@ -481,8 +481,9 @@ def _translate_cwd(cwd: str | None, root: str, data: str) -> str:
 
 def _stripped_ref(path: str | None, args_only: bool = False) -> str | None:
     """The stripped top-level entry a plugin-relative path ("./x/...",
-    "${PLUGIN_ROOT}/x/...") points into, or None. For an args element only
-    the ${PLUGIN_ROOT}/ form is plugin-relative ("./" is relative to cwd)."""
+    "${PLUGIN_ROOT}/x/...") points into, or None. With args_only, only the
+    ${PLUGIN_ROOT}/ form counts (an arg or env value's "./" is relative to
+    the server's cwd, which may not be the root)."""
     if not path:
         return None
     for prefix in (("${PLUGIN_ROOT}/",) if args_only else ("./", "${PLUGIN_ROOT}/")):
@@ -516,10 +517,13 @@ def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any
             or (cwd is not None and _has_foreign_placeholder(cwd, True))
         ):
             raise McpServerSkipped("placeholder")
+        # cwd' is the plugin root, so "./" args are root-relative too.
+        cwd_is_root = cwd in (None, "", "./", "${PLUGIN_ROOT}", "${PLUGIN_ROOT}/")
         stripped = (
             _stripped_ref(command)
             or (_stripped_ref(cwd) if cwd else None)
-            or next((r for r in (_stripped_ref(a, args_only=True) for a in args) if r), None)
+            or next((r for r in (_stripped_ref(a, args_only=not cwd_is_root) for a in args) if r), None)
+            or next((r for r in (_stripped_ref(v, args_only=True) for v in env.values()) if r), None)
         )
         if stripped:
             raise McpServerSkipped(f"it uses {stripped}, which is not installed for claude")
@@ -671,6 +675,14 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
     def data_dir(self, name: str) -> str:
         return os.path.join(self.data_root, name)
 
+    @staticmethod
+    def _has_root_skill(path: str) -> bool:
+        """A regular root SKILL.md: a skill, never part of an Agent Plugins
+        bundle (bundles keep skills under skills/)."""
+        skill_md = os.path.join(path, "SKILL.md")
+        return (os.path.isdir(path) and not os.path.islink(path)
+                and os.path.isfile(skill_md) and not os.path.islink(skill_md))
+
     def _has_generated_manifest(self, path: str) -> bool:
         return (
             os.path.isdir(path) and not os.path.islink(path)
@@ -786,6 +798,20 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 f"plugin {name} not installed for claude: {target} exists and was not installed by Scion")
         if os.path.islink(target):
             raise scion_harness.PluginInstallError(f"{target} is a symlink")
+        if self._has_root_skill(target):
+            # An owned dir that now also holds a skill Go did not flag (for
+            # example a SKILL.md written at runtime): never swap it away.
+            # Hand it to the skill, as uninstall does.
+            rec = self._recorded_plugins().get(name)
+            ref = rec.get("native_ref") if isinstance(rec, dict) else None
+            try:
+                self._release_dir(name, ref if isinstance(ref, dict) else {})
+            except OSError as exc:
+                raise scion_harness.PluginInstallError(f"cannot release {target}: {exc}") from None
+            self.owned.discard(name)
+            raise scion_harness.PluginInstallError(
+                f"plugin {name} not installed for claude: {target} holds a skill (SKILL.md); "
+                "left it to that skill")
 
         _warn_invalid_mcp(self.ctx, plugin)
         data_dir = self.data_dir(name)
@@ -842,18 +868,21 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         return ref
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
-        """Remove the plugin dir when it still carries both the root
-        plugin.json and the generated manifest. Anything else at that path
-        is no longer a Scion install and is left alone. data/<name> is kept
-        (spec 9.1 makes deletion optional). Success is judged by the
-        result: the generated plugin must be gone."""
+        """Remove Scion's plugin dir: one carrying the generated manifest,
+        or one whose generated manifest was removed by hand but whose root
+        plugin.json is still the one Scion installed (recorded sha). A dir
+        that also holds a skill (root SKILL.md) is handed to the skill
+        instead, and anything else is left alone. data/<name> is kept (spec
+        9.1 makes deletion optional). Success is judged by the result."""
         target = self.target(name)
-        skill_md = os.path.join(target, "SKILL.md")
-        if self._has_generated_manifest(target) and os.path.isfile(skill_md) and not os.path.islink(skill_md):
+        root_manifest = os.path.join(target, AGENT_PLUGIN_MANIFEST)
+        if self._has_root_skill(target):
+            if not self._has_generated_manifest(target):
+                self.owned.discard(name)
+                return  # nothing of the plugin loads; the dir is the skill's
             # A skill was merged into the plugin dir (a template added skill
-            # <name> in the same edit that dropped the plugin). An Agent
-            # Plugins bundle keeps its skills under skills/, so a root
-            # SKILL.md is not ours: hand the dir to the skill, never rmtree.
+            # <name> in the same edit that dropped the plugin): hand the dir
+            # to the skill, never rmtree.
             try:
                 self._release_dir(name, native_ref)
             except OSError as exc:
@@ -864,20 +893,21 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             )
             self.owned.discard(name)
             return
-        if self._has_generated_manifest(target):
+        ours = self._has_generated_manifest(target) or (
+            os.path.isdir(target) and not os.path.islink(target)
+            and os.path.isfile(root_manifest) and not os.path.islink(root_manifest)
+            and self._is_bundle_manifest(name, root_manifest, native_ref)
+        )
+        if ours:
             try:
                 shutil.rmtree(target)
             except OSError as exc:
                 raise scion_harness.PluginInstallError(f"cannot remove {target}: {exc}") from None
+            if os.path.lexists(target):
+                raise scion_harness.PluginInstallError(f"{target} is still present")
         if self._has_generated_manifest(target):
             raise scion_harness.PluginInstallError(f"{target} is still present")
-        # A bundle dir that lost only its generated manifest (removed by
-        # hand) stays Scion's for this run, so a reinstall at a new digest
-        # replaces it, as one at the same digest does.
-        root_manifest = os.path.join(target, AGENT_PLUGIN_MANIFEST)
-        if not (os.path.isdir(target) and not os.path.islink(target)
-                and os.path.isfile(root_manifest) and not os.path.islink(root_manifest)):
-            self.owned.discard(name)
+        self.owned.discard(name)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """Claude's registration of a skills-dir plugin is the directory

@@ -1165,8 +1165,11 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
             "root-cwd": {"type": "stdio", "command": "x", "cwd": "${PLUGIN_ROOT}/commands/sub"},
             "dot": {"type": "stdio", "command": "./.mcp.json"},
             "root-arg": {"type": "stdio", "command": "node", "args": ["${PLUGIN_ROOT}/hooks/x.js"]},
+            "env-ref": {"type": "stdio", "command": "x", "env": {"CFG": "${PLUGIN_ROOT}/agents/c.json"}},
+            "root-cwd-rel-arg": {"type": "stdio", "command": "node", "args": ["./hooks/x.js"]},
             "ok": {"type": "stdio", "command": "./bin/hooks", "cwd": "./lib/agents",
-                   "args": ["./hooks/relative-to-cwd", "${PLUGIN_ROOT}/lib/hooks"]},
+                   "args": ["./hooks/relative-to-cwd", "${PLUGIN_ROOT}/lib/hooks"],
+                   "env": {"A": "./hooks", "B": "${PLUGIN_DATA}/hooks"}},
         }
         got = provision.translate_mcp_servers(ctx, _plugin(servers=servers), "/d")
         self.assertEqual(sorted(got), ["ok"])
@@ -1174,7 +1177,11 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
                       "it uses hooks, which is not installed for claude", warnings.messages)
         self.assertIn("agent plugin acme.tools: mcp server root-arg skipped for claude: "
                       "it uses hooks, which is not installed for claude", warnings.messages)
-        self.assertEqual(len(warnings.messages), 5)
+        self.assertIn("agent plugin acme.tools: mcp server env-ref skipped for claude: "
+                      "it uses agents, which is not installed for claude", warnings.messages)
+        self.assertIn("agent plugin acme.tools: mcp server root-cwd-rel-arg skipped for claude: "
+                      "it uses hooks, which is not installed for claude", warnings.messages)
+        self.assertEqual(len(warnings.messages), 7)
 
     def test_old_copy_removal_failure_is_a_warning(self) -> None:
         # Review round 1, finding 2: nothing after the swap fails the
@@ -1290,11 +1297,69 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(self.cli.calls, [])
         self.assertEqual(sorted(e for e in os.listdir(self.skills) if e.startswith(".")), [".other.old"])
 
+    def test_install_hands_runtime_skill_back(self) -> None:
+        # Review round 3, finding 1: an owned dir reinstalled at the same
+        # digest (generated manifest gone) that now holds a SKILL.md Go did
+        # not flag is never swapped away.
+        self.stage({"p": {}})
+        self.reconcile()
+        target = os.path.join(self.skills, "p")
+        shutil.rmtree(os.path.join(target, ".claude-plugin"))
+        with open(os.path.join(target, "SKILL.md"), "w") as f:
+            f.write("written at runtime")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
+        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
+        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
+        self.assertEqual(warnings, [
+            f"agent plugin p: install failed (plugin p not installed for claude: {target} holds a skill "
+            "(SKILL.md); left it to that skill); will retry next start",
+        ])
+        # Dropping the plugin later leaves the skill alone.
+        self.stage({})
+        self.reconcile()
+        self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
+        self.assertEqual(self.state(), {})
+
+    def test_removal_after_manual_manifest_removal(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
+        self.stage({})
+        self.reconcile()
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertEqual(self.state(), {})
+
+    def test_failed_install_after_manual_manifest_removal_not_orphaned(self) -> None:
+        # Review round 3, finding 2: the digest-change uninstall removes
+        # Scion's bundle dir, so a failed install leaves nothing behind that
+        # would later count as "not installed by Scion".
+        self.stage({"p": {"digest": "d1"}})
+        self.reconcile()
+        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        warnings: list[str] = []
+        real_copytree = shutil.copytree
+
+        def copytree(src, dst, *a, **k):
+            if str(dst).endswith(".p.tmp"):
+                raise OSError("disk full")
+            return real_copytree(src, dst, *a, **k)
+
+        with mock.patch.object(provision.shutil, "copytree", copytree):
+            self.reconcile(warnings)
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertTrue(any("disk full" in w for w in warnings), warnings)
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+
     def test_uninstall_only_owned_generated_dirs(self) -> None:
         self.stage({"a": {}, "b": {}})
         self.reconcile()
-        # b's dir lost its generated manifest (now a plain dir): removal
-        # leaves it alone but still drops the record.
+        # b's dir lost its generated manifest by hand.
         shutil.rmtree(os.path.join(self.skills, "b", ".claude-plugin"))
         # A user skill and a user plugin are never touched.
         os.makedirs(os.path.join(self.skills, "mine", ".claude-plugin"))
@@ -1305,7 +1370,9 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.stage({})
         self.reconcile()
         self.assertFalse(os.path.exists(os.path.join(self.skills, "a")))
-        self.assertTrue(os.path.isdir(os.path.join(self.skills, "b")))
+        # b is still Scion's bundle (root plugin.json matches the recorded
+        # sha), so it is removed too.
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "b")))
         self.assertTrue(os.path.isdir(os.path.join(self.skills, "mine")))
         self.assertEqual(self.state(), {})
         self.assertEqual(sorted(self.status()["removed"]), ["a", "b"])
