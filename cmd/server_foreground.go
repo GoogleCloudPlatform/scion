@@ -1683,6 +1683,14 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// enables this check.
 	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
 
+	// On SQLite, snapshot the database when the migration is about to
+	// apply declared ON DELETE actions to orphaned rows. A snapshot that
+	// is needed but fails stops startup before any row changes.
+	if err := snapshotBeforeFKReconcile(ctx, s); err != nil {
+		_ = s.Close()
+		return nil, nil, err
+	}
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, s); err != nil {
