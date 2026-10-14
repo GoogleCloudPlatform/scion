@@ -193,7 +193,7 @@ The simplest way in is `scion ssh`, which runs your system `ssh` through the tun
 scion ssh my-agent
 ```
 
-To use plain `ssh`, `scp` or an editor's Remote-SSH, install Host blocks for your agents with `scion ssh-config --write`; each agent is then reachable as `scion.<hub>.<project>.<agent>`. See [`scion ssh`](/scion/reference/cli/#scion-ssh) and [`scion ssh-config`](/scion/reference/cli/#scion-ssh-config).
+To use plain `ssh`, `scp` or an editor's Remote-SSH, install Host blocks for your agents with `scion ssh-config --write`; each agent is then reachable as `scion.<hub-label>.<project>.<agent>`, where `<hub-label>` is derived from the Hub's host name (not its hub-list nickname). See [`scion ssh`](/scion/reference/cli/#scion-ssh) and [`scion ssh-config`](/scion/reference/cli/#scion-ssh-config).
 
 You can also use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand` directly:
 

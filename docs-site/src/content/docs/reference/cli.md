@@ -1244,9 +1244,9 @@ Print or install SSH Host blocks for reaching agents through `scion tunnel`, for
 
 **Usage:** `scion ssh-config [<agent>] [--write]`
 
-- Each agent gets a Host named `scion.<hub>.<project>.<agent>` whose `ProxyCommand` runs `scion tunnel` with the Hub and project pinned, and whose host key is pinned in a known-hosts file kept by Scion.
+- Each agent gets a Host named `scion.<hub-label>.<project>.<agent>` whose `ProxyCommand` runs `scion tunnel` with the Hub and project pinned, and whose host key is pinned in a known-hosts file kept by Scion, where `<hub-label>` is derived from the Hub's host name (not its hub-list nickname).
 - With no agent, every agent the Hub lists across all projects is included. With an agent, only that agent's block is updated.
-- Without `--write`, the files are printed to stdout and nothing is written. With `--write`, the blocks are installed in `~/.ssh/config.d/scion-<hub>`, the host keys in `~/.scion/ssh/known_hosts-<hub>`, and one `Include` line is added at the top of `~/.ssh/config`. Regenerating without an agent removes the blocks of agents that are no longer listed; if the listing fails or is incomplete, nothing is written.
+- Without `--write`, the files are printed to stdout and nothing is written. With `--write`, the blocks are installed in `~/.ssh/config.d/scion-<hub-label>`, the host keys in `~/.scion/ssh/known_hosts-<hub-label>`, and one `Include` line is added at the top of `~/.ssh/config`. Regenerating without an agent removes the blocks of agents that are no longer listed; if the listing fails or is incomplete, nothing is written.
 - Exit codes: `0` success, `1` other error, `2` usage error (bad flags or arguments, or an agent name found in several projects), `3` no usable or refused credential, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable.
 
 Tunnel streams opened this way are re-checked with the same authorization as when the tunnel was opened, and close when your access is withdrawn.
