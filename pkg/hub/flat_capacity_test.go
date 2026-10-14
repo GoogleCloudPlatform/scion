@@ -412,3 +412,41 @@ func TestUsage_PerInstanceRowsAndFlags(t *testing.T) {
 		}
 	}
 }
+
+// A direct-message wake of an agent that holds capacity on another Runtime
+// Broker surfaces the 409 scope conflict, not a generic quota failure; at a
+// full instance the 429 names the instance.
+func TestWakeDM_ScopeConflictAndCapSurfaceTheirCodes(t *testing.T) {
+	t.Run("scope conflict", func(t *testing.T) {
+		srv, s := testServer(t)
+		disp := &wakeTrackingDispatcher{}
+		srv.SetDispatcher(disp)
+		other, _ := newQuotaTestBrokerAndProject(t, s, "wake-conflict-other")
+		inst, project := newFlatQuotaInstance(t, s, "wake-conflict", "docker")
+		target := flatPinnedAgent(t, s, inst, project, "wake-conflict", state.PhaseSuspended)
+		seedSlot(t, s, other.ID, target.ID)
+
+		_, dmErr := srv.wakeAgentForDM(context.Background(), target)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Equal(t, ErrCodeBrokerReservationScopeConflict, dmErr.Code)
+		assert.Equal(t, fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+			target.ID, other.ID, inst.ID), dmErr.Message)
+		assert.Empty(t, disp.getStartCalls(), "no resume dispatch")
+	})
+	t.Run("cap", func(t *testing.T) {
+		srv, s := testServer(t)
+		disp := &wakeTrackingDispatcher{}
+		srv.SetDispatcher(disp)
+		inst, project := newFlatQuotaInstance(t, s, "wake-cap", "docker")
+		setInstanceMaxAgents(t, s, inst.ID, 1)
+		seedSlot(t, s, inst.ID, flatPinnedAgent(t, s, inst, project, "wake-cap-held", state.PhaseRunning).ID)
+		target := flatPinnedAgent(t, s, inst, project, "wake-cap", state.PhaseSuspended)
+
+		_, dmErr := srv.wakeAgentForDM(context.Background(), target)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusTooManyRequests, dmErr.HTTPStatus)
+		assert.Equal(t, ErrCodeQuotaExceeded, dmErr.Code)
+		assert.Equal(t, inst.ID, dmErr.Details["runtimeBrokerId"])
+	})
+}
