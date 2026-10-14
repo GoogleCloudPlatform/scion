@@ -28,6 +28,9 @@ import (
 // reads the stored row. Tests use it to reach a guard that runs after
 // authorization with an actor whose stored row is not active; the
 // account-status check itself is pinned by tests that do not use it.
+// The wrapper hides the concrete clamp type from the grant-clamp type
+// checks (authz_candelegate.go:225, agent_standing.go:311), which then
+// fall back to uncached reads; the tests that use it do not depend on that.
 func authzSeesUserActive(t *testing.T, srv *Server, userID string) {
 	t.Helper()
 	require.NotNil(t, srv.authzService)
