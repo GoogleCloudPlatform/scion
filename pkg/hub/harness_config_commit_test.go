@@ -511,8 +511,19 @@ func TestHarnessConfigFileDelete_ConfigYAMLRefused(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	before := globalHC(t, s, deriveHCName)
 
-	for _, p := range []string{"config.yaml", "./config.yaml"} {
-		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID+"/files/"+p, nil)
+	// Through the router: the exact name.
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID+"/files/config.yaml", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeHarnessConfigYAMLRequired)
+
+	// Spellings that clean to config.yaml reach the handler directly: the
+	// router's ServeMux redirects a URL with "./" or ".." segments (301)
+	// before any handler runs.
+	for _, p := range []string{"./config.yaml", "sub/../config.yaml"} {
+		row := globalHC(t, s, deriveHCName)
+		req := httptest.NewRequest(http.MethodDelete, "/", nil)
+		rec := httptest.NewRecorder()
+		srv.handleHarnessConfigFileDelete(rec, req, row, p)
 		require.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", p, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), ErrCodeHarnessConfigYAMLRequired)
 	}
