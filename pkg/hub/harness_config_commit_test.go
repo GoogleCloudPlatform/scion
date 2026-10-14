@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -858,4 +859,46 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "a lost repair commit must not sweep storage")
 	})
+}
+
+// existsErrorStorage fails every Exists and Download call while failing is
+// set, like a transient storage or permission error. With the blob layout
+// (ptone/scion#4219 part 2) a commit reads staged uploads and blobs with
+// Download rather than checking paths with Exists, so both fail.
+type existsErrorStorage struct {
+	*mockStorage
+	failing bool
+}
+
+func (m *existsErrorStorage) Exists(ctx context.Context, objectPath string) (bool, error) {
+	if m.failing {
+		return false, errors.New("injected storage error")
+	}
+	return m.mockStorage.Exists(ctx, objectPath)
+}
+
+func (m *existsErrorStorage) Download(ctx context.Context, objectPath string) (io.ReadCloser, *storage.Object, error) {
+	if m.failing {
+		return nil, nil, errors.New("injected storage error")
+	}
+	return m.mockStorage.Download(ctx, objectPath)
+}
+
+// A storage error while the commit reads the objects it introduces (staged
+// uploads, blobs) is a 500, not the 400 "file not found" (GCP#3669 review,
+// finding 1), and the row is left unchanged.
+func TestHarnessConfigCommit_StorageErrorIsNotFileNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	stor := &existsErrorStorage{mockStorage: newMockStorage("test-bucket")}
+	srv.SetStorage(stor)
+	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
+
+	stor.failing = true
+	rec := finalizeHCManifest(t, srv, hc, map[string]string{"config.yaml": deriveFullYAML})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "file not found")
+
+	after := globalHC(t, s, deriveHCName)
+	assert.Equal(t, hc.ContentHash, after.ContentHash, "a failed commit leaves the row unchanged")
+	assertDerivedFrom(t, after, deriveBareYAML)
 }
