@@ -61,6 +61,10 @@ const (
 	// LaunchStepLaunching: the generic step of runtimes that report no
 	// finer steps (container runtimes).
 	LaunchStepLaunching = "launching"
+	// LaunchStepSandboxLayout: the cloudrun-sandbox runtime is preparing
+	// the agent's host directory layout, before its Starting entry and
+	// `sandbox run` (which use LaunchStepLaunching).
+	LaunchStepSandboxLayout = "sandbox_layout"
 )
 
 // Launch failure codes.

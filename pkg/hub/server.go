@@ -59,6 +59,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -226,10 +227,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -1452,7 +1449,7 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// (projectSettingTelemetryEnabled), sent only to a broker that reports
 	// TemplateTiers. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
@@ -1608,6 +1605,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1748,6 +1748,11 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// brokerWork admits and joins broker connection work (connect,
+	// disconnect, reconcile and notification drains), so shutdown stops
+	// it before the store closes (broker_work.go, ptone/scion#4869).
+	brokerWork brokerWorkTracker
 
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
@@ -1931,6 +1936,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -2566,6 +2575,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			"audience", cfg.TransportAudience)
 	}
 
+	// Settings for user access credentials for peer hubs are read at
+	// startup only; an invalid value fails startup rather than being
+	// ignored.
+	if err := cfg.OIDCConfig.ValidateUserTokens(); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	if len(cfg.OIDCConfig.UserTokenAudiences) > 0 && !cfg.OIDCConfig.Enabled {
+		slog.Warn("oidc.user_token_audiences is set but oidc.enabled is false; no federation tokens are issued")
+	}
+
 	// Initialize OIDC Identity Provider key manager if enabled
 	if cfg.OIDCConfig.Enabled {
 		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
@@ -2661,8 +2680,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
 	// See handleBrokerDisconnect for the CAS/race rationale (issue #131).
+	// The callback is tracked work, so shutdown joins it before the store
+	// closes; once shutdown has started it is skipped (ptone/scion#4869).
 	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
-		srv.handleBrokerDisconnect(context.Background(), brokerID, sessionID)
+		ctx, done, ok := srv.brokerWork.begin()
+		if !ok {
+			return
+		}
+		defer done()
+		srv.handleBrokerDisconnect(ctx, brokerID, sessionID)
 	})
 	slog.Info("Control channel manager initialized")
 
@@ -4686,8 +4712,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -5757,8 +5784,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records
@@ -6488,9 +6515,22 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// already stops new ones from starting.
 		s.stopAutoSuspendWorker(ctx)
 
+		// Stop broker connection work (connect, disconnect, reconcile and
+		// notification drains) before the control channel closes: new
+		// work is refused, and running drains claim no more rows, so rows
+		// they have not claimed stay pending for the next connect instead
+		// of failing on a closed tunnel. The work is joined below, after
+		// the control channel closes, while the store is still open
+		// (ptone/scion#4869).
+		s.brokerWork.closeAdmission()
+
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
+		}
+		if n := s.brokerWork.wait(ctx, brokerWorkStopGrace); n > 0 {
+			slog.Warn("Broker connection work still running after the shutdown grace; cancelled it",
+				"running", n, "grace", brokerWorkStopGrace)
 		}
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
@@ -6693,6 +6733,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
+	// User access credentials for peer hubs: 404 while
+	// federation.project_visitors is off or the OIDC provider is not
+	// enabled (handlers_federation_token.go).
+	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)
@@ -7362,6 +7406,12 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
+	if errors.Is(err, errControlChannelClosed) {
+		// The hub is shutting down; the broker reconnects to a live
+		// instance (ptone/scion#4869).
+		slog.Info("Refused broker control channel: hub is shutting down", "brokerID", brokerID)
+		return
+	}
 	if err != nil {
 		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
@@ -7397,8 +7447,18 @@ func (s *Server) stampProvidersOnline(ctx context.Context, brokerID string) ([]s
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
 // It claims broker affinity for this hub instance + the connection's sessionID,
 // which also bumps status->online and refreshes the heartbeat in one CAS write.
+//
+// It runs as tracked broker work (brokerWorkTracker): shutdown waits for it
+// before the store closes, and once shutdown has started it does nothing,
+// because the control channel it would mark online is being torn down
+// (ptone/scion#4869).
 func (s *Server) markBrokerOnline(brokerID, sessionID string) {
-	ctx := context.Background()
+	ctx, done, ok := s.brokerWork.begin()
+	if !ok {
+		slog.Info("Hub is shutting down; not marking broker online", "brokerID", brokerID, "sessionID", sessionID)
+		return
+	}
+	defer done()
 	slog.Info("Broker connected, marking online", "brokerID", brokerID, "sessionID", sessionID, "instanceID", s.instanceID)
 
 	if err := s.store.ClaimRuntimeBrokerConnection(ctx, brokerID, s.instanceID, sessionID); err != nil {
@@ -7427,13 +7487,19 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// drain any durable dispatch intent that accumulated while the broker was
 	// offline or owned elsewhere. Async so it never blocks the connect path;
 	// idempotent + CAS-gated so concurrent drains execute each item once.
-	go s.reconcileBroker(context.Background(), brokerID)
+	// Tracked, so shutdown joins it; skipped once shutdown has started (the
+	// rows are durable and drain on the next connect).
+	s.brokerWork.goTracked(func(ctx context.Context) {
+		s.reconcileBroker(ctx, brokerID)
+	})
 
 	// Notification redeliver (ptone/scion#495): drain undispatched agent
 	// notifications for agents on this broker. Async + CAS-gated, same
 	// pattern as reconcileBroker above.
 	if s.notificationDispatcher != nil {
-		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+		s.brokerWork.goTracked(func(ctx context.Context) {
+			s.drainUndispatchedNotifications(ctx, brokerID)
+		})
 	}
 }
 

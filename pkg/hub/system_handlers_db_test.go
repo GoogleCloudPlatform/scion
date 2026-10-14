@@ -27,6 +27,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -159,6 +160,76 @@ func TestSystemRuntime_DBBackedNoRowStartsFromEffectiveProfiles(t *testing.T) {
 	otherDoc, _ := doc["other"].(map[string]interface{})
 	if otherDoc["runtime"] != "podman" {
 		t.Errorf("profiles.other.runtime = %v, want the bootstrap value carried into the new row", otherDoc["runtime"])
+	}
+}
+
+// With the co-located settings overlay installed and exactly one stored
+// profile that is not the configured active_profile, the overlay's
+// single-stored-profile default applies to dispatch only: the
+// system-runtime GET and PUT keep targeting the configured active profile,
+// and the only stored profile is left untouched.
+func TestSystemRuntime_DBBackedSingleStoredProfileNotRetargeted(t *testing.T) {
+	tempSettingsHome(t)
+	configured := activeProfileName() // before any overlay: the configured value
+	const stored = "cluster"
+	if configured == stored {
+		t.Fatalf("fixture: configured active profile %q must differ from the stored profile", configured)
+	}
+	prev := config.GetGlobalSettingsOverlay()
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+
+	srv, st, _ := newSQLiteOpsServer(t, nil, map[string]string{
+		"profiles": `{"` + stored + `":{"runtime":"podman","default_template":"keep-me"}}`,
+	})
+	srv.imageChecker = imagecheck.NewChecker()
+
+	// The overlay now holds the one stored profile, so dispatch resolution
+	// falls back to it; the system-runtime target does not.
+	effective, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.ActiveProfile != stored {
+		t.Fatalf("fixture: effective ActiveProfile = %q, want the single-stored-profile default %q", effective.ActiveProfile, stored)
+	}
+	if got := activeProfileName(); got != configured {
+		t.Fatalf("activeProfileName() = %q, want the configured %q", got, configured)
+	}
+
+	// GET reports the configured profile's runtime, which the stored
+	// profiles do not define, not the stored profile's.
+	rr := httptest.NewRecorder()
+	req := adminRequest(http.MethodGet, "/api/v1/system/runtime", "")
+	req.RemoteAddr = "127.0.0.1:1234"
+	srv.handleSystemRuntime(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime GET: %d %s", rr.Code, rr.Body.String())
+	}
+	var resp systemRuntimeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Configured != "" {
+		t.Errorf("GET configured = %q, want \"\" (the configured profile is not stored), not the stored profile's runtime", resp.Configured)
+	}
+
+	// PUT writes the configured profile and leaves the stored one as is.
+	rr = putSystem(t, srv, "/api/v1/system/runtime", `{"runtime":"container"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runtime PUT: %d %s", rr.Code, rr.Body.String())
+	}
+	_, doc := hubSettingDocMap(t, st, "profiles")
+	configuredDoc, _ := doc[configured].(map[string]interface{})
+	if configuredDoc["runtime"] != "container" {
+		t.Errorf("profiles.%s.runtime = %v, want container", configured, configuredDoc["runtime"])
+	}
+	storedDoc, _ := doc[stored].(map[string]interface{})
+	if storedDoc["runtime"] != "podman" || storedDoc["default_template"] != "keep-me" {
+		t.Errorf("profiles.%s = %v, want it untouched (runtime podman, default_template keep-me)", stored, storedDoc)
+	}
+	if len(doc) != 2 {
+		t.Errorf("profiles = %v, want exactly %q and %q", doc, configured, stored)
 	}
 }
 

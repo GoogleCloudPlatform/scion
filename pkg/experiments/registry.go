@@ -161,7 +161,9 @@ const AgentDelegation = "hub.agent_delegation"
 // external issuers (ptone/scion#4603). While it is off, a verified
 // federated user token always yields the same federated user identity as
 // before; while it is on, a token whose (issuer, subject) is linked to an
-// active federated account yields that account's visitor identity.
+// active federated account yields that account's visitor identity. It also
+// gates POST /api/v1/auth/federation-token (404 while off), where this
+// hub's own users obtain user access credentials for peer hubs.
 const FederationProjectVisitors = "federation.project_visitors"
 
 // ChatThreadGroups gates project-scoped chat thread groups
@@ -171,14 +173,32 @@ const FederationProjectVisitors = "federation.project_visitors"
 // Turning it off hides the feature but keeps every stored group.
 const ChatThreadGroups = "hub.chat_thread_groups"
 
+// AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
+// hub sends a create to the broker as an async launch only while it is on
+// and the request opted in (acceptAsyncLaunch). It is read at each create
+// send, so toggling needs no restart; launches already accepted finish or
+// are reaped either way.
+const AsyncAgentLaunch = "hub.async_agent_launch"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
 	{
+		Name:        AsyncAgentLaunch,
+		Title:       "Asynchronous agent create",
+		Description: "Lets the hub answer an agent create as soon as the Runtime Broker accepts it, while the broker finishes the launch in the background; clients that opt in (scion start and resume, the web create form, scheduled creates) follow its progress. Provision-only creates, reprovisioning and brokers without async launch support stay synchronous. Turning it off makes new creates synchronous; launches already accepted finish or time out as before.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4991",
+		Owner:       "async-start",
+		ReviewBy:    "2027-01-12",
+	},
+	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor). While off, federated user tokens behave exactly as before; stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences. While off, federated user tokens behave exactly as before, no user access credentials are issued, and stored accounts are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

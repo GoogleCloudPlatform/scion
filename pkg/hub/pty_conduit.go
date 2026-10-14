@@ -485,6 +485,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			SessionID: target.SessionID,
 			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
+			Renew:     conduitStreamRenewal(res, st.ID()),
 		})
 		return nil
 	})

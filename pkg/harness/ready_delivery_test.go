@@ -15,6 +15,7 @@
 package harness
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -82,3 +83,99 @@ func TestHarnessDeliverySpec_Implementations(t *testing.T) {
 }
 
 func intPtr(n int) *int { return &n }
+
+// TestResolve_ConfigWithoutReadyGetsBundleReady covers harness-configs
+// written before the ready block existed: one for a built-in harness type
+// resolves to that bundle's ready block (hook for claude), one for a harness
+// with no built-in bundle keeps the delay default, and an explicit block
+// always wins. The metadata-less rows resolve to the plain Generic harness,
+// which carries the entry's ready spec too; a declared ready block is itself
+// declarative metadata, so a config with only that block is declarative.
+func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
+	const declarative = "command:\n  base: [tool]\n"
+	hook := api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}
+	delay := api.ReadySpec{Strategy: "delay", Settle: 8 * time.Second}
+	for _, tc := range []struct {
+		name, config string
+		generic      bool
+		want         api.ReadySpec
+	}{
+		{"built-in harness, no block", "harness: claude\n" + declarative, false, hook},
+		{"custom harness, no block", "harness: some-custom\n" + declarative, false, delay},
+		{"built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n" + declarative, false,
+			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
+		{"metadata-less built-in harness, no block", "harness: claude\n", true, hook},
+		{"metadata-less custom harness, no block", "harness: some-custom\n", true, delay},
+		{"built-in harness, explicit block only", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n", false,
+			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved := resolveHC(t, tc.config+"image: img:test\n", nil)
+			if _, isGeneric := resolved.Harness.(*Generic); isGeneric != tc.generic {
+				t.Fatalf("harness is %T, want plain Generic = %v", resolved.Harness, tc.generic)
+			}
+			if got := resolved.Harness.ReadySpec(); got != tc.want {
+				t.Errorf("ReadySpec() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolve_BuiltInNameWithoutDirKeepsBundleReady: a built-in harness name
+// with no installed harness-config dir resolves to the plain Generic harness,
+// which carries the bundle's ready block, the readiness the name had when it
+// was keyed on the harness name.
+func TestResolve_BuiltInNameWithoutDirKeepsBundleReady(t *testing.T) {
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range append(AllHarnessNames(), "no-such-harness") {
+		resolved, err := Resolve(context.Background(), ResolveOptions{Name: name})
+		if err != nil {
+			t.Fatalf("%s: Resolve: %v", name, err)
+		}
+		if resolved.ConfigDir != nil {
+			t.Fatalf("%s: unexpected config dir %+v", name, resolved.ConfigDir)
+		}
+		if _, ok := resolved.Harness.(*Generic); !ok {
+			t.Fatalf("%s: harness is %T, want plain Generic", name, resolved.Harness)
+		}
+		want := config.DefaultReadySpec(config.ReadyStrategyDelay)
+		if legacyHook[name] {
+			want = config.DefaultReadySpec(config.ReadyStrategyHook)
+		}
+		if got := resolved.Harness.ReadySpec(); got != want {
+			t.Errorf("%s: ReadySpec() = %+v, want %+v", name, got, want)
+		}
+	}
+	// The zero Generic (harness.New for an unknown name) keeps the default.
+	if got := (&Generic{}).ReadySpec(); got != config.DefaultReadySpec(config.ReadyStrategyDelay) {
+		t.Errorf("zero Generic ReadySpec() = %+v", got)
+	}
+}
+
+// TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable: with no
+// harness-config dir, every built-in harness type gets its bundle's ready
+// block, which reproduces the legacy name-keyed table.
+func TestEffectiveConfig_ReadyFromBundleMatchesLegacyTable(t *testing.T) {
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	for _, name := range AllHarnessNames() {
+		entry := EffectiveConfig(name, nil, nil, "")
+		if entry.Ready == nil {
+			t.Errorf("%s: no ready block", name)
+			continue
+		}
+		want := config.DefaultReadySpec(config.ReadyStrategyDelay)
+		if legacyHook[name] {
+			want = config.DefaultReadySpec(config.ReadyStrategyHook)
+		}
+		if got := entry.ResolvedReady(); got != want {
+			t.Errorf("%s: ResolvedReady() = %+v, want %+v", name, got, want)
+		}
+	}
+	// The block is a copy: changing it does not change the bundle's.
+	first := EffectiveConfig("claude", nil, nil, "")
+	first.Ready.Strategy = "delay"
+	if again := EffectiveConfig("claude", nil, nil, ""); again.Ready.Strategy != "hook" {
+		t.Errorf("bundle block mutated through a returned entry: %+v", again.Ready)
+	}
+}
