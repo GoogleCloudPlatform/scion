@@ -294,14 +294,17 @@ a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 :::note[IAP authentication for API and scripted access]
 If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
 through IAP with an access token or an OIDC identity token. For identity tokens,
-the audience **must** be the IAP OAuth client ID (not the resource path):
+the audience **must** be the IAP OAuth client ID (not the resource path).
+
+The deploy script prints this ID in step 6 as `IAP OAuth client ID: ...`. If it
+reports that the ID could not be determined automatically, find it in the console
+under **Security > Identity-Aware Proxy** (the service's OAuth settings), or read
+it from the project's IAP settings:
 
 ```bash
-# Discover the auto-generated IAP OAuth client ID
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-gcloud alpha iap oauth-clients list \
-  "projects/$PROJECT_NUMBER/brands/$PROJECT_NUMBER" \
-  --format="value(name)" | sed 's|.*/||'
+# Read the IAP OAuth client ID from the project's IAP settings
+gcloud iap settings get --project=$PROJECT_ID --resource-type=iap_web \
+  --format="value(accessSettings.oauthSettings.clientId)"
 
 # Use it as the audience
 curl -s "$HUB_URL/health" \
@@ -489,6 +492,12 @@ Shared directories within the Cloud Run Sandbox are mounted at standard paths ma
 
 * **Standard Mount Path**: All shared directories are mapped to `/scion-volumes/<name>` inside the sandbox container.
 * **Workspace & Read-Only Support**: The sandbox runtime fully supports mounting shared volumes within the workspace directory tree (using `in_workspace: true` to mount at `/workspace/.scion-volumes/<name>`) and enforces read-only locks when specified.
+
+### Asynchronous agent create
+The sandbox runtime supports [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create). It is off unless the Hub sets `server.hub.async_agent_launch: true`; then eligible creates that opt in (such as `scion start`) are asynchronous. If you enable it:
+
+* **Launch timeout**: set `server.hub.launch_timeout` to at least `"60s"`.
+* **CPU allocation (not verified)**: an asynchronous launch keeps running on the Instance after the create response. This assumes the Cloud Run Instance keeps CPU allocated for that background work, which has not been verified on a live Instance. If launches stall after the create response and end with `broker_lost` or `launch_timeout`, set `async_agent_launch: false` and restart the Hub to return to the synchronous create.
 
 ---
 

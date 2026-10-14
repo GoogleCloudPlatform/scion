@@ -807,9 +807,9 @@ func (hc *BrokerConnection) TunnelRequest(ctx context.Context, req *wsprotocol.R
 		// We gave up waiting past our own dispatch timeout. Tell the broker
 		// for the same reason as above.
 		hc.sendCancel(req.RequestID)
-		return nil, fmt.Errorf("request timeout after %v", timeout)
+		return nil, &brokerTransportError{msg: fmt.Sprintf("request timeout after %v", timeout), sentinel: errBrokerResponseTimeout}
 	case <-hc.ctx.Done():
-		return nil, fmt.Errorf("connection closed")
+		return nil, &brokerTransportError{msg: "connection closed", sentinel: errBrokerConnectionLost}
 	}
 }
 

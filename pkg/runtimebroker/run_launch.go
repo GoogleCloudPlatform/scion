@@ -522,7 +522,14 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 		// longer this launch's to delete (design §3.8.4).
 		return
 	}
-	if owner := agentFilesRunOwner(lc.opts.Name, lc.opts.ProjectPath, lc.opts.RunID); owner != "" {
+	target := agent.RunOwnerTargetFor(lc.opts)
+	target.SharedWorkspace = target.SharedWorkspace || lc.sharedWorkspace
+	if owner, ownerErr := agentFilesRunOwner(target, lc.opts.RunID); ownerErr != nil {
+		// The owner of the files is unknown (ptone/scion#4771): keep them.
+		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the owner of the agent's files is unknown",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", lc.opts.RunID, "error", ownerErr)
+		return
+	} else if owner != "" {
 		// The files record a different run as their owner
 		// (ptone/scion#2675): they are not this launch's to delete.
 		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",

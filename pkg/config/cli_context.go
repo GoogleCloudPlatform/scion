@@ -86,6 +86,15 @@ type CLIContext struct {
 type CLIContextImports struct {
 	// Global is when the global settings' hub configuration was imported.
 	Global time.Time `yaml:"global,omitempty"`
+	// Current is when the current hub was set from the global settings'
+	// hub.endpoint (or found already set). It runs once, so a current hub
+	// the user later removes is not brought back.
+	Current time.Time `yaml:"current,omitempty"`
+	// Projects records, by link path (see LinkPathForProject), when the hub
+	// of a linked project was imported from its settings into a link
+	// entry. Each project is imported once, so a link entry removed later
+	// is not brought back.
+	Projects map[string]time.Time `yaml:"projects,omitempty"`
 }
 
 // HubEntry is a named hub. It holds no credentials: logins stay in

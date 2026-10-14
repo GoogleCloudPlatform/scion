@@ -162,6 +162,15 @@ type ServerConfig struct {
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
+	// ProxyDriverPrincipals is auth.proxy.driverPrincipals (ptone/scion#4240,
+	// phase WS2): the exact emails of the browser drivers that may carry
+	// test identity web sessions through the proxy. A verified proxy
+	// assertion for one of them never provisions or authenticates a user
+	// (403). New validates the list (config.ValidateProxyDriverConfig): a
+	// non-empty list when AuthMode is not "proxy" refuses startup. An empty
+	// list in proxy mode leaves test identity web sessions unavailable.
+	// Startup config only; never API-writable.
+	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -384,8 +393,8 @@ type ServerConfig struct {
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.
-	// It is accepted only while EnableTestIdentities is true; it is never
-	// writable through the API.
+	// It is accepted only while EnableTestIdentities is true
+	// (--test-mode=member or above); it is never writable through the API.
 	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
@@ -959,6 +968,10 @@ type DeleteAgentOptions struct {
 	// its files on the NFS export or its branch (runtimebroker deleteAgent,
 	// ?localOnly). Send it only to a broker advertising AgentMove.
 	LocalOnly bool
+	// PurgeRetained sends the delete as a removal of a soft-deleted agent's
+	// retained files after the retention window (api.PurgeRetainedQueryParam,
+	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
+	PurgeRetained bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -982,6 +995,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.LocalOnly {
 		query += "&localOnly=true"
+	}
+	if opts.PurgeRetained {
+		query += "&" + api.PurgeRetainedQueryParam + "=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1868,6 +1884,9 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// proxyDrivers is the normalized auth.proxy.driverPrincipals set (WS2),
+	// fixed in New. Empty unless the hub is in proxy auth mode.
+	proxyDrivers driverPrincipalSet
 	// workloadIssuer is the workload-bound issuer delegation state
 	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
 	// workload issuer is configured.
@@ -2261,6 +2280,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
+	// Proxy driver principals (WS2): exact emails only, and only in proxy
+	// auth mode. The normalized list is what the server keeps.
+	drivers, err := config.ValidateProxyDriverConfig(cfg.AuthMode, cfg.ProxyDriverPrincipals)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ProxyDriverPrincipals = drivers
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2544,6 +2570,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
@@ -2695,6 +2722,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	setAuthzTestAdminTier(srv.authzService,
 		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 		func() time.Time { return srv.testIdentities.clock() })
+	// The test-admin policy refusals decide makes are written to the test
+	// admin audit sink.
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, class, subject string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, class, subject)
+	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -2968,6 +3000,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
+
+		// Proxy driver principals (test identities phase WS2): a
+		// verified assertion for one of them is refused at Step 3a.
+		DriverPrincipals: srv.proxyDrivers,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -3044,6 +3080,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	googleResolver.SetDriverPrincipals(srv.proxyDrivers)
 	// Same policy as isUserAuthorized above, in its code-returning form,
 	// so a refusal's audit entry records the code the decision returned.
 	googleResolver.SetSignInDenial(srv.signInDenial)
@@ -3997,6 +4034,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if ops != nil {
+		// Every section write and delete asks the test-admin policy first.
+		ops.setWriteGuard(s.testAdminSettingsWriteGuard)
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -4994,9 +5035,14 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		// and agents soft-deleted earlier stay until a retention is set
 		// again. That is what a hub started with retention 0 does, and a
 		// save never deletes those agents at once.
+		//
+		// Each expired agent's broker is first asked to remove the files a
+		// soft delete retained there (retained_files_purge.go,
+		// ptone/scion#4744); a record whose broker cannot be reached yet
+		// is kept for a later run.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
-			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			purged, err := s.purgeExpiredAgents(ctx, cutoff)
 			if err != nil {
 				slog.Error("Scheduler: agent purge failed", "error", err)
 			} else if purged > 0 {
@@ -5346,7 +5392,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.
-	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, agent.RuntimeBrokerID, project); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
@@ -7108,6 +7154,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Test admin audit (ptone/scion#4240): runs right after authentication,
+	// so every request an admin-kind test identity makes is written to the
+	// test admin audit sink before anything else handles it.
+	h = s.testAdminRequestAuditMiddleware(h)
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens

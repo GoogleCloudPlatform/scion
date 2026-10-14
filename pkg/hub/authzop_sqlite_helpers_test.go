@@ -92,6 +92,8 @@ type idFixtures struct {
 	roleBindingDel          string
 	projectMembership       string
 	projectMembershipUpdate string
+	projectVisitor          string
+	projectVisitorUpdate    string
 	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
@@ -114,6 +116,18 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// userTemplate and userTemplateDel are user-scope templates of the
+	// caller, reached through /api/v1/users/me/templates: the dev user's
+	// here, the matrix super-admin's in the bearer disposition matrix
+	// (seedUserTemplates). userTemplateDel is the delete entry's target.
+	userTemplate    string
+	userTemplateDel string
+	// userScopeTemplateDel, userHarnessConfig and userHarnessConfigDel are
+	// the dev user's user-scope records for the user-scope branches of the
+	// /api/v1/templates and /api/v1/harness-configs routes.
+	userScopeTemplateDel string
+	userHarnessConfig    string
+	userHarnessConfigDel string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -486,6 +500,24 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, err)
 	f.projectMembershipUpdate = pmUpdate.ID
 
+	// project.visitors.update / .remove address a visitor (a federated
+	// account with a project-visitor binding on f.project) by account ID;
+	// update gets its own visitor so remove's is still there.
+	for _, v := range []struct {
+		email string
+		dst   *string
+	}{
+		{"li-visitor@corp.example", &f.projectVisitor},
+		{"li-visitor-update@corp.example", &f.projectVisitorUpdate},
+	} {
+		issuer, email := "https://li-issuer.example.com", v.email
+		acct := &store.User{DisplayName: "LI Visitor", Kind: store.UserKindFederated, Status: store.UserStatusPending, HomeIssuer: &issuer, FederatedEmail: &email}
+		require.NoError(t, s.CreateFederatedUser(ctx, acct))
+		_, err = s.CreateVisitorRoleBinding(ctx, &store.RoleBinding{PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: acct.ID, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user})
+		require.NoError(t, err)
+		*v.dst = acct.ID
+	}
+
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
 	// registry, not something a test creates.
@@ -612,6 +644,16 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.userTemplate, f.userTemplateDel = seedUserTemplates(t, ctx, s, DevUserID)
+	f.userScopeTemplateDel = tid("li-user-scope-template-del")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.userScopeTemplateDel, Name: "li-user-scope-template-del", Slug: "li-user-scope-template-del", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	f.userHarnessConfig = tid("li-user-hc")
+	f.userHarnessConfigDel = tid("li-user-hc-del")
+	for _, id := range []string{f.userHarnessConfig, f.userHarnessConfigDel} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: id, Name: "li-user-hc-" + id[len(id)-6:], Slug: "li-user-hc-" + id[len(id)-6:], Harness: "claude",
+			Scope: store.HarnessConfigScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
 	// Hub test identities: turn the feature on (--test-mode=member)
@@ -642,6 +684,20 @@ func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, us
 	si := &store.SkillInjection{Scope: store.SkillInjectionScopeUser, ScopeID: userID, SkillURI: "skill://li-user-injected", CreatedBy: userID}
 	require.NoError(t, s.AddSkillInjection(ctx, si))
 	return si.ID
+}
+
+// seedUserTemplates adds two active user-scope templates owned by userID
+// and returns their IDs: one the read and update entries address, and one
+// the delete entry removes.
+func seedUserTemplates(t *testing.T, ctx context.Context, s store.Store, userID string) (keep, del string) {
+	t.Helper()
+	now := time.Now()
+	ids := []string{tid("li-user-template-" + userID), tid("li-user-template-del-" + userID)}
+	for i, name := range []string{"li-user-template", "li-user-template-del"} {
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: ids[i], Name: name, Slug: name, Harness: "claude",
+			Scope: store.TemplateScopeUser, ScopeID: userID, OwnerID: userID, CreatedBy: userID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	}
+	return ids[0], ids[1]
 }
 
 // overrideKey identifies one (operation, pattern) pair for parameter
@@ -688,15 +744,25 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
 		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
-		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:                    {"id": f.gcpSADel},
-		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                          {"id": f.roleDefinitionDel},
-		{"quota.update", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
-		{"quota.delete", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
-		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
-		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
-		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
-		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
-		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}:       {"id": f.project, "memberId": f.projectMembershipUpdate},
+		// User-scope branches address the caller's user-scope records; a
+		// clone copies the global fixture into the caller's user scope.
+		{"template.user.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
+		{"template.user.delete", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"template.user.reimport", "/api/v1/templates/{id}/reimport"}:             {"id": f.userTemplate},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
+		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
+		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
+		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
+		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
+		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
+		{"quota.delete", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
+		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
+		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
+		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
+		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
+		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -803,10 +869,12 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/reincarnate": {"projectId": f.project, "id": f.agent},
 
 		// --- project family ---
-		"/api/v1/projects/{id}":                    {"id": f.project},
-		"/api/v1/projects/{id}/members":            {"id": f.project},
-		"/api/v1/projects/{id}/members/{memberId}": {"id": f.project, "memberId": f.projectMembership},
-		"/api/v1/projects/{id}/transfer-ownership": {"id": f.project},
+		"/api/v1/projects/{id}":                      {"id": f.project},
+		"/api/v1/projects/{id}/members":              {"id": f.project},
+		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
+		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
+		"/api/v1/projects/{id}/visitors":             {"id": f.project},
+		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},
@@ -822,6 +890,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
 		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
 		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
+		"/api/v1/users/me/templates/{id}":                         {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/upload":                  {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/finalize":                {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/download":                {"id": f.userTemplate},
 		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
 		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
 		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
@@ -1057,6 +1129,17 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// User-scope writes: valid bodies, so the probes reach the
+		// user-scope branch past body validation.
+		{"template.user.create", "/api/v1/users/me/templates"}:             {"name": "li-user-template-created"},
+		{"template.user.update", "/api/v1/users/me/templates/{id}"}:        {"name": "li-user-template-renamed"},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:            {"name": "li-user-template-clone", "scope": "user"},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}: {"name": "li-user-hc-clone", "scope": "user"},
+		{"skill.user.create", "/api/v1/skills"}:                            {"name": "li-user-skill", "scope": "user"},
+		{"template.user.import", "/api/v1/resources/import"}:               {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"template.user.import", "/api/v1/resources/discover"}:             {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/import"}:          {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/discover"}:        {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
 		// handleWorkspaceSyncTo and handleWorkspaceSyncToFinalize validate
 		// the file list and the manifest before they look up the agent or
 		// check authorization.

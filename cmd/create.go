@@ -99,15 +99,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		mgr := agent.NewManager(rt)
 
 		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
+		effectiveBranch := resolveBranch(branch, inlineCfg)
 		effectiveTask := task
 		effectiveHarnessConfig := harnessConfigFlag
 		effectiveImage := agentImage
 
 		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
 			if effectiveTask == "" && inlineCfg.Task != "" {
 				effectiveTask = inlineCfg.Task
 			}
@@ -415,7 +412,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inline
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
@@ -516,11 +514,16 @@ func init() {
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
 // context that create uses for skill resolution. A project named with a
-// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
+// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123). The hub
+// is the one selected for this invocation, as for requireHub: the hub
+// selected with 'scion use' never links or registers a project that is
+// already linked to a hub.
 func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
-		AutoConfirm:     true,
-		NonInteractive:  nonInteractive,
-		ExplicitProject: explicitProjectTargetFor(projectPath),
+		AutoConfirm:      true,
+		NonInteractive:   nonInteractive,
+		EndpointOverride: hubEndpoint,
+		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		HubFromContext:   hubSource == targetSourceContext,
 	}
 }

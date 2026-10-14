@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -111,6 +112,21 @@ func TestIsRetired(t *testing.T) {
 	}
 	if r.IsRetired("web.never_existed") {
 		t.Error("IsRetired(web.never_existed) = true, want false")
+	}
+}
+
+func TestRetired_SortedCopy(t *testing.T) {
+	r, err := NewRegistry(nil, []string{"web.zeta", "web.alpha"})
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	got := r.Retired()
+	if want := []string{"web.alpha", "web.zeta"}; !slices.Equal(got, want) {
+		t.Fatalf("Retired() = %v, want %v", got, want)
+	}
+	got[0] = "web.mutated"
+	if r.Retired()[0] != "web.alpha" || r.IsRetired("web.mutated") {
+		t.Error("mutating the Retired() result must not affect the Registry")
 	}
 }
 

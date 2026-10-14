@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 276
+**Operations:** 293
 
 ## Table of Contents
 
@@ -43,6 +43,10 @@
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
 - [project.membership.list](#projectmembershiplist) — List project members and their roles
 - [project.membership.transfer](#projectmembershiptransfer) — Atomically transfer project ownership from the actor to another user
+- [project.visitors.list](#projectvisitorslist) — List a project's visitor grants (federated accounts holding the project-visitor role)
+- [project.visitors.add](#projectvisitorsadd) — Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
+- [project.visitors.update](#projectvisitorsupdate) — Replace the window (not before, expires at) of a project visitor grant
+- [project.visitors.remove](#projectvisitorsremove) — Revoke a project visitor grant; the visitor's next request is refused
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
@@ -201,6 +205,11 @@
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
+- [user.skillinjection.read](#userskillinjectionread) — List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+- [template.user.read](#templateuserread) — List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+- [template.user.create](#templateusercreate) — Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+- [template.user.update](#templateuserupdate) — Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+- [template.user.delete](#templateuserdelete) — Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -252,6 +261,14 @@
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [template.user.clone](#templateuserclone) — Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+- [template.user.reimport](#templateuserreimport) — Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+- [skill.user.create](#skillusercreate) — Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+- [harnessconfig.user.clone](#harnessconfiguserclone) — Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+- [harnessconfig.user.delete](#harnessconfiguserdelete) — Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+- [harnessconfig.user.reimport](#harnessconfiguserreimport) — Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+- [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+- [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -271,7 +288,7 @@
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 - [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
-- [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate
+- [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
 - [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
 - [testidentity.delegation.list](#testidentitydelegationlist) — List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
@@ -1471,7 +1488,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.add`
+- **Event Type:** `project_member_add`
 - **Context Fields:** actor_id, project_id
 - **After Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1529,7 +1546,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.update`
+- **Event Type:** `project_member_role_change`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, old_role
 - **After Fields:** new_role
@@ -1582,7 +1599,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.remove`
+- **Event Type:** `project_member_remove`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1673,7 +1690,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.transfer`
+- **Event Type:** `project_ownership_transfer`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** old_owner_id
 - **After Fields:** new_owner_id, old_owner_role, new_owner_role
@@ -1684,6 +1701,194 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.visitors.list
+
+**Domain:** project.visitors
+
+**Description:** List a project's visitor grants (federated accounts holding the project-visitor role)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/visitors` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_AddListRemove`
+
+---
+
+## project.visitors.add
+
+**Domain:** project.visitors
+
+**Description:** Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/visitors` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; granting also needs every permission of the project-visitor role on the project. A visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| visitor-role-only | security | The grant binds only the project-visitor role, at project scope, to a federated account (CreateVisitorRoleBinding) | Yes |
+
+### Audit
+
+- **Event Type:** `project_visitor_grant`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** visitor_id, issuer, email, not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `principal_ineligible`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_AddListRemove`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_AuditFailureLeavesNoChange`
+
+---
+
+## project.visitors.update
+
+**Domain:** project.visitors
+
+**Description:** Replace the window (not before, expires at) of a project visitor grant
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{id}/visitors/{visitorId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Only a window change that extends the grant (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project, as for a grant; shortening never does
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor grant of the project; extending one also needs every permission of the project-visitor role on the project.
+
+### Audit
+
+- **Event Type:** `project_visitor_update`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** visitor_id, not_before, expires_at
+- **After Fields:** not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_WindowHonoured`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
+
+---
+
+## project.visitors.remove
+
+**Domain:** project.visitors
+
+**Description:** Revoke a project visitor grant; the visitor's next request is refused
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{id}/visitors/{visitorId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.
+
+### Audit
+
+- **Event Type:** `project_visitor_revoke`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** visitor_id, issuer, email, subject
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_RevokeRefusesNextRequest`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
 
 ---
 
@@ -6252,7 +6457,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.create`
+- **Event Type:** `role_binding_create`
 - **Context Fields:** actor_id
 - **After Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -6296,7 +6501,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.delete`
+- **Event Type:** `role_binding_delete`
 - **Context Fields:** actor_id
 - **Before Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -6338,7 +6543,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.add`
+- **Event Type:** `group_member_add`
 - **Context Fields:** actor_id, group_id
 - **After Fields:** member_principal_id
 - **Atomic:** Yes
@@ -6380,7 +6585,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.remove`
+- **Event Type:** `group_member_remove`
 - **Context Fields:** actor_id, group_id
 - **Before Fields:** member_principal_id
 - **Atomic:** Yes
@@ -6417,7 +6622,7 @@
 
 ### Audit
 
-- **Event Type:** `group.delete`
+- **Event Type:** `group_delete`
 - **Context Fields:** actor_id
 - **Before Fields:** group_id, group_name
 - **Atomic:** Yes
@@ -7367,6 +7572,183 @@
 - `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
 - `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
 - `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
+
+---
+
+## user.skillinjection.read
+
+**Domain:** user.skillinjection
+
+**Description:** List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, and the list carries only the caller's own entries (scope: caller's own user-scope injected skills) — waives: `base_permission`
+
+---
+
+## template.user.read
+
+**Domain:** template
+
+**Description:** List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/templates` |
+| http_route | GET | `/api/v1/users/me/templates/{id}` |
+| http_route | GET | `/api/v1/users/me/templates/{id}/download` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+
+---
+
+## template.user.create
+
+**Domain:** template
+
+**Description:** Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.update
+
+**Domain:** template
+
+**Description:** Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/users/me/templates/{id}` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/upload` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/finalize` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.delete
+
+**Domain:** template
+
+**Description:** Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/me/templates/{id}` |
+| http_route | DELETE | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -9148,6 +9530,274 @@
 
 ---
 
+## template.user.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## template.user.reimport
+
+**Domain:** template
+
+**Description:** Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTemplateUserReimport_RequiresUpdateAction`
+
+---
+
+## skill.user.create
+
+**Domain:** skill
+
+**Description:** Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeSkillCreate_RequiresSkillCreate`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.clone
+
+**Domain:** harnessconfig
+
+**Description:** Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## harnessconfig.user.delete
+
+**Domain:** harnessconfig
+
+**Description:** Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `harnessconfig.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** config_id, config_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserDelete_RequiresDeleteAction`
+
+---
+
+## harnessconfig.user.reimport
+
+**Domain:** harnessconfig
+
+**Description:** Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserReimport_RequiresUpdateAction`
+
+---
+
+## template.user.import
+
+**Domain:** template
+
+**Description:** Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.import
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
 ## broker.read
 
 **Domain:** broker
@@ -9886,7 +10536,7 @@
 
 **Domain:** testidentity
 
-**Description:** Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate
+**Description:** Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
 
 ### Entry Points
 
@@ -9909,12 +10559,12 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- The issued hub-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the capability. The binding expires with the identity
+- The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. The binding expires with the identity
 
 ### Governance
 
 - **Kind:** issuer_credential
-- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the test_identity:issue_admin scope, at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub; issuance is rate limited per issuer
+- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub of which at most one test super-admin; issuance is rate limited per issuer (6/h hub-admin, 2/h super-admin)
 
 ### Audit
 

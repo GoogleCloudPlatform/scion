@@ -17,6 +17,8 @@ package hub
 import (
 	"context"
 	"errors"
+	"sort"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -35,6 +37,8 @@ import (
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
 //   - Policy routes: removed in CO1 cutover.
 //   - Custom role definition create/update: wired in handlers_roles.go:createRoleDefinition.
+//   - Project visitor grant and window extension: wired in
+//     handlers_project_visitors.go:actorHoldsVisitorPermissions.
 
 // GrantType identifies the kind of authority being delegated.
 type GrantType string
@@ -119,6 +123,17 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		return *denied
 	}
 
+	// An admin-kind test identity grants no deny-classified permission
+	// (test-admin policy, design §3.7: no test kind can hold or grant
+	// them), through any grant path that confers roles: a role binding
+	// (system or project), a custom role definition, or a group membership
+	// whose group closure holds roles. The check runs before the
+	// super-admin shortcut and before the actor's own permissions are
+	// compared, so neither the role claim nor its bindings admit it.
+	if denied := a.refuseTestAdminDeniedGrant(ctx, actor, grant); denied != nil {
+		return *denied
+	}
+
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATDelegation(ctx, scoped, grant); denied != nil {
@@ -161,6 +176,156 @@ func (a *AuthzService) refuseTestAdminGrantee(ctx context.Context, grant GrantDe
 		return &Decision{Allowed: false, Reason: reason}
 	}
 	return nil
+}
+
+// Reasons of refuseTestAdminDeniedGrant.
+const (
+	testAdminDelegationReasonDenied     = "test-admin policy: a test identity with an admin role cannot grant these permissions"
+	testAdminDelegationReasonUnverified = "test-admin policy: cannot verify the actor's kind or the grant's permissions (fail-closed)"
+)
+
+// refuseTestAdminDeniedGrant denies a grant by an admin-kind test identity
+// whose permission set holds a permission the test-admin policy does not
+// allow (testAdminPermissionDenied), except the agent delegation grant
+// management permissions in a project-scope grant
+// (testAdminGrantableAtProjectScope, testAdminGrantRefuses). The
+// permission set is the bound role's permissions for a role binding, the
+// defined permissions for a custom role, and every role permission held
+// by the group closure for a group membership (a group membership grant
+// carries no scope, so the project-scope exemption never applies to it).
+// A kind or permission read error denies. Each refusal is written to the
+// test admin audit sink (class delegation).
+//
+// Agent delegations are not checked here, and neither decide step 0c (it
+// never fires on an agent principal) nor the delegation-time ceiling
+// (canDelegateAgent uses the global ceiling; actorHoldsAllPermissions
+// reads raw permissions) applies the cage to them. The containment of an
+// agent's secret material is instead: the material precheck admits only
+// when the secret's provenance root (Ancestry[0], set by the hub, not by
+// the caller) is an admitted project member (material_runtime.go check 5);
+// SystemAuthorityProof refuses an admin-kind root for a deny-classified
+// permission such as secret.use, so system authority does not stand in for
+// membership; a test admin cannot be added as a project member
+// (refuseTestAdminMemberGrantee, refuseTestAdminGrantee); and the test hub
+// gate. Re-review if any secret or material path is not gated by
+// provenance-root membership, if any route lets a test admin gain
+// membership or secret.use, or if Ancestry[0] can be set to another user.
+// (A3: clamp a test admin's agent delegation scopes to the policy
+// allow-set by construction.)
+func (a *AuthzService) refuseTestAdminDeniedGrant(ctx context.Context, actor Identity, grant GrantDescriptor) *Decision {
+	user, ok := actor.(UserIdentity)
+	if !ok || isNilIdentity(user) || grant.Type == GrantTypeAgentDelegation {
+		return nil
+	}
+	caged, err := a.principalIsCagedTestAdmin(ctx, user.ID())
+	if err != nil {
+		return &Decision{Allowed: false, Reason: testAdminDelegationReasonUnverified, DeniedBy: DeniedByTestAdminPolicy}
+	}
+	if !caged {
+		return nil
+	}
+	perms, err := a.grantPermissionSet(ctx, grant)
+	if err != nil {
+		return &Decision{Allowed: false, Reason: testAdminDelegationReasonUnverified, DeniedBy: DeniedByTestAdminPolicy}
+	}
+	scope, err := a.testAdminGrantScope(ctx, grant)
+	if err != nil {
+		return &Decision{Allowed: false, Reason: testAdminDelegationReasonUnverified, DeniedBy: DeniedByTestAdminPolicy}
+	}
+	// Every permission is checked: a grant is admitted only when none of
+	// its deny-classified permissions falls outside the project-scope
+	// exemption.
+	var denied []string
+	seen := map[string]bool{}
+	for _, p := range perms {
+		if testAdminGrantRefuses(p, scope) && !seen[p] {
+			seen[p] = true
+			denied = append(denied, p)
+		}
+	}
+	if len(denied) == 0 {
+		return nil
+	}
+	sort.Strings(denied)
+	a.reportTestAdminPolicyDenial(ctx, user.ID(), "delegation", string(grant.Type)+":"+strings.Join(denied, ","))
+	return &Decision{Allowed: false, Reason: testAdminDelegationReasonDenied + ": " + strings.Join(denied, ", "), DeniedBy: DeniedByTestAdminPolicy}
+}
+
+// testAdminGrantScope returns the scope a grant binds at, for the
+// project-scope exemption of the test-admin delegation check: the grant's
+// ScopeType, except that a role binding or project membership naming a
+// role definition binds at that role's scope, and a scope the two disagree
+// on is no scope (""), which the exemption never matches. A custom role
+// definition binds at its declared ScopeType; a group membership carries
+// none.
+func (a *AuthzService) testAdminGrantScope(ctx context.Context, grant GrantDescriptor) (string, error) {
+	switch grant.Type {
+	case GrantTypeRoleBinding, GrantTypeProjectMembership:
+		if grant.RoleDefinitionID == "" {
+			return grant.ScopeType, nil
+		}
+		rd, err := a.store.GetRoleDefinition(ctx, grant.RoleDefinitionID)
+		if err != nil {
+			return "", err
+		}
+		if rd.ScopeType != grant.ScopeType {
+			return "", nil
+		}
+		return rd.ScopeType, nil
+	case GrantTypeCustomRole:
+		return grant.ScopeType, nil
+	}
+	return "", nil
+}
+
+// grantPermissionSet resolves the permissions a grant confers, for the
+// test-admin delegation check.
+func (a *AuthzService) grantPermissionSet(ctx context.Context, grant GrantDescriptor) ([]string, error) {
+	switch grant.Type {
+	case GrantTypeCustomRole:
+		return grant.CustomRolePermissions, nil
+	case GrantTypeRoleBinding, GrantTypeProjectMembership:
+		perms := append([]string(nil), grant.RolePermissions...)
+		if grant.RoleDefinitionID != "" {
+			rd, err := a.store.GetRoleDefinition(ctx, grant.RoleDefinitionID)
+			if err != nil {
+				return nil, err
+			}
+			perms = append(perms, rd.Permissions...)
+		}
+		return perms, nil
+	case GrantTypeGroupMembership:
+		if grant.GroupID == "" {
+			return nil, nil
+		}
+		principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalGroup, ID: grant.GroupID}}
+		parents, err := a.store.GetParentGroups(ctx, grant.GroupID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range parents {
+			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: id})
+		}
+		bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		var perms []string
+		rds := map[string]bool{}
+		for _, b := range bindings {
+			if rds[b.RoleDefinitionID] {
+				continue
+			}
+			rds[b.RoleDefinitionID] = true
+			rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			if err != nil {
+				return nil, err
+			}
+			perms = append(perms, rd.Permissions...)
+		}
+		return perms, nil
+	}
+	return nil, nil
 }
 
 // Reasons of testAdminGranteeRefusal.

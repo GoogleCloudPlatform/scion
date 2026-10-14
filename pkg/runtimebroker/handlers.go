@@ -286,7 +286,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		Name:     s.config.BrokerName,
 		Version:  s.version,
 		Capabilities: &BrokerCapabilities{
-			WebPTY: false, // TODO: Implement WebSocket PTY
+			// WebPTY, like Attach, reflects the default runtime: the
+			// same webPTYSupported answer the static registration
+			// capabilities carry.
+			WebPTY: webPTYSupported(rt),
 			Sync:   true,
 			// Attach reflects the default runtime's own capability
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
@@ -1729,7 +1732,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// resolution failure above (#2546). It covers broker files only,
 		// not the hub's agent record.
 		// The files must also still be this run's (ptone/scion#2675): a
-		// newer run recorded in agent-info.json owns them otherwise.
+		// newer run recorded in the host state file owns them otherwise,
+		// and an owner that cannot be determined keeps them
+		// (ptone/scion#4771).
 		if opts.ProjectPath != "" {
 			// The ownership checks and the removal run under the
 			// process-wide workspace lock on the agent's files.
@@ -1746,7 +1751,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				if !ss.ownsName() {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
-				} else if owner := agentFilesRunOwner(opts.Name, opts.ProjectPath, opts.RunID); owner != "" {
+				} else if owner, ownerErr := agentFilesRunOwner(agent.RunOwnerTargetFor(opts), opts.RunID); ownerErr != nil {
+					s.agentLifecycleLog.Warn("Skipped agent file cleanup after start failure: the owner of the agent's files is unknown",
+						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
+						"run_id", opts.RunID, "error", ownerErr)
+				} else if owner != "" {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
@@ -2649,19 +2658,39 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 
 	// Agent files, worktree and leftover per-agent objects are addressed by
 	// name only, so a delete naming a run must not remove those of another
-	// run that reuses the name (ptone/scion#2675): the run recorded in
-	// agent-info.json, or a start of another run still in flight on this
-	// broker (which may not have recorded its run on disk yet). Without a
-	// run ID, or with no run recorded (legacy files), nothing changes.
+	// run that reuses the name (ptone/scion#2675): the run recorded in the
+	// host state file (ptone/scion#4771), or a start of another run still
+	// in flight on this broker (which may not have recorded its run on disk
+	// yet). An owner that cannot be determined (no trusted root, an
+	// unreadable or invalid record) keeps the files too. Without a run ID,
+	// or with no run recorded (legacy files), nothing changes. With no
+	// project path for a project-scoped delete no file is touched (see
+	// filesToDelete above), so there is nothing to check.
 	var filesOwnerRun, inFlightRun string
+	var filesOwnerErr error
 	if runID != "" && isSingleCleanPathElement(target.name) {
-		filesOwnerRun = agentFilesRunOwner(target.name, projectPath, runID)
+		if projectPath != "" || projectID == "" {
+			hubProjectID := projectID
+			if hubProjectID == "" {
+				hubProjectID = agentProjectID
+			}
+			filesOwnerRun, filesOwnerErr = agentFilesRunOwner(agent.RunOwnerTarget{
+				ProjectPath:  projectPath,
+				AgentName:    target.name,
+				HubProjectID: hubProjectID,
+			}, runID)
+		}
 		inFlightRun = s.deleteInFlightRunID(runID,
 			launchKey{ProjectID: projectID, Slug: id},
 			launchKey{ProjectID: agentProjectID, Slug: target.name})
 	}
 	otherRunInFlight := inFlightRun != ""
-	filesOfOtherRun := filesOwnerRun != "" || otherRunInFlight
+	filesOwnerUnknown := filesOwnerErr != nil
+	if filesOwnerUnknown {
+		s.agentLifecycleLog.Warn("Agent delete: the owner of the agent's files is unknown; keeping them",
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID, "error", filesOwnerErr)
+	}
+	filesOfOtherRun := filesOwnerRun != "" || filesOwnerUnknown || otherRunInFlight
 	if filesOfOtherRun {
 		if target.containerID == "" {
 			// Files only: they are the other run's, and so is anything
@@ -2673,14 +2702,14 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			// as in currentRunID, so the hub may still finalize.
 			s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; leaving them untouched",
 				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
-				"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight, "current_run_id", inFlightRun)
+				"files_run_id", filesOwnerRun, "files_owner_unknown", filesOwnerUnknown, "other_run_in_flight", otherRunInFlight, "current_run_id", inFlightRun)
 			RunMismatch(w, runID, inFlightRun)
 			return
 		}
 		// Remove the requested run's entry, but not the other run's files.
 		s.agentLifecycleLog.Info("Agent delete: the agent's files belong to another run; deleting the runtime entry only",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
-			"files_run_id", filesOwnerRun, "other_run_in_flight", otherRunInFlight,
+			"files_run_id", filesOwnerRun, "files_owner_unknown", filesOwnerUnknown, "other_run_in_flight", otherRunInFlight,
 			"container_id", target.containerID)
 		filesToDelete = false
 	}
@@ -3028,7 +3057,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
 		// HubAgentDefaults carries the hub defaults a start applies at its
-		// lowest tier (today the auto-expose default, for buildAgentEnv).
+		// lowest tiers: the limits, resources, auto-expose default,
+		// experiments and telemetry default (see api.HubAgentDefaults).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 		// TelemetryPolicy is the project's enforced telemetry on/off; see
 		// CreateAgentConfig.TelemetryPolicy (ptone/scion#4218).
@@ -5257,13 +5287,12 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	_, _ = w.Write([]byte(logs))
 }
 
+// getStats answers the agent stats action. No runtime reports resource
+// usage yet (the Runtime interface has no stats method), so it returns 501
+// with ErrCodeStatsNotImplemented rather than zero values a caller could
+// mistake for a real reading.
 func (s *Server) getStats(w http.ResponseWriter, r *http.Request, id, projectID string) {
-	// TODO: Implement real stats from runtime
-	// For now, return placeholder data
-	writeJSON(w, http.StatusOK, StatsResponse{
-		CPUUsagePercent:  0.0,
-		MemoryUsageBytes: 0,
-	})
+	StatsNotImplemented(w, "agent resource statistics are not implemented by this broker")
 }
 
 // HasPromptResponse is the response for the has-prompt action.
@@ -5649,7 +5678,9 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			// ANTHROPIC_API_KEY for claude) always wins over the identity
 			// leg — shared with pkg/agent's Start(), which uses the same
 			// function to select the auth type actually wired into the
-			// container.
+			// container. One exception to file-first: for an api-key
+			// default harness, an API key beats a gcloud-adc (vertex-ai)
+			// file credential (ptone/scion#4559).
 			if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, resolvedEnvKeys, gcpSAAssigned); detected != "" {
 				authType = detected
 			}

@@ -3416,6 +3416,30 @@ describe('scion-page-admin-server-config', () => {
       expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
     });
 
+    it('names the layer each superseded value comes from', async () => {
+      // The hub reports a key that only the coded defaults set with source
+      // "default", and a seed value equal to the default with "seed_env"
+      // (ptone/scion#4983).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            superseded_keys: {
+              agent_defaults: [
+                { key: 'default_template', source: 'seed_env' },
+                { key: 'default_harness_config', source: 'yaml' },
+              ],
+              access: [{ key: 'server.hub.admin_emails', source: 'default' }],
+            },
+          })
+        )
+      );
+      const text = panelText(element);
+      expect(text).toContain('(from built-in default)');
+      expect(text).toContain('(from SCION_SEED_*)');
+      expect(text).toContain('(from settings.yaml)');
+    });
+
     it('the Superseded badge goes away after the public URL is cleared', async () => {
       const cfg = makeBaseConfig({
         settings_tier: 'db',

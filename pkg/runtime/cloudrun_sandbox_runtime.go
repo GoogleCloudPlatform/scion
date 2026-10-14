@@ -235,6 +235,16 @@ func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
 	if entries == nil {
 		entries = make(map[string]*sandboxStateEntry)
 	}
+	// A key stored as JSON null decodes to a nil entry. It is treated as
+	// absent: dropped here, so no reader dereferences it, and left out of
+	// the file by the next write (ptone/scion#4819).
+	for name, e := range entries {
+		if e == nil {
+			runtimeLog().Warn("sandbox state file holds a null entry; treating it as absent",
+				"path", path, "name", name)
+			delete(entries, name)
+		}
+	}
 	return entries, nil
 }
 
@@ -242,7 +252,9 @@ func readSandboxStateFile(path string) (map[string]*sandboxStateEntry, error) {
 // writes a unique temporary file in the same directory (0600, audit M1)
 // and renames it over path (audit M2). There is no fsync, as before (the
 // default path is under /tmp). A crash between the create and the rename
-// leaves a "<name>.tmp-*" file behind; it is never read.
+// leaves a "<name>.tmp-*" file behind; it is never read, and load removes
+// it once it is older than sandboxStateTempMaxAge
+// (removeStaleSandboxStateTemps).
 func writeSandboxStateFile(path string, entries map[string]*sandboxStateEntry) error {
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
@@ -471,10 +483,54 @@ func (s *sandboxStateStore) refreshKeys(names []string) (map[string]*sandboxStat
 	return out, nil
 }
 
-// load fills the cache from the file. An unreadable file leaves the cache
-// empty (and is never written over: every write re-reads the file).
+// sandboxStateTempMaxAge is the age past which load removes a temporary
+// file of an interrupted state write. Writes in this process hold the file
+// mutex, which load also holds; the age covers a write in another process
+// on the host (a `scion` CLI), which is not fenced (ptone/scion#3951). A
+// variable so tests can change it.
+var sandboxStateTempMaxAge = time.Minute
+
+// removeStaleSandboxStateTemps removes the temporary files that
+// writeSandboxStateFile leaves next to path when it is interrupted between
+// the create and the rename ("<base>.tmp-*"), if older than
+// sandboxStateTempMaxAge. Names are matched by prefix, not as a glob, so a
+// state path with glob characters matches only its own files. The caller
+// holds the file mutex. Errors are logged and otherwise ignored.
+func removeStaleSandboxStateTemps(path string) {
+	dir := filepath.Dir(path)
+	prefix := filepath.Base(path) + ".tmp-"
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			runtimeLog().Warn("cannot list the sandbox state dir for stale temp files", "dir", dir, "error", err)
+		}
+		return
+	}
+	cutoff := time.Now().Add(-sandboxStateTempMaxAge)
+	for _, de := range dirEntries {
+		if !de.Type().IsRegular() || !strings.HasPrefix(de.Name(), prefix) {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil || !info.ModTime().Before(cutoff) {
+			continue
+		}
+		tmp := filepath.Join(dir, de.Name())
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			runtimeLog().Warn("cannot remove a stale sandbox state temp file", "path", tmp, "error", err)
+			continue
+		}
+		runtimeLog().Info("removed a stale sandbox state temp file", "path", tmp)
+	}
+}
+
+// load removes stale temporary files of interrupted state writes
+// (removeStaleSandboxStateTemps), then fills the cache from the file. An
+// unreadable file leaves the cache empty (and is never written over: every
+// write re-reads the file).
 func (s *sandboxStateStore) load() {
 	unlock := lockStateFile(s.path)
+	removeStaleSandboxStateTemps(s.path)
 	entries, err := readSandboxStateFile(s.path)
 	unlock()
 	if err != nil {
@@ -636,6 +692,122 @@ func readSandboxCommandOutputRaw(f *os.File, limit int64) string {
 // maxSandboxCommandOutput and trimmed.
 func readSandboxCommandOutput(f *os.File) string {
 	return strings.TrimSpace(readSandboxCommandOutputRaw(f, maxSandboxCommandOutput))
+}
+
+// runSandboxProbe runs the liveness probe `sandbox exec <name> --
+// /bin/true` under ctx (the start probe and the reconcile probe both use
+// it) and returns its output and error as runSimpleCommand would: the
+// error is wrapped as "<bin> failed: %w", and the output is
+// trimmed, bounded by maxSandboxCommandOutput.
+//
+// The output is captured in an unlinked temporary file
+// (newSandboxCommandOutput), never a pipe (ptone/scion#5003). Processes
+// the CLI leaves behind may inherit and hold its stdout and stderr; with
+// a pipe, Wait would block until every holder exits, past ctx's deadline,
+// since the deadline kills only the CLI. With a file, Wait returns when
+// the CLI exits or is killed. A WaitDelay on the shared runSimpleCommand
+// would also bound the wait, but it would change every other runtime's
+// commands and kill a holder with SIGPIPE on its next write (see
+// newSandboxCommandOutput). If the file cannot be created, the output is
+// discarded (stdio is /dev/null), so the probe gives no not-found answer
+// (sandboxProbeSaysGone) and reconcile keeps the entry.
+func runSandboxProbe(ctx context.Context, bin, name string) (string, error) {
+	args := []string{"exec", name, "--", "/bin/true"}
+	runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	outFile := newSandboxCommandOutput("exec")
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	elapsed := time.Since(begin)
+	out := readSandboxCommandOutput(outFile)
+	if err != nil {
+		logCommandFailure(ctx, bin, len(args), elapsed, []byte(sandboxCommandOutputForLog(out)))
+		return out, fmt.Errorf("%s failed: %w", bin, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
+	return out, nil
+}
+
+// sandboxExecStdinWaitDelay bounds how long runSandboxExec waits, after
+// the CLI has exited or been killed, for the copy of a caller's stdin
+// into the CLI to finish (exec.Cmd.WaitDelay).
+const sandboxExecStdinWaitDelay = 2 * time.Second
+
+// runSandboxExec runs `sandbox <args>` for the log retrieval and exec
+// paths (GetLogs, Attach's window-size step, Exec, ExecWithStdin) and
+// returns what runSimpleCommandWithStdin would: the same log lines
+// (argument count only, output omitted under WithSensitiveExec), the
+// error wrapped as "<bin> failed: %w", the raw output on error and the
+// trimmed output on success. stdin may be nil.
+//
+// The output is captured in an unlinked temporary file
+// (newSandboxCommandOutput), never a pipe (ptone/scion#5040), as the
+// probe, launch and delete paths do: a process left behind by the
+// command may inherit and hold its stdout and stderr, and with a pipe
+// Wait would block until every holder exits, past ctx's deadline. The
+// output read back is everything written up to Wait's return, with no
+// cap, as CombinedOutput returns. If the file cannot be created, the
+// output is discarded (stdio is /dev/null).
+//
+// A stdin that is not an *os.File is copied into the CLI through a pipe
+// by os/exec, and Wait waits for that copy; a holder that inherited the
+// pipe's read end and never reads it would block the copy. WaitDelay
+// bounds that wait. With stdout and stderr in a file, the only pipe it
+// can close is stdin's write end, which the holder sees as end of input,
+// not as SIGPIPE.
+//
+// Nothing here streams output: these paths return it as a string. The
+// interactive attach (runInteractiveCommand) streams by handing the
+// caller's own stdio files to the CLI, with no pipe or copy, and does
+// not use this helper. The shared runSimpleCommand helpers are left as
+// they are, for the other runtimes.
+func runSandboxExec(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, error) {
+	// Log the command name and argument count only, never the argument
+	// values or the stdin payload (see runSimpleCommand).
+	if stdin != nil {
+		runtimeLog().Debug("Executing command with stdin", "cmd", bin, "argc", len(args))
+	} else {
+		runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
+	}
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+		cmd.WaitDelay = sandboxExecStdinWaitDelay
+	}
+	outFile := newSandboxCommandOutput("exec")
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	elapsed := time.Since(begin)
+	out := readSandboxExecOutput(outFile)
+	if err != nil {
+		logCommandFailure(ctx, bin, len(args), elapsed, []byte(out))
+		return out, fmt.Errorf("%s failed: %w", bin, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(out), nil
+}
+
+// readSandboxExecOutput returns everything written to f up to now. The
+// size is taken once, so a holder still writing cannot extend the read.
+func readSandboxExecOutput(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	return readSandboxCommandOutputRaw(f, fi.Size())
 }
 
 // maxSandboxLaunchOutputRead bounds how much `sandbox run` output is read
@@ -806,7 +978,7 @@ func (s *sandboxStateStore) reconcile(bin string) {
 			// R1: absolute path required — the sandbox launcher resolves argv[0]
 			// before the sandbox environment (including PATH) is in effect.
 			ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
-			out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+			out, err := runSandboxProbe(ctx, bin, name)
 			gone := sandboxProbeSaysGone(ctx, out, err)
 			cancel()
 			switch {
@@ -1317,8 +1489,13 @@ type CloudRunSandboxRuntime struct {
 	rootDir       string             // /scion by default; overridable for testing
 	deleteTimeout time.Duration      // timeout for sandbox delete --force; 0 = default
 
-	watchMu      sync.Mutex                    // guards watchCancels
+	watchMu      sync.Mutex                    // guards watchCancels, watchTokens and watchSeq
 	watchCancels map[string]context.CancelFunc // per-sandbox watcher cancel functions
+	// watchTokens holds the token of the watcher whose cancel is in
+	// watchCancels for each name (installWatcher), so a watcher removes
+	// only its own cancel. Created on first use.
+	watchTokens map[string]uint64
+	watchSeq    uint64 // last token issued; tokens start at 1, so 0 is never issued
 }
 
 // NewCloudRunSandboxRuntime returns a new CloudRunSandboxRuntime.
@@ -1342,16 +1519,6 @@ func NewCloudRunSandboxRuntime(cfg *config.V1CloudRunSandboxConfig) *CloudRunSan
 func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
-
-// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run
-// calls neither RunConfig.Checkpoint nor RunConfig.OnResourceCreated, so an
-// async launch could not be stopped before the sandbox is started, and an
-// aborted launch would leave the sandbox running. The broker therefore
-// creates agents on this runtime synchronously. Remove this opt-out once
-// Run calls both hooks.
-func (r *CloudRunSandboxRuntime) AsyncLaunchUnsupported() bool { return true }
-
-var _ AsyncLaunchUnsupportedRuntime = (*CloudRunSandboxRuntime)(nil)
 
 // Run launches an agent inside a sandbox. See brief §Deliverable 2.
 // waitForSandboxLiveness polls with backoff until probe returns nil or ctx is
@@ -2160,7 +2327,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// flaky in practice, lengthen the ladder rather than removing the probe.
 	probeDelays := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
 	probeErr := waitForSandboxLiveness(ctx, probeDelays, func(probeCtx context.Context) error {
-		_, err := runSimpleCommand(probeCtx, r.bin, "exec", slug, "--", "/bin/true")
+		_, err := runSandboxProbe(probeCtx, r.bin, slug)
 		return err
 	}, slug)
 	if probeErr != nil {
@@ -2215,11 +2382,8 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// the exit in the state store when the sandbox terminates.
 	// The context is cancelled by deleteOrWorkaround to unblock the watcher
 	// when the sandbox is force-deleted.
-	watchCtx, watchCancel := context.WithCancel(context.Background())
-	r.watchMu.Lock()
-	r.watchCancels[slug] = watchCancel
-	r.watchMu.Unlock()
-	go r.watchSandbox(watchCtx, slug, nonce)
+	watchCtx, watchToken := r.installWatcher(slug)
+	go r.watchSandbox(watchCtx, slug, nonce, watchToken)
 	go r.tailEntrypointLog(watchCtx, slug, cfg.Name, cfg.Project, paths, entrypointLogOffset)
 
 	return slug, nil
@@ -2314,6 +2478,40 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 	return r.deletePlain(ctx, id, obs)
 }
 
+// installWatcher registers a new exit watcher for the sandbox name and
+// returns its context and token. Any watcher this instance already has for
+// the name is cancelled first (ptone/scion#4819): it watches an older
+// entry, and left running it would keep a `sandbox wait` and a log tailer
+// alive with no cancel in the map. A cancelled watcher returns without
+// touching the state or the map. Tokens start at 1: a watcher run with
+// token 0 is never registered and never releases a registration.
+func (r *CloudRunSandboxRuntime) installWatcher(name string) (context.Context, uint64) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if prev, ok := r.watchCancels[name]; ok {
+		prev()
+	}
+	if r.watchTokens == nil {
+		r.watchTokens = make(map[string]uint64)
+	}
+	r.watchSeq++
+	r.watchCancels[name] = cancel
+	r.watchTokens[name] = r.watchSeq
+	return ctx, r.watchSeq
+}
+
+// releaseWatcher removes the watcher with token from the map for name, if
+// it is still the registered one: a newer watcher for the name stays.
+func (r *CloudRunSandboxRuntime) releaseWatcher(name string, token uint64) {
+	r.watchMu.Lock()
+	defer r.watchMu.Unlock()
+	if tok, ok := r.watchTokens[name]; ok && tok == token {
+		delete(r.watchCancels, name)
+		delete(r.watchTokens, name)
+	}
+}
+
 // cancelWatcher cancels this instance's exit watcher for the sandbox id,
 // if any, so `sandbox wait` doesn't hang after the sandbox is deleted.
 func (r *CloudRunSandboxRuntime) cancelWatcher(id string) {
@@ -2323,6 +2521,7 @@ func (r *CloudRunSandboxRuntime) cancelWatcher(id string) {
 		cancel()
 		delete(r.watchCancels, id)
 	}
+	delete(r.watchTokens, id)
 }
 
 // classifiedDelete runs `sandbox delete --force id` on the path the
@@ -2544,7 +2743,7 @@ func (r *CloudRunSandboxRuntime) listEntries() []*sandboxStateEntry {
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSandboxExec(ctx, r.bin, nil, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
 	if err == nil && strings.TrimSpace(logs) != "" {
 		return logs, nil
 	}
@@ -2628,7 +2827,7 @@ func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("cloudrun-sandbox: sandbox %q not found", id)
 	}
 	// Set tmux window-size to latest for proper resize behavior.
-	_, _ = runSimpleCommand(ctx, r.bin, "exec", id, "--",
+	_, _ = runSandboxExec(ctx, r.bin, nil, "exec", id, "--",
 		"/usr/bin/tmux", "set-option", "-g", "window-size", "latest")
 	// Interactive attach via sandbox exec.
 	// TERM=xterm-256color is load-bearing: without it tmux sees TERM=dumb
@@ -2673,7 +2872,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	// Absolute paths: PATH is empty inside a sandbox, so callers must provide
 	// absolute paths or the command must be on a bind-mounted path.
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommand(ctx, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, nil, args...)
 }
 
 // ExecWithStdin runs cmd inside the sandbox with stdin piped from the given
@@ -2683,7 +2882,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 // #1355.
 func (r *CloudRunSandboxRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommandWithStdin(ctx, stdin, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, stdin, args...)
 }
 
 // GetWorkspacePath returns the HOST-side workspace path from the state
@@ -2709,8 +2908,8 @@ func (r *CloudRunSandboxRuntime) GetWorkspacePath(ctx context.Context, id string
 // cancel the watcher when the sandbox is force-deleted. nonce is the
 // nonce of the entry this watcher watches: the exit is recorded only if
 // the key still holds that entry, so a late watcher never marks a newer
-// run's entry stopped.
-func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, nonce sandboxNonce) {
+// run's entry stopped. token is the watcher's token from installWatcher.
+func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, nonce sandboxNonce, token uint64) {
 	// sandbox wait blocks until the sandbox exits.
 	cmd := exec.CommandContext(ctx, r.bin, "wait", name)
 	out, err := cmd.CombinedOutput()
@@ -2773,14 +2972,11 @@ func (r *CloudRunSandboxRuntime) watchSandbox(ctx context.Context, name string, 
 		}
 	}
 
-	// Clean up the cancel function from the map, unless the entry changed
-	// since this watcher started: the map may then hold a newer run's
-	// cancel for the name, which must stay.
-	if !errors.Is(markErr, errStateChanged) {
-		r.watchMu.Lock()
-		delete(r.watchCancels, name)
-		r.watchMu.Unlock()
-	}
+	// Clean up this watcher's cancel function from the map. A newer
+	// watcher for the name may have been installed since this one marked
+	// the entry (or failed to): its cancel must stay, so the removal is
+	// by token (ptone/scion#4819).
+	r.releaseWatcher(name, token)
 }
 
 // -----------------------------------------------------------------------

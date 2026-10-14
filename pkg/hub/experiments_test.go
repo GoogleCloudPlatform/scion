@@ -51,10 +51,12 @@ func TestExperimentRegistry_ZeroValueServerFallsBackToDefault(t *testing.T) {
 	if srv.experimentRegistry() != experiments.Default() {
 		t.Error("experimentRegistry() on a zero-value Server must return experiments.Default()")
 	}
-	// ptone/scion#2217: a zero-value &Server{} (no New()) must resolve
-	// web.terminal_workspace to its compiled default without panicking.
-	if !srv.experimentEnabled("web.terminal_workspace") {
-		t.Error("zero-value Server: web.terminal_workspace should resolve to its default (true)")
+	// ptone/scion#2217: a zero-value &Server{} (no New()) must resolve every
+	// compiled experiment to its default without panicking.
+	for _, exp := range experiments.Default().All() {
+		if got := srv.experimentEnabled(exp.Name); got != exp.Default {
+			t.Errorf("zero-value Server: %s = %v, want its default %v", exp.Name, got, exp.Default)
+		}
 	}
 }
 

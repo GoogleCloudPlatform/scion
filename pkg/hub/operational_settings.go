@@ -255,6 +255,12 @@ type OperationalSettings struct {
 	// to tell whether the seed layer gave a key its bootstrap value.
 	// Guarded by mu.
 	unseededKoanf *koanf.Koanf
+	// aboveSeedKoanf is the bootstrap merge with only the layers above
+	// SCION_SEED_* (settings files and SCION_SERVER_*), without the coded
+	// defaults (SetAboveSeedBootstrap), nil when unset. computeSupersededKeys
+	// uses it to tell a coded default from a value set in those layers.
+	// Guarded by mu.
+	aboveSeedKoanf *koanf.Koanf
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -275,6 +281,33 @@ type OperationalSettings struct {
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
+
+	// writeGuard, when set, is asked before every section write or delete
+	// (Update, DeleteSection); a non-nil error refuses the write. The
+	// server installs the test-admin policy guard here
+	// (Server.testAdminSettingsWriteGuard), so every settings write path
+	// refuses test identities with admin roles.
+	writeGuard atomic.Pointer[settingsWriteGuard]
+}
+
+// settingsWriteGuard decides whether the caller in ctx may write section.
+type settingsWriteGuard func(ctx context.Context, section string) error
+
+// setWriteGuard installs the write guard (nil removes it).
+func (o *OperationalSettings) setWriteGuard(g settingsWriteGuard) {
+	if g == nil {
+		o.writeGuard.Store(nil)
+		return
+	}
+	o.writeGuard.Store(&g)
+}
+
+// checkWriteGuard runs the write guard for section, if one is installed.
+func (o *OperationalSettings) checkWriteGuard(ctx context.Context, section string) error {
+	if g := o.writeGuard.Load(); g != nil && *g != nil {
+		return (*g)(ctx, section)
+	}
+	return nil
 }
 
 // NewOperationalSettings creates a new OperationalSettings service.
@@ -318,6 +351,22 @@ func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	o.unseededKoanf = k
 	o.unseededPublicURL = k.String(config.PublicURLKey)
 	o.hasUnseededPublicURL = true
+}
+
+// SetAboveSeedBootstrap records the bootstrap merge with only the layers
+// above SCION_SEED_*, without the coded defaults
+// (config.LoadAboveSeedBootstrapKoanfWithConfigPath). With it and the
+// unseeded bootstrap set, the admin view attributes a superseded key that
+// none of those layers sets to the seed layer when a seed value exists,
+// else to the coded defaults (ptone/scion#4983). Without it (tests,
+// embedded servers) such a key is attributed to settings.yaml.
+func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.aboveSeedKoanf = k
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
@@ -671,6 +720,9 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return 0, err
+	}
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
@@ -740,6 +792,9 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}

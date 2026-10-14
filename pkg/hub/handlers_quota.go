@@ -137,6 +137,11 @@ type usageReservationView struct {
 	// visibly (not tooltip-only) next to the cap, since a limit shown
 	// without that context would look enforced when it is not.
 	BrokerAgentLimitSource string `json:"brokerAgentLimitSource,omitempty"`
+	// ScopeConflict is true for a max_agents_per_broker reservation of a
+	// pinned agent whose Runtime Broker is not the reservation's broker.
+	// Such a reservation is reported, never moved, released or backfilled
+	// (ReconcileStaleBrokerQuotaReservations).
+	ScopeConflict bool `json:"scopeConflict,omitempty"`
 }
 
 // myUsageEntry represents one limit's current/max for the current user.
@@ -770,6 +775,14 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	// reservation below (design.md §5.9, AC-P2-10): def is already that one
 	// lookup, so no second query is needed.
 	brokerCapacityCache := make(map[string]BrokerCapacity)
+	var agentsByID map[string]*store.Agent
+	if def.Name == store.LimitMaxAgentsPerBroker {
+		agentsByID, err = s.reservedBrokerAgents(ctx, reservations)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
 	views := make([]usageReservationView, len(reservations))
 	for i, res := range reservations {
 		views[i] = usageReservationView{UsageReservation: res}
@@ -783,6 +796,9 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		}
 		views[i].BrokerAgentLimit = bc.Limit
 		views[i].BrokerAgentLimitSource = bc.Source
+		if a, ok := agentsByID[res.ResourceID]; ok && a.IsPinned() && a.RuntimeBrokerID != res.ScopeID {
+			views[i].ScopeConflict = true
+		}
 	}
 
 	writeJSON(w, http.StatusOK, usageByLimitResponse{
@@ -790,6 +806,26 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		Reservations:    views,
 		TotalActive:     len(reservations),
 	})
+}
+
+// reservedBrokerAgents loads the agents holding broker-scoped reservations
+// in one query, keyed by agent ID, for the scopeConflict flag. Missing and
+// soft-deleted agents are absent.
+func (s *Server) reservedBrokerAgents(ctx context.Context, reservations []*store.UsageReservation) (map[string]*store.Agent, error) {
+	ids := make([]string, 0, len(reservations))
+	for _, res := range reservations {
+		if res.ScopeType == store.QuotaScopeBroker {
+			ids = append(ids, res.ResourceID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	agents, err := s.store.GetAgentsByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load reserved agents: %w", err)
+	}
+	return agents, nil
 }
 
 // listBrokerScopedActiveReservations aggregates active reservations for

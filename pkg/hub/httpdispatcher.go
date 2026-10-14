@@ -1834,7 +1834,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// revokeAgentCredentialsBestEffort's doc comment.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -1913,6 +1916,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentReprovision(ctx context.Context, agen
 // back into AppliedConfig.
 func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *store.Agent, callerName string, reprovision bool, expectNFSWorkspace string) (err error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
 
@@ -2137,7 +2145,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// deferredCreateWithGather fallback, does go through this defer.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2265,6 +2276,11 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// Flat placement backstop: the first pass pinned the agent, so this
+	// refuses only a pin corrupted between the two passes.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return nil, err
+	}
 	return d.finalizeEnv(ctx, agent, env, false)
 }
 
@@ -2321,7 +2337,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// non-error needs-still-missing case).
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2739,7 +2758,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
@@ -2836,7 +2855,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	delete(keySet, agentTZEnvKey)
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -2925,6 +2944,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+		if err == nil {
+			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+		}
 		if err != nil {
 			if d.debug {
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
@@ -2994,7 +3016,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		return sources
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -3706,6 +3728,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	ctx = withDispatchAgentID(ctx, agent.ID)
 
@@ -3858,6 +3885,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -3913,6 +3945,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	ctx = withDispatchAgentID(ctx, agent.ID)
 
@@ -3951,6 +3988,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		DeletedAt:    deletedAt,
 		RunID:        agent.RunID,
 		NotAfter:     notAfter,
+		// The purge job's removal of retained files (ptone/scion#4744).
+		PurgeRetained: purgeRetainedFrom(ctx),
 	}
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, opts)
 	if errors.Is(err, ErrLifecycleDeferred) {
@@ -4042,6 +4081,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4068,6 +4112,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 // as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
 // any request could have reached a broker.
 func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	// Flat placement backstop, first: target is not an agent, so the row
+	// is loaded and checked, and target must name the agent's current
+	// Runtime Broker. Every failure is proven Hub-side, before anything is
+	// built or sent (agentkeys.ErrNotDispatched).
+	if err := d.keysPlacementBackstop(ctx, target); err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
+	}
 	// Fail closed on a missing or already-past deadline before spending a
 	// network round trip on it: BrokerRequest.ExecuteBefore's doc requires a
 	// zero value to fail closed, and contract §4.3 lists "the Hub's own
@@ -4131,6 +4182,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4146,6 +4202,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", 0, err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", 0, err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4159,6 +4220,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return false, err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return false, err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
@@ -4272,6 +4338,7 @@ func (d *HTTPAgentDispatcher) deferredDelete(ctx context.Context, agent *store.A
 		DeletedAt:      deletedAt,
 		RunID:          agent.RunID,
 		PreviousRunIDs: agent.PreviousRunIDs,
+		PurgeRetained:  purgeRetainedFrom(ctx),
 		// The target lets the executing node send the delete even after
 		// the agent row is gone, as after a project delete
 		// (ptone/scion#3665).
@@ -4559,6 +4626,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if err != nil {
 		return nil, nil, err
 	}
+	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {

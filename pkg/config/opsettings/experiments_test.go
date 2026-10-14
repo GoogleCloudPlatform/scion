@@ -33,10 +33,10 @@ func TestParseExperimentsDocMatchesRefreshUpdatePredicate(t *testing.T) {
 		name string
 		raw  json.RawMessage
 	}{
-		{"valid with overrides", json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`)},
+		{"valid with overrides", json.RawMessage(`{"overrides":{"web.sample_flag":false}}`)},
 		{"valid empty object", json.RawMessage(`{}`)},
 		{"invalid json", json.RawMessage(`not json`)},
-		{"non-boolean override value", json.RawMessage(`{"overrides":{"web.terminal_workspace":"nope"}}`)},
+		{"non-boolean override value", json.RawMessage(`{"overrides":{"web.sample_flag":"nope"}}`)},
 		{"parseable doc with extra top-level key", json.RawMessage(`{"overrides":{},"unexpected":true}`)},
 	}
 
@@ -60,12 +60,12 @@ func TestParseExperimentsDocMatchesRefreshUpdatePredicate(t *testing.T) {
 }
 
 func TestParseExperimentsDoc_ValidOverridesRoundTrip(t *testing.T) {
-	doc, malformed := ParseExperimentsDoc(json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`))
+	doc, malformed := ParseExperimentsDoc(json.RawMessage(`{"overrides":{"web.sample_flag":false}}`))
 	if malformed {
 		t.Fatal("expected a valid document, got malformed=true")
 	}
-	if v, ok := doc.Overrides["web.terminal_workspace"]; !ok || v != false {
-		t.Errorf("doc.Overrides = %v, want web.terminal_workspace=false", doc.Overrides)
+	if v, ok := doc.Overrides["web.sample_flag"]; !ok || v != false {
+		t.Errorf("doc.Overrides = %v, want web.sample_flag=false", doc.Overrides)
 	}
 }
 
@@ -78,12 +78,12 @@ func TestExperimentsSchemaValidation(t *testing.T) {
 		doc     json.RawMessage
 		wantErr bool
 	}{
-		{"valid overrides", json.RawMessage(`{"overrides":{"web.terminal_workspace":false}}`), false},
+		{"valid overrides", json.RawMessage(`{"overrides":{"web.sample_flag":false}}`), false},
 		{"empty doc", json.RawMessage(`{}`), false},
 		{"empty overrides", json.RawMessage(`{"overrides":{}}`), false},
 		{"bad name: no dot", json.RawMessage(`{"overrides":{"notaname":true}}`), true},
 		{"bad name: uppercase", json.RawMessage(`{"overrides":{"Web.Terminal":true}}`), true},
-		{"non-bool value", json.RawMessage(`{"overrides":{"web.terminal_workspace":"nope"}}`), true},
+		{"non-bool value", json.RawMessage(`{"overrides":{"web.sample_flag":"nope"}}`), true},
 		{"extra top-level key", json.RawMessage(`{"overrides":{},"unexpected":true}`), true},
 	}
 	for _, tt := range tests {
