@@ -249,19 +249,30 @@ func TestArtifactHostReviewGrantClause(t *testing.T) {
 	}
 }
 
-// TestArtifactHostReviewGrantClauseAuditsOnce: naming the clause costs no
-// extra authorization decision: a delegating user's ReviewGrantClause
-// records exactly the decisions MayGrantReview records (its one
-// project.manage check), so the decision log never adds an audit record.
+// TestArtifactHostReviewGrantClauseAuditsOnce: the host evaluates the review
+// rule once. For a delegating user that is exactly one authorization decision,
+// the project.manage deny of AdministersScope on the home project (the
+// provenance resolution records no decision), the same single record the
+// review rule wrote before it named its clause. A second evaluation, or an
+// extra check added for the decision log, would change the count.
 func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
 	f := newReviewGrantFixture(t)
 	host := newArtifactHost(f.srv)
 	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
-	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home))
-	may := len(emitter.records)
-	emitter.records = nil
 	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home))
-	assert.Equal(t, may, len(emitter.records), "ReviewGrantClause records the same decisions as MayGrantReview")
+	require.Len(t, emitter.records, 1, "one decision for a delegating user's review clause")
+	r := emitter.records[0]
+	assert.Equal(t, "deny", r.Result)
+	assert.Equal(t, "project", r.ResourceType)
+	assert.Equal(t, f.home, r.ResourceID)
+	assert.Equal(t, string(ActionManage), r.Permission)
+	assert.Equal(t, f.delegator, r.PrincipalID)
+
+	// MayGrantReview, the same evaluation, records the same one decision.
+	emitter.records = nil
+	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home))
+	require.Len(t, emitter.records, 1)
+	assert.Equal(t, "deny", emitter.records[0].Result)
 }
