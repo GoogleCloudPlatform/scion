@@ -717,8 +717,7 @@ harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest, beats ev
    See "The rank of hub agent_defaults depends on the hub's storage mode" below.
 ```
 
-The `template resources` rung is now empty: a template's `resources` is ignored with a warning
-(see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
+The `template resources` rung now holds only the agent's own `resources` (for example from `scion create --config`); a template's `resources` is ignored with a warning (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
 
 **One file, three ranks, and the top one outranks the template.** A reader handed
 "`runtime_broker` is lowest" as one uniform rule gets two of these three backwards.

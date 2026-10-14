@@ -771,7 +771,7 @@ The provisioning init container runs the agent's own image, so an older `scionto
 - writes `.scion-provisioned` back into the workspace root (newer images add it to the git excludes);
 - if it only waits for another Pod's provisioning, times out, because the newer image writes the sentinel in the state directory.
 
-No data is lost in these cases, but to keep the workspace free of provisioning files, update the images of the project's harness-configs to a release that includes the provisioning state directory.
+No data is lost in these cases, but to keep the workspace free of provisioning files, make sure every agent of the project runs an image from a release that includes the provisioning state directory.
 
 `mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
 
