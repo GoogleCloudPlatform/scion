@@ -238,7 +238,7 @@ The warning applies to project commands only. Commands that need no project, suc
 
 **Environment variables.** `SCION_HUB_ENDPOINT` overrides the current hub in that shell and is never saved. `SCION_HUB_URL` also turns off the current hub and link entries in that shell, but a `hub.endpoint` in settings wins over it. Bare `scion use` and `scion use --hub` print `Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.` (or `SCION_HUB_URL`, whichever is set) when the variable names another hub. `SCION_HUB_TOKEN` is not tied to a hub. When it is set and the hub came from the current context, `scion use` warns: `Warning: SCION_HUB_TOKEN is set and will be sent to hub '<name>'`.
 
-**`scion server` and `scion runtime-broker`** do not use the current context at all; see [The server's own hub endpoint](#the-servers-own-hub-endpoint).
+**`scion server` and `scion runtime-broker`** do not use the current context: only a `--hub` nickname is resolved there. See [The server's own hub endpoint](#the-servers-own-hub-endpoint).
 
 ## Linked directories
 
@@ -288,7 +288,7 @@ A server still falls back to the CLI's `hub.endpoint` (or `SCION_HUB_ENDPOINT`) 
 deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
 ```
 
-Because of this split, `scion use --hub prod` never changes the endpoint that a local workstation server gives its agents. Under `scion server` and `scion runtime-broker`, `--hub` takes a URL, not a nickname. See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution) for the full order.
+Because of this split, `scion use --hub prod` never changes the endpoint that a local workstation server gives its agents. Under `scion server` and `scion runtime-broker`, `--hub` takes a nickname or a URL, but nothing else comes from the hub list there: no current hub and no current project. See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution) for the full order.
 
 ## See also
 
