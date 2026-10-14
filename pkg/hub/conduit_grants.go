@@ -90,8 +90,8 @@ import (
 // half only, kept for re-check verification until not_after plus the
 // largest stream authorization interval plus 30s (conduitGrantKeyRetention;
 // retention only grows). Retained keys are never published and never
-// verify a stream grant at admission. Operators remove a possibly exposed
-// key at once with POST /api/v1/admin/conduit/grant-keys/revoke
+// verify a stream grant at admission. Operators withdraw a key at once
+// with POST /api/v1/admin/conduit/grant-keys/revoke
 // (handleAdminConduitGrantKeyRevoke): rotate first, wait for the new key to
 // activate, then revoke the old kid.
 const (
@@ -626,8 +626,8 @@ func (s *Server) conduitGrantKeyRetention() time.Duration {
 	return s.conduitUserStreamAuthzInterval() + 30*time.Second
 }
 
-// RevokeConduitGrantKey removes a grant key from the ring at once, for use
-// when the key may have been exposed: it stops verifying anything, and
+// RevokeConduitGrantKey removes a grant key from the ring at once, to
+// withdraw it before its not_after: it stops verifying anything, and
 // streams whose latest grant it signed get no further renewal. The key that
 // signs now cannot be revoked; rotate first and wait for the new key to
 // activate. POST /api/v1/admin/conduit/grant-keys/revoke calls it.

@@ -109,7 +109,9 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 
 **Rotating grant keys.** `POST /api/v1/admin/conduit/grant-keys/rotate` (unscoped Hub administrators only, `hub.conduit_grant_keys.execute`) rotates in a new grant signing key with an overlap window: grants signed with the outgoing key stay valid until the earlier of their own expiry and the outgoing key's `NotAfter`. Once the new key activates, the outgoing key can no longer sign; the Hub keeps only its public half. After `NotAfter` the Hub stops publishing the key, but keeps its public half for the stream renewal check for one `stream_authz_max.user` interval plus 30 seconds. The response lists only key IDs and timestamps.
 
-**Revoking a grant key.** If a grant key may have been exposed, rotate first, wait until the new key is active (`activate_at` in the rotate response), then call `POST /api/v1/admin/conduit/grant-keys/revoke` with `{"kid": "<old key id>"}` (same permission as rotate). The key stops verifying anything at once. Streams whose latest grant it signed are not renewed again and end at their current authorization deadline. The key that signs now cannot be revoked.
+**Revoking a grant key.** To withdraw a grant key at once, rotate first, wait until the new key is active (`activate_at` in the rotate response), then call `POST /api/v1/admin/conduit/grant-keys/revoke` with `{"kid": "<old key id>"}` (same permission as rotate). The key stops verifying anything at once. Streams whose latest grant it signed are not renewed again and end at their current authorization deadline. The key that signs now cannot be revoked.
+
+**Upgrading hub replicas.** Upgrade all hub replicas to this version before the next grant key rotation, and not within one overlap window of a rotation (the activation delay plus the overlap, about 1 hour 15 minutes with the defaults). An upgraded hub does not rewrite a stored key ring that has one active key and no successor.
 
 **TLS on the internal hop.** Use TLS for the internal relay endpoint (for example a service mesh or a TLS-terminating proxy) and advertise it as `https://`. Plain `http://` is accepted.
 
