@@ -453,6 +453,32 @@ func filterAgentsByRun(agents []api.AgentInfo, runID string) []api.AgentInfo {
 	return legacy
 }
 
+// filterAgentsByExactRun keeps only the entries labelled with run runID.
+// Unlike filterAgentsByRun it never admits an unlabelled legacy entry: a
+// caller that deletes by run (a restarted broker removing what a dead launch
+// created) must not touch an entry it cannot prove belongs to that run.
+func filterAgentsByExactRun(agents []api.AgentInfo, runID string) []api.AgentInfo {
+	if runID == "" {
+		return nil
+	}
+	var exact []api.AgentInfo
+	for _, a := range agents {
+		if a.RunID == runID {
+			exact = append(exact, a)
+		}
+	}
+	return exact
+}
+
+// SelectExactRunTarget picks the single runtime entry for agentName that is
+// labelled with run runID exactly, scoped to projectPath's project as
+// Stop and Delete scope it (ptone/scion#4668). Entries with no run label or
+// another run's label are never selected. found is false when none
+// matches; an ambiguous match is an error.
+func SelectExactRunTarget(agents []api.AgentInfo, agentName, projectPath, runID string) (target api.AgentInfo, found bool, err error) {
+	return selectAgentTarget(filterAgentsByExactRun(agents, runID), agentName, resolveProjectName(projectPath))
+}
+
 // StopTarget stops the runtime entry ref, which the caller has already
 // resolved; unlike Stop it performs no slug re-resolution.
 func (m *AgentManager) StopTarget(ctx context.Context, ref runtime.RunRef) error {

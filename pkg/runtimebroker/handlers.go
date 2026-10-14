@@ -819,6 +819,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refused while the broker drains for shutdown, before the dispatch
+	// attempt, the registration and any file work (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "create", req.ID) {
+		return
+	}
+
 	attemptKey := req.ID
 	if attemptKey == "" {
 		attemptKey = req.Name
@@ -1461,7 +1467,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		default:
 			// runLaunch completes the ownership mirror only for an accepted
 			// launch; a refused one leaves it to the deferred release.
-			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
+			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.RuntimeType, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -2957,6 +2963,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 }
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "start", id) {
+		return
+	}
 	// Tracked until Manager.Start and Run's deferred cleanup have returned.
 	// The run comes from the runId query parameter when the hub sends it,
 	// so the start carries its run from the moment it is tracked
@@ -4082,6 +4093,11 @@ func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id,
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "restart", id) {
+		return
+	}
 	// Tracked until the start leg, including Run's deferred cleanup, has
 	// returned, with its run from the runId query parameter as on start.
 	queryRunID := r.URL.Query().Get("runId")
