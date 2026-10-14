@@ -189,21 +189,18 @@ const redactedLogValue = "REDACTED"
 // next whitespace or the next "http://" or "https://", so two URLs joined
 // with no separator are redacted one by one, and a URL holding a raw quote
 // or angle bracket is redacted whole. In each URL:
-//   - Userinfo is dropped: everything after the scheme up to the last "@"
-//     in the URL, whatever comes before it (a raw "/", "?" or "#" in a
-//     password included). The one exception is an "@" that comes only
-//     after the first "?" or "#" of a URL whose host before that is a
-//     plausible host name (see plausibleAuthority): that "@" is in the
-//     query or fragment, which is replaced anyway. So an "@" in a path is
-//     taken as the end of userinfo too.
-//   - Everything after the first "?" up to the next whitespace (the query,
-//     any fragment and any closing punctuation) becomes "?REDACTED", and a
-//     fragment with no query becomes "#REDACTED". For example,
-//     Get "https://h/x?q=v": EOF  becomes  Get "https://h/x?REDACTED EOF
+//   - A URL holding an "@" anywhere (userinfo, or an "@" in its path, query
+//     or fragment) becomes "(redacted URL)" after its scheme, and nothing
+//     else of it is kept. This loses the host from the log line, which is
+//     accepted: it is the one rule that never keeps userinfo.
+//   - Otherwise, everything after the first "?" up to the next whitespace
+//     (the query, any fragment and any closing punctuation) becomes
+//     "?REDACTED", and a fragment with no query becomes "#REDACTED". For
+//     example, Get "https://h/x?q=v": EOF  becomes
+//     Get "https://h/x?REDACTED EOF
 //   - An artifact path becomes logging.RedactedArtifactPath.
 //   - A URL that does not parse after this becomes "(unparseable URL)"
-//     after its scheme. A single-label host (http://hub/...) is kept, but
-//     is not plausible enough to treat a later "@" as part of a query.
+//     after its scheme.
 //
 // Punctuation ending a URL with no query or fragment (see
 // urlTrailingPunct; "]" only when the URL has no "[", as in an IPv6 host)
@@ -240,17 +237,22 @@ func redactURLsInText(s string) string {
 func redactURLToken(token string, schemeLen int) string {
 	scheme := strings.ToLower(token[:schemeLen])
 	rest := token[schemeLen:]
-	if at := strings.LastIndexByte(rest, '@'); at >= 0 && !atInQueryOrFragment(rest, at) {
-		rest = rest[at+1:]
+	q := strings.IndexAny(rest, "?#")
+	if strings.Contains(rest, "@") {
+		trailing := ""
+		if q < 0 {
+			_, trailing = trimURLTrailing(rest)
+		}
+		return scheme + redactedURL + trailing
 	}
 	var suffix, trailing string
-	if i := strings.IndexAny(rest, "?#"); i >= 0 {
-		if rest[i] == '?' {
+	if q >= 0 {
+		if rest[q] == '?' {
 			suffix = "?" + redactedLogValue
 		} else {
 			suffix = "#" + redactedLogValue
 		}
-		rest = rest[:i]
+		rest = rest[:q]
 	} else {
 		rest, trailing = trimURLTrailing(rest)
 	}
@@ -258,6 +260,8 @@ func redactURLToken(token string, schemeLen int) string {
 	if j := strings.IndexByte(rest, '/'); j >= 0 {
 		authority, path = rest[:j], rest[j:]
 	}
+	// A URL with an "@" was replaced above, so u.User is always nil here;
+	// the check is a defence in case that rule changes.
 	u, err := url.Parse(scheme + authority + path)
 	if err != nil || u.User != nil {
 		return scheme + unparseableURL + suffix + trailing
@@ -268,65 +272,12 @@ func redactURLToken(token string, schemeLen int) string {
 	return scheme + authority + path + suffix + trailing
 }
 
+// redactedURL replaces a logged URL, after its scheme, that holds an "@".
+const redactedURL = "(redacted URL)"
+
 // unparseableURL replaces a logged URL, after its scheme, that does not
-// parse once its userinfo, query and fragment are removed.
+// parse once its query and fragment are removed.
 const unparseableURL = "(unparseable URL)"
-
-// atInQueryOrFragment reports whether the "@" at rest[at] is in the query or
-// fragment of the URL rest (a URL after its scheme), not the end of
-// userinfo: it comes after the first "?" or "#", nothing before that holds
-// an "@", and the authority before that is a plausible host.
-func atInQueryOrFragment(rest string, at int) bool {
-	q := strings.IndexAny(rest, "?#")
-	if q < 0 || at < q || strings.Contains(rest[:q], "@") {
-		return false
-	}
-	authority := rest[:q]
-	if j := strings.IndexByte(authority, '/'); j >= 0 {
-		authority = authority[:j]
-	}
-	return plausibleAuthority(authority)
-}
-
-// plausibleAuthority reports whether a looks like host[:port]: a bracketed
-// IPv6 address, "localhost", or a dotted name of letters, digits, "-" and
-// ".", with an optional all-digit port.
-func plausibleAuthority(a string) bool {
-	host, port := a, ""
-	if strings.HasPrefix(a, "[") {
-		end := strings.IndexByte(a, ']')
-		if end < 0 {
-			return false
-		}
-		host, port = a[:end+1], a[end+1:]
-		if port != "" && !strings.HasPrefix(port, ":") {
-			return false
-		}
-		port = strings.TrimPrefix(port, ":")
-	} else if i := strings.LastIndexByte(a, ':'); i >= 0 {
-		host, port = a[:i], a[i+1:]
-	}
-	if i := strings.LastIndexByte(a, ':'); i >= 0 && i == len(a)-1 {
-		return false
-	}
-	for _, c := range port {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	if strings.HasPrefix(host, "[") {
-		return len(host) > 2
-	}
-	if host != "localhost" && !strings.Contains(host, ".") {
-		return false
-	}
-	for _, c := range host {
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '.' {
-			return false
-		}
-	}
-	return host != ""
-}
 
 // trimURLTrailing splits rest, a URL after its scheme with no query or
 // fragment, into the URL and the punctuation that ends it (see

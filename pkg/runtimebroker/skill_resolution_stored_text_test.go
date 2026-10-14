@@ -204,6 +204,7 @@ func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 			t.Errorf("logs carry %q: %s", v, logs)
 		}
 	}
+	assertResolverLogRecord(t, logs, "runLaunch: agent start failed", startErrTextRunID)
 }
 
 // TestProvisionOnly_SkillResolverError_FixedReasonPhrase covers the
@@ -359,4 +360,33 @@ func TestSyncCreate_SkillFailureWithEarlierCase_LogsOnce(t *testing.T) {
 		t.Errorf("response body carries resolver text: %s", w.Body.String())
 	}
 	assertResolverLogRecord(t, logs.String(), "Agent create failed", startErrTextRunID)
+}
+
+// TestProvisionOnly_SkillFailureWithEarlierCase_LogsOnce is the
+// provision-only counterpart of TestSyncCreate_SkillFailureWithEarlierCase_LogsOnce.
+func TestProvisionOnly_SkillFailureWithEarlierCase_LogsOnce(t *testing.T) {
+	const runID = "run-provision-earlier-5061"
+	srv := newTestServer(t)
+	srv.manager.(*mockManager).provisionErr = fmt.Errorf("%w: %w", config.ErrTemplateNotFound, resolverTestError())
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+	body := fmt.Sprintf(`{"name": "skill-provision-earlier", "id": "agent-skill-provision-earlier", "runId": %q,
+		"provisionOnly": true, "config": {"template": "claude"}}`, runID)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error body: %v (status %d, body %s)", err, w.Code, w.Body.String())
+	}
+	if w.Code != http.StatusNotFound || resp.Error.Code != ErrCodeNotFound {
+		t.Errorf("got status %d code %q, want %d %q", w.Code, resp.Error.Code, http.StatusNotFound, ErrCodeNotFound)
+	}
+	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
+		t.Errorf("response body carries resolver text: %s", w.Body.String())
+	}
+	assertResolverLogRecord(t, logs.String(), "Agent provision failed: template or harness-config not found", runID)
 }
