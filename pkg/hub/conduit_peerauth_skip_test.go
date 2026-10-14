@@ -113,3 +113,35 @@ func TestConduitRelayNotRunning503NamesTheKey(t *testing.T) {
 	assert.Contains(t, body, "startup failed; see the startup log")
 	assert.NotContains(t, body, "server.hub.conduit")
 }
+
+// TestConduitRelayNotRunning503_AgentAndBrokerPaths: the agent and broker
+// handshakes answer a node with no relay running with the same 503, naming
+// the recorded setting.
+func TestConduitRelayNotRunning503_AgentAndBrokerPaths(t *testing.T) {
+	const key = "server.hub.conduit.peer_service_accounts"
+	t.Run("agent", func(t *testing.T) {
+		srv, _ := testServer(t)
+		srv.SetConduitRelayStartFailure(key)
+		ident := newTestAgentIdentity("agent-1", "project-1", []AgentTokenScope{ScopeAgentPortForward})
+		rec := httptest.NewRecorder()
+		_, ok := srv.decideConduitAgent(rec, httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil), ident, false)
+		require.False(t, ok)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Contains(t, rec.Body.String(), "startup failed on "+key)
+	})
+	t.Run("broker", func(t *testing.T) {
+		f := newBrokerConduitFixture(t, nil, nil)
+		// No relay running on this node for the handshake; restored before
+		// the fixture's cleanup stops the relay.
+		prev := f.srv.conduit.Swap(nil)
+		t.Cleanup(func() { f.srv.conduit.Store(prev) })
+		f.srv.SetConduitRelayStartFailure(key)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+		req.Header = f.signedHeader(t, "/api/v1/conduit", nil)
+		rec := httptest.NewRecorder()
+		_, ok := f.srv.decideConduitBroker(rec, req, false)
+		require.False(t, ok)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+		assert.Contains(t, rec.Body.String(), "startup failed on "+key)
+	})
+}

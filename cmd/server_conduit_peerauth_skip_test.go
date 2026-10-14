@@ -60,6 +60,20 @@ func countInternalListeners(t *testing.T) *int {
 	return n
 }
 
+// recordStartFailures collects the keys startConduit records on the hub
+// for the rest of the test (the real record still runs).
+func recordStartFailures(t *testing.T) *[]string {
+	t.Helper()
+	got := &[]string{}
+	prev := conduitRecordStartFailure
+	conduitRecordStartFailure = func(hubSrv *hub.Server, setting string) {
+		*got = append(*got, setting)
+		prev(hubSrv, setting)
+	}
+	t.Cleanup(func() { conduitRecordStartFailure = prev })
+	return got
+}
+
 // startRelayForSkipTest runs startConduitRelay on a fresh hub with
 // hub.conduit on and no shared signing secret.
 func startRelayForSkipTest(t *testing.T, cfg *config.GlobalConfig, requireHA bool) (*hub.Server, error) {
@@ -215,6 +229,7 @@ func TestStartConduit_FailureLogNamesTheKey(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	resetForSkipTest(t)
 	logs := captureConduitLog(t)
+	recorded := recordStartFailures(t)
 	const account = "relay-peer@p.iam.gserviceaccount.com"
 	cfg := &config.GlobalConfig{}
 	cfg.Hub.Conduit.PeerAuth = "mtls" // an unknown mode
@@ -230,4 +245,25 @@ func TestStartConduit_FailureLogNamesTheKey(t *testing.T) {
 	assert.Contains(t, out, "setting=server.hub.conduit.peer_auth")
 	assert.NotContains(t, out, "mtls", "the configured value is not logged")
 	assert.NotContains(t, out, account)
+	assert.Equal(t, []string{"server.hub.conduit.peer_auth"}, *recorded, "the key is recorded for the relay-not-running response")
+}
+
+// TestStartConduit_NonSettingFailureRecordsNoKey: a relay start that fails
+// for a reason other than one setting (here the internal listener cannot
+// open) records the failure with no key.
+func TestStartConduit_NonSettingFailureRecordsNoKey(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetForSkipTest(t)
+	t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+	recorded := recordStartFailures(t)
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
+	cfg.Hub.Conduit.InternalListen = "256.0.0.1:1" // cannot open
+	srv := conduitHubServer(t, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
+	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
+	assert.Equal(t, []string{""}, *recorded, "a failure not caused by one setting records no key")
 }

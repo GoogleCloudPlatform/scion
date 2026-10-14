@@ -211,6 +211,11 @@ var (
 	// serveConduitInternalListenerFn opens the internal listener that
 	// serves the internal relay API (serveConduitInternalListener).
 	serveConduitInternalListenerFn = serveConduitInternalListener
+	// conduitRecordStartFailure records a failed relay start on the hub,
+	// with the failing setting's key or "".
+	conduitRecordStartFailure = func(hubSrv *hub.Server, setting string) {
+		hubSrv.SetConduitRelayStartFailure(setting)
+	}
 )
 
 // trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
@@ -352,11 +357,11 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 	var se *relay.SettingError
 	if errors.As(err, &se) {
 		slog.Error("Conduit relay not started; agent conduit sessions are unavailable on this node", "setting", se.Key, "error", err)
-		hubSrv.SetConduitRelayStartFailure(se.Key)
+		conduitRecordStartFailure(hubSrv, se.Key)
 		return nil
 	}
 	slog.Error("Conduit relay not started; agent conduit sessions are unavailable on this node", "error", err)
-	hubSrv.SetConduitRelayStartFailure("")
+	conduitRecordStartFailure(hubSrv, "")
 	return nil
 }
 
