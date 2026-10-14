@@ -134,6 +134,9 @@ func entNotifToStore(e *ent.Notification) *store.Notification {
 		Dispatched:     e.Dispatched,
 		Acknowledged:   e.Acknowledged,
 		CreatedAt:      e.Created,
+
+		DispatchAttempts: e.DispatchAttempts,
+		DispatchOutcome:  e.DispatchOutcome,
 	}
 }
 
@@ -408,6 +411,8 @@ func (s *NotificationStore) CreateNotification(ctx context.Context, notif *store
 		SetDispatched(notif.Dispatched).
 		SetAcknowledged(notif.Acknowledged).
 		SetCreated(notif.CreatedAt).
+		SetDispatchAttempts(notif.DispatchAttempts).
+		SetDispatchOutcome(notif.DispatchOutcome).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -618,6 +623,37 @@ func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id
 	_, err = s.client.Notification.Update().
 		Where(notification.IDEQ(uid)).
 		SetDispatched(false).
+		Save(ctx)
+	return mapError(err)
+}
+
+// RecordNotificationDispatchAttempt atomically increments a notification's
+// dispatch_attempts by one (UPDATE ... SET dispatch_attempts =
+// dispatch_attempts + 1), so concurrent recorders never lose a count.
+func (s *NotificationStore) RecordNotificationDispatchAttempt(ctx context.Context, id string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Notification.UpdateOneID(uid).
+		AddDispatchAttempts(1).
+		Save(ctx)
+	return mapError(err)
+}
+
+// SetNotificationDispatchOutcome records a terminal dispatch outcome and sets
+// dispatched=true so the sweep stops considering the notification.
+func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error {
+	if outcome != store.NotificationOutcomeDelivered && outcome != store.NotificationOutcomeFailed {
+		return store.ErrInvalidInput
+	}
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Notification.UpdateOneID(uid).
+		SetDispatched(true).
+		SetDispatchOutcome(outcome).
 		Save(ctx)
 	return mapError(err)
 }

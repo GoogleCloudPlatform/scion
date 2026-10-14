@@ -229,7 +229,39 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type` (`docker` or `kubernetes`), an optional `display_name`, and for `kubernetes` the optional `context`, `namespace`, `kubeconfig`, `kubernetes_service_account_mappings`, `kubernetes_block_service_account`, `shared_dir_storage_class` and `shared_dir_size`. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type` (`docker` or `kubernetes`), an optional `display_name`, and for `kubernetes` the optional `context`, `namespace`, `kubeconfig`, `kubernetes_service_account_mappings`, `kubernetes_block_service_account`, `shared_dir_storage_class` and `shared_dir_size`. An entry may also set `agent_defaults`, the workload defaults of the agents it runs (see below). |
+
+#### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
+
+An optional block of workload defaults for the agents a flat Runtime Broker instance runs. A flat instance does not use Runtime Broker profiles, so these take the place of the matching profile settings. Each value sits exactly where the profile value sat in its own precedence order: a template, the agent's own configuration or the request still wins wherever it won over a profile, and an unset value falls through to the same lower settings. The block is read from `settings.yaml` only and is never sent to the Hub. Unknown keys are refused at startup, naming the settings path.
+
+| Key | Type | Precedence |
+| :--- | :--- | :--- |
+| `default_harness_config` | string | Below the template's and the agent's stored harness config; above the top-level `default_harness_config`. |
+| `image_registry` | string | Above the top-level `image_registry`. |
+| `volumes` | list of volume mounts | Appended after the harness config's volumes. |
+| `resources` | resource spec | The agent's own resources win over it; it wins over the Hub `agent_defaults.resources` and `default_resources`. |
+| `harness_overrides.<harness-config>` | `image`, `image_pull_policy`, `user`, `auth_selected_type`, `env`, `volumes`, `resources` | Applied over `harness_configs.<harness-config>`, as a profile's harness override is. An explicit `image` outranks the template and inline images (only a request image beats it). Its `resources` rank above the agent's own. An empty `env` value in any override marks a key the user must supply. Validated like a profile's harness override. |
+| `secrets` | list of secret declarations (no values) | Required secrets, between the harness config's secrets and the template's. |
+| `clone_depth` | `"full"` or an integer from 1 | Below the template's or agent's `clone_depth`; unset keeps the default shallow clone. |
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: docker-1
+        name: docker-1
+        runtime_target:
+          type: docker
+        agent_defaults:
+          image_registry: registry.example.com/team
+          resources:
+            requests:
+              memory: 2Gi
+          harness_overrides:
+            claude:
+              auth_selected_type: vertex-ai
+```
 
 ### Database (`server.database`)
 
@@ -1022,6 +1054,20 @@ Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is de
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 
 The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
+
+#### The hub a Runtime Broker reports to
+
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose Runtime Broker runs next to the Hub, the Runtime Broker uses the Hub's localhost address when that setting is unset. A server that runs only a Runtime Broker falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+
+#### Deprecated fallback to the CLI's hub endpoint
+
+`hub.endpoint` and `SCION_HUB_ENDPOINT` are CLI settings. The CLI now keeps its Hubs in a per-user hub list (see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/)), and the server's own endpoints belong in `server.hub.public_url` and `server.broker.hub_endpoint`. When the server's endpoint actually comes from the legacy fallback, the server logs this warning once at startup:
+
+```text
+deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
+```
+
+There is no warning when removing the fallback would not change the result, for example on a workstation whose `hub.endpoint` is its own loopback address. On a host configured as a server, `scion doctor` reports the same text as its `server-hub-endpoint` check; it cannot see the server's flags, so it warns only when every way the server could run would be affected. Selecting a Hub with `scion use` never changes the endpoint a server advertises.
 
 #### Splitting the agent endpoint from the public URL
 

@@ -1617,6 +1617,14 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// Check the OTLP TLS settings in the final env, after every merge. Only
+	// a warning: in the container sciontool logs a failed telemetry start
+	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
+	// start that worked without telemetry must not fail here.
+	if err := config.ValidateTelemetryEnv(agentEnv); err != nil {
+		warnings = append(warnings, fmt.Sprintf("Warning: %v; with cloud telemetry export configured, the agent starts without telemetry", err))
+	}
+
 	// Determine the effective workspace path. If agentWorkspace is empty but we have
 	// a volume mounted to /workspace (e.g., shared worktree case), use that source path.
 	effectiveWorkspace := agentWorkspace
