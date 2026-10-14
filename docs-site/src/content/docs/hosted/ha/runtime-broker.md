@@ -187,6 +187,12 @@ Register, re-register, rotate, link and unlink events in the audit log record th
 
 With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
 
+With the experiment on, a Runtime Broker's Conduit session also carries the Hub's short requests to it: agent logs, `exec`, image status, pull and removal, and project cleanup. The session lists the requests it serves when it connects, and any Hub instance can reach it, not only the one that holds the control channel. A request that no Conduit session serves uses the control channel, and then the broker's HTTP endpoint; this path is the fallback only. Agent creation, start, stop, delete, messages, keys and attach do not change.
+
+- An `exec` whose request reached the Runtime Broker but whose result was lost (for example, the session closed while it ran) returns `502` with code `outcome_unknown`. The command may have run. The Hub does not retry it, and `error.details` carries `operation`, `broker_id` and `request_id`. A failure the Runtime Broker reports still returns `502 runtime_error`.
+- A logs request or project cleanup that loses its session is retried on another session of the same Runtime Broker. When none serves it, logs return `503 unavailable`.
+- Project cleanup on the Runtime Broker removes the project's directory under `~/.scion/project-configs` even when the project directory itself is already gone, and reports success only once both are gone, so repeating it finishes any step that failed. The Hub's Conduit path reports a cleanup failure as a failure.
+
 ## Headless registration with a hub token
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
