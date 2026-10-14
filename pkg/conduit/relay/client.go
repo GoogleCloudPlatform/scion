@@ -459,6 +459,7 @@ func (s *RemoteSession) Info() conduit.SessionInfo {
 			Rpc:                 append([]string(nil), c.RPC...),
 			EndpointIncarnation: c.EndpointIncarnation,
 			ExecScope:           c.ExecScope,
+			Features:            append([]string(nil), c.Features...),
 			TransportLimits: &conduitv1.TransportLimits{
 				MaxFrame:     uint32(c.TransportLimits.MaxFrame),
 				IdleTimeoutS: uint32(c.TransportLimits.IdleTimeoutS),
