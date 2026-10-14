@@ -929,3 +929,19 @@ func TestReleaseSlotIfIdle_ClaimBrokerMustBeTheRowBroker(t *testing.T) {
 	assert.Equal(t, held.ID, after.ID)
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerX.ID))
 }
+
+// A halted agent (a run the platform ended, GoogleCloudPlatform/scion#3643)
+// holds no broker capacity: it is not counted, and the idle release frees
+// its slot on its own broker as for stopped (store.BrokerQuotaCountedPhase).
+func TestHalted_NotCounted_IdleReleaseFreesSlot(t *testing.T) {
+	assert.False(t, store.AgentHoldsBrokerCapacity(&store.Agent{Phase: string(state.PhaseHalted)}), "a halted agent holds no capacity")
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "halted-idle")
+	a := newQuotaTestAgent(t, s, broker, project, "halted-idle", state.PhaseHalted)
+	seedSlot(t, s, broker.ID, a.ID)
+
+	srv.releaseSlotIfIdleOn(ctx, a.ID, broker.ID)
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the halted agent's slot is freed")
+	assert.Zero(t, brokerReservationCount(t, s, broker.ID))
+}
