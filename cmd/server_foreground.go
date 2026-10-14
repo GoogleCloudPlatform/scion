@@ -171,6 +171,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// this takes effect for every later record.
 	applyServerLogLevelSetting(cfg.LogLevel)
 	if enableHub {
+		warnRetiredServerSettings(slog.Default(), serverConfigPath)
 		if err := validateHubWorkspaceStorage(cfg); err != nil {
 			return err
 		}
@@ -1207,6 +1208,16 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 		return fmt.Errorf("invalid workspace storage settings: %w", err)
 	}
 	return nil
+}
+
+// warnRetiredServerSettings logs one warning for each retired server setting
+// still set in the server config or environment. The loader ignores them, so
+// without this a hub would silently change behaviour after an upgrade
+// (ptone/scion#4991).
+func warnRetiredServerSettings(logger *slog.Logger, configPath string) {
+	for _, w := range config.RetiredServerSettingWarnings(configPath) {
+		logger.Warn(w)
+	}
 }
 
 // loadAndReconcileConfig loads the server configuration file and reconciles
@@ -2421,7 +2432,6 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
-		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,

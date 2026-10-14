@@ -100,7 +100,9 @@ type startSiteCase struct {
 func directStartSite(name string, phase state.Phase, run func(t *testing.T, srv *Server, a *store.Agent) bool) startSiteCase {
 	return startSiteCase{name: name, setup: func(t *testing.T, disp *hookedStartDispatcher, async bool) (*Server, store.Store, *store.RuntimeBroker, string, func() bool) {
 		srv, s := testServer(t)
-		srv.config.AsyncAgentLaunch = async
+		if async {
+			newAsyncLaunchToggle(t, srv).set(true)
+		}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 3)
 		sfx := fmt.Sprintf("sd-%s-%v", name, async)
@@ -116,7 +118,9 @@ func directStartSite(name string, phase state.Phase, run func(t *testing.T, srv 
 func createExistingStartSite(name, action string) startSiteCase {
 	return startSiteCase{name: name, affectedByAsync: true, setup: func(t *testing.T, disp *hookedStartDispatcher, async bool) (*Server, store.Store, *store.RuntimeBroker, string, func() bool) {
 		srv, s, project := setupCreateAgentServer(t, disp)
-		srv.config.AsyncAgentLaunch = async
+		if async {
+			newAsyncLaunchToggle(t, srv).set(true)
+		}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 3)
 		ctx := context.Background()
