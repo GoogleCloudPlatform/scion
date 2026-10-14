@@ -131,7 +131,10 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		// One conditional store write: the reservation is released only if
 		// the run is the one just read and the queued stop is still the
 		// intent at the same RunIntentAt, so a start that claimed the agent
-		// after the re-read keeps the slot.
+		// after the re-read keeps the slot. (Tests rely on this being the only
+		// conditional release with neither NoStartKindClaim nor NotCounted:
+		// settleHookStore in queued_stop_settle_race_test.go selects it that
+		// way. Keep it so, or update that selector.)
 		released, err := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
 			ExpectedRunID:         cur.RunID,
 			QueuedStopIntent:      true,

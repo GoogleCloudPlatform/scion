@@ -461,3 +461,38 @@ func TestFirstHeartbeatBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
 	f.heartbeat(completeInventory(), a.Slug)
 	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "retried on the next heartbeat")
 }
+
+// reservationWriteFaultStore fails CreateUsageReservation for agentID while
+// armed.
+type reservationWriteFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+}
+
+func (r *reservationWriteFaultStore) CreateUsageReservation(ctx context.Context, res *store.UsageReservation) (*store.UsageReservation, error) {
+	if r.fault.Active() && res.ResourceID == r.agentID {
+		return nil, errReservationRead
+	}
+	return r.Store.CreateUsageReservation(ctx, res)
+}
+
+// A reservation write that fails during a broker's first-heartbeat backfill
+// does not mark the broker row as backfilled either: the next heartbeat
+// retries.
+func TestFirstHeartbeatBackfill_WriteError_RetriedNextHeartbeat(t *testing.T) {
+	f := newReconcileFixture(t)
+	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationWriteFaultStore {
+		return &reservationWriteFaultStore{Store: inner, fault: fs}
+	})
+	a := f.addAgent("bf-write-retry", "running", "working")
+	hook.agentID = a.ID
+	fault.Arm()
+
+	f.heartbeat(completeInventory(), a.Slug)
+	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the write failed: not backfilled")
+
+	hook.agentID = ""
+	f.heartbeat(completeInventory(), a.Slug)
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "retried on the next heartbeat")
+}

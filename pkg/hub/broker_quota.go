@@ -779,8 +779,8 @@ func brokerBackfillHolds(agent *store.Agent) bool {
 // for that broker. An unpinned agent's backfill onto a row held elsewhere is
 // refused by the unique index and reported. Returns the number of
 // reservations recorded, of conflicts reported and of agents skipped
-// because their reservation could not be read; err is the agent list's
-// error.
+// because their reservation could not be read or written; err is the agent
+// list's error.
 func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool) (backfilled, conflicts, skipped int, err error) {
 	agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: brokerID}, store.ListOptions{Limit: 10000})
 	if err != nil {
@@ -818,6 +818,7 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 			}
 			s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
 				"agent_id", agent.ID, "broker_id", brokerID, "error", err)
+			skipped++
 			continue
 		}
 		if created {
@@ -862,9 +863,9 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 		s.agentLifecycleLog.Warn("quota backfill: failed to list agents for broker", "broker_id", brokerID, "error", err)
 		return false
 	}
-	if backfilled > 0 || conflicts > 0 {
+	if backfilled > 0 || conflicts > 0 || skipped > 0 {
 		s.agentLifecycleLog.Info("quota backfill: recorded reservations of a Runtime Broker's agents",
-			"broker_id", brokerID, "backfilled", backfilled, "scope_conflicts", conflicts)
+			"broker_id", brokerID, "backfilled", backfilled, "scope_conflicts", conflicts, "skipped", skipped)
 	}
 	// A skipped agent is retried on the next heartbeat (the backfill is
 	// idempotent): the broker row is not recorded as done.

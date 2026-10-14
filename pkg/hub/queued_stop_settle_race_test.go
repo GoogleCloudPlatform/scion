@@ -36,8 +36,8 @@ import (
 )
 
 // settleHookStore runs beforeRelease and afterRelease, once each, around
-// the settle's conditional release of agentID, and counts that agent's status writes while
-// countWrites is set. Transparent until armed.
+// the settle's conditional release of agentID, and counts that agent's
+// status writes while countWrites is set. Transparent until armed.
 type settleHookStore struct {
 	store.Store
 	fault         *storeFaultSwitch
