@@ -564,7 +564,28 @@ func TestGrantShaping_VisitorWindowUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.ExpiresAt, "no unbounded window under shaping")
 
+	// A binding made under another admin-kind identity's issuance is
+	// refused, and the row is left unchanged.
+	other := newTestAdminUser(store.UserKindTestSuperAdmin, uuid.NewString(), time.Now().Add(20*time.Minute))
+	_, err = e.cs.CreateTestAdminUser(ctx, other, newTestAdminSystemRole(t, e.cs, store.SystemRoleSuperAdmin).ID)
+	require.NoError(t, err)
+	other, err = e.cs.GetUser(ctx, other.ID)
+	require.NoError(t, err)
+	otherShaped := store.ContextWithGrantShaping(store.ContextWithGrantActor(ctx, other.ID),
+		store.GrantShaping{IdentityID: other.ID, IssuanceID: *other.IssuanceID, ExpiresAt: *other.ExpiresAt})
+	otherMade := bind(otherShaped, fed(), other.ID)
+	require.NotNil(t, otherMade.IssuanceID)
+	require.NotNil(t, otherMade.ExpiresAt)
+	_, err = e.cs.UpdateVisitorRoleBindingWindow(e.shaped, otherMade.ID, nil, &later)
+	assert.ErrorIs(t, err, store.ErrTestAdminGrantRefused, "a visitor binding of a different issuance")
+	stored, err := e.cs.GetRoleBinding(ctx, otherMade.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.ExpiresAt)
+	assert.True(t, stored.ExpiresAt.Equal(*otherMade.ExpiresAt), "row unchanged: %v", stored.ExpiresAt)
+	assert.Equal(t, *otherMade.IssuanceID, *stored.IssuanceID, "stamp unchanged")
+
 	got, err = e.cs.UpdateVisitorRoleBindingWindow(e.humanCtx, personMade.ID, nil, &later)
 	require.NoError(t, err, "control: a person changes the window")
-	assert.True(t, got.ExpiresAt.Equal(later.UTC()) || got.ExpiresAt.Sub(later).Abs() < time.Second)
+	require.NotNil(t, got.ExpiresAt)
+	assert.WithinDuration(t, later, *got.ExpiresAt, time.Second)
 }
