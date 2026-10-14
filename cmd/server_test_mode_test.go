@@ -140,21 +140,17 @@ func TestTestMode_ProductionRefusedAtEveryNonOffLevel(t *testing.T) {
 	for _, level := range []hub.TestMode{hub.TestModeMember, hub.TestModeAdmin, hub.TestModeSuperAdmin} {
 		err := validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode="+string(level)+":"+tiaCmdHubID))
 		require.Error(t, err, level)
-		if level == hub.TestModeSuperAdmin {
-			// G3 runs first: super-admin is refused whatever else is set.
-			assert.ErrorIs(t, err, hub.ErrTestSuperAdminRequiresPolicyRegistry, level)
-		} else {
-			assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, level)
-		}
+		// With a complete test-admin policy (A2, G3) super-admin passes G3
+		// and is refused by G5 like the other levels; the incomplete-policy
+		// refusal is TestTestMode_SuperAdminNeedsCompletePolicy.
+		assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, level)
 		in := tiaValidInputs()
 		in.Level = level
 		in.ProductionFlagExplicit = true
 		res, err := resolveTestMode(in)
 		require.Error(t, err, level)
 		assert.Equal(t, testModeResolution{}, res, level)
-		if level != hub.TestModeSuperAdmin {
-			assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, level)
-		}
+		assert.ErrorIs(t, err, hub.ErrTestAdminProductionFlag, level)
 	}
 	require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--production", "--test-mode=off")))
 }
@@ -286,7 +282,9 @@ func TestTestMode_DaemonParentRefuses(t *testing.T) {
 		{[]string{"--enable-test-identities"}, hub.ErrTestModeRemovedFlag},
 		{[]string{"--enable-test-admin-identities=" + tiaCmdHubID}, hub.ErrTestModeRemovedFlag},
 		{[]string{"--test-mode=memebr:" + tiaCmdHubID}, hub.ErrTestModeUnrecognized},
-		{[]string{"--test-mode=super-admin:" + tiaCmdHubID}, hub.ErrTestSuperAdminRequiresPolicyRegistry},
+		// A complete test-admin policy admits super-admin (A2, G3); the
+		// incomplete-policy refusal is TestTestMode_SuperAdminNeedsCompletePolicy.
+		{[]string{"--test-mode=super-admin:" + tiaCmdHubID}, nil},
 		{[]string{"--production", "--test-mode=member:" + tiaCmdHubID}, hub.ErrTestAdminProductionFlag},
 		{[]string{"--hosted", "--test-mode=member:" + tiaCmdHubID}, nil},
 		{nil, nil},
