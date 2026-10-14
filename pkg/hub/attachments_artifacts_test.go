@@ -596,7 +596,8 @@ func TestAttachmentArtifacts_TokenCannotSendArtifactAttachment(t *testing.T) {
 
 	unknown := uuid.NewString()
 	missing := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{unknown}})
-	require.NotEqual(t, http.StatusCreated, missing.status, missing.body)
+	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
+	require.Contains(t, missing.body, "not available in this conversation")
 	got := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{id}})
 	require.Equal(t, missing.status, got.status, got.body)
 	require.Equal(t, strings.ReplaceAll(missing.body, unknown, "ID"), strings.ReplaceAll(got.body, id, "ID"), "the same answer as an unknown id")
@@ -623,6 +624,61 @@ func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) 
 	require.NoError(t, json.Unmarshal([]byte(got.body), &hist))
 	require.NotEmpty(t, hist.Messages, "the token reads the conversation")
 	require.Empty(t, hist.MessageAttachments[resp.ID], "the token's history lists no attachment stored as an artifact")
+}
+
+// streamEventAs opens the agent messages stream of agentID as identity,
+// publishes evt on agent.<agentID>.message until its text arrives, and
+// returns the stream body.
+func streamEventAs(t *testing.T, srv *Server, events *ChannelEventPublisher, identity UserIdentity, agentID string, evt UserMessageEvent) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentID+"/messages/stream", nil)
+	rctx := context.WithValue(contextWithIdentity(ctx, identity), userContextKey{}, identity)
+	rec := &syncRecorder{header: http.Header{}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.mux.ServeHTTP(rec, req.WithContext(rctx))
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(rec.String(), evt.Msg) {
+		events.PublishRaw("agent."+agentID+".message", evt)
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	body := rec.String()
+	require.Contains(t, body, evt.Msg, "stream never delivered the event")
+	return body
+}
+
+// The agent messages stream lists attachments stored as artifacts only to a
+// session: a user access token's stream gets each event with only the
+// attachments of the AttachmentStore, while the session's stream lists both.
+func TestAttachmentArtifacts_AgentStreamOmitsArtifactAttachmentsForTokens(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	f.srv.events = events
+	legacy := f.attach(t, f.projA.ID, f.ua.ID, "legacy.txt")
+	artifact := f.uploadAs(t, f.ua, f.projA.ID, "artifact-file.txt", "stored as an artifact")
+	evt := UserMessageEvent{
+		ID: uuid.NewString(), SenderID: f.ua.ID, RecipientID: f.aa.ID, AgentID: f.aa.ID, Msg: "message-with-files",
+		Attachments: []AttachmentRef{{ID: legacy, Name: "legacy.txt"}, {ID: artifact, Name: "artifact-file.txt"}},
+	}
+
+	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "agent:read")
+	body := streamEventAs(t, f.srv, events, token, f.aa.ID, evt)
+	assert.Contains(t, body, legacy, "the AttachmentStore attachment is listed to the token")
+	require.NotContains(t, body, artifact, "the attachment stored as an artifact is not listed to the token")
+	require.NotContains(t, body, "artifact-file.txt")
+
+	session := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	body = streamEventAs(t, f.srv, events, session, f.aa.ID, evt)
+	assert.Contains(t, body, legacy)
+	assert.Contains(t, body, artifact, "the session's stream lists the attachment stored as an artifact")
 }
 
 // With the experiment on, a user access token's upload is stored in the

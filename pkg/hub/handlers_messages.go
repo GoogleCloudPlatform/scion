@@ -564,6 +564,11 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	// only see messages where they are a participant.
 	userID := user.ID()
 	filterStream := !fullHistory.Allowed
+	// Only a caller the artifact service lets read attachments (a session)
+	// sees attachments stored as artifacts listed; for any other caller each
+	// event keeps only the attachments of the AttachmentStore
+	// (ptone/scion#4596).
+	legacyOnly := !newArtifactHost(s).PermitsMessageRead(ctx)
 
 	heartbeat := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
@@ -592,7 +597,14 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 					continue
 				}
 			}
-			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", evt.Data)
+			data := evt.Data
+			if legacyOnly {
+				var ok bool
+				if data, ok = s.legacyAttachmentsOnly(ctx, data); !ok {
+					continue
+				}
+			}
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
 			flusher.Flush()
 		case <-heartbeat.C:
 			_, _ = fmt.Fprintf(w, ":heartbeat %d\n\n", time.Now().UnixMilli())

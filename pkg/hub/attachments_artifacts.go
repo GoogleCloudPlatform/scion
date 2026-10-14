@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 
@@ -189,4 +190,37 @@ func (s *Server) retireMessageAttachments(ctx context.Context, messageID string)
 		!errors.Is(err, artifacts.ErrUnavailable) {
 		s.messageLog.Error("Failed to retire the attachments of a deleted message", "message", messageID, "error", err)
 	}
+}
+
+// legacyAttachmentsOnly returns data, an encoded UserMessageEvent, with only
+// the attachments of the AttachmentStore kept: an attachment stored as an
+// artifact is never listed to a caller PermitsMessageRead refuses. An event
+// without attachments is returned as it is. ok is false when data cannot be
+// decoded or encoded again; the event is then not sent.
+func (s *Server) legacyAttachmentsOnly(ctx context.Context, data []byte) ([]byte, bool) {
+	var evt UserMessageEvent
+	if err := json.Unmarshal(data, &evt); err != nil {
+		return nil, false
+	}
+	if len(evt.Attachments) == 0 {
+		return data, true
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	kept := make([]AttachmentRef, 0, len(evt.Attachments))
+	for _, a := range evt.Attachments {
+		if wcs == nil {
+			break
+		}
+		if meta, err := wcs.GetAttachment(ctx, a.ID); err == nil && meta != nil {
+			kept = append(kept, a)
+		}
+	}
+	evt.Attachments = kept
+	out, err := json.Marshal(evt)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
