@@ -61,19 +61,19 @@ var fedCredentialCensus = map[string]string{
 	"test_identity_workload_issuer.go:(*workloadIssuerAuthenticator).authenticate": fedCensusRefuses,
 	// Reads the Google issuer configuration for the external bearer path;
 	// that path never receives the federation header and verifies nothing here.
-	"auth_external_bearer.go:googleTrust":                                          fedCensusNoCredential,
-	"federation_auth.go:(*FederationAuthenticator).IssuerConfig":                   fedCensusNoCredential,
-	"federation_auth.go:NewFederationAuthenticator":                                fedCensusNoCredential,
-	"federation_auth.go:extractHubTokenIdentity":                                   fedCensusNoCredential,
-	"federation_auth.go:extractHubUserClaims":                                      fedCensusNoCredential,
-	"federation_auth.go:extractHubClaims":                                          fedCensusNoCredential,
-	"federation_auth.go:extractServiceAccountClaims":                               fedCensusNoCredential,
-	"federation_auth.go:extractUserClaims":                                         fedCensusNoCredential,
-	"federation_auth.go:hasHubAgentClaims":                                         fedCensusNoCredential,
-	"handlers_project_visitors.go:(*Server).visitorGrantIssuer":                    fedCensusNoCredential,
-	"operational_settings.go:ApplySnapshot":                                        fedCensusNoCredential,
-	"server.go:New":                                                                fedCensusNoCredential,
-	"test_admin_gate.go:(*Server).VerifyTestAdminFederationOff":                    fedCensusNoCredential,
+	"auth_external_bearer.go:googleTrust":                        fedCensusNoCredential,
+	"federation_auth.go:(*FederationAuthenticator).IssuerConfig": fedCensusNoCredential,
+	"federation_auth.go:NewFederationAuthenticator":              fedCensusNoCredential,
+	"federation_auth.go:extractHubTokenIdentity":                 fedCensusNoCredential,
+	"federation_auth.go:extractHubUserClaims":                    fedCensusNoCredential,
+	"federation_auth.go:extractHubClaims":                        fedCensusNoCredential,
+	"federation_auth.go:extractServiceAccountClaims":             fedCensusNoCredential,
+	"federation_auth.go:extractUserClaims":                       fedCensusNoCredential,
+	"federation_auth.go:hasHubAgentClaims":                       fedCensusNoCredential,
+	"handlers_project_visitors.go:(*Server).visitorGrantIssuer":  fedCensusNoCredential,
+	"operational_settings.go:ApplySnapshot":                      fedCensusNoCredential,
+	"server.go:New":                                              fedCensusNoCredential,
+	"test_admin_gate.go:(*Server).VerifyTestAdminFederationOff":  fedCensusNoCredential,
 }
 
 // fedCensusMarkers are the identifiers whose use makes a function a census
