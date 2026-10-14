@@ -269,10 +269,10 @@ func publishTarget(srv *Server, overlay *config.SettingsOverlay, brokerID, globa
 	srv.profileRefs.mu.Unlock()
 }
 
-// refFaultStore gates GetBrokerProjects behind its switch: blocking until
+// profileRefsFaultStore gates GetBrokerProjects behind its switch: blocking until
 // release (or ctx ends), failing, or panicking, and counts calls and their
 // concurrency.
-type refFaultStore struct {
+type profileRefsFaultStore struct {
 	store.Store
 	fault   *storeFaultSwitch
 	mode    string // "block", "fail" or "panic"
@@ -286,7 +286,7 @@ type refFaultStore struct {
 	ctxErr    error
 }
 
-func (r *refFaultStore) GetBrokerProjects(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
+func (r *profileRefsFaultStore) GetBrokerProjects(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
 	r.mu.Lock()
 	r.calls++
 	r.inFlight++
@@ -328,16 +328,16 @@ func (r *refFaultStore) GetBrokerProjects(ctx context.Context, brokerID string) 
 	}
 }
 
-func (r *refFaultStore) snapshot() (calls, maxFlight int, ctxErr error) {
+func (r *profileRefsFaultStore) snapshot() (calls, maxFlight int, ctxErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls, r.maxFlight, r.ctxErr
 }
 
-func newRefFaultServer(t *testing.T, mode string) (*Server, store.Store, *refFaultStore, *storeFaultSwitch) {
+func newRefFaultServer(t *testing.T, mode string) (*Server, store.Store, *profileRefsFaultStore, *storeFaultSwitch) {
 	t.Helper()
-	return testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *refFaultStore {
-		return &refFaultStore{Store: inner, fault: f, mode: mode, started: make(chan struct{}, 1), release: make(chan struct{})}
+	return testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *profileRefsFaultStore {
+		return &profileRefsFaultStore{Store: inner, fault: f, mode: mode, started: make(chan struct{}, 1), release: make(chan struct{})}
 	})
 }
 
