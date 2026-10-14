@@ -407,9 +407,23 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
-		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
+		// A skill failure anywhere in the error chain has its full text
+		// logged once, with a correlation id, whatever the launch code (a
+		// resolver cut off by the launch deadline reports launch_timeout).
+		// The stored text is the skill failure's fixed text only for
+		// skill_resolution_failed.
+		launchSkill := skillFailureFrom(sr.err, lc.opts.RunID)
+		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code, "error", sr.err}, runtimeFailureLogAttrs(sr.err)...)...)
+			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
+			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
+		if launchSkill != nil {
+			s.logSkillResolutionFailure(launchSkill,
+				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
+			if code == ErrCodeSkillResolution {
+				message = launchSkill.publicText()
+			}
+		}
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
@@ -783,9 +797,10 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 		return api.LaunchCodeNameInUse, scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
-		// synchronous create or start returns, with the error naming the
-		// skill and its cause.
-		return ErrCodeSkillResolution, err.Error()
+		// synchronous create or start returns, with a fixed reason phrase
+		// naming the skill. runLaunch adds the correlation id and logs the
+		// full error (see skillResolutionPublicText).
+		return ErrCodeSkillResolution, skillResolutionPublicText(skillErr, "")
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		// The same text the synchronous create gives: it names the
 		// template or harness-config (the ptone/scion#1316 404 contract)
