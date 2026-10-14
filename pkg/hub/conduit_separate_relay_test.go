@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"sync"
 	"testing"
@@ -181,12 +182,22 @@ func (w *separateRelayWorld) startAgentDialingRelay(t *testing.T, relayAddr stri
 	w.agentClock = clock.NewFake(w.clock.Now())
 	admitted := make(chan *conduitv1.Welcome, 4)
 	// The conduit dial goes to the relay; every other request (grant keys
-	// among them) goes to the hub URL.
+	// among them) goes to the hub URL. Relay admission binds the request
+	// Host to the relay's registered public endpoint (relayServesHost; a
+	// dial naming another host is refused with 403, which
+	// TestRelayAdmit_BindsRelayAndHost in conduit_relay_ops_test.go covers),
+	// so the dial must present the relay's own host, as a hub conduit
+	// ingress in proxy mode must too. The Proxy hook sets that Host on the
+	// built upgrade request and uses no proxy.
 	toRelay := &websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,
 		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, network, relayAddr)
+		},
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			req.Host = relayAddr
+			return nil, nil
 		},
 	}
 	a, err := sconduit.New(sconduit.Options{
