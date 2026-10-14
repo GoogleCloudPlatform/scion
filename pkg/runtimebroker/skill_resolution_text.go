@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -68,17 +69,60 @@ func skillResolutionPhrase(code string) string {
 const maxPublicSkillRefLen = 200
 
 // redactSkillRef returns the declared skill reference uri for user-visible
-// text and the server-side log. An http(s) reference (see urlStartPattern)
-// gets the same decision as a URL in free text (see redactURLRun), applied
-// to the whole reference: one holding an "@", "?", "#", whitespace or a
-// second scheme becomes "(redacted URL)" after its scheme. Any other
-// reference (gh://, a registry name) is kept.
+// text and the server-side log, deciding the whole reference:
+//   - A reference that starts with an http(s) scheme (see urlStartPattern)
+//     gets the free-text decision (see redactURLRun): the path-only form
+//     when it holds no "@", "?", "#", whitespace or second scheme, else
+//     "(redacted URL)" after its scheme.
+//   - A reference that starts with a skill scheme (gh://, gcp-skill:// or
+//     skill://) is kept when isSkillSchemeRefShown allows it, else it
+//     becomes "(redacted URL)".
+//   - Any other reference that holds "://" or an http(s) scheme anywhere
+//     (git+https://..., a leading space, ssh://, s3://) becomes
+//     "(redacted URL)" with no scheme.
+//   - A reference that is not URL-like (a plain skill name) is kept.
 func redactSkillRef(uri string) string {
 	loc := urlStartPattern.FindStringIndex(uri)
-	if loc == nil || loc[0] != 0 {
-		return uri
+	if loc != nil && loc[0] == 0 {
+		return redactURLRun(normalisedScheme(uri[:loc[1]]), uri[loc[1]:])
 	}
-	return redactURLRun(normalisedScheme(uri[:loc[1]]), uri[loc[1]:])
+	if rest, ok := skillSchemeRest(uri); ok {
+		if isSkillSchemeRefShown(rest) {
+			return uri
+		}
+		return redactedURL
+	}
+	if loc != nil || strings.Contains(uri, "://") {
+		return redactedURL
+	}
+	return uri
+}
+
+// skillSchemes are the skill reference schemes whose references can be
+// shown as they are (see isSkillSchemeRefShown).
+var skillSchemes = []string{"gh://", "gcp-skill://", "skill://"}
+
+// skillSchemeRest returns the part of uri after its skill scheme (one of
+// skillSchemes, in any case, at the start of uri), and whether it has one.
+func skillSchemeRest(uri string) (string, bool) {
+	lower := strings.ToLower(uri)
+	for _, scheme := range skillSchemes {
+		if strings.HasPrefix(lower, scheme) {
+			return uri[len(scheme):], true
+		}
+	}
+	return "", false
+}
+
+// isSkillSchemeRefShown reports whether a skill-scheme reference, whose
+// part after the scheme is rest, can be shown as it is: rest holds no
+// http(s) scheme, no whitespace, no "?" or "#", and no ":" (so no
+// user:password@ form). An "@" is allowed, as in gh://o/r/s@ref or
+// skill://scope/name@version.
+func isSkillSchemeRefShown(rest string) bool {
+	return !urlStartPattern.MatchString(rest) &&
+		strings.IndexFunc(rest, unicode.IsSpace) < 0 &&
+		!strings.ContainsAny(rest, "?#:")
 }
 
 // publicSkillRef returns redactSkillRef(uri) cut to maxPublicSkillRefLen
@@ -284,7 +328,12 @@ func trimURLTrailing(rest string) (head, trailing string) {
 func skillLogText(e *agent.SkillResolutionError) string {
 	redacted := *e
 	redacted.URI = redactSkillRef(e.URI)
-	redacted.Message = redactURLsInText(e.Message)
+	redacted.Message = e.Message
+	if e.URI != "" && redacted.URI != e.URI {
+		// The message may quote the reference itself.
+		redacted.Message = strings.ReplaceAll(redacted.Message, e.URI, redacted.URI)
+	}
+	redacted.Message = redactURLsInText(redacted.Message)
 	return redacted.Error()
 }
 
@@ -339,13 +388,22 @@ func runtimeCauseLogAttrs(err error, f *skillFailure) []any {
 
 // spanErrorText returns err's text for a trace span status: for an error
 // holding a skill resolution failure, the failure's redacted log text (see
-// skillLogText); for any other error, err's text unchanged.
+// skillLogText), with a fixed suffix when err also holds
+// context.DeadlineExceeded or context.Canceled; for any other error, err's
+// text unchanged.
 func spanErrorText(err error) string {
 	var skillErr *agent.SkillResolutionError
-	if errors.As(err, &skillErr) {
-		return skillLogText(skillErr)
+	if !errors.As(err, &skillErr) {
+		return err.Error()
 	}
-	return err.Error()
+	text := skillLogText(skillErr)
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		text += "; context deadline exceeded"
+	case errors.Is(err, context.Canceled):
+		text += "; context canceled"
+	}
+	return text
 }
 
 // skillFailureLogMsg is the message of the log record that carries the full

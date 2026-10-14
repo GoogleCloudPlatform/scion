@@ -91,6 +91,22 @@ func TestPublicSkillRef(t *testing.T) {
 		"https:skills.example.test/a":                                   "https://skills.example.test/a",
 		"https://skills.example.test/%zz":                               "https://(unparseable URL)",
 		"my-registry-skill":                                             "my-registry-skill",
+		"my-skill@1.0":                                                  "my-skill@1.0",
+		"git+https://u:pw-1@h.example.test/x?k=qv-2":                    "(redacted URL)",
+		" https://u:pw-1@h.example.test/x":                              "(redacted URL)",
+		"\thttps://h.example.test/x":                                    "(redacted URL)",
+		"ssh://u:pw-1@h.example.test/x":                                 "(redacted URL)",
+		"s3://bucket/o?k=qv-1":                                          "(redacted URL)",
+		"gh://owner/repo/skill@main":                                    "gh://owner/repo/skill@main",
+		"GH://owner/repo/skill@main":                                    "GH://owner/repo/skill@main",
+		"gh://u:pw-1@owner/repo/skill":                                  "(redacted URL)",
+		"gh://owner/repo/skill@main?token=NAME":                         "(redacted URL)",
+		"gh://owner/repo/https://h.example.test/x":                      "(redacted URL)",
+		"skill://scion/core/scion@^1.0":                                 "skill://scion/core/scion@^1.0",
+		"skill://scion/core/scion?k=qv-1":                               "(redacted URL)",
+		"skill://scion/core/sc ion":                                     "(redacted URL)",
+		"gcp-skill://reg/some-skill":                                    "gcp-skill://reg/some-skill",
+		"gcp-skill://reg/some-skill#qv-1":                               "(redacted URL)",
 	}
 	for in, want := range tests {
 		if got := publicSkillRef(in); got != want {
@@ -351,4 +367,37 @@ func TestAsyncLaunch_SkillResolverError_StatusInStoredText(t *testing.T) {
 		t.Errorf("log status = %v, want 422", rec["status"])
 	}
 	assertResolverLogRecord(t, logs, "runLaunch: agent start failed", startErrTextRunID)
+}
+
+// TestSkillLogText_SchemeAfterOtherText checks a reference with text before
+// its scheme is redacted whole, in the log text and the user-visible text,
+// also where the message quotes it.
+func TestSkillLogText_SchemeAfterOtherText(t *testing.T) {
+	const uri = "git+https://u:pw-1@h.example.test/x?k=qv-2"
+	e := &agent.SkillResolutionError{
+		URI: uri, Code: "unsupported_scheme",
+		Message: `no resolver registered for scheme "git+https"; cannot fetch ` + uri,
+	}
+	want := `required skill "(redacted URL)" could not be resolved: no resolver registered for scheme "git+https"; cannot fetch (redacted URL)`
+	if got := skillLogText(e); got != want {
+		t.Errorf("skillLogText = %q, want %q", got, want)
+	}
+	if got, want := skillResolutionPublicText(e, "r"), `required skill "(redacted URL)" could not be resolved: resolver error (ref r)`; got != want {
+		t.Errorf("public text = %q, want %q", got, want)
+	}
+}
+
+func TestSpanErrorText_ContextSuffix(t *testing.T) {
+	e := &agent.SkillResolutionError{URI: "gh://o/r/s@v", Code: agent.SkillErrCodeTimeout, Message: "timed out"}
+	base := `required skill "gh://o/r/s@v" could not be resolved: timed out`
+	tests := map[string]error{
+		base + "; context deadline exceeded": fmt.Errorf("provision: %w: %w", e, context.DeadlineExceeded),
+		base + "; context canceled":          fmt.Errorf("provision: %w: %w", e, context.Canceled),
+		base:                                 fmt.Errorf("provision: %w", e),
+	}
+	for want, err := range tests {
+		if got := spanErrorText(err); got != want {
+			t.Errorf("spanErrorText(%v) = %q, want %q", err, got, want)
+		}
+	}
 }
