@@ -50,6 +50,12 @@ type Harness interface {
 	// already applied, so callers can use the value as is.
 	DeliverySpec() DeliverySpec
 
+	// ReadySpec returns the resolved readiness spec: how the harness's
+	// readiness for a pasted message is decided. Defaults are already
+	// applied. The broker passes it to the container, whose init writes it
+	// to the init-run file for the host's readiness wait.
+	ReadySpec() ReadySpec
+
 	// GetHarnessEmbedsFS returns the embedded filesystem containing default harness-config files
 	// and the base path within it (e.g., "embeds").
 	GetHarnessEmbedsFS() (embed.FS, string)

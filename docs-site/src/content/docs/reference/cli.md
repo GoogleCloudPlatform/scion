@@ -156,17 +156,23 @@ and its status is not readable with this credential's scope, and exits 0 like a
 timeout (1 with `--attach`); the launch continues on the Hub. When the Hub has
 already finished the start and you wait with `--attach`, there is no retry: an
 agent launcher's 404 gives the same not-readable report at once, and exits 1.
-The agent is reported as deleted only on a 404 after its status was read that
-persists through a 5-second retry (or until the wait ends, if that is sooner),
-or, for a user's login, on a 404 before that: after the 5-second retry while
-the Hub is still launching the agent, and at once otherwise. If the agent's
-create did not complete (for example the image could not be pulled), the error
-shows the stored template and task. Delete the agent and create it again
+An agent launcher's 404 after the status was read is retried for 5 seconds (or
+until the wait ends, if that is sooner). If it lasts, `start` reports that the
+status is no longer readable and that the agent may have been deleted or the
+Hub refused the read: the Hub answers an agent with 404 both for an agent that
+is gone and for a read it refuses, so a launcher cannot tell the two apart.
+This exits 0 when the Hub accepted the launch, and 1 with `--attach` or when
+it did not. The agent is reported as deleted only for a user's login: on a 404
+after its status was read that persists through the 5-second retry (or until
+the wait ends, if that is sooner), or on a 404 before that, after the 5-second
+retry while the Hub is still launching the agent, and at once otherwise. If the
+agent's create did not complete (for example the image could not be pulled), the
+error shows the stored template and task. Delete the agent and create it again
 (`scion delete <agent-name>`, then `scion start` with the same template and
 task). If soft-delete retention is enabled on the Hub, the name stays reserved
 until the agent is deleted with force=true or purged; until then, use a new
-name. With `--format json`, `--attach` after a workspace upload attaches
-without printing the JSON result.
+name. With `--format json`, `--attach` after a workspace upload attaches without
+printing the JSON result.
 
 #### Long tasks and task files
 
@@ -260,6 +266,7 @@ start or stop was recorded first. With `--rm`, a queued stop does not remove the
     - `-a, --all`: Stop all running agents in the current project, at most six at a time. If any agent fails to stop
       (or, with `--rm`, to be removed), the command exits 1. With `--format json` the result
       object (`"status": "partial"`) is still printed on stdout, and no separate error message is added.
+    - `--self`: With `--rm`, allow removing the current agent. Inside an agent container, `scion stop --rm` naming the agent the CLI runs in is refused before anything is stopped, and exits 1 with a message that `--self` is required; re-run the same command with `--self` added to go ahead. `--all --rm` skips the current agent, prints a note on stderr that it was skipped and that `--self` includes it, and stops and removes the other agents as usual. With `--format json` the result object lists the skipped agent under `"skipped"`. If the current agent was the only running agent, the command prints "No other running agents to stop (current agent skipped; add --self to include it)" instead of "No running agents found." The current agent is matched by name, slug or agent ID within its own project. A stop without `--rm` does not need `--self`. Outside an agent container `--self` has no effect.
 
 ### `scion suspend`
 
@@ -344,7 +351,7 @@ Sends a message to a running agent or user.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
-        - **Undelivered attachments:** If the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead.
+        - **Undelivered attachments:** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
         - **Constraints:** Cannot be combined with `--in` or `--at`, or used with `group[...]` recipients.
         - **Requirements:** Requires Hub mode with the `hub.artifacts` experiment on.
@@ -622,6 +629,7 @@ per agent) is still printed on stdout, and no separate error message is added.
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).
     - `--stopped`: Delete all agents with stopped containers.
     - `--cleanup-only`: Remove only the agent's local files: its worktree, its agent directory and, unless `--preserve-branch` is given, its git branch. Use it when a delete went through on the Hub but the local cleanup failed; it replaces the old `scion --no-hub delete` recovery step. It refuses while the Hub still has the agent (run `scion delete <agent-name>` instead); an agent the Hub no longer has, or has only soft-deleted, is cleaned up. When the Hub cannot be checked (unreachable, or no Hub in use) it refuses unless `--force` is given, which removes the local files without checking. Cannot be combined with `--stopped`. When a Hub delete succeeds but its local cleanup fails, `scion delete` prints the `--cleanup-only` command to retry.
+    - `--self`: Allow deleting the current agent. Inside an agent container, if one of the named agents is the agent the CLI runs in, `scion delete` refuses, deletes none of the named agents, and exits 1 with a message that `--self` is required. That agent is matched by name, slug or agent ID within its own project. Deleting the current agent removes its files and branch and ends its session. With `--self` the delete goes ahead as usual; to use it after a refusal, re-run the same command with `--self` added. Other agents are deleted as usual. Outside an agent container `--self` has no effect. Also applies with `--cleanup-only`.
     - `-f, --force`: Remove the agent from the Hub even when its Runtime Broker cannot be reached or cannot resolve it. A forced delete is permanent: it skips soft-delete retention, so the agent cannot be restored. Runtime resources on the Runtime Broker (containers, worktrees) may need separate cleanup on that Runtime Broker. `--force` does not purge an agent that is already soft-deleted. Applies to every named agent; it cannot be combined with `--stopped` (name the agents to force-delete instead). In local mode (no Hub), `--force` has no effect and the CLI prints a warning; the local delete already removes the container. `--force` does not override a Runtime Broker that holds a different run of the agent than the Hub recorded: the Hub refuses that delete with `409 conflict` and keeps the agent (see [`DELETE /agents/:id`](/scion/reference/api/)).
 
 In Hub mode the Hub may answer `202` when teardown is still running (see [`DELETE /agents/:id`](/scion/reference/api/)). The CLI then polls the agent every 2 seconds for up to 180 seconds. It removes the local worktree only after the Hub confirms the delete:
@@ -837,7 +845,7 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List the projects on all registered hubs, each with its hub, merged with the project directories on this machine (a linked directory shows its local path; an unlinked one shows hub `-`). Offline unless `--refresh` is given.
     - Flags: `--hub <hub>` (only that hub's projects; a nickname or URL), `--refresh` (fetch the project list of each logged-in hub, or of `--hub`, first), `--local` (list the project directories on this machine instead, with their type, agent count, status and workspace path).
     - Scripts that parse `scion project list` should use `scion project list --local`, which keeps the earlier output, JSON included.
-- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up. A git project configuration with no agents and no recorded workspace path shows as `unverified` in `scion project list --local` and is never removed.
+- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist, or whose recorded workspace is itself a scion `.scion` directory. This stops any running containers associated with orphaned projects before cleaning up. A git project configuration with no agents and no recorded workspace path shows as `unverified` in `scion project list --local` and is never removed.
 - `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
     - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
 - `scion project service-accounts` (alias `sa`): Manage GCP service accounts registered for the project.
@@ -1060,6 +1068,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - **Endpoint persistence.** After a successful login, if no `hub.endpoint` is set in the settings that apply (the current project's own settings, else global), the hub URL is saved so `scion hub status` and the other Hub commands use the Hub you logged in to. It is saved to global settings (`~/.scion/settings.yaml`), because credentials are global and project settings are often tracked in git. It goes to the project's settings only when that project already has hub settings, or when you pass `--global=false` explicitly. An existing `hub.endpoint` is never overwritten; a note shows how to use the other Hub (`--hub <url>` or `scion config set hub.endpoint <url>`).
         - **Hub mode.** If Hub mode is off, an interactive login offers to enable it, in the same settings the endpoint went to. Otherwise (non-interactive, or declined) run `scion hub enable`.
     - `logout`: Clear stored credentials. Uses the same Hub URL order, without `--hub-url`.
+    - `federation-token`: Obtain a short-lived user access credential that names you to a peer hub, signed with the Hub's OIDC key, and print it. Requires the `federation.project_visitors` [experiment](/scion/reference/experiments/) on the Hub (the Hub answers 404 while it is off or while its OIDC provider is not enabled). Human mode only. A user access token used for this command needs the `federation_token:mint` scope on a hub boundary.
+        - Flags:
+            - `--audience <url>`: Issuer URL of the peer hub the credential is for (required). It must be listed in the Hub's `server.oidc.user_token_audiences` setting; the credential expires after `server.oidc.user_token_lifetime` (15 minutes by default). See [Server Configuration](/scion/reference/server-config/).
+            - `--json`: Print the credential and its expiry as JSON instead of the credential alone.
 - `scion hub token`: Manage user access tokens (scoped, revocable bearer tokens for CI/CD and automation).
     - `create`: Create a new token.
         - Flags:
@@ -1082,7 +1094,8 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
         - Flags: `--slug`, `--name`, `--branch`, `--workspace-mode`, `--json`
         - `--workspace-mode <shared|per-agent|worktree-per-agent>`: The [workspace sharing mode](/scion/local/workspaces-and-sharing/#setting-the-mode-on-a-hub-project). On a project without git, `per-agent` gives each agent an empty private directory (empty-per-agent). The mode is set at create time only and cannot be changed later. The Hub validates the value: unknown values, and `worktree-per-agent` without a git URL, fail with the Hub's `400` message.
     - `info [project-name-or-id]`: Show details for a project, given by name or project ID (UUID), including its providers. Each provider shows its Runtime Broker's capacity as `(agents: count/limit)`, or `(agents: count)` when that Runtime Broker has no limit. `(not enforced)` is appended when the hub-wide switch for Runtime Broker quota enforcement is off.
-    - `delete [project-name-or-id]`: Delete a project from the Hub, given by name or project ID (UUID), together with its agents and broker provider associations. Asks for confirmation unless `--yes` or `--non-interactive` is set. The project is resolved the same way as for `info`, so `info` shows the project that `delete` would remove.
+    - `delete [project-name-or-id]`: Delete a project from the Hub, given by name or project ID (UUID), with its broker provider associations. The Hub refuses while the project still has agents that are not deleted (including agents whose delete failed) and lists them; delete those agents first. `--force` deletes the project anyway: its agent records are removed and the Runtime Brokers are asked to delete the agents best-effort. With `--format json` a refusal is reported as `{status: "error", details: {projectId, projectName, agents, truncated}}`. Asks for confirmation unless `--yes` or `--non-interactive` is set. The project is resolved the same way as for `info`, so `info` shows the project that `delete` would remove.
+        - Flags: `--yes`, `--non-interactive`, `--force`
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
     - `join-token create <broker-name>`: Create the broker if it does not exist, and a single-use join token for it, to redeem on the broker host with `scion runtime-broker join` (see [Headless Registration with a Join Token](/scion/hosted/ha/runtime-broker/#headless-registration-with-a-join-token)). The token is printed on stdout; the instructions go to stderr. For an existing broker, only its owner or a super-admin can create a token, and the new token replaces any unused earlier one. The broker's settings are not changed. Requires the `broker.create` permission, with a sign-in or a hub-boundary user access token carrying `broker:create`; a token issues a token only for a broker its user created.
         - `--ttl <duration>`: How long the token is valid, from `5m` to `24h`. Default: the Hub's default, `1h`.
@@ -1226,7 +1239,7 @@ scion unexpose 8080
 
 ### `scion artifact`
 
-Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share` and `delete`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
+Publishes files as artifacts and fetches them by reference (`scion://artifact/<id>[@<seq>]`). Requires Hub mode and the `hub.artifacts` experiment (off by default). Available in agent mode, except `share`, `grants` and `delete`. An unknown subcommand is an error, also with `--help`: `scion artifact nosuch --help` exits non-zero with `unknown command`, as do `scion hub nosuch --help` and `scion config nosuch --help`. See [Artifacts](/scion/reference/artifacts/) for access rules and the API.
 
 - `scion artifact publish <file|folder>`: Publish a file or folder in the current project; prints its reference, version and web page URL.
     - Flags: `--title <title>` (set when the artifact is created; default: the entry file's name), `--key <key>` (publishing again under the key adds a version), `--note <text>`, `--entry <path>` (a folder's entry file).
@@ -1234,8 +1247,14 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 - `scion artifact get <ref>`: Write an artifact's entry file to stdout, or with `--out` the file or the whole bundle.
     - Flags: `--out`, `-o <path>` (a file, an existing directory for a single file, or the directory a bundle is written into), `--force` (replace files that already exist under `--out`).
 - `scion artifact versions <ref>`: List an artifact's versions, newest first; the current one is marked `*`. Discarded versions (a rejected or stale review, or an upload not finished in time) are listed among them by number with their reason, so gaps in the numbering are explained.
+- `scion artifact list`: List the artifacts you can read, newest first: those you own, those shared with you, and those homed in projects whose artifacts you may read. Each line shows the reference, title, current version, why you see it (`owned`, `project` or `shared`) and when it last changed; one page is printed unless `--all` is given.
+    - Flags: `--mine` (only artifacts you own), `--project-id <id>` (only artifacts homed in, or shared with, that project), `--shared` (only those shared with you, or with `--project-id` with that project, from elsewhere), `--review-pending`, `--query <text>` (title or key), `--limit <n>` (page size), `--all` (follow every page), `--cursor <c>` (start at the page a previous `--format json` list returned as `nextCursor`).
+- `scion artifact view <ref>`: Print a short-lived link that shows a version whose entry is HTML, the way the web UI shows it, and when it expires (30 minutes unless the Hub says otherwise). It never opens a browser. A version whose entry is not HTML has no view. In agent mode it prints the version and the expiry but not the link; `--show-link` prints the link too. In human mode the link is always printed.
+    - Flags: `--show-link` (print the link in agent mode too), `--check` (also read the version's HTML files and report every `href` or `src` that names no file of the version, including links that start with `/` or climb above the bundle's top folder, and exit non-zero if there is one; links with a scheme, to another host or to a fragment of the same page are not checked, and a link that cannot be parsed is reported; a `<base href>` is not taken into account).
 - `scion artifact share <ref>`: Create a share link and print it, with its expiry and the command that revokes it. The link is shown only once. Only the artifact's owner or a user with an admin grant can share it; not available in agent mode, and the Hub refuses agents. See [Share links](/scion/reference/artifacts/#share-links).
     - Flags: `--ttl <n>h|<n>d` (link lifetime; default: the Hub's, 7 days unless changed; a lifetime above the Hub's maximum, 30 days unless changed, is rejected, not shortened), `--list` (list the active links instead), `--revoke <link-id>` (revoke one instead).
+- `scion artifact grants <ref>`: List an artifact's grants (id, subject, permission, created), or add, change or remove one. Only the artifact's owner or a user with an admin grant can see or change its grants. On an artifact owned by an agent, the user who delegated to the agent and anyone holding `project.manage` in its home project (the project owners and admins, and super-admins) may also add a review grant for a user who can already read it, and nothing else; they cannot list the grants. Not available in agent mode, and the Hub refuses agents. See [Grants](/scion/reference/artifacts/#grants).
+    - Flags: `--add <subject>` with `--permission read|review|write|admin` (subjects `user:<id>`, `agent:<id>` or `project:<id>`; review is for users only; a subject that already has a grant gets the new permission), `--remove <grant-id>`.
 - `scion artifact delete <ref>`: Delete an artifact after confirming (`--yes` skips the prompt; required when stdin is not a terminal). Its grants and share links end with it and its files are removed after the hub's grace period; there is no undelete. The artifact's owner, a user with an admin grant on it, or an admin of its home project can delete it; not available in agent mode, and the Hub refuses agents. See [Deletion](/scion/reference/artifacts/#deletion).
 
 ## Notification Management

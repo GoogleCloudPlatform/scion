@@ -839,6 +839,107 @@ describe('scion-page-admin-server-config', () => {
       expect(server.hub?.host).toBeUndefined();
     });
 
+    function brokerHostField(el: HTMLElement): Element {
+      const label = queryAll(el, 'sl-tab-panel[name="broker"] label').find(
+        (l) => l.textContent?.trim() === 'Host'
+      );
+      expect(label).toBeDefined();
+      return label!.closest('.form-field')!;
+    }
+
+    const workstation = { settings_tier: 'db', layer0_editable: true };
+
+    function withBrokerHost(host: string | undefined, overrides: Record<string, unknown>) {
+      const base = makeBaseConfig(overrides) as any;
+      base.server.broker = host === undefined ? { enabled: true } : { enabled: true, host };
+      return base;
+    }
+
+    it('runtime broker host is editable on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('10.0.0.5', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 127.0.0.1 on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, workstation)));
+      const field = brokerHostField(element);
+      const input = field.querySelector('sl-input')!;
+      expect(input.getAttribute('value')).toBe('');
+      expect(input.getAttribute('placeholder')).toBe('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('a 0.0.0.0 runtime broker host counts as unset on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('0.0.0.0', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('an untouched empty runtime broker host is not sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), () => {});
+      const server = payload.server as Record<string, Record<string, unknown>> | undefined;
+      expect(server?.broker?.host).toBeUndefined();
+    });
+
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
     // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
     // every Layer-1 field the page shows must be sent explicitly when it is
     // cleared: "" / [] / null / false, never left out.
