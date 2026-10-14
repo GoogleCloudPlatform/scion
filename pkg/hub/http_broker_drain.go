@@ -132,11 +132,17 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		// the run is the one just read and the queued stop is still the
 		// intent at the same RunIntentAt, so a start that claimed the agent
 		// after the re-read keeps the slot.
-		released := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
+		released, err := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
 			ExpectedRunID:         cur.RunID,
 			QueuedStopIntent:      true,
 			QueuedStopRunIntentAt: a.RunIntentAt,
 		})
+		if err != nil {
+			// A store failure, not a condition that did not hold: nothing
+			// was released. Leave the stop queued (no confirmation), so the
+			// next heartbeat settles it again.
+			continue
+		}
 		// Read once more: if the queued stop is no longer the intent, a
 		// start superseded it. Its slot was not freed by the conditional
 		// release above, so the re-assert below is a backstop that writes

@@ -445,6 +445,35 @@ func TestAbandonedRestartClaim_ReaperReleases_ThenSlotFrees(t *testing.T) {
 	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "freed once the claim was released")
 }
 
+// A restart whose holder died after a counted phase was written: the
+// reaper releases the claim once a fresh inventory shows nothing running,
+// but the agent still reads a counted phase, so releaseSlotIfIdle keeps the
+// slot. The missing-container reconcile then moves the phase to error, and
+// the observed-phase release frees the slot, with no sweep.
+func TestAbandonedRestartClaim_CountedPhase_SlotFreesWhenMissing(t *testing.T) {
+	f := newReconcileFixture(t)
+	noObservationLag(t)
+	ctx := context.Background()
+	a := f.addAgent("abandon-running", "running", "working")
+	seedSlot(t, f.s, f.brokerID, a.ID)
+	_, err := f.s.ClaimAgentStart(ctx, a.ID, "dead-hub", store.StartClaimRestart, "", time.Millisecond)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+
+	f.srv.reapStartClaims(ctx) // demoted
+	f.heartbeat(completeInventory())
+	f.srv.reapStartClaims(ctx) // released
+	require.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the reaper released the claim")
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "a counted phase keeps the slot")
+
+	f.heartbeat(completeInventory())
+	f.expireClock(a.ID)
+	f.heartbeat(completeInventory())
+
+	assert.Equal(t, string(state.PhaseError), getAgent(t, f.s, a.ID).Phase, "marked missing")
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "freed by the observed-phase release")
+}
+
 // A delete wins over a held start claim: the delete finalize releases the
 // agent's quotas (the delete-won path is agent-delete-lead's; this pins the
 // end state only).

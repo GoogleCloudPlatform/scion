@@ -185,28 +185,34 @@ func (s *Server) rollbackBrokerQuota(ctx context.Context, agent *store.Agent, cr
 // releaseBrokerQuotaIf releases agent's max_agents_per_broker reservation
 // only if cond holds on the stored agent row, in one conditional store write
 // (store.ReleaseReservationIfAgent): a start that claimed the agent, or
-// minted a run, since the caller read it keeps its slot. Reports whether a
-// reservation was released. Best-effort: a failure is logged. A missing
-// agent row releases nothing here; the sweep releases a missing agent's row
-// itself.
-func (s *Server) releaseBrokerQuotaIf(ctx context.Context, agent *store.Agent, cond store.AgentReleaseCond) bool {
+// minted a run, since the caller read it keeps its slot. released reports
+// whether a reservation was released; err is a store failure (logged here),
+// distinct from a condition that did not hold or no active reservation
+// (released false, err nil). A missing agent row releases nothing and is not
+// an error here; the sweep releases a missing agent's row itself.
+func (s *Server) releaseBrokerQuotaIf(ctx context.Context, agent *store.Agent, cond store.AgentReleaseCond) (released bool, err error) {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
-		return false
+		return false, nil
 	}
 	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("quota: conditional release: limit lookup failed",
-				"agent_id", agent.ID, "error", err)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
 		}
-		return false
+		s.agentLifecycleLog.Warn("quota: conditional release: limit lookup failed",
+			"agent_id", agent.ID, "error", err)
+		return false, err
 	}
-	released, err := s.store.ReleaseReservationIfAgent(ctx, def.ID, agent.ID, cond)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
+	released, err = s.store.ReleaseReservationIfAgent(ctx, def.ID, agent.ID, cond)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
 		s.agentLifecycleLog.Warn("quota: conditional release failed",
 			"agent_id", agent.ID, "error", err)
+		return false, err
 	}
-	return released
+	return released, nil
 }
 
 // releaseSlotIfIdle releases agentID's max_agents_per_broker reservation if
@@ -230,11 +236,11 @@ func (s *Server) releaseSlotIfIdle(ctx context.Context, agentID string) {
 		}
 		return
 	}
-	if s.releaseBrokerQuotaIf(ctx, row, store.AgentReleaseCond{
+	if released, _ := s.releaseBrokerQuotaIf(ctx, row, store.AgentReleaseCond{
 		ExpectedRunID:    row.RunID,
 		NoStartKindClaim: true,
 		NotCounted:       true,
-	}) {
+	}); released {
 		s.agentLifecycleLog.Info("quota: released the slot of an agent left idle when its claim cleared",
 			"agent_id", agentID, "runtime_broker_id", row.RuntimeBrokerID)
 	}
@@ -449,7 +455,7 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 	if agent == nil || s.lifecycleOps.active(agent.ID) {
 		return
 	}
-	s.releaseBrokerQuotaIf(ctx, agent, store.AgentReleaseCond{
+	_, _ = s.releaseBrokerQuotaIf(ctx, agent, store.AgentReleaseCond{
 		ExpectedRunID:    agent.RunID,
 		NoStartKindClaim: true,
 	})

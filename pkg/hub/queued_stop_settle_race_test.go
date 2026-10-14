@@ -45,13 +45,19 @@ type settleHookStore struct {
 	agentID       string
 	beforeRelease func()
 	afterRelease  func()
-	countWrites   atomic.Bool
-	statusWrites  atomic.Int32
+	// releaseErr, while set, is returned by the settle's conditional
+	// release instead of calling the store (a store failure).
+	releaseErr   error
+	countWrites  atomic.Bool
+	statusWrites atomic.Int32
 }
 
 func (h *settleHookStore) ReleaseReservationIfAgent(ctx context.Context, limitDefID, agentID string, cond store.AgentReleaseCond) (bool, error) {
 	if !h.fault.Active() || agentID != h.agentID || !cond.QueuedStopIntent {
 		return h.Store.ReleaseReservationIfAgent(ctx, limitDefID, agentID, cond)
+	}
+	if h.releaseErr != nil {
+		return false, h.releaseErr
 	}
 	if f := h.beforeRelease; f != nil {
 		h.beforeRelease = nil
@@ -410,4 +416,49 @@ func TestBackfill_SkipsStopQueuedWithClaimOrStartIntent(t *testing.T) {
 			assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID))
 		})
 	}
+}
+
+// A store failure in the settle's conditional release is not a condition
+// that did not hold: nothing was released, so the termination is not
+// confirmed and the stop stays queued; the next heartbeat settles it.
+func TestSettle_ReleaseStoreError_NotConfirmed_RetriedNextHeartbeat(t *testing.T) {
+	sf := newSettleFixture(t, "release-err")
+	sf.hook.releaseErr = errors.New("database is locked")
+	sf.fault.Arm()
+
+	sf.settle()
+
+	require.NotNil(t, sf.held(t), "nothing released")
+	assert.Equal(t, containerStatusStopQueued, getAgent(t, sf.s, sf.agent.ID).ContainerStatus, "not confirmed")
+	assert.Zero(t, sf.backstops(backstopSiteSettle))
+
+	sf.hook.releaseErr = nil
+	sf.settle()
+
+	assert.Nil(t, sf.held(t), "released on the next heartbeat")
+	assert.Equal(t, "stopped", getAgent(t, sf.s, sf.agent.ID).ContainerStatus)
+	assert.Zero(t, sf.backstops(backstopSiteSettle))
+}
+
+// The claim branch of the settle's re-assert skip: the drain took its
+// stop-kind claim for the same queued stop after the settle's release and
+// has not written the stop result yet. Nothing is re-asserted, and the
+// settle does not overwrite the queued-stop status the drain owns.
+func TestQueuedStop_SettleSkip_DrainClaimHeld(t *testing.T) {
+	sf := newSettleFixture(t, "drain-claim")
+	sf.hook.afterRelease = func() {
+		_, err := sf.s.ClaimAgentStop(context.Background(), sf.agent.ID, "drain-hub", sf.intentAt, time.Minute)
+		require.NoError(t, err)
+		sf.hook.countWrites.Store(true)
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	assert.Nil(t, sf.held(t), "released by the settle; no re-assert")
+	assert.Zero(t, sf.backstops(backstopSiteSettle))
+	got := getAgent(t, sf.s, sf.agent.ID)
+	assert.Equal(t, store.StartClaimStop, got.StartClaimKind, "the drain's claim is held")
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "not overwritten")
+	assert.Zero(t, sf.hook.statusWrites.Load(), "no status write after the drain claimed")
 }

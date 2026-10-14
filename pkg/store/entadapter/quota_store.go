@@ -626,7 +626,8 @@ func (q *QuotaStore) ReleaseReservationIfAgent(ctx context.Context, limitDefinit
 // conditional write:
 //
 //	UPDATE usage_reservations SET released_at = now
-//	WHERE id = :rid AND released_at IS NULL
+//	WHERE id = :rid AND scope_type = 'broker' AND scope_id = :scopeID
+//	  AND released_at IS NULL
 //	  AND NOT EXISTS (SELECT 1 FROM runtime_brokers WHERE id = :scopeUUID)
 //
 // scopeID is parsed first. An unparseable scope ID matches no broker (as
@@ -641,6 +642,8 @@ func (q *QuotaStore) ReleaseReservationIfScopeBrokerAbsent(ctx context.Context, 
 	upd := q.client.UsageReservation.Update().
 		Where(
 			usagereservation.IDEQ(resUID),
+			usagereservation.ScopeTypeEQ(usagereservation.ScopeType(store.QuotaScopeBroker)),
+			usagereservation.ScopeIDEQ(scopeID),
 			usagereservation.ReleasedAtIsNil(),
 		)
 	if scopeUID, perr := uuid.Parse(scopeID); perr == nil {

@@ -254,6 +254,20 @@ func ReservationReleaseConformance(t *testing.T, factory Factory) {
 			assert.NoError(t, err)
 		})
 
+		t.Run("the row must be on the named scope", func(t *testing.T) {
+			s := factory(t)
+			def := seedReservationLimit(t, ctx, s)
+			gone, other := uuid.NewString(), uuid.NewString()
+			res, err := s.CreateUsageReservation(ctx, newBrokerReservation(def, gone, uuid.NewString()))
+			require.NoError(t, err)
+
+			released, err := s.ReleaseReservationIfScopeBrokerAbsent(ctx, res.ID, other)
+			require.NoError(t, err)
+			assert.False(t, released, "another broker's absence does not release this row")
+			_, err = s.GetActiveReservation(ctx, def, res.ResourceID)
+			assert.NoError(t, err)
+		})
+
 		t.Run("an absent broker's row is released, once, and only that row", func(t *testing.T) {
 			s := factory(t)
 			def := seedReservationLimit(t, ctx, s)
