@@ -37,15 +37,23 @@ import (
 )
 
 // Template reimport downloads a template source with its own fetcher rather
-// than the general import path. The source must be a folder in a public
-// GitHub repository; the hub builds the archive URL itself, and every request
+// than the general import path. The source must be a folder in a GitHub
+// repository; the hub builds the archive URL itself, and every request
 // (including GitHub's redirect to its download host) is limited to the hosts
 // below, vetted for public addresses, bounded in redirects, size and time.
 // The archive is then extracted with its own size and file-count limits.
+//
+// When the template's own scope has a repository credential (resolved by
+// importCredential, the same lookup order as template import), the archive
+// is requested from the GitHub API tarball endpoint with that credential as
+// the Authorization header, sent to api.github.com only; GitHub's redirect
+// to codeload carries its own short-lived access and gets no header. With no
+// credential the public archive URL is fetched without one.
 
 // templateSourceHosts is the complete set of hosts a template reimport may
-// contact. github.com serves the archive URL and redirects to codeload.
-var templateSourceHosts = []string{"github.com", "codeload.github.com"}
+// contact. github.com serves the public archive URL and api.github.com the
+// credentialed tarball; both redirect to codeload.
+var templateSourceHosts = []string{"github.com", "api.github.com", "codeload.github.com"}
 
 // templateSourceLimits bounds one template source download and extraction.
 type templateSourceLimits struct {
@@ -73,9 +81,11 @@ var defaultTemplateSourceLimits = templateSourceLimits{
 	MaxRedirects: 3,
 }
 
-// templateSourceFetcher downloads one body. *remotefetch.Fetcher satisfies it.
+// templateSourceFetcher downloads one body, without or with an Authorization
+// header. *remotefetch.Fetcher satisfies it.
 type templateSourceFetcher interface {
 	FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error)
+	FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*remotefetch.Result, error)
 }
 
 // newTemplateSourceFetcher returns the fetcher template reimport uses: https
@@ -175,6 +185,13 @@ func parseTemplateGitHubSource(raw string) (*templateGitHubSource, error) {
 // archiveURL is the GitHub archive URL for the source's branch.
 func (g *templateGitHubSource) archiveURL() string {
 	return "https://github.com/" + g.Owner + "/" + g.Repo + "/archive/refs/heads/" + url.PathEscape(g.Branch) + ".tar.gz"
+}
+
+// apiTarballURL is the GitHub API tarball URL for the source's branch, used
+// when a credential is sent. It serves the same single-top-directory gzip
+// tarball as archiveURL.
+func (g *templateGitHubSource) apiTarballURL() string {
+	return "https://api.github.com/repos/" + g.Owner + "/" + g.Repo + "/tarball/refs/heads/" + url.PathEscape(g.Branch)
 }
 
 // errTemplateSourceTooLarge reports that a source exceeded an extraction limit.
@@ -345,7 +362,7 @@ func templateSourceFetchError(err error) error {
 	if errors.As(err, &fe) {
 		switch fe.Reason {
 		case remotefetch.ReasonStatus:
-			return errors.New("GitHub did not return the source archive; the repository or branch may not exist or may not be public")
+			return errors.New("GitHub did not return the source archive; the repository or branch may not exist, or the template scope's repository credential (if any) cannot read it")
 		case remotefetch.ReasonTooLarge:
 			return errTemplateSourceTooLarge
 		case remotefetch.ReasonTimeout:
@@ -422,6 +439,22 @@ func selectTemplateSourceDir(dirs []resourceDir, tmpl *store.Template) (resource
 	}
 }
 
+// fetchTemplateSourceArchive downloads src's branch archive. The credential is
+// the one template import would use for tmpl's own scope and scope ID
+// (importCredential: a project's GH_ credentials, App token or GITHUB_TOKEN;
+// the hub's or the calling user's GH_ credentials or GITHUB_TOKEN, a user's
+// only when the caller is that user). With a credential the API tarball is
+// fetched with it as a Bearer Authorization header; without one, the public
+// archive URL is fetched with no header. Only the credential name is logged
+// (by importCredential), never its value.
+func (s *Server) fetchTemplateSourceArchive(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template) (*remotefetch.Result, error) {
+	fetcher := s.getTemplateSourceFetcher()
+	if cred := s.importCredential(ctx, tmpl.Scope, tmpl.ScopeID, sourceURL); cred != "" {
+		return fetcher.FetchBytesAuthorized(ctx, src.apiTarballURL(), "Bearer "+cred)
+	}
+	return fetcher.FetchBytes(ctx, src.archiveURL())
+}
+
 // reimportTemplateSource downloads src, extracts it and refreshes tmpl from
 // the matching folder. sourceURL is the validated source URL recorded on the
 // template. Only tmpl is written; no other template is created or changed.
@@ -435,7 +468,7 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	res, err := s.getTemplateSourceFetcher().FetchBytes(ctx, src.archiveURL())
+	res, err := s.fetchTemplateSourceArchive(ctx, src, sourceURL, tmpl)
 	if err != nil {
 		s.resourceLog.Warn("template reimport: source download failed",
 			"owner", src.Owner, "repo", src.Repo, "error", err)

@@ -77,22 +77,22 @@ skills:
   - uri: gh://my-org/skills/linting        # federated GitHub source
     as: lint-rules                          # mount under a different name
   - uri: skill://scion/user/alice/scratch
-    optional: true                          # do not fail provisioning if unresolved
+    optional: true                          # skip (with a warning) if it can't be resolved or installed
 ```
 
 | Field | Required | Description |
 | :--- | :--- | :--- |
 | `uri` | Yes | A [skill reference URI](#skill-reference-uris) or bare skill name. |
 | `as` | No | Mount the skill under a different directory name. |
-| `optional` | No | If `true`, provisioning continues even when the skill cannot be resolved. |
+| `optional` | No | If `true`, provisioning continues even when the skill cannot be resolved or installed. The skipped skill is logged as a warning that names it and gives the reason. |
 
 At provisioning time Scion resolves every required skill, downloads its files (using the [content-hash cache](#content-hash-caching)), and mounts them into the harness's skills directory (for example `.claude/skills/` or `.gemini/skills/`).
 
 When a Hub dispatches the agent, the Hub resolves Hub-registry skill references with the permissions of the principal creating the agent. That principal is the user, or the parent agent when an agent creates a child. The Runtime Broker's own identity is not used. A required skill provisions whenever the agent's creator can read it. A skill the creator cannot read is reported the same way as one that does not exist, so the failure does not reveal that the skill is there. The broker installs Hub-resolved skills as-is. It resolves only what the Hub did not cover itself, such as `gh://`, `gcp-skill://`, federated registries, and references found only in broker-local templates.
 
-### When a required skill cannot be resolved
+### When a required skill cannot be resolved or installed
 
-If a required skill cannot be resolved, the request fails with an error instead of reporting success. This applies to `scion create`, `scion start`, restart, and resuming a stopped or suspended agent. A new agent whose provisioning failed is removed. An existing agent keeps its record and is not started. Starting can re-provision the agent, which resolves its skills again. Skills marked `optional: true` are skipped instead.
+If a required skill cannot be resolved, or resolves but cannot be downloaded, verified or installed, the request fails with an error instead of reporting success. This applies to `scion create`, `scion start`, restart, and resuming a stopped or suspended agent. A new agent whose provisioning failed is removed. An existing agent keeps its record and is not started. Starting can re-provision the agent, which resolves its skills again. Skills marked `optional: true` are skipped instead, with a warning in the provisioning log.
 
 The error uses code `skill_resolution_failed`. Its message names the skill reference, and `details` has the reference (`skill`) and the cause (`cause`). The HTTP status depends on the cause:
 
@@ -103,6 +103,7 @@ The error uses code `skill_resolution_failed`. Its message names the skill refer
 | `rate_limited` | 429 | GitHub rate-limited the request. The response has a `Retry-After` header when GitHub sent one. |
 | `timeout` | 504 | GitHub did not respond before the deadline. |
 | `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
+| `install_failed` | 500 | The skill resolved, but its files could not be downloaded, verified or installed. The message gives a short reason, such as `download failed with status 404`; a failure on the broker's own filesystem is reported as `install failed on the broker`. |
 | any other cause | 500 | An internal failure while resolving the skill. |
 
 For `scion create` (which only provisions), a provisioning failure for any other reason is reported as a warning on the created agent.
@@ -209,6 +210,8 @@ project > template > user > hub > platform
 When a destination-name collision is detected and resolved:
 1. Scion logs the collision and the resolution outcome in the Hub and agent dispatch logs.
 2. The collision details and final resolved mapping are recorded in a `resolved-skills.json` file inside the agent's run/state directory.
+
+If a required skill loses a collision to an optional one, the winner is treated as required: if it then fails to install, provisioning fails and names the winning URI. The collision warning names the dropped required URI.
 
 Each `SkillReference` includes a `Scope` field, annotated at all injection sites, allowing full traceability of where each skill was sourced and how collisions were handled.
 

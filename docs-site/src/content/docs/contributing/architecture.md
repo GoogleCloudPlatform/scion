@@ -71,6 +71,7 @@ An **Agent** is an isolated container running an LLM harness. Each agent has:
 | :--- | :--- |
 | **Home directory** | Mounted at `/home/<user>` inside the container. Contains harness config, credentials, and a per-agent `agent-info.json`. |
 | **Workspace** | Mounted at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`). A per-agent clone, a git worktree, or a shared or empty directory, depending on the project's workspace sharing mode; see [About Workspaces](/scion/local/workspace/). |
+| **Host state** | `agents/<name>/host-state.json` in the agent directory, outside the home and workspace mounts. Holds state only the host needs, such as the run that owns the agent's files (used by run-scoped deletes and failure cleanups), so the host and the container need not share a writable home. A project layout where that location cannot be determined (a symlinked `.scion`, or a `.scion` marker that does not match the hub project) records no run, and run-scoped deletes and failure cleanups then keep the agent's files. |
 | **Template** | The blueprint that seeded the agent's home directory and configuration. |
 | **Harness** | The LLM-specific adapter (Claude, Gemini, OpenCode, Codex, or Generic). |
 
@@ -271,7 +272,7 @@ Inside the Runtime Broker, `agent.Manager` runs these steps:
    c. Merges configuration: `template base → template → settings (harness/profile) → agent overrides`.
    d. Prepares the workspace for the project's sharing mode (a per-agent clone made inside the container, a git worktree, or a shared or empty directory).
    e. Runs harness-specific provisioning (`harness.Provision()`).
-   f. Writes `scion-agent.json` and `agent-info.json`.
+   f. Writes `scion-agent.json` and `agent-info.json`, and records the starting run in `host-state.json` in the agent directory.
 4. **Image resolution**: Resolves the container image from settings/template/CLI override. Pulls if not present.
 5. **Container launch** (`runtime.Run`):
    a. Builds container run arguments (volumes, env vars, labels, resource limits).

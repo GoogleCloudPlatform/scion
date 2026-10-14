@@ -2597,6 +2597,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
 	}
 
+	if conflictRec, err := hub.NewOTelQuotaScopeConflictMetrics(mp); err != nil {
+		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
+	} else {
+		hubSrv.SetQuotaScopeConflictMetrics(conflictRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {
@@ -3049,6 +3055,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// The admin view shows a public URL from the layers startup's endpoint
 	// resolution reads, not a seed value (ptone/scion#4826).
 	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(serverConfigPath))
+	// It attributes a superseded key that only the coded defaults set to
+	// them, not to settings.yaml (ptone/scion#4983).
+	ops.SetAboveSeedBootstrap(config.LoadAboveSeedBootstrapKoanfWithConfigPath(serverConfigPath))
 
 	changed, err := ops.Refresh(ctx)
 	if err != nil {

@@ -88,6 +88,7 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	// addresses the super-admin's records in the fixture project.
 	ids.inbox = seedInboxRecords(t, ctx, s, adminID, ids.project, ids.agent)
 	ids.userSkillInjection = seedUserSkillInjection(t, ctx, s, adminID)
+	ids.userTemplate, ids.userTemplateDel = seedUserTemplates(t, ctx, s, adminID)
 	// The chat routes likewise address the super-admin's own chat records.
 	ids.chat = seedChatRecords(t, ctx, s, srv.webChatStore, adminID, ids.project, ids.chatTopic, ids.agent, ids.user)
 	// The fixture agent takes messages from any user holding agent.message

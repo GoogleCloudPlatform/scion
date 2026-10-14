@@ -1,0 +1,49 @@
+{
+  "profile_map": {},
+  "findings": [
+    {
+      "code": "unknown_settings_key",
+      "severity": "blocking",
+      "path": "profiles.dev.harness_overrides.claude.imag",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.harness_overrides.claude.imag is not a known settings key"
+      ]
+    },
+    {
+      "code": "unknown_settings_key",
+      "severity": "blocking",
+      "path": "profiles.dev.templat",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.templat is not a known settings key"
+      ]
+    },
+    {
+      "code": "unknown_settings_key",
+      "severity": "blocking",
+      "path": "profiles.dev.volumes[0].sourc",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.volumes[0].sourc is not a known settings key"
+      ]
+    },
+    {
+      "code": "unknown_settings_key",
+      "severity": "blocking",
+      "path": "runtimes.cluster.nodepool",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.cluster.nodepool is not a known settings key"
+      ]
+    }
+  ]
+}

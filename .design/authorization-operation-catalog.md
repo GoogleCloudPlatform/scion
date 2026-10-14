@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 281
+**Operations:** 289
 
 ## Table of Contents
 
@@ -201,6 +201,11 @@
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
+- [user.skillinjection.read](#userskillinjectionread) — List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+- [template.user.read](#templateuserread) — List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+- [template.user.create](#templateusercreate) — Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+- [template.user.update](#templateuserupdate) — Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+- [template.user.delete](#templateuserdelete) — Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -252,12 +257,15 @@
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [template.user.clone](#templateuserclone) — Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+- [template.user.reimport](#templateuserreimport) — Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+- [skill.user.create](#skillusercreate) — Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+- [harnessconfig.user.clone](#harnessconfiguserclone) — Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+- [harnessconfig.user.delete](#harnessconfiguserdelete) — Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+- [harnessconfig.user.reimport](#harnessconfiguserreimport) — Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+- [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+- [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
-- [broker.material.read](#brokermaterialread) — Read a runtime broker's environment variables (sensitive values masked) and secret metadata. A user needs broker.read on the broker and, beyond it, the owner relationship or broker.update; the broker reads its own material
-- [broker.material.write](#brokermaterialwrite) — Set, patch or delete a runtime broker's environment variables and secrets. A user needs an interactive session and broker.update on the broker; the broker writes its own material
-- [broker.update](#brokerupdate) — Update a runtime broker's name, labels or host service account. A user needs an interactive session and broker.update on the broker
-- [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
-- [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -7375,6 +7383,183 @@
 
 ---
 
+## user.skillinjection.read
+
+**Domain:** user.skillinjection
+
+**Description:** List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, and the list carries only the caller's own entries (scope: caller's own user-scope injected skills) — waives: `base_permission`
+
+---
+
+## template.user.read
+
+**Domain:** template
+
+**Description:** List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/templates` |
+| http_route | GET | `/api/v1/users/me/templates/{id}` |
+| http_route | GET | `/api/v1/users/me/templates/{id}/download` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+
+---
+
+## template.user.create
+
+**Domain:** template
+
+**Description:** Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.update
+
+**Domain:** template
+
+**Description:** Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/users/me/templates/{id}` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/upload` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/finalize` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.delete
+
+**Domain:** template
+
+**Description:** Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/me/templates/{id}` |
+| http_route | DELETE | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
 ## hub.authreset
 
 **Domain:** hub
@@ -9153,6 +9338,274 @@
 
 ---
 
+## template.user.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## template.user.reimport
+
+**Domain:** template
+
+**Description:** Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTemplateUserReimport_RequiresUpdateAction`
+
+---
+
+## skill.user.create
+
+**Domain:** skill
+
+**Description:** Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeSkillCreate_RequiresSkillCreate`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.clone
+
+**Domain:** harnessconfig
+
+**Description:** Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## harnessconfig.user.delete
+
+**Domain:** harnessconfig
+
+**Description:** Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `harnessconfig.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** config_id, config_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserDelete_RequiresDeleteAction`
+
+---
+
+## harnessconfig.user.reimport
+
+**Domain:** harnessconfig
+
+**Description:** Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserReimport_RequiresUpdateAction`
+
+---
+
+## template.user.import
+
+**Domain:** template
+
+**Description:** Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.import
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
 ## broker.read
 
 **Domain:** broker
@@ -9166,13 +9619,10 @@
 | http_route | GET | `/api/v1/runtime-brokers` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
-| http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `broker.read`
 
@@ -9185,192 +9635,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-- `pkg/hub:TestHubTokenBrokerOwner_ReadsOwnBrokerThroughOwnerGrant`
-
----
-
-## broker.material.read
-
-**Domain:** broker
-
-**Description:** Read a runtime broker's environment variables (sensitive values masked) and secret metadata. A user needs broker.read on the broker and, beyond it, the owner relationship or broker.update; the broker reads its own material
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/runtime-brokers/{id}/env` |
-| http_route | GET | `/api/v1/runtime-brokers/{id}/env/{key}` |
-| http_route | GET | `/api/v1/runtime-brokers/{id}/secrets` |
-| http_route | GET | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
-
-**Principals:** `user`, `broker`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `broker_token`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `broker.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`, `list-scoped`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-- `pkg/hub:TestBrokerMaterial_ReadsRequireBrokerRead`
-
----
-
-## broker.material.write
-
-**Domain:** broker
-
-**Description:** Set, patch or delete a runtime broker's environment variables and secrets. A user needs an interactive session and broker.update on the broker; the broker writes its own material
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | PUT | `/api/v1/runtime-brokers/{id}/env/{key}` |
-| http_route | DELETE | `/api/v1/runtime-brokers/{id}/env/{key}` |
-| http_route | PUT | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
-| http_route | PATCH | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
-| http_route | DELETE | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
-
-**Principals:** `user`, `broker`
-
-**Credentials:** `session_jwt`, `broker_token`
-
-**Bearer:** `session_only` (reason `GOV_PENDING`)
-
-**Base Permission:** `broker.update`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `create-resource`, `update-resource`, `delete-resource`
-
-### Audit
-
-- **Event Type:** `broker.material.write`
-- **Context Fields:** actor_id, broker_id
-- **Before Fields:** key
-- **Atomic:** Yes
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-- `pkg/hub:TestBrokerMaterial_WritesSessionOnly`
-
----
-
-## broker.update
-
-**Domain:** broker
-
-**Description:** Update a runtime broker's name, labels or host service account. A user needs an interactive session and broker.update on the broker
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | PATCH | `/api/v1/runtime-brokers/{id}` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `GOV_PENDING`)
-
-**Base Permission:** `broker.update`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## broker.delete
-
-**Domain:** broker
-
-**Description:** Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | DELETE | `/api/v1/runtime-brokers/{id}` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `GOV_PENDING`)
-
-**Base Permission:** `broker.delete`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `delete-resource`
-
-### Audit
-
-- **Event Type:** `broker.deregister`
-- **Context Fields:** actor_id, broker_id
-- **Before Fields:** broker_name
-- **Atomic:** Yes
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## broker.heartbeat
-
-**Domain:** broker
-
-**Description:** Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/runtime-brokers/{id}/heartbeat` |
-
-**Principals:** `broker`, `user`
-
-**Credentials:** `broker_token`, `session_jwt`
-
-**Bearer:** `session_only` (reason `HOST_OPERATIONS`)
-
-**Base Permission:** `broker.update`
-
-**Resource Resolver:** broker-self
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-- `pkg/hub:TestBrokerHeartbeat_UserPathSessionOnly`
 
 ---
 

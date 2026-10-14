@@ -99,15 +99,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		mgr := agent.NewManager(rt)
 
 		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
+		effectiveBranch := resolveBranch(branch, inlineCfg)
 		effectiveTask := task
 		effectiveHarnessConfig := harnessConfigFlag
 		effectiveImage := agentImage
 
 		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
 			if effectiveTask == "" && inlineCfg.Task != "" {
 				effectiveTask = inlineCfg.Task
 			}
@@ -415,7 +412,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inline
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,

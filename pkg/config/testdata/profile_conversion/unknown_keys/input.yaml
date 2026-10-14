@@ -1,0 +1,16 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    nodepool: big
+profiles:
+  dev:
+    runtime: cluster
+    templat: researcher
+    harness_overrides:
+      claude:
+        imag: claude:2
+    volumes:
+      - target: /data
+        sourc: /srv

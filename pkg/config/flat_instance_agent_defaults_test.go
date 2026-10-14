@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 // A flat instance's agent_defaults
@@ -597,14 +598,44 @@ func TestValidateRuntimeBrokerInstances_AgentDefaultsValues(t *testing.T) {
 }
 
 func TestSettingsPathSuffix(t *testing.T) {
+	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(`{"clone_depth": "x",
+		"harness_overrides": {"claude": {"volumes": [{"type": "x"}]}, "a/b": {"env": {"X~Y": ""}},
+			"7": {"env": {"123": ""}, "volumes": [{}, {"type": "x"}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for in, want := range map[string]string{
 		"":            "",
 		"clone_depth": ".clone_depth",
 		"harness_overrides/claude/volumes/0/type": ".harness_overrides.claude.volumes[0].type",
 		"harness_overrides/a~1b/env/X~0Y":         ".harness_overrides.a/b.env.X~Y",
+		// Digits are bracketed only as a list index, never as a map key.
+		"harness_overrides/7/env/123":        ".harness_overrides.7.env.123",
+		"harness_overrides/7/volumes/1/type": ".harness_overrides.7.volumes[1].type",
+		// A pointer past the document keeps dotted segments.
+		"harness_overrides/missing/9": ".harness_overrides.missing.9",
 	} {
-		if got := settingsPathSuffix(in); got != want {
+		if got := settingsPathSuffix(doc, in); got != want {
 			t.Errorf("settingsPathSuffix(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A schema error under a harness override whose name is made of digits
+// names the override as a map key, not as a list index.
+func TestValidateInstanceAgentDefaults_NumericOverrideNamePath(t *testing.T) {
+	errs := validateInstanceAgentDefaults("p", &V1InstanceAgentDefaults{
+		HarnessOverrides: map[string]V1HarnessOverride{"123": {ImagePullPolicy: "Sometimes"}}})
+	found := false
+	for _, e := range errs {
+		if e.Path == "p.harness_overrides.123.image_pull_policy" {
+			found = true
+		}
+		if strings.Contains(e.Path, "[123]") {
+			t.Errorf("path %q brackets a map key", e.Path)
+		}
+	}
+	if !found {
+		t.Fatalf("no error at p.harness_overrides.123.image_pull_policy: %v", errs)
 	}
 }

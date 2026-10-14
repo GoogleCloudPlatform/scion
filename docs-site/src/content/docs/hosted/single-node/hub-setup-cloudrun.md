@@ -490,6 +490,12 @@ Shared directories within the Cloud Run Sandbox are mounted at standard paths ma
 * **Standard Mount Path**: All shared directories are mapped to `/scion-volumes/<name>` inside the sandbox container.
 * **Workspace & Read-Only Support**: The sandbox runtime fully supports mounting shared volumes within the workspace directory tree (using `in_workspace: true` to mount at `/workspace/.scion-volumes/<name>`) and enforces read-only locks when specified.
 
+### Asynchronous agent create
+The sandbox runtime supports [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create). It is off unless the Hub sets `server.hub.async_agent_launch: true`; then eligible creates that opt in (such as `scion start`) are asynchronous. If you enable it:
+
+* **Launch timeout**: set `server.hub.launch_timeout` to at least `"60s"`.
+* **CPU allocation (not verified)**: an asynchronous launch keeps running on the Instance after the create response. This assumes the Cloud Run Instance keeps CPU allocated for that background work, which has not been verified on a live Instance. If launches stall after the create response and end with `broker_lost` or `launch_timeout`, set `async_agent_launch: false` and restart the Hub to return to the synchronous create.
+
 ---
 
 ## 6. Teardown
