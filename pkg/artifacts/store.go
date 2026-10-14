@@ -44,14 +44,13 @@ var ErrTooManyGrants = errors.New("artifacts: too many grants")
 var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only be read or write")
 
 // ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
-// home or owner changed since the caller's authority was checked, or the
-// subject already holds a principal grant other than review.
+// home or owner changed since the caller's authority was checked.
 var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
 
-// ErrReviewReplacesAccess is returned by PutGrant for a review grant to a
-// user who holds a principal read, write or admin grant on the artifact:
-// the review grant would take that grant's row, and with it the user's
-// read.
+// ErrReviewReplacesAccess is returned by PutGrant and PutReviewGrant for
+// a review grant to a user who holds a principal read, write or admin
+// grant on the artifact: the review grant would take that grant's row,
+// and with it the user's read.
 var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
 
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
@@ -394,9 +393,10 @@ type Store interface {
 	// PutReviewGrant is PutGrant for a review grant (design D24): g must
 	// be a review grant to a user principal. Under the artifact's lock it
 	// also refuses, with ErrReviewGrantRefused and writing nothing, when
-	// the artifact is no longer homed in home or not owned by an agent, or
-	// when the user already holds a principal grant other than review on it
-	// (a read, write or admin grant is never replaced this way).
+	// the artifact is no longer homed in home or not owned by an agent; like
+	// PutGrant it refuses with ErrReviewReplacesAccess when the user already
+	// holds a principal grant other than review on it (a read, write or
+	// admin grant is never replaced this way).
 	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact

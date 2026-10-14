@@ -438,21 +438,21 @@ func TestStorePutReviewGrant(t *testing.T) {
 			SubjectRef: "user:read", Permission: GrantRead, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:read") != GrantRead {
+		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:read") != GrantRead {
 			t.Errorf("replace read: %v %q", err, permOf("user:read"))
 		}
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:adm", Permission: GrantAdmin, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:adm"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:adm") != GrantAdmin {
+		if _, err := st.PutReviewGrant(ctx, review("user:adm"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:adm") != GrantAdmin {
 			t.Errorf("lower admin: %v %q", err, permOf("user:adm"))
 		}
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:wr", Permission: GrantWrite, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:wr"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:wr") != GrantWrite {
+		if _, err := st.PutReviewGrant(ctx, review("user:wr"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:wr") != GrantWrite {
 			t.Errorf("lower write: %v %q", err, permOf("user:wr"))
 		}
 		// Authority checked for another home does not apply.
