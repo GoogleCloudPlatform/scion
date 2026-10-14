@@ -1005,15 +1005,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}, 1)
 
 	// Start a new harness-readiness run before tmux starts: drop the previous
-	// run's files and record a fresh nonce and mode. The agent runtime waits
-	// on these before pasting a buffered message. Failure only means the
-	// runtime falls back to its session-age check, so it is not fatal.
-	readyNonce, err := writeInitRunFile(os.Getenv("SCION_HARNESS"))
+	// run's files and record a fresh nonce and the ready spec the broker
+	// passed in. The agent runtime waits on these before pasting a buffered
+	// message. Failure only means the runtime falls back to its session-age
+	// check, so it is not fatal.
+	readySpec := hooks.LoadReadySpec(os.Getenv)
+	readyNonce, err := writeInitRunFile(readySpec)
 	if err != nil {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
 		readyNonce = ""
 	}
-	readyMode := hooks.HarnessReadyMode(os.Getenv("SCION_HARNESS"))
+	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1114,7 +1116,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			Nonce:         readyNonce,
 			Mode:          readyMode,
 			Start:         harnessLaunchedAt,
-			MarkerReady:   harnessReadyMarkerMatches,
+			Settle:        readySpec.Settle,
+			Deadline:      readySpec.Timeout,
+			MarkerTime:    harnessReadyMarkerTime,
 			LocalActivity: statusHandler.CurrentActivity,
 			ReplaceLocal:  statusHandler.ReplaceActivityIf,
 		}

@@ -27,6 +27,7 @@ const hostedUserGuide = {
 	label: 'User Guide',
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
+		{ label: 'Working with Several Hubs', slug: 'hosted/user/multiple-hubs' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
@@ -130,7 +131,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Local Mode',
+					label: 'Agents on Your Machine',
 					items: [
 						{ label: 'Local Configuration', slug: 'local/local-governance' },
 						{ label: 'Working with Agents', slug: 'local/agent-lifecycle' },

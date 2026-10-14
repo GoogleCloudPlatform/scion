@@ -28,7 +28,7 @@ Settings are classified into two layers:
 | Layer | Examples | Behavior |
 |-------|----------|----------|
 | **Layer-0** (bootstrap) | `server.mode`, `server.database.*`, `server.storage.*`, `server.secrets.*`, `server.hub.port`, `server.auth.dev_mode` | Always resolved from bootstrap configuration (`settings.yaml` and environment). Editable through the admin UI only on workstation Hubs; see [Layer-0 edits by deployment mode](#layer-0-edits-by-deployment-mode). |
-| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `server.hub.public_url`, `server.hub.hub_name`, `image_registry`, `telemetry.*`, the agent defaults (top-level `default_*` keys such as `default_template` and `default_timezone`), `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `auto_expose_ports.enabled`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only`, `project_defaults.default_scratchpad` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
+| **Layer-1** (operational) | `server.hub.admin_emails`, `server.auth.user_access_mode`, `server.auth.default_user_role`, `server.hub.public_url`, `server.hub.hub_name`, `image_registry`, `telemetry.*`, the agent defaults (top-level `default_*` keys such as `default_template` and `default_timezone`), `server.github_app.*`, `server.notification_channels`, `server.federation.*`, `runtimes`, `profiles`, `harness_configs`, `auto_expose_ports.enabled`, `quotas.enforce_broker_quotas`, `agent_secrets.user_scope_only`, `project_defaults.default_scratchpad`, `server.hub.observability.metrics_enabled`, `server.hub.observability.tracing_enabled` | Stored in the Hub database on every driver and editable via the admin UI. Bootstrap values serve as initial defaults. |
 
 For the full key lists by section, see [Layer 0](/scion/reference/server-config/#layer-0--bootstrap-file--env-only) and [Layer 1](/scion/reference/server-config/#layer-1--operational-hub_settings-table) in the server configuration reference.
 
@@ -84,10 +84,11 @@ A database-backed save (`PUT /api/v1/admin/server-config`) returns a `reload` ob
 | `applied` | Database sections written, plus, on a workstation Hub, the `settings.yaml` changes applied live. |
 | `applied_keys` | Changed Layer-1 keys (koanf paths, for example `server.hub.soft_delete_retention`) that the running Hub now uses. |
 | `pending_restart` | Changed Layer-1 keys flagged `restart_required`: saved, but used only after a restart. |
+| `skipped` | Changed Layer-1 keys that were saved but are not in use, as a list of `{"key", "reason"}` objects. They are not in `applied_keys`. |
 | `file_applied` | Workstation Hubs: the `settings.yaml` changes applied live (also listed in `applied`). |
 | `requires_restart` | Workstation Hubs: the `settings.yaml` changes that need a restart. |
 
-A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. `applied_keys` lists keys whose saved document changed. A notification channel that fails validation, or a federation issuer that cannot be built, is still listed there even though it is skipped when applied (ptone/scion#4466).
+A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. When the running Hub cannot use a saved change, the key is listed in `skipped` instead of `applied_keys`: `server.notification_channels` when a notification channel fails validation (the reason gives the channel's position; the channels that pass validation are in use), and the changed `server.federation.*` keys when the federation configuration is not installed: it fails validation, its authenticator cannot be built, or the test admin tier is on. A reason never repeats a configured value. The Server Config page lists these keys under **Saved but not applied**.
 
 A `409 revision_conflict` response covers the sections written before the conflict:
 
@@ -96,7 +97,7 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `applied` | Revisions of the sections this request wrote. |
 | `unchanged_revisions` | Current revisions of sections the request sent unchanged; they were not written. |
 | `conflicted` | The section that conflicted, with its expected and current revision. |
-| `applied_keys`, `pending_restart` | As in `reload`, for the sections written before the conflict. |
+| `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
 
 ### Layer-0 edits by deployment mode
 
@@ -305,6 +306,7 @@ Furthermore, these database-backed settings are wired directly into the runtime 
 #### Navigation Updates
 
 - **Message Broker Integration**: The Message Broker configuration has been consolidated and moved from the General tab to the **Hub Server** tab, grouping external integrations and network-bound transports in one logical place.
+- **Hub Observability Export**: The **Hub Server** tab has one switch each for the Hub's own metrics and trace export (`server.hub.observability.*`). Both apply after a restart. An unset switch shows the state in effect and keeps the earlier rule; **Use default** clears a switch that is set. The section also shows each exporter's state at startup and, read-only, the export project with its source (`env`, `file` or `metadata`). Only a Hub admin in an interactive session can change the switches; a user access token is refused. See [Observability export](/scion/reference/server-config/#observability-export-serverhubobservability).
 
 ### Visual Indicators
 
@@ -329,5 +331,6 @@ The admin UI provides structured feedback on save:
 | **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
+| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

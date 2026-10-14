@@ -105,7 +105,7 @@ The error uses code `skill_resolution_failed`. Its message names the skill refer
 | `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
 | any other cause | 500 | An internal failure while resolving the skill. |
 
-When a Hub dispatches `scion create` (which only provisions), a provisioning failure for any other reason is still reported as a warning on the created agent. Without a Hub, `scion create` fails with the error.
+For `scion create` (which only provisions), a provisioning failure for any other reason is reported as a warning on the created agent.
 
 On a Hub that runs several nodes, a create, start, restart or resume handed to another Hub node returns the same error, status and `Retry-After` as on a single node. For a create, this covers a failure the broker reports when it answers the request. A failure the broker reports after it has accepted an asynchronous launch is reported through that launch, as on a single node.
 

@@ -227,6 +227,7 @@ var projectOperations = []OperationSpec{
 		AuthorityEval: AuthorityEvalNone,
 		Invariants: []Invariant{
 			{ID: "target-exists", Description: "Project must exist and not be already deleted", Kind: InvariantBusiness, FailClosed: true},
+			{ID: "agents-runtime-deleted", Description: "Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization", Kind: InvariantBusiness, FailClosed: true},
 		},
 		ExternalPolicy: &ExternalEffectPolicy{
 			DeliveryMode:   DeliveryFireAndForget,
@@ -242,9 +243,11 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"cascade_summary"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialCredentialInsufficient, DenialResourceNotFound},
+		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialCredentialInsufficient, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteOwnerPositiveControl"},
+			{Package: "pkg/hub", Function: "TestProjectDelete_LiveAgentRefused"},
+			{Package: "pkg/hub", Function: "TestProjectDelete_GuardRunsAfterAuthorization"},
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteGovernanceMatrix"},
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteAtomicAudit"},
 		},

@@ -47,8 +47,8 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f := &fixture{signer: s, keys: &KeyHolder{}, other: &KeyHolder{}}
-	// Round-trip through the Welcome encoding, as a target receives them.
-	if err := f.keys.SetFromWelcome(&conduitv1.Welcome{GrantKeys: KeysToProto(r1.PublicKeys(t0))}); err != nil {
+	// The target's key set, as fetched from the hub.
+	if err := f.keys.Set(r1.PublicKeys(t0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.other.Set(r2.PublicKeys(t0)); err != nil {

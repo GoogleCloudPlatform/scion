@@ -26,7 +26,7 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`).
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`). The `scion runtime-broker` commands read it (or `--hub`, which takes a URL or a hub list nickname); they do not use the current Hub selected with `scion use`. To keep the Runtime Broker process off the deprecated `hub.endpoint` fallback, also set `server.broker.hub_endpoint` (see [Runtime Broker prerequisites](/scion/hosted/ha/runtime-broker/#0-prerequisites)).
 2. **Start the broker**:
    ```bash
    scion runtime-broker start
@@ -72,7 +72,7 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
-To run a flat Runtime Broker, start the Hub and the Runtime Broker in the same process and add one entry under `server.broker.instances` in `settings.yaml`:
+To run a flat Runtime Broker, add an entry under `server.broker.instances` in `settings.yaml`:
 
 ```yaml
 server:
@@ -84,7 +84,9 @@ server:
           type: docker
 ```
 
-Only `docker` targets and a single entry are accepted in this release. A process with `server.broker.instances` hosts only the flat instance, not a regular Runtime Broker. Startup is refused if the Hub is not in the same process or if the entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
+Several entries may be listed, each with a unique `key`; `runtime_target.type` is `docker` or `kubernetes`. A process with `server.broker.instances` hosts only the flat instances, not a regular Runtime Broker. With the Hub in the same process, the instances register through it. A process without the Hub hosts them remotely: register each one first with `scion runtime-broker register --instance <key>`, which saves the instance's own credentials, and they are checked against the Hub at every start. Startup is refused if an entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
+
+A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
 
 ## Moving an Agent to Another Runtime Broker
 
@@ -186,6 +188,6 @@ See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) fo
 
 - Each broker manages its own **port pools, container images, and local storage**. Images must be available on each broker independently.
 - **Shared directories** (mounted volumes) only work within a single broker by default. Agents on different brokers cannot share a local directory. To share them across brokers, set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` in every broker's global settings, pointing at the same NFS export.
-- **Workspace strategy** may differ per broker: local brokers typically use git worktrees (`.scion_worktrees/`), while hub-hosted git projects use a single workspace checkout.
+- **Workspace strategy** depends on the project's sharing mode: worktree-per-agent projects use a git worktree per agent over a shared base clone on the broker, shared-workspace projects mount one checkout, and other git projects use a per-agent clone.
 - **Per-broker agent limit.** The Hub caps how many agents can be running on each broker with the `max_agents_per_broker` limit (default **100**). The limit is checked before an agent is created and again when it is started, resumed, or restarted. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) instead of overloading the broker's host. A restart that is refused this way leaves the running container alone; it is not stopped first. Only running agents count: stopping, suspending, or exiting an agent frees its slot. Admins can change the hub-wide default through the [admin limits API](/scion/reference/api/#admin-apiv1admin), and override it for a single broker — including to a value *lower* than the hub-wide default — through that broker's settings (see [Broker Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings)). The Hub does not balance load across brokers; size the limit to each machine's resources, and lower it below the default if any broker in the fleet is a single-node Cloud Run deployment.
 - **Global project on multi-hub brokers.** A broker connected to more than one Hub rejects agents in the global project with `409 Conflict` and the error code `global_project_disabled` (formerly `global_grove_disabled`).

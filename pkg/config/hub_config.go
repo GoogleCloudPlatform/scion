@@ -17,6 +17,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -36,6 +37,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubServerConfig holds configuration for the Hub API server.
@@ -168,12 +171,6 @@ type HubServerConfig struct {
 
 	// --- Async agent create (design §3.7) ---
 
-	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
-	// by default; even when on, a launch is only non-blocking for a request
-	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
-	// stay synchronous permanently, regardless of this flag.
-	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
-
 	// PerfTrace turns on per-request performance tracing (phase timings,
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
@@ -205,6 +202,10 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -573,6 +574,20 @@ type RuntimeBrokerInstanceConfig struct {
 	Key           string               `json:"key" yaml:"key" koanf:"key"`
 	Name          string               `json:"name" yaml:"name" koanf:"name"`
 	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+	// AgentDefaults mirrors V1RuntimeBrokerInstanceConfig.AgentDefaults.
+	AgentDefaults *InstanceAgentDefaultsConfig `json:"agentDefaults,omitempty" yaml:"agentDefaults,omitempty" koanf:"agentDefaults"`
+}
+
+// InstanceAgentDefaultsConfig is the server-config form of
+// V1InstanceAgentDefaults.
+type InstanceAgentDefaultsConfig struct {
+	DefaultHarnessConfig string                       `json:"defaultHarnessConfig,omitempty" yaml:"defaultHarnessConfig,omitempty" koanf:"defaultHarnessConfig"`
+	ImageRegistry        string                       `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" koanf:"imageRegistry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harnessOverrides,omitempty" yaml:"harnessOverrides,omitempty" koanf:"harnessOverrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"cloneDepth,omitempty" yaml:"cloneDepth,omitempty" koanf:"cloneDepth"`
 }
 
 // RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
@@ -848,6 +863,97 @@ type OIDCProviderConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
 	// TokenLifetime is the validity duration of issued identity tokens. Default: 15m.
 	TokenLifetime time.Duration `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" koanf:"token_lifetime"`
+	// UserTokenAudiences lists the peer hub issuer URLs for which this hub
+	// issues user access credentials to its own users (POST
+	// /api/v1/auth/federation-token). Empty, the default, means none are
+	// issued. Read at startup; a change needs a restart.
+	UserTokenAudiences []string `json:"user_token_audiences,omitempty" yaml:"user_token_audiences,omitempty" koanf:"user_token_audiences"`
+	// UserTokenLifetime is the validity of those credentials. Zero means
+	// DefaultUserTokenLifetime; otherwise it must be a whole number of
+	// seconds and may not exceed MaxUserTokenLifetime.
+	UserTokenLifetime time.Duration `json:"user_token_lifetime,omitempty" yaml:"user_token_lifetime,omitempty" koanf:"user_token_lifetime"`
+}
+
+const (
+	// DefaultUserTokenLifetime is the validity of an issued user access
+	// credential for a peer hub when UserTokenLifetime is zero.
+	DefaultUserTokenLifetime = 15 * time.Minute
+	// MaxUserTokenLifetime is the longest UserTokenLifetime accepted.
+	MaxUserTokenLifetime = time.Hour
+)
+
+// EffectiveUserTokenLifetime returns UserTokenLifetime, or
+// DefaultUserTokenLifetime when it is zero.
+func (c OIDCProviderConfig) EffectiveUserTokenLifetime() time.Duration {
+	if c.UserTokenLifetime == 0 {
+		return DefaultUserTokenLifetime
+	}
+	return c.UserTokenLifetime
+}
+
+// NormalizeUserTokenAudience returns aud without surrounding whitespace or
+// trailing slashes, the form in which audiences are compared.
+func NormalizeUserTokenAudience(aud string) string {
+	return strings.TrimRight(strings.TrimSpace(aud), "/")
+}
+
+// ValidateUserTokens checks UserTokenAudiences and UserTokenLifetime: the
+// lifetime must be a whole number of seconds between zero and
+// MaxUserTokenLifetime (credential times are whole seconds), and each audience
+// must be a distinct http(s) URL with a host and no user info, query or
+// fragment.
+func (c OIDCProviderConfig) ValidateUserTokens() error {
+	var errs []error
+	if c.UserTokenLifetime < 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must not be negative", c.UserTokenLifetime))
+	} else if c.UserTokenLifetime > MaxUserTokenLifetime {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s exceeds the maximum of %s", c.UserTokenLifetime, MaxUserTokenLifetime))
+	} else if c.UserTokenLifetime%time.Second != 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must be a whole number of seconds", c.UserTokenLifetime))
+	}
+	seen := make(map[string]bool)
+	for i, aud := range c.UserTokenAudiences {
+		norm := NormalizeUserTokenAudience(aud)
+		if norm == "" {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: must not be empty", i))
+			continue
+		}
+		u, err := url.Parse(norm)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: invalid URL %q: %v", i, aud, err))
+			continue
+		case u.Scheme != "https" && u.Scheme != "http":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must use https or http scheme", i, aud))
+			continue
+		case u.Host == "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q has no host", i, aud))
+			continue
+		case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must be an issuer URL without user info, query or fragment", i, aud))
+			continue
+		}
+		if seen[norm] {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: duplicate audience %q", i, aud))
+		}
+		seen[norm] = true
+	}
+	return errors.Join(errs...)
+}
+
+// AllowsUserTokenAudience reports whether aud, normalized, is one of
+// UserTokenAudiences. It is false for an empty aud or an empty list.
+func (c OIDCProviderConfig) AllowsUserTokenAudience(aud string) bool {
+	norm := NormalizeUserTokenAudience(aud)
+	if norm == "" {
+		return false
+	}
+	for _, allowed := range c.UserTokenAudiences {
+		if NormalizeUserTokenAudience(allowed) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 // GlobalConfig holds the complete server configuration.
@@ -1558,6 +1664,8 @@ var snakeCaseFields = map[string]string{
 	"missingagentgrace":          "missing_agent_grace",
 	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
+	"metricsenabled":             "metrics_enabled",
+	"tracingenabled":             "tracing_enabled",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"disablessh":                 "disable_ssh",
@@ -1643,7 +1751,6 @@ var camelCaseFields = map[string]string{
 	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
-	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
 	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
@@ -1679,6 +1786,8 @@ var camelCaseFields = map[string]string{
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"monitoringdashboardurl":        "monitoringDashboardUrl",
+	"metricsenabled":                "metricsEnabled",
+	"tracingenabled":                "tracingEnabled",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",

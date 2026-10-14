@@ -2461,10 +2461,10 @@ HUB_ENV_EXISTS=$(gcloud compute ssh "${INSTANCE_NAME}" \
   --command="test -f /home/scion/.scion/hub.env && echo yes || echo no" 2>/dev/null) || true
 
 if [[ "$HUB_ENV_EXISTS" == "yes" ]]; then
-  info "hub.env already exists, preserving existing SESSION_SECRET."
+  info "hub.env already exists, preserving existing SCION_SERVER_SESSION_SECRET."
 else
   info "Generating session secret..."
-  SESSION_SECRET="$(openssl rand -base64 32)"
+  session_secret="$(openssl rand -base64 32)"
 
   info "Writing hub.env..."
   # Security: write to a local temp file and transfer via SCP to avoid
@@ -2473,10 +2473,10 @@ else
   HUB_ENV_TMPFILE="$(mktemp)"
   chmod 600 "${HUB_ENV_TMPFILE}"
   sed \
-    -e "s|__SESSION_SECRET__|${SESSION_SECRET}|g" \
+    -e "s|__SESSION_SECRET__|${session_secret}|g" \
     -e "s|__PROJECT_ID__|${PROJECT_ID}|g" \
     "${SCRIPT_DIR}/config-templates/hub.env.template" > "${HUB_ENV_TMPFILE}"
-  unset SESSION_SECRET
+  unset session_secret
 
   gcloud compute scp "${HUB_ENV_TMPFILE}" \
     "${INSTANCE_NAME}:/tmp/hub.env" \

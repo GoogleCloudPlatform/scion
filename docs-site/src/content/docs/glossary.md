@@ -75,7 +75,7 @@ How a project's workspace is provisioned across its agents. There are four canon
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.
 
 ### Worktree-per-agent
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
 
 ### Clone-per-agent
 A workspace sharing mode where each agent gets its own full git clone of the repository. It is also what a Hub git project resolves to when it has no workspace mode set: only `shared` selects the shared checkout.
@@ -93,6 +93,9 @@ The directory mounted as the container user's home folder, holding that agent's 
 
 ### Hub
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
+
+### Hub nickname
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
 
 ### Runtime Broker
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. It is not itself a compute node. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
@@ -132,6 +135,15 @@ A project whose workspace is created and managed by Scion in the hub-controlled 
 
 ### Linked project
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
+
+### Hub list
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
+
+### Current context
+The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+
+### Link entry
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
 
 ### Server
 The `scion server` command group, and the single combined process it manages — one or more server components run together as a background daemon (or with `--foreground`) via `start`/`stop`/`restart`/`status`.
@@ -177,7 +189,7 @@ _See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
 
 ### Group
-A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients), from a **Thread Group** (a set of a project's chat threads) and from a **Project**.
 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
@@ -245,7 +257,10 @@ The default message mode. Any user with the `agent:message` permission in the pr
 A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging.
 
 ### Message Group
-A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users).
+A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users) and from a **Thread Group**.
+
+### Thread Group
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Managed with [`scion conversation group`](/scion/reference/cli/#scion-conversation-group), behind the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/). Distinct from **Group** (Hub users) and from a **Message Group** (the recipients of one send).
 
 ### Notification
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion start`.
@@ -259,7 +274,7 @@ A project's unique identifier — always a randomly generated UUID. A git remote
 The tracked `root → parent → child` relationship between agents that governs transitive access control.
 
 ### Phase
-The infrastructure lifecycle stage of an agent container: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`. In Hub mode, an agent provisioned with `scion create` and not yet started is shown as `created (not started)`.
+The infrastructure lifecycle stage of an agent container: `created`, `provisioning`, `cloning`, `starting`, `running`, `stopping`, `stopped`, `suspended`, or `error`. An agent provisioned with `scion create` and not yet started is shown as `created (not started)`.
 
 ### Activity
 What a running agent is currently doing within the `running` phase, such as `initializing` (shown as "starting": the harness is not yet reading input), `thinking`, `executing`, `waiting_for_input`, `blocked`, `completed`, `limits_exceeded`, `stalled`, or `offline`. Distinct from phase.
@@ -283,27 +298,26 @@ A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspend
 Whether the Hub has been asked to keep an agent running (`running`) or stopped (`stopped`). It is recorded when a lifecycle request (start, restart, wake, create-and-start, stop, suspend or delete) is accepted, before dispatch to the Runtime Broker, so it reflects the request even when the dispatch is queued or fails. Kept separately from phase and not shown in the agent's API record.
 
 ### Run ID
-The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name. A start without a Hub (local mode) gets a run ID from the agent manager instead.
+The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name.
 
 ### Start claim
 A leased, per-agent claim the Hub takes for every start, restart, create-and-start, message wake, automatic recovery and reincarnation start, and while applying a queued stop, so only one of these runs at a time. A competing request gets `409 start_in_progress`, with the holder's kind and state (`live`, or `unconfirmed` when the outcome is not yet known) in `error.details`.
 
 ## Modes
 
-The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
+The run modes form a spine of increasing infrastructure — **Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
 
 | Mode | Control plane | State & durability | Tenancy | Canonical use |
 |------|---------------|--------------------|---------|----------------|
-| **Local mode** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
 | **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
 | **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub (single VM, or single Cloud Run instance + SQLite) |
 | **HA hosted** | Hub replicated behind a load balancer | External managed DB (Postgres) + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment (Cloud Run + Cloud SQL) |
 
-### Local mode
-Running Scion with no server at all — agents launched directly via the `scion` CLI, with state on the local machine and isolation via git worktrees.
-
 ### Workstation mode
-Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine, giving the hosted experience locally over loopback. A local server, not the no-server CLI workflow.
+Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine over loopback, started with `scion server start`. It is the hub that the `scion` CLI and the web dashboard on that machine run agents through; repositories link to it on their first command.
+
+### Local mode (historical)
+Running agents directly from the `scion` CLI with no Hub. Removed; Workstation mode replaces it. See the [migration page](/scion/reference/local-mode-removal/).
 
 ### Hosted mode
 The umbrella term for running against a networked Hub — reachable beyond a single machine — that coordinates state across users, projects, and runtime brokers. Spans two **availability tiers**, **Single-node hosted** and **HA hosted**, distinguished by control-plane durability and cost; the tier is fixed by the Hub's database driver (embedded `sqlite` vs. external `postgres`). Orthogonal to the tier is **Tenancy** (single- vs. multi-user).
@@ -342,7 +356,7 @@ Operational health metrics for Scion as a system — the Hub process, its databa
 Telemetry about what agents and their harnesses are doing — token usage, tool calls, model API latency, session counts, and cost signals. They answer "what are the agents doing and what do they cost?" and are consumed by users and project owners. Prefixes: `gen_ai.*`, `agent.*` (following OpenTelemetry Generative AI semantic conventions).
 
 ### Telemetry pipeline
-The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
+The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; without it, telemetry is collected in the container but not exported.
 
 ### Session metrics
 Database-backed summaries and aggregations computed on agent session-end (aggregated by `sciontool` and delivered as a `MetricsPayload` in the StatusUpdate protocol) and stored in the Hub's `agent_session_metrics` SQL table. They provide an IDOR-safe structural view of token usage (input, output, cached, reasoning), tool execution counts, session duration, and model usage, queried via dedicated summary API endpoints and displayed in the Web Dashboard. Contrast with raw OpenTelemetry time-series metrics.
