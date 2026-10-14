@@ -41,7 +41,7 @@ async function createList(
   items: Array<Record<string, unknown>>
 ): Promise<{ el: ScionResourceList; fetchMock: ReturnType<typeof vi.fn> }> {
   const key = kind === 'template' ? 'templates' : 'harnessConfigs';
-  const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+  const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
     if (init?.method === 'POST') return Promise.resolve(jsonResponse({ count: 1 }));
     return Promise.resolve(jsonResponse({ [key]: items }));
   });
