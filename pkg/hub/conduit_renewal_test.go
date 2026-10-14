@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,13 @@ const renewalSessionID = "sess-renew"
 
 func newRenewalFixture(t *testing.T) *renewalFixture {
 	t.Helper()
+	return newRenewalFixtureWithIncarnation(t, "inc-renew")
+}
+
+// newRenewalFixtureWithIncarnation is newRenewalFixture with the agent
+// session's endpoint incarnation set to inc.
+func newRenewalFixtureWithIncarnation(t *testing.T, inc string) *renewalFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &renewalFixture{conduitFixture: newConduitFixture(t)}
 
@@ -108,11 +116,11 @@ func newRenewalFixture(t *testing.T) *renewalFixture {
 	epoch, err := inner.InsertSessionWithNextEpoch(ctx, registry.SessionRecord{
 		SessionID: renewalSessionID, PrincipalKind: registry.PrincipalAgent, PrincipalID: f.agent.ID,
 		ProjectID: f.agent.ProjectID, RelayInstanceID: "hub-a", RelayGeneration: gen, Transport: "ws",
-		EndpointIncarnation: "inc-renew", ConnectedAt: now, LastSeen: now,
+		EndpointIncarnation: inc, ConnectedAt: now, LastSeen: now,
 	})
 	require.NoError(t, err)
 	f.regTarget = grant.Target{
-		Kind: grant.TargetKindAgent, ID: f.agent.ID, EndpointIncarnation: "inc-renew",
+		Kind: grant.TargetKindAgent, ID: f.agent.ID, EndpointIncarnation: inc,
 		SessionID: renewalSessionID, ConnectionEpoch: epoch,
 	}
 	f.fault = &registry.FaultStore{Inner: inner}
@@ -559,4 +567,51 @@ func TestConduitGrantLargestScopeFits(t *testing.T) {
 	r, err := f.renew(tok, open, 1)
 	require.NoError(t, err)
 	assert.Less(t, len(r.Token), 16<<10)
+}
+
+// TestConduitRenewStream_OversizeRenewalRefused: when the renewal of an
+// open grant that fits the grant size limit would not fit, no renewal is
+// minted and the refusal is unavailable (wrapping grant.ErrTooLarge), never
+// a renewal without part of its claims.
+func TestConduitRenewStream_OversizeRenewalRefused(t *testing.T) {
+	probe := newRenewalFixture(t)
+	ctx := context.Background()
+	signer, err := probe.srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	_, sample := probe.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+	sizes := func(inc string) (openFits, renewalFits bool) {
+		c := sample
+		c.Target.EndpointIncarnation = inc
+		_, err := grant.Mint(signer, c)
+		openFits = err == nil
+		jti, err := grant.NewJTI()
+		require.NoError(t, err)
+		now := probe.clock.Now().Truncate(time.Second)
+		_, err = grant.MintRenewal(signer, grant.RenewalClaims{
+			Issuer: c.Issuer, Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream, Via: c.Via,
+			StreamID: 7, OpenJTI: c.JTI, JTI: jti,
+			AuthzUntil: now.Add(probe.srv.conduitUserStreamAuthzInterval()), NotBefore: now, Expiry: now.Add(conduitGrantTTL),
+		})
+		return openFits, err == nil
+	}
+	lo, hi := 1, 16<<10 // the largest incarnation length whose open grant fits
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if ok, _ := sizes(strings.Repeat("i", mid)); ok {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	inc := strings.Repeat("i", lo)
+	openFits, renewalFits := sizes(inc)
+	require.True(t, openFits)
+	require.False(t, renewalFits, "a renewal is never larger than its open grant here; the test cannot build the case")
+
+	f := newRenewalFixtureWithIncarnation(t, inc)
+	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+	r, err := f.renew(tok, open, 7)
+	assert.Nil(t, r)
+	assert.ErrorIs(t, err, errConduitAuthzUnavailable)
+	assert.ErrorIs(t, err, grant.ErrTooLarge)
 }

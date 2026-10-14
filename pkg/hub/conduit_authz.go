@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -527,12 +528,17 @@ func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalR
 	}
 	jti, err := grant.NewJTI()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: renewal jti: %w", errConduitAuthzUnavailable, err)
 	}
 	rc.JTI = jti
 	tok, err := grant.MintRenewal(signer, rc)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, grant.ErrTooLarge) {
+			// The stream gets no renewal and ends at its deadline.
+			slog.Error("Conduit renewal grant exceeds the grant size limit; no renewal minted",
+				"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID, "error", err)
+		}
+		return nil, fmt.Errorf("%w: mint renewal: %w", errConduitAuthzUnavailable, err)
 	}
 	rc.KeyID, rc.Audience = signer.KeyID, grant.Audience
 	return &conduitRenewal{Token: tok, AuthzUntil: rc.AuthzUntil, Claims: &rc}, nil
