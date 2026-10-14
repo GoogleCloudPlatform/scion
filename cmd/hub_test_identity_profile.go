@@ -157,7 +157,7 @@ func viewOf(e *hubprofile.CacheEntry) profileIdentityView {
 // prints e.Token.
 func printProfileEntry(out io.Writer, verb string, e *hubprofile.CacheEntry, cacheFile string, asJSON bool) error {
 	if asJSON {
-		return writeIndentedJSON(out, profileIssueOutput{
+		return writeJSONTo(out, profileIssueOutput{
 			Alias: e.Alias, Run: e.Run, Profile: e.Profile, IdentityView: viewOf(e),
 			CacheFile: cacheFile, TokenExpiresAt: e.TokenExpiresAt,
 		})
@@ -315,7 +315,7 @@ func runHubTestIdentityTeardown(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 	failMsg := fmt.Sprintf("teardown of run %s did not complete; run it again", rep.Run)
 	if testIdentityJSON {
-		if err := writeIndentedJSON(out, rep); err != nil {
+		if err := writeJSONTo(out, rep); err != nil {
 			return err
 		}
 		if !rep.Complete {
@@ -379,7 +379,7 @@ func runHubTestIdentityDelegateCreate(cmd *cobra.Command, _ []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if delegateJSON {
-		return writeIndentedJSON(out, d)
+		return writeJSONTo(out, d)
 	}
 	_, _ = fmt.Fprintf(out, "Created delegation %s\n", d.ID)
 	_, _ = fmt.Fprintf(out, "  Workload sub: %s\n", d.WorkloadSub)
@@ -403,7 +403,7 @@ func runHubTestIdentityDelegateList(cmd *cobra.Command, _ []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if delegateJSON {
-		return writeIndentedJSON(out, resp)
+		return writeJSONTo(out, resp)
 	}
 	if len(resp.Items) == 0 {
 		_, _ = fmt.Fprintln(out, "No delegations.")

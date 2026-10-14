@@ -35,6 +35,8 @@ import (
 //   - Scheduled dispatch: wired in server.go:authorizeScheduledAgentCreate.
 //   - Policy routes: removed in CO1 cutover.
 //   - Custom role definition create/update: wired in handlers_roles.go:createRoleDefinition.
+//   - Project visitor grant and window extension: wired in
+//     handlers_project_visitors.go:actorHoldsVisitorPermissions.
 
 // GrantType identifies the kind of authority being delegated.
 type GrantType string
