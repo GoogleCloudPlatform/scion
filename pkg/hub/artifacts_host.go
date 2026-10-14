@@ -195,8 +195,8 @@ var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
 // ReviewGrantClause implements artifacts.ReviewGrantClauser (and, through
 // MayGrantReview, artifacts.ReviewGrantAuthority; design D24,
 // ptone/scion#4014, ptone/scion#5120): which clause, if any, lets the
-// calling user give a user review access
-// (a write grant) on an artifact owned by agent ownerAgentID and homed in
+// calling user give a user review access (a review grant)
+// on an artifact owned by agent ownerAgentID and homed in
 // project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
 //     admins, and super-admins), decided by AuthzService.CheckAccess like any

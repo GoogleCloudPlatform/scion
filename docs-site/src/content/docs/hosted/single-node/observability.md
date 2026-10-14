@@ -340,7 +340,7 @@ See the [Local Development Logging guide](/scion/contributing/logging/#http-requ
 
 ## Artifact Decision Log
 
-The Hub writes one structured entry per artifact decision (publish, versions, grants, share links, moves, expiry, deletion, owner liveness marks and authorization refusals) to a dedicated log, `scion-artifacts`. With `SCION_CLOUD_LOGGING=true` it is a separate Cloud Logging log. Otherwise it goes to stdout. Each entry carries the artifact id from the parsed route, a route template, the outcome and a fixed reason code, and the `request_id` of the matching request log line:
+The Hub writes one structured entry per artifact decision (publish, versions, grants, share links, moves, expiry, deletion, owner liveness marks and authorization refusals) to a dedicated log, `scion-artifacts`. With `SCION_CLOUD_LOGGING=true` it is a separate Cloud Logging log. Otherwise it goes to stdout. Entries carry the artifact id (from the parsed route, never the raw path), the outcome, a fixed reason code for refusals and failures, and, for decisions made on a request, the route template and the `request_id` of the matching request log line:
 
 ```
 -- Every decision about one artifact

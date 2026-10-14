@@ -26,8 +26,10 @@ import (
 // structured entry per decision to the logger set with SetLogger: each
 // lifecycle change it records in artifact_event (and the grant, link and
 // version changes it does not), each authorization refusal on a
-// management or write route (WARN), and each read answered with the 404
-// of a hidden or missing artifact (DEBUG only, to bound volume).
+// management or write route (WARN; a refused review grant from a caller who
+// cannot administer the artifact is not logged here), and each read
+// answered with the 404 of a hidden or missing artifact (DEBUG only, to
+// bound volume).
 //
 // An entry carries ids, enums and counts only. It never carries a share
 // link's token, its hash or its id (no segment under a link route), a
@@ -74,7 +76,7 @@ const (
 	logActionCreated          = "created"           // artifact with a pending first version
 	logActionVersionCreated   = "version_created"   // pending version appended
 	logActionVersionFinalized = "version_finalized" // version made ready
-	logActionVersionFailed    = "version_failed"    // version could not be finalized or was discarded
+	logActionVersionFailed    = "version_failed"    // version could not be recorded or finalized, or was discarded
 	logActionGrantCreated     = "grant_created"
 	logActionGrantChanged     = "grant_changed"
 	logActionGrantRemoved     = EventGrantRemoved
@@ -117,13 +119,14 @@ const (
 	logReasonCheckerError          = "principal_check_failed"
 )
 
-// Log authorities: why the actor was allowed. The values follow the artifact
-// share-authority design, so they match the artifact_event authorities:
-// owner, admin_grant and custodian_project_admin are the event authorities
-// of the same name; steward_project_owner and steward_delegator are a review
-// grant given as an owner or administrator of the home project or as the
-// owning agent's delegating user (the clause a ReviewGrantClauser names). A
-// review grant on a host that does not name the clause is logged without an
+// Log authorities: why the actor was allowed. The values follow the planned
+// share-authority vocabulary. owner, admin_grant and custodian_project_admin
+// are also the artifact_event authorities of the same name.
+// steward_project_owner is a review grant given as a holder of project
+// administration in the home project (its owners and admins, and
+// super-admins); steward_delegator is a review grant given as the owning
+// agent's delegating user (the clause a ReviewGrantClauser names). A review
+// grant on a host that does not name the clause is logged without an
 // authority. The maintenance pass logs the event authorities retention and
 // reconciler.
 const (
@@ -416,7 +419,7 @@ func (s *Service) logCreateRefusal(r *http.Request, scope string) {
 	if !s.host.Permits(r.Context(), scope, PermissionCreate) {
 		reason = logReasonCredentialNotPermit
 	}
-	// The scope is caller text here (the publish refused before any lookup):
+	// The scope is caller text here (refused before any store lookup):
 	// log it only when it has a project id's shape.
 	logged := &Artifact{}
 	if projectIDShaped(scope) {

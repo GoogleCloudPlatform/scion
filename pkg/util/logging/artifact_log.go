@@ -54,10 +54,11 @@ type ArtifactLoggerConfig struct {
 // NewArtifactLogger creates the dedicated logger for artifact decisions.
 // When Cloud Logging is enabled, entries go to the separate
 // "scion-artifacts" log with the artifact id, project, action, outcome,
-// reason and principal promoted to labels. Otherwise (a hub without Cloud
-// Logging) they go to stdout, as the message log does. Every entry logged
-// with a context carries the request id of that context's request, so it
-// joins to the request log.
+// reason and principal promoted to labels, and also to stdout except on
+// Cloud Run (whose runtime forwards stdout). Without Cloud Logging they go
+// to stdout only, as the message log does. An entry logged with a
+// request's context carries that request's id, so it joins to the request
+// log.
 // Returns the logger, a cleanup function, and any error.
 func NewArtifactLogger(cfg ArtifactLoggerConfig) (*slog.Logger, func(), error) {
 	var handlers []slog.Handler
