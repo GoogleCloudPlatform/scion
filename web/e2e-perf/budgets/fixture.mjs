@@ -216,6 +216,7 @@ export function buildFixture() {
         testHubAdmin: false,
         testSuperAdmin: false,
         testIdentityWebSessions: false,
+        testIdentityWebSessionsUnavailableReason: '',
         testIssuerAudience: '',
       },
     },

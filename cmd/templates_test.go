@@ -184,6 +184,9 @@ func setupHubProject(t *testing.T, home, endpoint, projectID string) string {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return projectDir
 }
 
@@ -431,18 +434,9 @@ func TestWarnDeprecatedHubAccessScopes_JSON_WithScopes(t *testing.T) {
 		}
 	}`), 0644))
 
-	// Capture stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	warnDeprecatedHubAccessScopes("test-template", dir)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := captureStderr(t, func() {
+		warnDeprecatedHubAccessScopes("test-template", dir)
+	})
 
 	assert.Contains(t, output, "deprecated hubAccess.scopes",
 		"should warn about deprecated hubAccess.scopes")
@@ -457,18 +451,9 @@ func TestWarnDeprecatedHubAccessScopes_JSON_WithoutScopes(t *testing.T) {
 		"harness": "claude"
 	}`), 0644))
 
-	// Capture stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	warnDeprecatedHubAccessScopes("test-template", dir)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := captureStderr(t, func() {
+		warnDeprecatedHubAccessScopes("test-template", dir)
+	})
 
 	assert.Empty(t, output,
 		"should not warn when hubAccess.scopes is absent")
@@ -485,18 +470,9 @@ hubAccess:
     - agent:create
 `), 0644))
 
-	// Capture stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	warnDeprecatedHubAccessScopes("yaml-template", dir)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := captureStderr(t, func() {
+		warnDeprecatedHubAccessScopes("yaml-template", dir)
+	})
 
 	assert.Contains(t, output, "deprecated hubAccess.scopes",
 		"should warn about deprecated hubAccess.scopes in YAML")
@@ -514,18 +490,9 @@ func TestWarnDeprecatedHubAccessScopes_EmptyScopes(t *testing.T) {
 		}
 	}`), 0644))
 
-	// Capture stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	warnDeprecatedHubAccessScopes("empty-scopes", dir)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	output := string(buf[:n])
+	output := captureStderr(t, func() {
+		warnDeprecatedHubAccessScopes("empty-scopes", dir)
+	})
 
 	assert.Empty(t, output,
 		"should not warn when hubAccess.scopes is empty array")
