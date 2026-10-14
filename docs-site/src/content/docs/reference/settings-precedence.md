@@ -541,14 +541,11 @@ The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PO
 `SCION_AUTO_EXPOSE_INTERVAL`, `SCION_AUTO_EXPOSE_MIN_PORT`) have no project or hub tier and follow
 the ordinary env rules on this page.
 
-:::caution[Two edges of this order]
+:::caution[An edge of this order]
 - **A storage-scope value outranks harness-config env.** A
   `SCION_AUTO_EXPOSE_PORTS` set with `scion hub env set` (any scope) fills the key before the
   Runtime Broker applies the harness-config tier, so it beats it. It still loses to an
   explicit value and to the project annotation, and it beats the hub default.
-- **A local CLI start on the broker host gets no hub default.** The hub default reaches the broker
-  only with a hub dispatch. An agent started from the `scion` CLI on the broker machine itself
-  does not receive it; with no higher tier set, auto-expose stays off.
 :::
 
 ### `Changed in this release` — template env is a fallback below every other source
@@ -558,8 +555,8 @@ agents an earlier change had already put harness-config env above it, so that cr
 declared in a harness config (`GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and similar) reach auth
 detection; in local mode template env still beat harness-config env.
 **After:** template env is a separate, lowest-precedence fallback on every path. It never
-enters the agent's config, its values are literal, `SCION_*` keys are ignored, and the
-harness-config's auth-candidate keys are never filled from it. See
+enters the agent's config, its values are literal, `SCION_*` keys are ignored, and no env key
+the harness-config's auth metadata lists is ever filled from it. See
 [Template env is a lowest-precedence fallback](#template-env-is-a-lowest-precedence-fallback)
 for the full rule.
 
@@ -1116,19 +1113,14 @@ settings-level (and harness-config-file-level) default; neither existed before t
 **Backward compatibility:** an agent created *before* this change has no `explicitImage` /
 `explicitImagePullPolicy` recorded on its `agent-info.json` (the fields didn't exist yet, and a
 missing field decodes to empty). If that agent's image *or* `kubernetes.imagePullPolicy` came from
-an inline `--config` at create time, its next plain local restart no longer re-applies that inline
+an inline `--config` at create time, its next plain restart no longer re-applies that inline
 value — it falls through to the template tier (if the agent's template sets one), then Hub
 settings, then the file default, where before this change the persisted (then-unconditional) value
 kept it regardless of any of those. This is an accepted, narrow trade-off: the code cannot tell "a
 pre-upgrade agent with no recorded inline value" apart from "an agent that never had an inline
-override" from the file alone. `--image` or `--config` on a **local `scion start`** applies to that
-one start only — it is never written back to `agent-info.json` (only `ProvisionAgent`, which a
-plain restart does not call, records `ExplicitImage`/`ExplicitImagePullPolicy`) — so passing it
-again re-pins the value for that single start but does not make it survive the *next* plain
-restart. Re-create the agent to make an inline value durable across restarts going forward (a
-Hub-managed agent's *hub-dispatched* restarts are unaffected either way, since the broker resends
-`AppliedConfig.InlineConfig` live on every call — reincarnating isn't a remedy here, since it
-requires a Hub and a local agent's restarts don't go through it).
+override" from the file alone. A later `scion start --image` is not applied to an existing agent
+(the CLI warns that the flag is ignored), so re-create the agent to make an inline value durable
+across restarts.
 
 Separately: if an agent's **template** can no longer be resolved at all on a local restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
@@ -1165,7 +1157,7 @@ The practical consequence: if an admin later changes a hub default, projects tha
 unset pick up the new value, and projects that explicitly set it do not. Treating null as
 equivalent to "set to the hub default value" gets this backwards.
 
-### Hub `agent_defaults` are a fallback below the template
+### Where hub `agent_defaults` rank
 
 **`Changed in this release`** (this settles [issue #623](https://github.com/ptone/scion/issues/623)'s
 precedence question for job keys). Hub `agent_defaults` are a **low-priority fallback**: for every
