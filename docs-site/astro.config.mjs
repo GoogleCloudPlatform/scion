@@ -195,6 +195,7 @@ export default defineConfig({
 								{ label: 'Multi-Broker Setup', slug: 'hosted/ha/multi-broker' },
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
+								{ label: 'Separate Conduit Relays', slug: 'hosted/ha/separate-relay' },
 								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
 								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },

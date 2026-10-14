@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -1659,6 +1660,22 @@ type Server struct {
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
 	conduit atomic.Pointer[conduitRuntime]
+	// conduitExternal is the hub's conduit runtime in external relay mode
+	// (conduit_external.go): routing to separate relays, no relay of its
+	// own. At most one of conduit and conduitExternal is set.
+	conduitExternal atomic.Pointer[conduitExternalRuntime]
+	// conduitEligibleRelays is the number of eligible separate relays at
+	// the last check (-1: not checked yet), read by the readiness gauge.
+	conduitEligibleRelays atomic.Int64
+	// conduitAdmissionAEADv is the admission token cipher
+	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
+	// it could not be.
+	conduitAdmissionKeyOnce sync.Once
+	conduitAdmissionAEADv   cipher.AEAD
+	conduitAdmissionKeyErr  error
+	// conduitRenewal verifies latest grants and mints renewal grants for
+	// relay stream re-checks (conduit_renewal.go); nil until set.
+	conduitRenewal atomic.Pointer[conduitRenewalGrants]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
@@ -6206,7 +6223,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// process runs a relay (hub.conduit on at startup). One replica per tick
 	// under Postgres; the registry requires the three reaps to run together
 	// under one lock.
-	if s.conduit.Load() != nil {
+	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		s.scheduler.RegisterRecurringSingleton("conduit-registry-reap", conduitRegistryReapInterval, store.LockConduitRegistryReap, s.conduitRegistryReapHandler())
 	}
 
