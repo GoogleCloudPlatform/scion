@@ -214,10 +214,10 @@ Administrators can control whether port forwarding and auto-expose are permitted
 
 1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
 2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
-3. **Template or harness-config env.**
+3. **Harness-config env.** A template cannot set `SCION_*` keys.
 4. **The Hub default** `auto_expose_ports.enabled` (see below).
 
-A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks template and harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
+A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
 
 ### Global Server Configuration
 The Hub-wide default, the lowest tier above, is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
@@ -240,13 +240,13 @@ Project owners and admins can control the auto-expose feature for all agents wit
 scion.io/auto-expose-ports-enabled: "true"
 ```
 
-When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides template, harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
+When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
 
 ### Precedence
 
-The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project or template value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
+The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
 
-In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project or template, or Hub default), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project, template, and Hub default values.
+In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
 
 ---
 

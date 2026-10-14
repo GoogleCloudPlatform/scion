@@ -988,8 +988,8 @@ stored image, never from Hub settings (`pkg/hub/reincarnate_config.go`).
 
 **After:** a Hub settings image now wins over the harness-config file default, resolved fresh on
 every `Start` (see above), and the reincarnate plan preview resolves the same settings tier
-before falling back to the harness config's own stored image. An explicit template or
-inline-config `image` still outranks settings, matching the pre-existing rule that a per-agent
+before falling back to the harness config's own stored image. An explicit inline-config `image`
+still outranks settings (a template's `image` is now ignored), matching the pre-existing rule that a per-agent
 override is the most specific source of truth. `kubernetes.imagePullPolicy` gained the same
 settings-level (and harness-config-file-level) default; neither existed before this change.
 
@@ -1015,7 +1015,8 @@ Separately: if an agent's **template** can no longer be resolved at all on a loc
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
 file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
 value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
-merged `scion-agent.json` value, for agents provisioned at that version or later.
+merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
+`image` is now ignored, so no template value is recorded.
 
 ---
 

@@ -64,7 +64,7 @@ If you are using **Podman** as your container runtime, Scion automatically creat
 
 If you are using other runtimes, you may need to ensure that the containers can route traffic back to the host machine's IP address on the port where the Hub is listening (e.g., `8080`).
 
-To configure the agents to find the Hub, you might need to adjust the `SCION_HUB_API_URL` setting passed to the agents in your template or via the CLI:
+To configure the agents to find the Hub, you might need to adjust the `SCION_HUB_API_URL` setting passed to the agents via the CLI (a template cannot set `SCION_*` keys):
 
 ```bash
 scion start my-agent --env SCION_HUB_API_URL=http://host.bridge.internal:8080
