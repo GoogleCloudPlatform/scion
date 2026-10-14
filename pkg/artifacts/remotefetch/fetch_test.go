@@ -730,3 +730,75 @@ func TestFetchAllowedHosts(t *testing.T) {
 		t.Fatalf("Fetch honours AllowedHosts too: got %v", err)
 	}
 }
+
+// TestFetchBytesAuthorizedSendsHeaderOnlyToFirstHost: FetchBytesAuthorized
+// sends the Authorization header on the first request and on a redirect hop
+// back to the same host, never on a hop to another host, and never logs it.
+func TestFetchBytesAuthorizedSendsHeaderOnlyToFirstHost(t *testing.T) {
+	const authorization = "Bearer fake-authorized-cred"
+	var env *testEnv
+	env = newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+		switch r.URL.Path {
+		case "/start":
+			w.Header().Set("Location", "/same-host")
+			w.WriteHeader(http.StatusFound)
+		case "/same-host":
+			// 127.0.0.1 reaches the same server under another host name.
+			w.Header().Set("Location", "https://127.0.0.1:"+port+"/download?access=short-lived")
+			w.WriteHeader(http.StatusFound)
+		case "/download":
+			_, _ = w.Write([]byte("archive"))
+		default:
+			http.NotFound(w, r)
+		}
+	}, Config{})
+
+	res, err := env.fetcher.FetchBytesAuthorized(context.Background(), env.url("example.com", "/start"), authorization)
+	if err != nil {
+		t.Fatalf("FetchBytesAuthorized: %v", err)
+	}
+	if string(res.Body) != "archive" {
+		t.Fatalf("body %q, want %q", res.Body, "archive")
+	}
+	if _, err := env.fetcher.FetchBytesAuthorized(context.Background(), env.url("example.com", "/missing"), authorization); reasonOf(t, err) != ReasonStatus {
+		t.Fatalf("missing path: want %q, got %v", ReasonStatus, err)
+	}
+
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	want := map[string]string{
+		"/start":     authorization,
+		"/same-host": authorization,
+		"/download":  "",
+		"/missing":   authorization,
+	}
+	if len(env.requests) != len(want) {
+		t.Fatalf("%d requests, want %d", len(env.requests), len(want))
+	}
+	for _, r := range env.requests {
+		if got := r.Header.Get("Authorization"); got != want[r.URL.Path] {
+			t.Errorf("%s carried Authorization %q, want %q", r.URL.Path, got, want[r.URL.Path])
+		}
+	}
+	if strings.Contains(env.logs.String(), "fake-authorized-cred") {
+		t.Errorf("log contains the Authorization value: %s", env.logs.String())
+	}
+}
+
+// TestFetchBytesAuthorizedEmptyIsFetchBytes: an empty authorization sends no
+// Authorization header.
+func TestFetchBytesAuthorizedEmptyIsFetchBytes(t *testing.T) {
+	env := newTestEnv(t, serveBytes([]byte("ok"), ""), Config{})
+	if _, err := env.fetcher.FetchBytesAuthorized(context.Background(), env.url("example.com", "/a"), ""); err != nil {
+		t.Fatalf("FetchBytesAuthorized: %v", err)
+	}
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	if len(env.requests) != 1 {
+		t.Fatalf("%d requests, want 1", len(env.requests))
+	}
+	if _, ok := env.requests[0].Header["Authorization"]; ok {
+		t.Errorf("empty authorization sent an Authorization header")
+	}
+}

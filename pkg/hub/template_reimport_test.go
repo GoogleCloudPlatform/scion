@@ -94,11 +94,13 @@ func TestParseTemplateGitHubSource_ArchiveURL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "templates/my-template", src.Path)
 	assert.Equal(t, "https://github.com/acme/repo/archive/refs/heads/dev.tar.gz", src.archiveURL())
+	assert.Equal(t, "https://api.github.com/repos/acme/repo/tarball/refs/heads/dev", src.apiTarballURL())
 
 	src, err = parseTemplateGitHubSource("https://github.com/acme/repo")
 	require.NoError(t, err)
 	assert.Equal(t, "", src.Path)
 	assert.Equal(t, "https://github.com/acme/repo/archive/refs/heads/main.tar.gz", src.archiveURL())
+	assert.Equal(t, "https://api.github.com/repos/acme/repo/tarball/refs/heads/main", src.apiTarballURL())
 }
 
 type tarEntry struct {
@@ -158,15 +160,22 @@ func twoTemplateArchive(t *testing.T, readme string) []byte {
 }
 
 // fakeTemplateSourceFetcher serves a fixed body (or error) and records the
-// URLs it was asked for.
+// URLs it was asked for, with the Authorization value of each request in
+// auths ("" for FetchBytes).
 type fakeTemplateSourceFetcher struct {
-	body []byte
-	err  error
-	urls []string
+	body  []byte
+	err   error
+	urls  []string
+	auths []string
 }
 
-func (f *fakeTemplateSourceFetcher) FetchBytes(_ context.Context, rawURL string) (*remotefetch.Result, error) {
+func (f *fakeTemplateSourceFetcher) FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error) {
+	return f.FetchBytesAuthorized(ctx, rawURL, "")
+}
+
+func (f *fakeTemplateSourceFetcher) FetchBytesAuthorized(_ context.Context, rawURL, authorization string) (*remotefetch.Result, error) {
 	f.urls = append(f.urls, rawURL)
+	f.auths = append(f.auths, authorization)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -312,7 +321,7 @@ func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
 		"too many redirects": {&remotefetch.Error{Reason: remotefetch.ReasonRedirects, Detail: "more than 3 redirects"}, "could not download"},
 		"internal address":   {&remotefetch.Error{Reason: remotefetch.ReasonDeniedAddress, Detail: "codeload.github.com resolves to denied address 10.0.0.5"}, "could not download"},
 		"host off the list":  {&remotefetch.Error{Reason: remotefetch.ReasonHostNotAllowed, Detail: `host "other.test" is not allowed`}, "could not download"},
-		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}, "may not be public"},
+		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}, "no repository credential"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{err: tc.err}
