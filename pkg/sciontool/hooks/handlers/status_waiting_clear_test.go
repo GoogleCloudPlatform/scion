@@ -10,13 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,6 +65,20 @@ func waitClearClaudeToolEnd(t *testing.T) *hooks.Event {
 	})
 }
 
+// waitClearClaudeToolFailure is the event Claude Code sends instead of
+// PostToolUse when the tool call fails.
+func waitClearClaudeToolFailure(t *testing.T) *hooks.Event {
+	return waitClearClaudeEvent(t, map[string]interface{}{
+		"hook_event_name": "PostToolUseFailure",
+		"session_id":      "00000000-0000-0000-0000-000000000000",
+		"tool_name":       "Bash",
+		"tool_input":      map[string]interface{}{"command": "false"},
+		"tool_use_id":     "toolu_synthetic",
+		"error":           "Command exited with non-zero status code 1",
+		"is_interrupt":    false,
+	})
+}
+
 func waitClearClaudeStop(t *testing.T) *hooks.Event {
 	return waitClearClaudeEvent(t, map[string]interface{}{
 		"hook_event_name": "Stop",
@@ -86,6 +100,7 @@ func TestStatusWaitingClear_ClaudeNotificationThenEndEvent(t *testing.T) {
 		end  func(*testing.T) *hooks.Event
 	}{
 		{"PostToolUse", waitClearClaudeToolEnd},
+		{"PostToolUseFailure", waitClearClaudeToolFailure},
 		{"Stop", waitClearClaudeStop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,6 +127,7 @@ func TestStatusWaitingClear_AgentSetWaitingStaysAcrossEndEvents(t *testing.T) {
 		end  func(*testing.T) *hooks.Event
 	}{
 		{"PostToolUse", waitClearClaudeToolEnd},
+		{"PostToolUseFailure", waitClearClaudeToolFailure},
 		{"Stop", waitClearClaudeStop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,11 +231,9 @@ func TestStatusWaitingClear_ModelEndKeepsNotificationWaiting(t *testing.T) {
 // Other harnesses whose permission prompt maps to notification clear the
 // same way on their tool-end event.
 func TestStatusWaitingClear_OtherDialects(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
 	loadMapping := func(t *testing.T, name string) hooks.Dialect {
 		t.Helper()
-		md, err := dialects.LoadMappingDialect(filepath.Join(root, "harnesses", name, "dialect.yaml"))
+		md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, name))
 		require.NoError(t, err)
 		return md
 	}

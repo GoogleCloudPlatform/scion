@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stub runuser for the fix-tls-rotation.sh tests. Only
+# "runuser -u USER -- test -r PATH" is supported. It answers as a user who
+# owns nothing and whose only group is $STUB_CADDY_GROUP: every directory on
+# the way to PATH, and on the way to the file a symlink resolves to, must be
+# searchable by that group (or others), and the file readable. Only paths
+# under $FIX_TLS_ROOT are checked; the temp directories above it are not.
+set -u
+printf 'runuser %s\n' "$*" >> "${STUB_LOG:?}"
+[ "$1" = "-u" ] && [ "$3" = "--" ] && [ "$4" = "test" ] && [ "$5" = "-r" ] || exit 2
+root="${FIX_TLS_ROOT:?}"
+g="${STUB_CADDY_GROUP:?}"
+allowed() { # PATH BIT(1=x,4=r)
+  grp="$(stat -c '%G' "$1" 2>/dev/null)" || return 1
+  m="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  m=$((8#$m))
+  if [ "$grp" = "$g" ]; then [ $(( (m >> 3) & $2 )) -ne 0 ]; else [ $(( m & $2 )) -ne 0 ]; fi
+}
+dirs_ok() { # check every directory from $root down to dirname PATH
+  d="$(dirname "$1")"
+  while :; do
+    allowed "$d" 1 || return 1
+    [ "$d" = "$root" ] && return 0
+    case "$d" in "$root"/*) d="$(dirname "$d")" ;; *) return 0 ;; esac
+  done
+}
+# $STUB_RUNUSER_ALLOW set: answer "readable" for everything, like a path
+# readable through an ACL that the mode bits do not show.
+[ -z "${STUB_RUNUSER_ALLOW:-}" ] || exit 0
+p="$6"
+[ -e "$p" ] || exit 1
+dirs_ok "$p" || exit 1
+real="$(readlink -f "$p")"
+dirs_ok "$real" || exit 1
+allowed "$real" 4

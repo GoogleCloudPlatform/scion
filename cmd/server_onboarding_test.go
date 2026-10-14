@@ -42,6 +42,9 @@ type quickstartProbeRecorder struct {
 // allowed"; tests that check opening set quickstartBrowserAllowed.
 func stubQuickstartProbes(t *testing.T, ready bool, status onboardingStatusResult, statusErr error) *quickstartProbeRecorder {
 	t.Helper()
+	// printWorkstationQuickstart registers the local hub in
+	// ~/.scion/context.yaml: keep it out of the real HOME.
+	t.Setenv("HOME", t.TempDir())
 	rec := &quickstartProbeRecorder{}
 	origWait, origTimeout, origStatus := quickstartWaitReady, quickstartReadyTimeout, quickstartOnboardingStatus
 	origAllowed, origOpen := quickstartBrowserAllowed, quickstartOpenBrowser
@@ -244,7 +247,7 @@ func TestPrintWorkstationQuickstart_OnboardingStatus(t *testing.T) {
 			rec := stubQuickstartProbes(t, tt.ready, tt.status, tt.err)
 
 			out := captureStdout(t, func() {
-				printWorkstationQuickstart(tt.settingsMissing, dir, "127.0.0.1", 8080, true, false, tt.hubEnabled, true)
+				printWorkstationQuickstart(tt.settingsMissing, dir, nil, "127.0.0.1", 8080, true, false, tt.hubEnabled, true)
 			})
 
 			assert.Contains(t, out, tt.wantURL)
@@ -265,7 +268,7 @@ func TestPrintWorkstationQuickstart_BrowserRule(t *testing.T) {
 		rec := stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
 		quickstartBrowserAllowed = func() bool { return true }
 		_ = captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.Equal(t, []string{"http://127.0.0.1:8080/onboarding"}, rec.opened)
 	})
@@ -274,7 +277,7 @@ func TestPrintWorkstationQuickstart_BrowserRule(t *testing.T) {
 		rec := stubQuickstartProbes(t, false, onboardingStatusResult{}, nil)
 		quickstartBrowserAllowed = func() bool { return true }
 		_ = captureStdout(t, func() {
-			printWorkstationQuickstart(true, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(true, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.Empty(t, rec.opened)
 	})
@@ -282,7 +285,7 @@ func TestPrintWorkstationQuickstart_BrowserRule(t *testing.T) {
 	t.Run("disallowed (e.g. SCION_NO_BROWSER): prints, does not open", func(t *testing.T) {
 		rec := stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
 		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.Contains(t, out, "/onboarding")
 		assert.Empty(t, rec.opened)
@@ -305,7 +308,7 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.Contains(t, out, "/onboarding")
 		assert.Contains(t, out, "Runtime broker not started: image_registry is not configured")
@@ -318,7 +321,7 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 		t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/maint")
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.NotContains(t, out, "Runtime broker not started")
 	})
@@ -327,7 +330,7 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
 		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, true)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 		})
 		assert.NotContains(t, out, "Runtime broker not started")
 	})
@@ -336,8 +339,30 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 		unsetImageRegistry(t)
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), "127.0.0.1", 8080, true, false, true, false)
+			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, false)
 		})
 		assert.NotContains(t, out, "Runtime broker not started")
 	})
+}
+
+// TestPrintWorkstationQuickstart_ProjectOnlyRegistryStillNotices: the server
+// runs in the global directory, so an image_registry set only in the project
+// 'server start' was run from does not keep its broker on, and the notice
+// must still be printed.
+func TestPrintWorkstationQuickstart_ProjectOnlyRegistryStillNotices(t *testing.T) {
+	_, globalDir := brokerTestHome(t)
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+	project := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(project, ".scion"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(project, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\nimage_registry: registry.example.com/project-only\n"), 0o644))
+	t.Chdir(project)
+	require.NoError(t, requireImageRegistryForBroker(), "the working-directory check sees the project registry")
+
+	stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
+	out := captureStdout(t, func() {
+		printWorkstationQuickstart(false, globalDir, nil, "127.0.0.1", 8080, true, false, true, true)
+	})
+	assert.Contains(t, out, "Runtime broker not started: image_registry is not configured")
 }

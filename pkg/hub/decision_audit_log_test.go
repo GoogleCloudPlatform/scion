@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_1
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -102,6 +100,24 @@ func TestMapDecisionEnvelope_AgentResourceWithoutContainment(t *testing.T) {
 	rec.PermissionID = "agent.read"
 	_, d := mapDecisionEnvelope(decisionCtx(), rec)
 	require.Equal(t, decisionAuditEnqueued, d)
+}
+
+// TestMapDecisionEnvelope_HubScopedTargetIsInDomain pins that a hub-scoped
+// target (an explicit system parent with no parent ID, as built by
+// hubScopedResource) is in the recorded domain like an unparented one,
+// while a system parent with a parent ID is not.
+func TestMapDecisionEnvelope_HubScopedTargetIsInDomain(t *testing.T) {
+	rec := inDomainDecisionRecord()
+	rec.ResourceType = "agent"
+	rec.ResourceID = "hub"
+	rec.ResourceParentType = "system"
+	rec.PermissionID = "agent.stop_all"
+	_, d := mapDecisionEnvelope(decisionCtx(), rec)
+	require.Equal(t, decisionAuditEnqueued, d)
+
+	rec.ResourceParentID = "proj-1"
+	_, d = mapDecisionEnvelope(decisionCtx(), rec)
+	require.Equal(t, decisionAuditExcludedScope, d)
 }
 
 func TestMapDecisionEnvelope_OperationContextPrecedesRequestID(t *testing.T) {

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -27,7 +28,7 @@ import (
 
 // TestIdentityService handles hub test identities (ptone/scion#4240): short
 // lived synthetic member or viewer users for testing. The hub must run with
-// --enable-test-identities, otherwise every call returns a 404 API error.
+// --test-mode=member or above, otherwise every call returns a 404 API error.
 // The caller needs the test_identity.issue permission.
 type TestIdentityService interface {
 	// Issue creates a test identity and returns one access token for it.
@@ -45,6 +46,61 @@ type TestIdentityService interface {
 	// 409 API error while the identity owns agents or is the last owner of
 	// a project (see TestIdentityDeleteConflict).
 	Delete(ctx context.Context, id string) error
+
+	// Purge deletes a test identity together with the agents, schedules,
+	// groups and projects it created (DELETE ...?purge=true). A complete
+	// purge returns the report and a nil error. One that did not complete
+	// returns the report and a 409 API error (run it again); see
+	// TestIdentityPurgeIncomplete. An identity that is already gone, or one
+	// the caller may not purge, returns an empty report.
+	Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error)
+
+	// WebLoginCode mints a single-use web-login code for a live test
+	// identity (POST /api/v1/test-identities/{id}/web-login-code). The code
+	// is redeemed at POST /auth/test-identity/redeem for a browser session
+	// as the identity. It is valid for 5 minutes and a new code replaces
+	// any earlier unredeemed one. The hub answers 404 when web sessions are
+	// not available on it.
+	WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error)
+}
+
+// TestIdentityPurgeCounts counts what a purge removed.
+type TestIdentityPurgeCounts struct {
+	Agents    int `json:"agents"`
+	Schedules int `json:"schedules"`
+	Groups    int `json:"groups"`
+	Projects  int `json:"projects"`
+}
+
+// TestIdentityPurgeItem is a resource a purge did not remove.
+type TestIdentityPurgeItem struct {
+	Type      string `json:"type"`
+	ID        string `json:"id"`
+	ProjectID string `json:"projectId,omitempty"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// TestIdentityPurgeKeptProject is a project a purge kept.
+type TestIdentityPurgeKeptProject struct {
+	ID              string `json:"id"`
+	Reason          string `json:"reason"`
+	BindingsRemoved int    `json:"bindingsRemoved"`
+	Ownerless       bool   `json:"ownerless,omitempty"`
+}
+
+// TestIdentityPurgeReport is the hub's report of a purge.
+type TestIdentityPurgeReport struct {
+	IdentityID         string                         `json:"identityId"`
+	Complete           bool                           `json:"complete"`
+	IdentityDeleted    bool                           `json:"identityDeleted"`
+	Deleted            TestIdentityPurgeCounts        `json:"deleted"`
+	NotDone            []TestIdentityPurgeItem        `json:"notDone,omitempty"`
+	Unproven           []TestIdentityPurgeItem        `json:"unproven,omitempty"`
+	UnprovenTruncated  bool                           `json:"unprovenTruncated,omitempty"`
+	KeptProjects       []TestIdentityPurgeKeptProject `json:"keptProjects,omitempty"`
+	IdentityKeptReason string                         `json:"identityKeptReason,omitempty"`
+	Truncated          bool                           `json:"truncated,omitempty"`
 }
 
 // testIdentityService is the implementation of TestIdentityService.
@@ -74,16 +130,19 @@ type TestIdentityTokenRequest struct {
 // TestIdentity is a test identity as the hub reports it. It never carries a
 // token.
 type TestIdentity struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Role        string    `json:"role"`
-	Status      string    `json:"status"`
-	Purpose     string    `json:"purpose,omitempty"`
-	IssuedBy    string    `json:"issuedBy"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Created     time.Time `json:"created"`
-	Live        bool      `json:"live"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+	DisplayName string `json:"displayName"`
+	Role        string `json:"role"`
+	Status      string `json:"status"`
+	Purpose     string `json:"purpose,omitempty"`
+	IssuedBy    string `json:"issuedBy"`
+	// IssuerDelegationID is the workload issuer delegation the identity
+	// was issued through; empty for session and PAT issuance.
+	IssuerDelegationID string    `json:"issuerDelegationId,omitempty"`
+	ExpiresAt          time.Time `json:"expiresAt"`
+	Created            time.Time `json:"created"`
+	Live               bool      `json:"live"`
 }
 
 // TestIdentityTokenResponse is the response of Issue and Token. AccessToken
@@ -95,6 +154,15 @@ type TestIdentityTokenResponse struct {
 	TokenType      string       `json:"tokenType"`
 	ExpiresIn      int64        `json:"expiresIn"`
 	TokenExpiresAt time.Time    `json:"tokenExpiresAt"`
+}
+
+// TestIdentityWebLoginCode is the response of WebLoginCode. Code is a
+// secret: callers write it only to a private file and never log or print
+// it.
+type TestIdentityWebLoginCode struct {
+	Code      string    `json:"code"`
+	CodeID    string    `json:"codeId"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 // ListTestIdentitiesOptions are the query options of List.
@@ -142,6 +210,26 @@ func (s *testIdentityService) Token(ctx context.Context, id string, req *TestIde
 	return apiclient.DecodeRequired[TestIdentityTokenResponse](resp)
 }
 
+// WebLoginCode mints a web-login code. It is sent once, never retried,
+// since each mint replaces the previous code.
+func (s *testIdentityService) WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error) {
+	if id == "" {
+		return nil, fmt.Errorf("test identity id is required")
+	}
+	resp, err := s.c.postNoRetry(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"/web-login-code", struct{}{}, nil)
+	if err != nil {
+		return nil, err
+	}
+	code, err := apiclient.DecodeRequired[TestIdentityWebLoginCode](resp)
+	if err != nil {
+		return nil, err
+	}
+	if code.Code == "" {
+		return nil, fmt.Errorf("hub returned no web-login code")
+	}
+	return code, nil
+}
+
 // List returns test identities.
 func (s *testIdentityService) List(ctx context.Context, opts *ListTestIdentitiesOptions) (*ListTestIdentitiesResponse, error) {
 	query := url.Values{}
@@ -170,6 +258,48 @@ func (s *testIdentityService) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// Purge deletes a test identity and what it created. It is sent once,
+// never retried by the transport; running it again is safe.
+func (s *testIdentityService) Purge(ctx context.Context, id string) (*TestIdentityPurgeReport, error) {
+	if id == "" {
+		return nil, fmt.Errorf("test identity id is required")
+	}
+	resp, err := s.c.delete(ctx, "/api/v1/test-identities/"+url.PathEscape(id)+"?purge=true", nil)
+	if err != nil {
+		return nil, err
+	}
+	report, err := apiclient.DecodeRequired[TestIdentityPurgeReport](resp)
+	if err != nil {
+		if r, ok := TestIdentityPurgeIncomplete(err); ok {
+			return r, err
+		}
+		return nil, err
+	}
+	return report, nil
+}
+
+// TestIdentityPurgeIncomplete returns the report carried by a purge answer
+// that did not complete (details.reason purge_incomplete). ok is false when
+// err is not such an answer.
+func TestIdentityPurgeIncomplete(err error) (*TestIdentityPurgeReport, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Details == nil {
+		return nil, false
+	}
+	if reason, _ := apiErr.Details["reason"].(string); reason != "purge_incomplete" {
+		return nil, false
+	}
+	raw, err2 := json.Marshal(apiErr.Details["report"])
+	if err2 != nil {
+		return nil, false
+	}
+	var report TestIdentityPurgeReport
+	if json.Unmarshal(raw, &report) != nil {
+		return nil, false
+	}
+	return &report, true
 }
 
 // TestIdentityBlockingAgent is an agent that blocks a test identity delete.

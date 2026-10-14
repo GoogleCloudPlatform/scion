@@ -225,8 +225,20 @@ type SubscriptionTemplate func(*sql.Selector)
 // Template is the predicate function for template builders.
 type Template func(*sql.Selector)
 
+// TestIdentityDelegation is the predicate function for testidentitydelegation builders.
+type TestIdentityDelegation func(*sql.Selector)
+
+// TestIdentityLoginCode is the predicate function for testidentitylogincode builders.
+type TestIdentityLoginCode func(*sql.Selector)
+
 // TestInfraMarker is the predicate function for testinframarker builders.
 type TestInfraMarker func(*sql.Selector)
+
+// ThreadGroup is the predicate function for threadgroup builders.
+type ThreadGroup func(*sql.Selector)
+
+// ThreadGroupMember is the predicate function for threadgroupmember builders.
+type ThreadGroupMember func(*sql.Selector)
 
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)

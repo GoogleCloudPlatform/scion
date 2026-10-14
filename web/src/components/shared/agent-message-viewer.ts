@@ -70,6 +70,17 @@ interface ParsedMessage {
 
 const MAX_BUFFER = 500;
 
+/**
+ * Reports whether a message log entry is a message record. Lifecycle and
+ * bookkeeping entries (tagged log_kind=event, or carrying neither a sender
+ * nor a recipient) are not listed.
+ */
+function isMessageRecord(entry: MessageLogEntry, parsed: ParsedMessage): boolean {
+  const kind = entry.labels?.['log_kind'] ?? entry.jsonPayload?.['log_kind'];
+  if (kind === 'event') return false;
+  return parsed.sender !== '' || parsed.recipient !== '';
+}
+
 @customElement('scion-agent-message-viewer')
 export class ScionAgentMessageViewer extends LitElement {
   /** Re-renders timestamps and date dividers when the display zone changes. */
@@ -625,7 +636,9 @@ export class ScionAgentMessageViewer extends LitElement {
   private mergeEntries(newEntries: MessageLogEntry[]): void {
     for (const entry of newEntries) {
       if (!this.entryMap.has(entry.insertId)) {
-        this.entryMap.set(entry.insertId, this.parseEntry(entry));
+        const parsed = this.parseEntry(entry);
+        if (!isMessageRecord(entry, parsed)) continue;
+        this.entryMap.set(entry.insertId, parsed);
       }
     }
 

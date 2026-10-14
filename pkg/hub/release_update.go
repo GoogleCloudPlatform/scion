@@ -28,10 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 )
 
-// HubSettingSectionUpdateAvailable is the hub_settings section key used to
-// store the latest detected release update for the admin UI.
-const HubSettingSectionUpdateAvailable = "system.update_available"
-
 // UpdateAvailableInfo is the JSON payload stored in the
 // system.update_available hub setting.
 type UpdateAvailableInfo struct {

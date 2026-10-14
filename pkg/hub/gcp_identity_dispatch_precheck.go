@@ -168,15 +168,34 @@ func profileSAMappingDecision(broker *store.RuntimeBroker, profileName, account 
 		d.Reason = SAMappingReasonNoAccount
 		return d
 	}
-	var profile *store.BrokerProfile
 	for i := range broker.Profiles {
 		if broker.Profiles[i].Name == profileName {
-			profile = &broker.Profiles[i]
-			break
+			return profileSAMappingDecisionOn(broker.Name, &broker.Profiles[i], account, now)
 		}
 	}
+	d.Reason = SAMappingReasonProfileNotOnBroker
+	return d
+}
+
+// profileSAMappingDecisionOn is profileSAMappingDecision for a profile the
+// caller already holds, on the broker named brokerName. The per-account
+// status view and the not-mapped warnings use it on the profile rows they
+// collected, so they apply the same rule as the dispatch refusal. A nil
+// profile is unknown with reason no_profile: there is no profile to decide
+// on.
+func profileSAMappingDecisionOn(brokerName string, profile *store.BrokerProfile, account string, now time.Time) SAMappingDecision {
+	d := SAMappingDecision{
+		State:   SAMappingStateUnknown,
+		Account: strings.ToLower(strings.TrimSpace(account)),
+		Broker:  brokerName,
+	}
 	if profile == nil {
-		d.Reason = SAMappingReasonProfileNotOnBroker
+		d.Reason = SAMappingReasonNoProfile
+		return d
+	}
+	d.Profile = profile.Name
+	if d.Account == "" {
+		d.Reason = SAMappingReasonNoAccount
 		return d
 	}
 	if !isKubernetesRuntimeType(profile.Type) {

@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -79,8 +78,8 @@ func (s *Server) reclaimInDoubtDeletion(ctx context.Context, agentID string, cla
 	}
 	// The finalize is soft or hard as the original claim decided, never
 	// as recomputed now: without that decision, leave the row in_doubt.
-	var req store.DeletionRequestInfo
-	if cur.DeletionRequest == "" || json.Unmarshal([]byte(cur.DeletionRequest), &req) != nil {
+	req, ok := storedDeletionRequest(cur)
+	if !ok {
 		s.agentLifecycleLog.Warn("in_doubt delete: no stored request; leaving it in_doubt",
 			"agent_id", agentID, "claim", claim)
 		return nil, nil

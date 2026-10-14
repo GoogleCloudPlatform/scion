@@ -251,11 +251,15 @@ type GCPServiceAccountProfileMapping struct {
 	Incomplete       bool   `json:"incomplete,omitempty"`
 	IncompleteReason string `json:"incompleteReason,omitempty"`
 	// Ambiguous is true when more than one Kubernetes ServiceAccount is
-	// annotated with the account; the broker refuses it.
+	// annotated with the account and none is mapped explicitly; the broker
+	// refuses it. State is then "unknown" with UnknownReason
+	// "ambiguous_mapping".
 	Ambiguous bool `json:"ambiguous,omitempty"`
-	// UnknownReason says why State is "unknown" ("report_missing",
-	// "report_incomplete", "report_old_version" or "report_stale"): the
-	// report cannot show the account is absent.
+	// UnknownReason says why State is "unknown", in the hub's shared
+	// mapping-decision codes: "report_missing", "report_incomplete",
+	// "report_old_version", "report_stale", "runtime_unrecognized" (a
+	// runtime key the hub cannot tell is Kubernetes) or "ambiguous_mapping".
+	// Clients should show a newer code they do not know as-is.
 	UnknownReason string `json:"unknownReason,omitempty"`
 }
 

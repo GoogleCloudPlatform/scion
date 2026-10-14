@@ -392,6 +392,30 @@ func (m *mockScheduledEventStore) ListRoleBindingsForPrincipals(_ context.Contex
 	return result, nil
 }
 
+// ListRoleBindingsForPrincipal returns the principal's bindings, like
+// ListRoleBindingsForPrincipals for one principal (the project-role
+// reads of isProjectOwner and isActiveMember use it).
+func (m *mockScheduledEventStore) ListRoleBindingsForPrincipal(_ context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []*store.RoleBinding
+	for _, b := range m.roleBindings {
+		if b.PrincipalType == principalType && b.PrincipalID == principalID {
+			result = append(result, b)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockScheduledEventStore) GetRoleDefinition(_ context.Context, id string) (*store.RoleDefinition, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rd, ok := m.roleDefinitions[id]; ok {
+		return rd, nil
+	}
+	return nil, store.ErrNotFound
+}
+
 func (m *mockScheduledEventStore) GetRoleDefinitionsByIDs(_ context.Context, ids []string) (map[string]*store.RoleDefinition, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

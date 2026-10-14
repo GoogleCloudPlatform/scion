@@ -44,9 +44,6 @@ async function setup(
   let closes = 0;
   const sent: string[] = [];
   await installEventSourceStub(page);
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );
@@ -193,7 +190,6 @@ test('unsupported coordination capability shows clear limitation message', async
   await installEventSourceStub(page);
   // Set up the page with locks disabled to simulate unsupported environment
   await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
     // Remove Web Lock API to simulate unsupported environment
     Object.defineProperty(navigator, 'locks', { value: undefined });
   });

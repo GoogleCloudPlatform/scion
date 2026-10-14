@@ -48,7 +48,7 @@ func trackedRunID(srv *Server, ctx context.Context) string {
 // is run-tracked with the hub run ID (ptone/scion#2550). A legacy Runtime
 // Broker in the same situation still gets the 503.
 func TestFlatInstance_UnresolvableSavedProfileNeverReturns503(t *testing.T) {
-	for _, path := range []string{"/api/v1/agents/test-agent-1/start", flatRestartPath} {
+	for _, path := range []string{"/api/v1/agents/test-agent-1/start" + flatStartQuery, flatRestartPath + flatStartQuery} {
 		t.Run("flat "+path, func(t *testing.T) {
 			f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
 			projectDir, err := config.GetResolvedProjectDir("")
@@ -60,8 +60,9 @@ func TestFlatInstance_UnresolvableSavedProfileNeverReturns503(t *testing.T) {
 			f.srv.loadSettings = func(string) (*config.VersionedSettings, []string, error) {
 				return nil, nil, errors.New("settings unavailable")
 			}
+			f.seedOwnedAgent(t)
 			w := serveFlat(f.srv, http.MethodPost, path,
-				`{"runId":"run-flat-strict","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`"}`)
+				`{"runId":"run-flat-strict","expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("status = %d, want 202 (never 503): %s", w.Code, w.Body.String())
 			}

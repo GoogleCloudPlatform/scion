@@ -885,6 +885,30 @@ func (f TemplateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, er
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TemplateMutation", m)
 }
 
+// The TestIdentityDelegationFunc type is an adapter to allow the use of ordinary
+// function as TestIdentityDelegation mutator.
+type TestIdentityDelegationFunc func(context.Context, *ent.TestIdentityDelegationMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TestIdentityDelegationFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TestIdentityDelegationMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TestIdentityDelegationMutation", m)
+}
+
+// The TestIdentityLoginCodeFunc type is an adapter to allow the use of ordinary
+// function as TestIdentityLoginCode mutator.
+type TestIdentityLoginCodeFunc func(context.Context, *ent.TestIdentityLoginCodeMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f TestIdentityLoginCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.TestIdentityLoginCodeMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TestIdentityLoginCodeMutation", m)
+}
+
 // The TestInfraMarkerFunc type is an adapter to allow the use of ordinary
 // function as TestInfraMarker mutator.
 type TestInfraMarkerFunc func(context.Context, *ent.TestInfraMarkerMutation) (ent.Value, error)
@@ -895,6 +919,30 @@ func (f TestInfraMarkerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Va
 		return f(ctx, mv)
 	}
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.TestInfraMarkerMutation", m)
+}
+
+// The ThreadGroupFunc type is an adapter to allow the use of ordinary
+// function as ThreadGroup mutator.
+type ThreadGroupFunc func(context.Context, *ent.ThreadGroupMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ThreadGroupFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ThreadGroupMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ThreadGroupMutation", m)
+}
+
+// The ThreadGroupMemberFunc type is an adapter to allow the use of ordinary
+// function as ThreadGroupMember mutator.
+type ThreadGroupMemberFunc func(context.Context, *ent.ThreadGroupMemberMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ThreadGroupMemberFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ThreadGroupMemberMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ThreadGroupMemberMutation", m)
 }
 
 // The UsageReservationFunc type is an adapter to allow the use of ordinary

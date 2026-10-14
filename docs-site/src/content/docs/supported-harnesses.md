@@ -63,7 +63,7 @@ Claude supports four authentication methods (auto-detected in this precedence or
 - **API Key** (`api-key`): Set `ANTHROPIC_API_KEY` in your host environment. Scion propagates this to the agent and pre-approves it in `.claude.json` so Claude Code does not prompt for confirmation.
 - **OAuth Token** (`oauth-token`): Set `CLAUDE_CODE_OAUTH_TOKEN` (generate with `claude setup-token`). This is also the token captured automatically after an in-agent `claude setup-token` login.
 - **Auth File** (`auth-file`): Uses `~/.claude/.credentials.json` (file-secret key `CLAUDE_AUTH`) if available.
-- **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_REGION`. Scion automatically translates `GOOGLE_CLOUD_PROJECT` to `ANTHROPIC_VERTEX_PROJECT_ID` during container provisioning to ensure compatibility with Claude Code's native Vertex AI client.
+- **Vertex AI** (`vertex-ai`): Uses Google Cloud's Vertex AI endpoint with ADC, a GCP project (`GOOGLE_CLOUD_PROJECT`) and a region. Both the project and the region are required. The region is read from `GOOGLE_CLOUD_LOCATION`, then `GOOGLE_CLOUD_REGION`, then `CLOUD_ML_REGION`, with a warning when the first two are set to different values (see [Vertex Model Garden](/scion/local/agent-credentials/#vertex-model-garden-vertex-ai)). Scion translates the project to `ANTHROPIC_VERTEX_PROJECT_ID` and the region to `CLOUD_ML_REGION` during container provisioning, for Claude Code's native Vertex AI client.
 
 If no credentials are found, the agent drops to a shell — run `claude setup-token` interactively, then capture the credential with `capture_auth.py` (see [Harness Authentication](/scion/local/agent-credentials/#capturing-credentials-from-a-running-agent)).
 
@@ -83,6 +83,7 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
   - `extra-large` &rarr; `fable`
   The resolved model is set in the environment overlay as `ANTHROPIC_MODEL`. If no model is requested, it falls back to the default model `opus`. Note that setting `ANTHROPIC_MODEL` directly in your settings or a template environment block acts as an explicit, non-overridable pin.
 - **Claude Code version guard:** Claude Code versions older than 2.1.280 reject Opus 5.5 (`claude-opus-5-5*`, and the `opus` alias) with a `400 claude_code_version_too_old` error. If the container's `claude` binary is older than 2.1.280 and the resolved model is Opus 5.5, `provision.py` falls back to `claude-opus-4-8` and logs a warning. Rebuild the `scion-claude` image with Claude Code 2.1.280 or later to use Opus 5.5.
+- **Failed-tool hook:** the bundled settings register the `PostToolUseFailure` hook, which reports failed tool calls. The image installs the latest Claude Code. A custom image needs Claude Code 2.0.56 or later for this hook: the published package contains the event from that version on, although the Claude Code changelog does not name the version that added it. Claude Code 2.1.101 and later also tolerate hook event names they do not recognize in `settings.json`.
 - **Auto-updater disabled:** Scion sets `DISABLE_AUTOUPDATER=1` in the container, so Claude Code does not try to update itself in the background. To upgrade Claude Code, rebuild the harness image.
 
 ### Effort (Thinking Level)
@@ -143,6 +144,7 @@ Codex supports two authentication methods (auto-detected in this order):
 - **Default Flags**: Runs with `--full-auto` approval mode enabled by default with unified flag formatting.
 - **Resume Support**: Automatically uses the `resume` positional argument to continue existing sessions.
 - **Notify Bridge**: Scion configures `notify = "sh ~/.codex/scion_notify.sh"` so Codex notify payloads can drive Scion state updates.
+- **Hooks**: `~/.codex/config.toml` registers the `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop` and `SubagentStop` hooks, each routed through `scion_notify.sh` to `sciontool hook --dialect=codex`. `SubagentStart`, `PermissionRequest`, `PreCompact`, `PostCompact` and `Interrupt` are not registered because Scion has no mapping for them.
 - **OpenTelemetry**: When telemetry is enabled, Scion performs telemetry reconciliation at start to ensure consistent OTLP export (default `localhost:4317`).
 
 ### Reasoning Effort (Thinking Level)
@@ -386,8 +388,8 @@ The following table summarizes the capabilities supported by each agent harness 
 | **Interject** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Interrupt Key | C-c | C-c | Esc / C-c | C-c | C-c | C-c | C-c | C-c | Esc |
 | **Enqueue** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Hooks** | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Support | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
+| **Hooks** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ |
+| Support | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ |
 | **OpenTelemetry** | ✅ | ✅  | ❌ | ✅  | ✅ | ❌ | ❌ | ✅ | ❌ |
 | **System Prompt Override** | ✅ | ✅ | ❌ | ❌ | ◐ | ◐ | ◐ | ✅ | ◐ |
 | **Auth: API Key** | ✅ | ✅ | ✅ | ✅ | ✅¹ | ✅ | ❌ | ✅ | ✅ |

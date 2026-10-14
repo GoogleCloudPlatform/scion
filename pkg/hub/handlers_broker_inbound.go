@@ -470,11 +470,22 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// package), so the gate here only skips the dispatch call; the
 	// persisted row below is stamped "deferred" via agentReincarnating.
 	agentReincarnating := reincarnationInFlight(agent)
+	// The hub's message record, written before the gate and the dispatch
+	// outcome (see logMessageRecord); the delivered line below is an event.
+	// Logged from a copy carrying the hub's recipient and conversation, so
+	// the dispatched message is unchanged.
+	recordMsg := *req.Message
+	recordMsg.Recipient = "agent:" + agent.Slug
+	recordMsg.RecipientID = agent.ID
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if !agentReincarnating {
 		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
 			GatewayTimeout(w, "Broker unreachable after 30s deadline")
 			return
 		} else if err != nil {
@@ -636,6 +647,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"source", "broker-inbound",
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
+			logging.AttrLogKind, logging.LogKindEvent,
 		}
 		if storeMsg.ConversationID != "" {
 			req.Message.ConversationID = storeMsg.ConversationID

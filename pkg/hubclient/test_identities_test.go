@@ -160,3 +160,81 @@ func TestTestIdentities_TokenListDelete(t *testing.T) {
 		t.Error("empty id: want error")
 	}
 }
+
+// The code below is a synthetic placeholder, not a credential.
+const fakeWebLoginCode = "tiwc_synthetic-placeholder"
+
+func TestTestIdentities_WebLoginCodeSentOnce(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/api/v1/test-identities/u%201/web-login-code" {
+			t.Errorf("got %s %s", r.Method, r.URL.EscapedPath())
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != "{}" && string(body) != "{}\n" {
+			t.Errorf("unexpected body %q", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"code":"` + fakeWebLoginCode + `","codeId":"c1","expiresAt":"2026-10-12T02:05:00Z"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithRetry(3, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := c.TestIdentities().WebLoginCode(context.Background(), "u 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != fakeWebLoginCode || resp.CodeID != "c1" || resp.ExpiresAt.UTC().Format("15:04:05") != "02:05:00" {
+		t.Errorf("unexpected response codeId=%q expiresAt=%v", resp.CodeID, resp.ExpiresAt)
+	}
+	if calls.Load() != 1 {
+		t.Errorf("mint sent %d times, want 1", calls.Load())
+	}
+}
+
+func TestTestIdentities_WebLoginCodeErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		check  func(error) bool
+	}{
+		{"not available", http.StatusNotFound, `{"error":{"code":"not_found","message":"test identity web sessions are not available on this hub"}}`, apiclient.IsNotFoundError},
+		{"server error not retried", http.StatusInternalServerError, `{"error":{"code":"internal_error","message":"x"}}`, func(err error) bool { return err != nil }},
+		{"empty code", http.StatusCreated, `{"codeId":"c1","expiresAt":"2026-10-12T02:05:00Z"}`, func(err error) bool { return err != nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL, WithRetry(3, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.TestIdentities().WebLoginCode(context.Background(), "u1")
+			if err == nil || resp != nil || !tc.check(err) {
+				t.Fatalf("got resp=%v err=%v", resp != nil, err)
+			}
+			if calls.Load() != 1 {
+				t.Errorf("mint sent %d times, want 1", calls.Load())
+			}
+		})
+	}
+	c, err := New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.TestIdentities().WebLoginCode(context.Background(), ""); err == nil {
+		t.Error("an empty id must be refused before any request")
+	}
+}

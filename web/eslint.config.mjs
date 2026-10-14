@@ -123,6 +123,7 @@ export default defineConfig([
   project(
     [
       'e2e/agent-store-count/*.ts',
+      'e2e/artifacts-access/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',
@@ -133,6 +134,9 @@ export default defineConfig([
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
       'e2e/test-hub-banner/*.ts',
+      'e2e/test-identity-session/*.ts',
+      'e2e/harness-selftest/*.ts',
+      'e2e/async-create/*.ts',
       'e2e/client-main-stub.ts',
       'e2e/event-source-stub.ts',
       'e2e/palette-focus.ts',

@@ -839,6 +839,107 @@ describe('scion-page-admin-server-config', () => {
       expect(server.hub?.host).toBeUndefined();
     });
 
+    function brokerHostField(el: HTMLElement): Element {
+      const label = queryAll(el, 'sl-tab-panel[name="broker"] label').find(
+        (l) => l.textContent?.trim() === 'Host'
+      );
+      expect(label).toBeDefined();
+      return label!.closest('.form-field')!;
+    }
+
+    const workstation = { settings_tier: 'db', layer0_editable: true };
+
+    function withBrokerHost(host: string | undefined, overrides: Record<string, unknown>) {
+      const base = makeBaseConfig(overrides) as any;
+      base.server.broker = host === undefined ? { enabled: true } : { enabled: true, host };
+      return base;
+    }
+
+    it('runtime broker host is editable on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('10.0.0.5', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 127.0.0.1 on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, workstation)));
+      const field = brokerHostField(element);
+      const input = field.querySelector('sl-input')!;
+      expect(input.getAttribute('value')).toBe('');
+      expect(input.getAttribute('placeholder')).toBe('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('a 0.0.0.0 runtime broker host counts as unset on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('0.0.0.0', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('an untouched empty runtime broker host is not sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), () => {});
+      const server = payload.server as Record<string, Record<string, unknown>> | undefined;
+      expect(server?.broker?.host).toBeUndefined();
+    });
+
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
     // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
     // every Layer-1 field the page shows must be sent explicitly when it is
     // cleared: "" / [] / null / false, never left out.
@@ -3164,6 +3265,239 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── Public URL pinned state (ptone/scion#3905) ──
+
+  describe('Public URL field (ptone/scion#3905)', () => {
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Public URL');
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function withStatus(tier: string, status: Record<string, unknown>) {
+      return makeBaseConfig({ settings_tier: tier, public_url_status: status });
+    }
+
+    it.each([
+      ['db', 'SCION_SERVER_HUB_ENDPOINT'],
+      ['db', '--base-url'],
+      ['db', 'SCION_SERVER_BASE_URL'],
+    ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus(tier, { effective: 'https://env.example.com', source: 'env', pinned_by: pin })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(`Set by ${pin}`);
+      expect(f.querySelector('.read-only-value')?.textContent).toContain('https://env.example.com');
+      expect(f.querySelector('.public-url-in-effect')).toBeNull();
+    });
+
+    it('a pinned public URL is not sent on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', {
+            effective: 'https://env.example.com',
+            source: 'env',
+            pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubPublicUrl = 'https://other.example.com';
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('public_url');
+    });
+
+    it('is editable when not pinned and shows the value in effect and its source', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', { effective: 'https://db.example.com', source: 'database' })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')?.getAttribute('value')).toBe('https://hub.example.com');
+      expect(f.querySelector('.read-only-badge')).toBeNull();
+      const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
+      expect(hint).toContain('https://db.example.com');
+      expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+    });
+
+    it('is editable when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(field(element).querySelector('sl-input')).not.toBeNull();
+    });
+
+    const supersededPublicUrl = {
+      endpoints: [
+        { key: 'server.hub.public_url', source: 'server_env' },
+        { key: 'image_registry', source: 'yaml' },
+      ],
+    };
+
+    function panelText(el: HTMLElement): string {
+      return query(el, '.superseded-panel')?.textContent ?? '';
+    }
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeTruthy();
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    it('a pinned public URL is not listed as superseded by database settings', async () => {
+      // While a setting pins the public URL, the hub leaves it out of
+      // superseded_keys (computeSupersededKeys); the page shows the list
+      // as the hub sends it (ptone/scion#4707).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: {
+              effective: 'https://env.example.com',
+              source: 'env',
+              pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+            },
+            superseded_keys: { endpoints: [{ key: 'image_registry', source: 'yaml' }] },
+          })
+        )
+      );
+      expect(panelText(element)).not.toContain('Public URL');
+      expect(panelText(element)).toContain('Image Registry');
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+    });
+
+    it('an unpinned public URL the database value supersedes is listed', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: { effective: 'https://file.example.com', source: 'file' },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).toContain('Public URL');
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+    });
+
+    it('names the layer each superseded value comes from', async () => {
+      // The hub reports a key that only the coded defaults set with source
+      // "default", and a seed value equal to the default with "seed_env"
+      // (ptone/scion#4983).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            superseded_keys: {
+              agent_defaults: [
+                { key: 'default_template', source: 'seed_env' },
+                { key: 'default_harness_config', source: 'yaml' },
+              ],
+              access: [{ key: 'server.hub.admin_emails', source: 'default' }],
+            },
+          })
+        )
+      );
+      const text = panelText(element);
+      expect(text).toContain('(from built-in default)');
+      expect(text).toContain('(from SCION_SEED_*)');
+      expect(text).toContain('(from settings.yaml)');
+    });
+
+    it('the Superseded badge goes away after the public URL is cleared', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://file.example.com', source: 'file' },
+        superseded_keys: { endpoints: [{ key: 'server.hub.public_url', source: 'yaml' }] },
+      }) as Record<string, any>;
+      cfg.server.hub.public_url = 'https://saved.example.com';
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: () => {
+            // After the clear the hub reports the bootstrap value in effect
+            // and nothing superseded.
+            delete cfg.superseded_keys;
+            cfg.server.hub.public_url = 'https://file.example.com';
+            return {
+              status: 200,
+              body: { reload: { applied_keys: [], pending_restart: ['server.hub.public_url'] } },
+            };
+          },
+        })
+      );
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+
+      (element as any).hubPublicUrl = '';
+      await (element as any).updateComplete;
+      await clickSave(element);
+
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+      expect(query(element, '.superseded-panel')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://file.example.com'
+      );
+    });
+
+    it('an echo save keeps the value in effect and reports no pending restart', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://hub.example.com', source: 'file' },
+      }) as Record<string, any>;
+      let sent: unknown;
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: (body) => {
+            sent = (body.server as Record<string, any> | undefined)?.hub?.public_url;
+            return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+          },
+        })
+      );
+      await clickSave(element);
+
+      expect(sent).toBe('https://hub.example.com');
+      expect(query(element, '.pending-restart')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://hub.example.com'
+      );
+    });
+  });
+
   // ── Structured save errors at the field/section (ptone/scion#3923) ──
 
   describe('Structured save errors shown at the field and section (ptone/scion#3923)', () => {
@@ -3497,7 +3831,9 @@ describe('scion-page-admin-server-config', () => {
             default_user_role: 'member',
             authorized_domains: [],
           },
-          github_app: {},
+          // Empty GitHub App fields are echoed as explicit clears
+          // (ptone/scion#4416).
+          github_app: { app_id: 0, api_base_url: '', installation_url: '' },
         },
         telemetry: {
           enabled: false,
@@ -3682,6 +4018,7 @@ describe('scion-page-admin-server-config', () => {
             stalled_threshold: '10m',
             gcp_iam_check_mode: 'enforce',
             gcp_iam_deny_unknown_policy: 'fail-closed',
+            observability: { metrics_enabled: true, tracing_enabled: false },
           },
           broker: {
             enabled: true,
@@ -3839,6 +4176,15 @@ describe('scion-page-admin-server-config', () => {
         clear: (el) => (el.agentSecretsUserScopeOnly = false),
         expected: false,
       },
+      // hub_observability: "cleared" is unset (Use default), sent as null.
+      'server.hub.observability.metrics_enabled': {
+        clear: (el) => (el.hubMetricsEnabled = null),
+        expected: null,
+      },
+      'server.hub.observability.tracing_enabled': {
+        clear: (el) => (el.hubTracingEnabled = null),
+        expected: null,
+      },
       // telemetry
       'telemetry.enabled': { clear: (el) => (el.telemetryEnabled = false), expected: false },
       'telemetry.cloud.enabled': {
@@ -3929,7 +4275,8 @@ describe('scion-page-admin-server-config', () => {
      * against that request.
      */
     const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
-      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: null },
+      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
       'server.github_app.api_base_url': {
         clear: (el) => (el.githubAppApiBaseUrl = ''),
         expected: '',
@@ -3945,18 +4292,12 @@ describe('scion-page-admin-server-config', () => {
     };
 
     /**
-     * Known payload gaps, reported on ptone/scion#3924 and not fixed by this
-     * test-only change: the GitHub App save sends app_id, api_base_url and
-     * installation_url as `|| undefined`, so a cleared value is left out and
-     * the server (GitHubAppConfigUpdateRequest, nil pointer = keep) keeps the
-     * stored one. The test asserts this exact list, so fixing a gap fails it
-     * until the entry is removed.
+     * Known payload gaps: GitHub App fields left out of the save when
+     * cleared. The three reported on ptone/scion#3924 (app_id, api_base_url,
+     * installation_url) were fixed in ptone/scion#4416. The test asserts this
+     * exact list, so a new gap fails it.
      */
-    const KNOWN_GITHUB_APP_GAPS = [
-      'server.github_app.api_base_url',
-      'server.github_app.app_id',
-      'server.github_app.installation_url',
-    ];
+    const KNOWN_GITHUB_APP_GAPS: string[] = [];
 
     const READ_ONLY_PROBE = 'readOnlyReason';
 
@@ -4112,6 +4453,287 @@ describe('scion-page-admin-server-config', () => {
       expect(unknown).toEqual([]);
     });
   });
+  describe('GitHub App card sends explicit clears (ptone/scion#4416)', () => {
+    const LOADED = {
+      app_id: 123,
+      api_base_url: 'https://ghe.example.com/api/v3',
+      webhooks_enabled: true,
+      installation_url: 'https://github.com/apps/x/installations/new',
+    };
+
+    /** Ways the mock hub can fail a request. */
+    interface MockFailures {
+      /** GET /api/v1/admin/server-config answers 500. */
+      configGet?: boolean;
+      /** GET /api/v1/github-app answers 500, or throws (network error). */
+      githubAppGet?: 'status' | 'throw';
+      /** PUT /api/v1/github-app answers 500 and stores nothing. */
+      githubAppPut?: boolean;
+      /** A GET /api/v1/github-app after a PUT waits for this to settle. */
+      holdGetAfterPut?: Promise<void>;
+    }
+
+    const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    /**
+     * A fetch handler whose GET /api/v1/github-app returns the stored
+     * config and whose PUT applies the sent non-secret keys to it, as the
+     * hub does (a sent "" or 0 replaces the stored value; an omitted key
+     * keeps it). The GET leaves out empty URLs, as the hub's omitempty does.
+     */
+    function statefulGitHubApp(
+      config: Record<string, unknown>,
+      fail: MockFailures = {}
+    ): {
+      handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+      puts: Array<Record<string, unknown>>;
+      stored: Record<string, unknown>;
+    } {
+      const stored: Record<string, unknown> = { ...LOADED };
+      const puts: Array<Record<string, unknown>> = [];
+      const base = createFetchHandler(config);
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        const isPut = init?.method === 'PUT';
+        if (fail.configGet && !isPut && path.includes('/api/v1/admin/server-config')) {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        }
+        if (!path.endsWith('/api/v1/github-app')) return base(url, init);
+        if (isPut) {
+          const body = JSON.parse(init.body as string) as Record<string, unknown>;
+          puts.push(body);
+          if (fail.githubAppPut) return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+          for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
+            if (k in body) stored[k] = body[k];
+          }
+        } else if (fail.holdGetAfterPut && puts.length > 0) {
+          return fail.holdGetAfterPut.then(storedResponse);
+        } else if (fail.githubAppGet === 'status') {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        } else if (fail.githubAppGet === 'throw') {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return storedResponse();
+      };
+      function storedResponse(): Promise<Response> {
+        const res: Record<string, unknown> = { ...stored, configured: true };
+        for (const k of ['api_base_url', 'installation_url']) {
+          if (!res[k]) delete res[k];
+        }
+        return jsonResponse(res);
+      }
+      return { handler, puts, stored };
+    }
+
+    /** The page members these tests drive. */
+    interface CardElement {
+      [state: string]: unknown;
+      handleSaveGitHubApp(): Promise<void>;
+      buildLayer1Payload(): { server?: { github_app?: Record<string, unknown> } };
+      buildFilePayload(): { server?: { github_app?: Record<string, unknown> } };
+    }
+
+    function saveButton(el: HTMLElement): HTMLElement {
+      const btn = query(el, 'sl-button[data-action="save-github-app"]');
+      expect(btn, 'card Save button').not.toBeNull();
+      return btn as HTMLElement;
+    }
+
+    const FIELDS = [
+      { state: 'githubAppId', key: 'app_id', cleared: 0 },
+      { state: 'githubAppApiBaseUrl', key: 'api_base_url', cleared: '' },
+      { state: 'githubAppInstallationUrl', key: 'installation_url', cleared: '' },
+    ] as const;
+
+    for (const field of FIELDS) {
+      it(`clearing ${field.key} sends ${JSON.stringify(field.cleared)}, the stored value is removed, and the other fields are unchanged`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' })
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el[field.state]).toEqual(LOADED[field.key]);
+
+        el[field.state] = field.cleared;
+        await el.handleSaveGitHubApp();
+
+        expect(puts).toHaveLength(1);
+        expect(puts[0]![field.key]).toBe(field.cleared);
+        expect(stored[field.key]).toBe(field.cleared);
+        // Untouched fields go back as loaded.
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(puts[0]![other.key], other.key).toEqual(LOADED[other.key]);
+        }
+        expect(puts[0]!.webhooks_enabled).toBe(true);
+        // Secrets are sent only when typed in.
+        expect('private_key' in puts[0]!).toBe(false);
+        expect('webhook_secret' in puts[0]!).toBe(false);
+        // The main save's echo carries the clear too.
+        const echo = el.buildLayer1Payload().server!.github_app!;
+        expect(echo[field.key]).toBe(field.cleared);
+      });
+    }
+
+    it('a set value is sent as entered', async () => {
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 456;
+      el.githubAppApiBaseUrl = 'https://ghe2.example.com/api/v3';
+      el.githubAppInstallationUrl = 'https://github.com/apps/y/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      await el.handleSaveGitHubApp();
+      expect(puts[0]).toEqual({
+        app_id: 456,
+        api_base_url: 'https://ghe2.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/y/installations/new',
+        private_key: 'PEM',
+      });
+    });
+
+    // A card that did not load holds defaults (app_id 0, empty URLs), not
+    // the stored config. Saving them would clear the stored App, so the
+    // card cannot be saved and the main save leaves github_app out.
+    const LOAD_FAILURES: Array<{ name: string; fail: MockFailures }> = [
+      { name: 'GET server-config answers 500', fail: { configGet: true } },
+      { name: 'GET github-app answers 500', fail: { githubAppGet: 'status' } },
+      { name: 'GET github-app throws', fail: { githubAppGet: 'throw' } },
+    ];
+
+    for (const { name, fail } of LOAD_FAILURES) {
+      it(`${name}: the card cannot be saved and sends no PUT`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' }),
+          fail
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el.githubAppLoaded).toBe(false);
+        expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+        expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+
+        // Even a direct call (or a typed secret) sends nothing.
+        el.githubAppPrivateKey = 'PEM';
+        await el.handleSaveGitHubApp();
+        expect(puts).toEqual([]);
+        expect(stored).toEqual(LOADED);
+      });
+    }
+
+    for (const { name, fail } of LOAD_FAILURES.filter((f) => !f.fail.configGet)) {
+      for (const tier of ['db', 'file'] as const) {
+        it(`${name}: the ${tier} main save leaves github_app out`, async () => {
+          // The server-config GET carries a github_app block, so the
+          // payload would echo it if the card's load were not checked.
+          const base = makeBaseConfig({ settings_tier: tier });
+          const config = {
+            ...base,
+            server: { ...(base.server as Record<string, unknown>), github_app: { app_id: 123 } },
+          };
+          const { handler } = statefulGitHubApp(config, fail);
+          element = await createComponent(handler);
+          const el = element as unknown as CardElement;
+          const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+          expect(payload.server?.github_app).toBeUndefined();
+        });
+      }
+    }
+
+    it('a loaded card can be saved', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      expect((element as unknown as CardElement).githubAppLoaded).toBe(true);
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+    });
+
+    it('the reload after a card save does not show the "did not load" hint while in flight', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        holdGetAfterPut: hold,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & { updateComplete: Promise<boolean> };
+      el.githubAppApiBaseUrl = '';
+      const saving = el.handleSaveGitHubApp();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await el.updateComplete;
+      // The PUT is done and the reload GET is held.
+      expect(puts).toHaveLength(1);
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+
+      release();
+      await saving;
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('a reload that fails after a loaded card disables Save and shows the hint', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & {
+        updateComplete: Promise<boolean>;
+        loadGitHubAppConfig(): Promise<void>;
+      };
+      expect(el.githubAppLoaded).toBe(true);
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await el.loadGitHubAppConfig();
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+    });
+
+    it('main save with the card untouched echoes the loaded values', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    it('main save after a failed card save still echoes the loaded values', async () => {
+      const { handler, puts, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        githubAppPut: true,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 0;
+      el.githubAppApiBaseUrl = '';
+      await el.handleSaveGitHubApp();
+      expect(puts).toHaveLength(1);
+      expect(stored).toEqual(LOADED);
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    for (const tier of ['db', 'file'] as const) {
+      it(`${tier} mode main save echoes empty GitHub App fields as explicit clears`, async () => {
+        const { handler, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: tier }));
+        stored.app_id = 0;
+        stored.api_base_url = '';
+        stored.installation_url = '';
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+        expect(payload.server!.github_app).toEqual({
+          app_id: 0,
+          api_base_url: '',
+          webhooks_enabled: true,
+          installation_url: '',
+        });
+      });
+    }
+  });
 });
 
 // ── Save report: keys applied now vs pending a restart (ptone/scion#3904) ──
@@ -4187,6 +4809,54 @@ describe('save report', () => {
     expect(shadowText(element)).toContain('Reloaded: log_level');
   });
 
+  it('lists skipped keys with their reasons apart from the applied keys', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'notifications'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name'],
+      pending_restart: [],
+      skipped: [
+        {
+          key: 'server.notification_channels',
+          reason: 'Notification channel 2 of 2 failed validation and is not in use.',
+        },
+      ],
+    });
+    const skipped = query(element, '.reload-info .skipped-keys');
+    expect(skipped).not.toBeNull();
+    expect(skipped!.textContent).toContain('Saved but not applied');
+    expect(skipped!.textContent).toContain('server.notification_channels');
+    expect(skipped!.textContent).toContain('Notification channel 2 of 2 failed validation');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).not.toContain('server.notification_channels');
+  });
+
+  it('shows no "Applied now" line when every changed key was skipped', async () => {
+    element = await saveWith({
+      applied: ['federation'],
+      requires_restart: [],
+      applied_keys: [],
+      pending_restart: [],
+      skipped: [{ key: 'server.federation.enabled', reason: 'Could not be applied.' }],
+    });
+    expect(query(element, '.reload-info .applied-keys')).toBeNull();
+    expect(query(element, '.reload-info .skipped-keys')).not.toBeNull();
+  });
+
+  it('shows no skipped notice when nothing was skipped', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      skipped: [],
+    });
+    expect(query(element, '.reload-info .skipped-keys')).toBeNull();
+  });
+
   it('shows no restart notice when every changed key applied live', async () => {
     element = await saveWith({
       applied: ['lifecycle'],
@@ -4196,5 +4866,261 @@ describe('save report', () => {
     });
     expect(query(element, '.reload-info .pending-restart')).toBeNull();
     expect(query(element, '.reload-info .applied-keys')).not.toBeNull();
+  });
+});
+
+// ── Hub observability export switches (ptone/scion#4914) ──
+
+describe('hub observability export switches', () => {
+  let element: HTMLElement | null = null;
+  const METRICS_KEY = 'server.hub.observability.metrics_enabled';
+  const TRACING_KEY = 'server.hub.observability.tracing_enabled';
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const EXPORT_STATUS = {
+    project: { id: 'meta-project', source: 'metadata' },
+    metrics: {
+      exporter: 'metrics',
+      setting: true,
+      enabled: true,
+      basis: 'setting',
+      reason: 'server.hub.observability.metrics_enabled=true',
+      project: { id: 'meta-project', source: 'metadata' },
+    },
+    tracing: {
+      exporter: 'tracing',
+      setting: null,
+      enabled: false,
+      basis: 'legacy',
+      reason:
+        'server.hub.observability.tracing_enabled unset; off because SCION_TRACING_ENABLED is not set',
+      project: {},
+    },
+  };
+
+  /** A hosted DB-tier GET with the given switches and export status. */
+  function obsConfig(
+    observability: Record<string, unknown> | undefined,
+    extra: Record<string, unknown> = {}
+  ): Record<string, any> {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      observability_export: EXPORT_STATUS,
+      ...extra,
+    }) as Record<string, any>;
+    if (observability) cfg.server.hub.observability = observability;
+    return cfg;
+  }
+
+  async function render(
+    cfg: Record<string, unknown>,
+    putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown }
+  ): Promise<HTMLElement> {
+    return createComponent(
+      createFetchHandler(cfg, {
+        schemaResponse: registrySchemaResponse(),
+        ...(putHandler ? { putHandler } : {}),
+      })
+    );
+  }
+
+  function exportSwitch(el: HTMLElement, key: string): HTMLElement | null {
+    return query(el, `sl-switch.hub-export-switch[data-key="${key}"]`) as HTMLElement | null;
+  }
+
+  async function save(el: HTMLElement): Promise<void> {
+    await (el as any).updateComplete;
+    const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(btn).toBeDefined();
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  it('shows a toggle per exporter, checked from the saved switch', async () => {
+    element = await render(obsConfig({ metrics_enabled: true, tracing_enabled: false }));
+    const metrics = exportSwitch(element, METRICS_KEY);
+    const tracing = exportSwitch(element, TRACING_KEY);
+    expect(metrics).not.toBeNull();
+    expect(tracing).not.toBeNull();
+    expect(metrics!.hasAttribute('checked')).toBe(true);
+    expect(tracing!.hasAttribute('checked')).toBe(false);
+    expect(metrics!.textContent).toContain('Export hub metrics');
+    expect(tracing!.textContent).toContain('Export hub traces');
+    // A set switch can be returned to the default rule.
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+  });
+
+  it('an unset switch shows the state in effect and the default rule', async () => {
+    element = await render(obsConfig(undefined));
+    // Metrics runs at startup, so the unset toggle shows on; tracing is off.
+    expect(exportSwitch(element, METRICS_KEY)!.hasAttribute('checked')).toBe(true);
+    expect(exportSwitch(element, TRACING_KEY)!.hasAttribute('checked')).toBe(false);
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).toBeNull();
+    const hint = query(element, `.hub-export-restart[data-key="${TRACING_KEY}"]`);
+    expect(hint!.textContent).toContain('Not set: on when SCION_TRACING_ENABLED');
+  });
+
+  it('says each switch applies after a restart', async () => {
+    element = await render(obsConfig({ metrics_enabled: false }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const hint = query(element, `.hub-export-restart[data-key="${key}"]`);
+      expect(hint, key).not.toBeNull();
+      expect(hint!.textContent).toContain('Applies after restart.');
+    }
+  });
+
+  it('shows the exporters in effect and the export project with its source, read-only', async () => {
+    element = await render(obsConfig({ metrics_enabled: true }));
+    const project = query(element, '.hub-export-project');
+    expect(project).not.toBeNull();
+    expect(project!.textContent).toContain('meta-project');
+    expect(project!.textContent).toContain('(source: metadata)');
+    // No editable control for the project, endpoint or credentials.
+    const section = query(element, '.section.hub-observability')!;
+    expect(section.querySelectorAll('sl-input').length).toBe(0);
+    expect(section.textContent).toContain('Not editable here.');
+
+    const metricsInEffect = query(element, `.hub-export-in-effect[data-key="${METRICS_KEY}"]`);
+    expect(metricsInEffect!.textContent).toContain('In effect: on');
+    const tracingInEffect = query(element, `.hub-export-in-effect[data-key="${TRACING_KEY}"]`);
+    expect(tracingInEffect!.textContent).toContain('In effect: off');
+    expect(tracingInEffect!.textContent).toContain('SCION_TRACING_ENABLED is not set');
+  });
+
+  it('shows the source of an operator-set project and when none resolved', async () => {
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: { ...EXPORT_STATUS, project: { id: 'env-project', source: 'env' } },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('(source: env)');
+    element.remove();
+
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: {
+          ...EXPORT_STATUS,
+          project: { detail: 'server.hub.gcp_project_id is not set' },
+        },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('None resolved');
+    expect(shadowText(element)).toContain('server.hub.gcp_project_id is not set');
+    expect(query(element, '.hub-export-project-remedy')!.textContent).toContain(
+      'Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud.'
+    );
+  });
+
+  it('marks an env-set switch with the env badge', async () => {
+    element = await render(
+      obsConfig({ metrics_enabled: true }, { settings_tier: 'db', env_overrides: [METRICS_KEY] })
+    );
+    const sw = exportSwitch(element, METRICS_KEY);
+    expect(sw).not.toBeNull();
+    const badge = sw!.previousElementSibling;
+    expect(badge?.classList.contains('env-badge')).toBe(true);
+    const tracingBadge = exportSwitch(element, TRACING_KEY)!.previousElementSibling;
+    expect(tracingBadge?.classList.contains('env-badge') ?? false).toBe(false);
+  });
+
+  it('sends only a changed switch, and null to return it to the default', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig({ metrics_enabled: true }), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [METRICS_KEY, TRACING_KEY] } },
+      };
+    });
+    const el = element as any;
+
+    // Nothing changed: the switches are not sent.
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+
+    el.hubTracingEnabled = true;
+    el.hubMetricsEnabled = null;
+    await save(element);
+    expect(bodies[1].server.hub.observability).toEqual({
+      metrics_enabled: null,
+      tracing_enabled: true,
+    });
+
+    // The save report lists both keys as applying after a restart.
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain(METRICS_KEY);
+    expect(pending!.textContent).toContain(TRACING_KEY);
+  });
+
+  it('labels an unset switch as the default next to the toggle', async () => {
+    element = await render(obsConfig(undefined));
+    const metrics = query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`);
+    const tracing = query(element, `.hub-export-default-state[data-key="${TRACING_KEY}"]`);
+    expect(metrics!.textContent).toContain('Default (on)');
+    expect(tracing!.textContent).toContain('Default (off)');
+  });
+
+  it('labels an unset switch as not reported when the hub gives no status, not as off', async () => {
+    element = await render(obsConfig(undefined, { observability_export: undefined }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const label = query(element, `.hub-export-default-state[data-key="${key}"]`);
+      expect(label, key).not.toBeNull();
+      expect(label!.textContent).toContain('Default (state not reported)');
+      expect(label!.textContent).not.toContain('Default (off)');
+    }
+  });
+
+  it('toggling an unset switch twice leaves it unset and sends nothing', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+    });
+    // Metrics runs at startup, so the unset toggle starts checked.
+    const sw = exportSwitch(element, METRICS_KEY)! as HTMLInputElement;
+    sw.checked = false;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBe(false);
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBeNull();
+    expect(query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+  });
+
+  it('toggling the switch sets the value that is saved', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [TRACING_KEY] } },
+      };
+    });
+    const sw = exportSwitch(element, TRACING_KEY)! as HTMLInputElement;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect(query(element, `.hub-export-default[data-key="${TRACING_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0].server.hub.observability).toEqual({ tracing_enabled: true });
   });
 });

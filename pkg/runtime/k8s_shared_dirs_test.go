@@ -365,9 +365,6 @@ func TestCreateSharedDirPVCs_SettingsResolvedClassAndSize(t *testing.T) {
 // one logs a warning naming the claim, both classes and (when Pending) the
 // phase; a matching class or no requested class logs nothing.
 func TestCreateSharedDirPVCs_ReuseWarnsOnStorageClassMismatch(t *testing.T) {
-	oldLog := runtimeLog
-	defer func() { runtimeLog = oldLog }()
-
 	strPtr := func(s string) *string { return &s }
 	tests := []struct {
 		name          string
@@ -385,7 +382,7 @@ func TestCreateSharedDirPVCs_ReuseWarnsOnStorageClassMismatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			runtimeLog = slog.New(slog.NewTextHandler(&buf, nil))
+			setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
 
 			rt, clientset, _ := newTestK8sRuntime()
 			ctx := context.Background()

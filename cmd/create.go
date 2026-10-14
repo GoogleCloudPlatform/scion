@@ -51,6 +51,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
+		// A target-hub profile refuses the flags that need local state
+		// before anything else (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+
 		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
 			return asUsageError(err)
 		}
@@ -72,27 +78,20 @@ The agent is provisioned but not started, even when a task is given. Run
 		// Check if Hub should be used, excluding the target agent from sync requirements.
 		// This allows creating an agent even if it already exists on Hub (recreate scenario)
 		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
+		if err != nil {
+			return err
+		}
+
+		// Load inline config if --config was specified (needed for both
+		// local and Hub paths).
+		inlineCfg, err := loadCreateInlineConfig()
 		if err != nil {
 			return err
 		}
 
 		if hubCtx != nil {
-			return createAgentViaHub(hubCtx, agentName, task)
-		}
-
-		// Load inline config if --config was specified
-		var inlineCfg *api.ScionConfig
-		if inlineConfigPath != "" {
-			var inlineConfigDir string
-			var loadErr error
-			inlineCfg, inlineConfigDir, loadErr = loadInlineConfig(inlineConfigPath)
-			if loadErr != nil {
-				return loadErr
-			}
-			if loadErr := resolveInlineConfigContent(inlineCfg, inlineConfigDir); loadErr != nil {
-				return loadErr
-			}
+			return createAgentViaHub(hubCtx, agentName, task, inlineCfg)
 		}
 
 		// Local mode
@@ -100,15 +99,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		mgr := agent.NewManager(rt)
 
 		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
+		effectiveBranch := resolveBranch(branch, inlineCfg)
 		effectiveTask := task
 		effectiveHarnessConfig := harnessConfigFlag
 		effectiveImage := agentImage
 
 		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
 			if effectiveTask == "" && inlineCfg.Task != "" {
 				effectiveTask = inlineCfg.Task
 			}
@@ -344,7 +340,26 @@ func writeHubCreateText(w io.Writer, agentName string, resp *hubclient.CreateAge
 	_, _ = io.WriteString(w, b.String())
 }
 
-func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error {
+// loadCreateInlineConfig loads the --config file, if one was given, and
+// resolves its file:// content fields. It returns nil without --config.
+func loadCreateInlineConfig() (*api.ScionConfig, error) {
+	if inlineConfigPath == "" {
+		return nil, nil
+	}
+	cfg, configDir, err := loadInlineConfig(inlineConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveInlineConfigContent(cfg, configDir); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// createAgentViaHub provisions the agent through the Hub. inlineCfg is the
+// --config file's config (nil without --config); it is sent as the request
+// config, as startAgentViaHub does, so the Hub stores it with the agent.
+func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -397,7 +412,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
@@ -407,7 +423,14 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
-	if agentImage != "" {
+	// The inline config from --config is the base; CLI flags override
+	// specific fields (ptone/scion#4012).
+	if inlineCfg != nil {
+		req.Config = inlineCfg
+		if agentImage != "" {
+			req.Config.Image = agentImage
+		}
+	} else if agentImage != "" {
 		req.Config = &api.ScionConfig{
 			Image: agentImage,
 		}
@@ -464,7 +487,7 @@ func init() {
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -482,10 +505,11 @@ func init() {
 
 	// Agent message mode flag
 	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project")
+		"Agent message mode: none, lineage, branch, project, hub\n"+
+			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
@@ -493,10 +517,8 @@ func init() {
 // flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
 func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
-		NoHub:           noHub,
 		AutoConfirm:     true,
 		NonInteractive:  nonInteractive,
-		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}
 }

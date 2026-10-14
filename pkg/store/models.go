@@ -168,6 +168,9 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -192,6 +195,14 @@ type Agent struct {
 	// changed since the column was added. Like RunID, UpdateAgent never
 	// writes it.
 	RunIDUpdatedAt *time.Time `json:"-"`
+
+	// SSHHostKey is the authorized_keys line of the agent's SSH host key
+	// for the run SSHHostKeyRunID. The reported host key is bound to the
+	// reporting agent's current run: the only writer is SetAgentSSHHostKey,
+	// and readers use it only while SSHHostKeyRunID equals RunID. Like
+	// RunID, UpdateAgent never writes them.
+	SSHHostKey      string `json:"-"`
+	SSHHostKeyRunID string `json:"-"`
 
 	// RunIntent is whether the agent should be running ("running" or
 	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
@@ -574,7 +585,11 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). The input is never mutated.
+// ResponseView/MarshalJSON above). ClearedFields is dropped for every
+// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// entries name env keys a viewer without attach access must not learn, and
+// leaving it out means a GET echoed back into a PATCH never carries it. The
+// input is never mutated.
 //
 // This redaction lives here, in the response-view copy, and deliberately
 // not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
@@ -593,6 +608,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		return nil
 	}
 	copied := *cfg
+	copied.ClearedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -1120,6 +1136,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): the hub telemetry default in
+	// HubAgentDefaults.Telemetry and the project telemetry policy in
+	// TelemetryPolicy on create, start and restart. Only for such a broker
+	// does the hub stop writing those values into InlineConfig
+	// (ptone/scion#4222). Refreshed by every heartbeat.
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1362,8 +1385,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"
@@ -1433,17 +1459,37 @@ type User struct {
 	// Session revocation
 	SessionGeneration int64 `json:"sessionGeneration,omitempty"`
 
-	// Kind is UserKindHuman (the default; empty reads as human) or
-	// UserKindTestFixture. It is written only at create and never changes.
-	// Only UserStore.CreateTestFixtureUser can write UserKindTestFixture.
-	// It is never bound from a request body (json:"-").
+	// Kind is UserKindHuman (the default; empty reads as human),
+	// UserKindTestFixture, UserKindTestHubAdmin or UserKindTestSuperAdmin.
+	// It is written only at create and never changes. Only
+	// UserStore.CreateTestFixtureUser can write UserKindTestFixture, and
+	// only Store.CreateTestAdminUser the two admin kinds. It is never bound
+	// from a request body (json:"-").
 	Kind string `json:"-"`
-	// ExpiresAt, IssuedBy and Purpose are set only on test-fixture rows,
-	// at create, and never change. They are never bound from a request
-	// body (json:"-").
+	// ExpiresAt, IssuedBy and Purpose are set only on test identity rows
+	// (every kind other than human), at create, and never change. They are
+	// never bound from a request body (json:"-").
 	ExpiresAt *time.Time `json:"-"`
 	IssuedBy  *string    `json:"-"`
 	Purpose   *string    `json:"-"`
+	// IssuanceID and IssuerCredentialID are set only on admin-kind test
+	// identity rows, at create, and never change. IssuanceID identifies
+	// the issuance (audit correlation); IssuerCredentialID is the ID of the
+	// issuer's user access token when the issuer used one, and empty for a
+	// session. Never bound from a request body (json:"-").
+	IssuanceID         *string `json:"-"`
+	IssuerCredentialID *string `json:"-"`
+	// FederatedEmail and HomeIssuer are set only on UserKindFederated
+	// rows, at create, and never change: the user's lower-cased email as
+	// asserted by HomeIssuer, the canonical URL of the trusted issuer.
+	// Such a row's Email is a synthetic address (FederatedSyntheticEmail).
+	// Never bound from a request body (json:"-").
+	FederatedEmail *string `json:"-"`
+	HomeIssuer     *string `json:"-"`
+	// IssuerDelegationID is set only on a test-fixture row issued through
+	// a workload-bound issuer delegation (TestIdentityDelegation), at
+	// create, and never changes. Nil for session and PAT issuance.
+	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
 	Created   time.Time `json:"created"`
@@ -1451,9 +1497,69 @@ type User struct {
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
 }
 
-// IsTestFixture reports whether u is a hub-issued test fixture.
+// IsTestFixture reports whether u is a hub-issued member-tier test fixture
+// (kind test_fixture). It is false for the admin kinds.
 func (u *User) IsTestFixture() bool {
 	return u != nil && u.Kind == UserKindTestFixture
+}
+
+// IsTestAdmin reports whether u is a hub-issued admin-kind test identity
+// (test_hub_admin or test_super_admin).
+func (u *User) IsTestAdmin() bool {
+	return u != nil && IsTestAdminKind(u.Kind)
+}
+
+// IsHumanKind reports whether u is positively an ordinary (human) user:
+// kind "" (the column default) or "human". It is false for every test
+// identity kind and for any unrecognized kind, so code that admits only
+// humans fails closed on kind skew. Use it, not !IsTestIdentity(), wherever
+// a check must refuse anything that is not a known human row.
+func (u *User) IsHumanKind() bool {
+	return u != nil && (u.Kind == "" || u.Kind == UserKindHuman)
+}
+
+// IsFederated reports whether u is a federated account (kind federated).
+func (u *User) IsFederated() bool {
+	return u != nil && u.Kind == UserKindFederated
+}
+
+// IsTestIdentity reports whether u is any hub-issued test identity: every
+// kind other than human. A row with an empty or unrecognized kind is not
+// reported as a test identity here; authorization reads the kind through
+// the hub's kindForPrincipal, which refuses an unrecognized kind.
+func (u *User) IsTestIdentity() bool {
+	return u != nil && (u.Kind == UserKindTestFixture || IsTestAdminKind(u.Kind))
+}
+
+// ExpiredTestFixtureQuery selects test fixture users by expiry for
+// Store.ListExpiredTestFixtureUsers. A fixture row always has an expiry
+// (the users_test_fixture_expiry_check CHECK), so every selected row has
+// one.
+type ExpiredTestFixtureQuery struct {
+	// ExpiredAtOrBefore keeps rows with expires_at <= ExpiredAtOrBefore.
+	// Required.
+	ExpiredAtOrBefore time.Time
+	// ExpiredAfter, when non-zero, keeps rows with expires_at >
+	// ExpiredAfter.
+	ExpiredAfter time.Time
+	// AfterID, when non-empty, is a keyset cursor: only rows strictly after
+	// (AfterExpiresAt, AfterID) in (expires_at, id) order are returned.
+	AfterExpiresAt time.Time
+	AfterID        string
+	// Limit caps the rows returned when positive.
+	Limit int
+}
+
+// FixtureRootedResources is what Store.ListFixtureRootedResources found for
+// one fixture root: every resource whose stamp names it.
+type FixtureRootedResources struct {
+	// Agents includes soft-deleted agents.
+	Agents    []Agent
+	Schedules []Schedule
+	Groups    []Group
+	Projects  []Project
+	// Truncated is true when a kind had more rows than the limit.
+	Truncated bool
 }
 
 // FixtureProvenance is the creation-time test-identity provenance stamp of
@@ -1502,13 +1608,133 @@ const (
 	UserStatusActive    = "active"
 	UserStatusSuspended = "suspended"
 	UserStatusInvited   = "invited"
+	// UserStatusPending is used only on UserKindFederated rows: the
+	// account was recorded before the user's first verified request.
+	UserStatusPending = "pending"
 )
 
 // User kind constants.
 const (
 	UserKindHuman       = "human"
 	UserKindTestFixture = "test_fixture"
+	// UserKindTestHubAdmin is a hub-issued test identity holding a real,
+	// expiring system hub-admin binding (admin tier, ptone/scion#4240).
+	UserKindTestHubAdmin = "test_hub_admin"
+	// UserKindTestSuperAdmin is a hub-issued test identity holding a real,
+	// expiring system super-admin binding. Its issuance stays refused until
+	// the admin tier's policy phase ships.
+	UserKindTestSuperAdmin = "test_super_admin"
+	// UserKindFederated is a local account for a user of a trusted
+	// external issuer. Only Store.CreateFederatedUser writes it.
+	UserKindFederated = "federated"
 )
+
+// IsTestAdminKind reports whether kind is one of the admin test identity
+// kinds.
+func IsTestAdminKind(kind string) bool {
+	return kind == UserKindTestHubAdmin || kind == UserKindTestSuperAdmin
+}
+
+// TestIdentityIssuanceCreatedBy is the CreatedBy of the role bindings the
+// test identity issuance paths create: the member tier's hub grants and the
+// admin kinds' system binding. It is deliberately distinct from
+// AdminAPICreatedBy, so super-admin reconciliation never counts such a
+// binding as an intended administrator.
+const TestIdentityIssuanceCreatedBy = "test-identity-issuance"
+
+// Reserved email domains of the admin test identity kinds, one per kind,
+// so a domain identifies the kind without a join. Like
+// TestFixtureEmailDomain, only the issuance path creates a user in them.
+const (
+	TestHubAdminEmailDomain   = "scion-test-hub-admin.invalid"
+	TestSuperAdminEmailDomain = "scion-test-super-admin.invalid"
+)
+
+// TestAdminEmailDomain returns the reserved email domain of an admin test
+// identity kind, and "" for any other kind.
+func TestAdminEmailDomain(kind string) string {
+	switch kind {
+	case UserKindTestHubAdmin:
+		return TestHubAdminEmailDomain
+	case UserKindTestSuperAdmin:
+		return TestSuperAdminEmailDomain
+	}
+	return ""
+}
+
+// TestAdminRole returns the stored role of an admin test identity kind:
+// member for test_hub_admin (as a real hub-admin), admin for
+// test_super_admin (the legacy admin fast path reads the role). It
+// returns "" for any other kind.
+func TestAdminRole(kind string) string {
+	switch kind {
+	case UserKindTestHubAdmin:
+		return UserRoleMember
+	case UserKindTestSuperAdmin:
+		return UserRoleAdmin
+	}
+	return ""
+}
+
+// emailInDomain reports whether email is in domain or one of its
+// subdomains, trimming surrounding white space and ignoring case.
+func emailInDomain(email, domain string) bool {
+	e := strings.ToLower(strings.TrimSpace(email))
+	at := strings.LastIndex(e, "@")
+	if at < 0 {
+		return false
+	}
+	d := strings.TrimSuffix(e[at+1:], ".")
+	return d == domain || strings.HasSuffix(d, "."+domain)
+}
+
+// TestIdentityEmailKind returns the test identity kind whose reserved
+// domain email is in, and "" when email is in none of them.
+func TestIdentityEmailKind(email string) string {
+	switch {
+	case emailInDomain(email, TestFixtureEmailDomain):
+		return UserKindTestFixture
+	case emailInDomain(email, TestHubAdminEmailDomain):
+		return UserKindTestHubAdmin
+	case emailInDomain(email, TestSuperAdminEmailDomain):
+		return UserKindTestSuperAdmin
+	}
+	return ""
+}
+
+// IsReservedTestIdentityEmail reports whether email is in any test identity
+// domain: the member fixture domain or either admin kind domain. Every
+// path that resolves or creates a user by email, other than issuance and
+// the hub-issued JWT, refuses such an email.
+func IsReservedTestIdentityEmail(email string) bool {
+	return TestIdentityEmailKind(email) != ""
+}
+
+// TestIdentityDelegation is a workload-bound issuer delegation
+// (ptone/scion#4240, phase X2): a human grantor delegates test identity
+// issuance with one scope to one workload identity, pinned by its Google
+// subject. It holds no secret. Only the dedicated delegation store methods
+// write it; every field except RevokedAt and RevokedBy is immutable.
+type TestIdentityDelegation struct {
+	ID          string
+	GrantorID   string
+	WorkloadSub string
+	// Scope is the single delegated scope (test_identity:issue).
+	Scope string
+	// MemberCap is the number of live test identities the delegation may
+	// hold at once.
+	MemberCap int
+	Label     string
+	Created   time.Time
+	ExpiresAt time.Time
+	RevokedAt *time.Time
+	RevokedBy *string
+}
+
+// LiveAt reports whether d is neither revoked nor expired at now.
+func (d *TestIdentityDelegation) LiveAt(now time.Time) bool {
+	return d != nil && d.RevokedAt == nil && now.Before(d.ExpiresAt)
+}
 
 // TestFixtureEmailDomain is the reserved email domain of hub-issued test
 // fixture users. Only the issuance path creates a user in it; every other
@@ -1520,19 +1746,34 @@ const TestFixtureEmailDomain = "scion-fixture.invalid"
 // The comparison trims surrounding white space and ignores case. A
 // subdomain of the reserved domain counts as reserved too.
 func IsTestFixtureEmail(email string) bool {
-	e := strings.ToLower(strings.TrimSpace(email))
-	at := strings.LastIndex(e, "@")
-	if at < 0 {
-		return false
-	}
-	domain := strings.TrimSuffix(e[at+1:], ".")
-	return domain == TestFixtureEmailDomain || strings.HasSuffix(domain, "."+TestFixtureEmailDomain)
+	return emailInDomain(email, TestFixtureEmailDomain)
 }
 
 // ErrTestFixtureKindRefused is returned when a path other than
 // UserStore.CreateTestFixtureUser tries to create a test-fixture user, or a
 // user in TestFixtureEmailDomain.
 var ErrTestFixtureKindRefused = errors.New("test fixture users can only be created by the test identity issuance path")
+
+// TestIdentityLoginCode is a single-use web-login code for a test identity
+// (ptone/scion#4240, phase WS1). Only the hash of the code is stored. A
+// user holds at most one; see UserStore.ReplaceTestIdentityLoginCode.
+type TestIdentityLoginCode struct {
+	ID                 string
+	UserID             string
+	CodeHash           string
+	IssuedBy           string
+	IssuerCredentialID string
+	ExpiresAt          time.Time
+	ConsumedAt         *time.Time
+	Created            time.Time
+}
+
+// Errors of UserStore.ConsumeTestIdentityLoginCode for a code hash that
+// exists but cannot be redeemed. An unknown hash returns ErrNotFound.
+var (
+	ErrTestIdentityLoginCodeConsumed = errors.New("test identity login code already used")
+	ErrTestIdentityLoginCodeExpired  = errors.New("test identity login code expired")
+)
 
 // Visibility constants - re-exported from api package for convenience.
 // The api package is the canonical source for these values.
@@ -1848,7 +2089,27 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent. Rows
+	// stored before attempts were recorded read 0.
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is NotificationOutcomeDelivered, NotificationOutcomeFailed,
+	// or empty when no outcome is recorded (pending, in flight, or a row
+	// stored before outcomes were recorded, whose Dispatched flag keeps its
+	// old meaning).
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
+
+// Notification.DispatchOutcome values.
+const (
+	// NotificationOutcomeDelivered: the notification was delivered to its
+	// subscriber agent.
+	NotificationOutcomeDelivered = "delivered"
+	// NotificationOutcomeFailed: dispatch gave up without delivering, either
+	// because retries were exhausted (notificationRetryMaxAge in pkg/hub) or
+	// because the subscription, subscriber or watched agent is gone. The row
+	// stays dispatched so the sweep does not retry it.
+	NotificationOutcomeFailed = "failed"
+)
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -3294,6 +3555,21 @@ type RoleDefinition struct {
 	System      bool      `json:"system"`      // true = seeded, not user-modifiable
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+	// ConfersMembership reports whether a binding of this role makes its
+	// principal a project member. Every role confers membership except
+	// the seeded project-visitor role. CreateRoleDefinition stores nil
+	// as true. Read it through ConfersProjectMembership.
+	ConfersMembership *bool `json:"confersMembership,omitempty"`
+}
+
+// ConfersProjectMembership reports whether a binding of rd makes its
+// principal a project member. An unset ConfersMembership means true; a nil
+// rd (an unresolved role definition) confers nothing.
+func (rd *RoleDefinition) ConfersProjectMembership() bool {
+	if rd == nil {
+		return false
+	}
+	return rd.ConfersMembership == nil || *rd.ConfersMembership
 }
 
 // RoleBinding connects a principal to a role definition, optionally scoped.
@@ -3340,6 +3616,11 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleVisitor is the seeded project role for a federated
+	// account granted visitor access to a project. It does not confer
+	// membership (RoleDefinition.ConfersMembership is false), and only
+	// CreateVisitorRoleBinding binds it.
+	ProjectRoleVisitor = "project-visitor"
 )
 
 // MembershipKindBuiltin is the value stored in the membership_kind column
@@ -3644,7 +3925,10 @@ type DelegationEdgeDeactivateGuard struct {
 	// Recorded requires provenance version 1 and a bounded or principal
 	// ceiling.
 	Recorded bool
-	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	// UpdatedAt, when non-nil, requires the row's updated time to be the
+	// same instant (time.Time.Equal), whatever form the database stores it
+	// in. The store guards the write with the exact stored value it read,
+	// so a change after that read makes the deactivation affect no row.
 	UpdatedAt *time.Time
 }
 
@@ -3849,6 +4133,10 @@ const (
 	MembershipLossTriggerSystemScopeChange     MembershipLossTrigger = "system_scope_change"
 	MembershipLossTriggerRestoreCheck          MembershipLossTrigger = "restore_check"
 	MembershipLossTriggerReconcile             MembershipLossTrigger = "reconcile"
+	// MembershipLossTriggerTestIdentityExpiry: a hub test identity
+	// (ptone/scion#4240) passed its expiry, so it is no longer admitted
+	// anywhere and its agents are held until the expiry reaper purges them.
+	MembershipLossTriggerTestIdentityExpiry MembershipLossTrigger = "test_identity_expiry"
 )
 
 // ValidMembershipLossTrigger reports whether t is a recognised trigger.
@@ -3863,7 +4151,8 @@ func ValidMembershipLossTrigger(t MembershipLossTrigger) bool {
 		MembershipLossTriggerBindingExpiry,
 		MembershipLossTriggerSystemScopeChange,
 		MembershipLossTriggerRestoreCheck,
-		MembershipLossTriggerReconcile:
+		MembershipLossTriggerReconcile,
+		MembershipLossTriggerTestIdentityExpiry:
 		return true
 	}
 	return false

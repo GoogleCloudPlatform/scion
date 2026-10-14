@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -48,6 +46,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/tokens":                            "authenticated:user-token",
 	"/api/v1/auth/tokens/":                           "authenticated:user-token",
 	"/api/v1/auth/scopes":                            "authenticated:user-token",
+	"POST /api/v1/auth/federation-token":             "authenticated:federation-token",
 	"/api/v1/auth/providers":                         "public:auth",
 	"/api/v1/auth/invite/redeem":                     "public:invite",
 	"/api/v1/auth/cli/authorize":                     "public:cli-oauth",
@@ -58,6 +57,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/conversations":                          "authenticated:conversation",
 	"/api/v1/conversations/":                         "authenticated:conversation",
 	"/api/v1/conversations/resolve":                  "authenticated:conversation",
+	"/api/v1/thread-groups":                          "authenticated:thread-group",
+	"/api/v1/thread-groups/":                         "authenticated:thread-group",
 	"/api/v1/agents":                                 "policy:agent",
 	"/api/v1/agents/":                                "policy:agent",
 	"/api/v1/projects":                               "policy:project",
@@ -104,6 +105,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/templates":                     "authenticated:user-templates",
 	"/api/v1/users/me/templates/":                    "authenticated:user-templates",
 	"/api/v1/users/me/terminal-workspace":            "authenticated:user-terminal-workspace",
+	"/api/v1/users/me/delegations":                   "authenticated:agent-delegations",
 	"/api/v1/hub/settings/injected-skills":           "authenticated:injected-skills",
 	"/api/v1/brokers":                                "broker-hmac:registration",
 	"/api/v1/brokers/join":                           "broker-hmac:registration",
@@ -186,6 +188,11 @@ var routePermissionClassifications = map[string]string{
 	"GET /api/v1/test-identities":                    "hub-admin:test-identity",
 	"POST /api/v1/test-identities/{id}/token":        "hub-admin:test-identity",
 	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
+	"POST /api/v1/test-identities/admin":             "hub-admin:test-identity",
+	"POST /api/v1/test-identities/admin/revoke-all":  "hub-admin:test-identity",
+	"POST /api/v1/test-identity-delegations":         "hub-admin:test-identity",
+	"GET /api/v1/test-identity-delegations":          "hub-admin:test-identity",
+	"DELETE /api/v1/test-identity-delegations/{id}":  "hub-admin:test-identity",
 	"/api/v1/telegram/link":                          "authenticated:account-link",
 	"/api/v1/telegram/link/verify":                   "authenticated:account-link",
 	"/api/v1/telegram/link/status":                   "authenticated:account-link",
@@ -247,6 +254,9 @@ var routePermissionClassifications = map[string]string{
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",
 	"/api/v1/admin/roles/import": "hub-admin:role",
+
+	// Test identity web-login codes (ptone/scion#4240, WS1)
+	"POST /api/v1/test-identities/{id}/web-login-code": "hub-admin:test-identity",
 }
 
 func TestConstraintAuditRoutePermissionClassification(t *testing.T) {
@@ -481,6 +491,8 @@ func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 	// The test identity routes answer 404 before their guard while the
 	// feature is off; turn it on so this checks the guard itself.
 	srv.testIdentities.enabled = true
+	// Likewise the admin-kind test identity routes and the test admin gate.
+	srv.testAdminGate = testAdminGate{hubAdmin: true}
 	srv.registerRoutes()
 
 	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")

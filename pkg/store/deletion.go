@@ -35,6 +35,9 @@ type DeletionPredicate struct {
 	Codes []string
 	// DeletedAtNull requires deleted_at IS NULL.
 	DeletedAtNull bool
+	// DeletedAtNotNull requires deleted_at IS NOT NULL (a soft-deleted
+	// row). Setting it together with DeletedAtNull matches nothing.
+	DeletedAtNotNull bool
 	// LeaseExpiredBefore, when set, requires deletion_lease_at to be set and
 	// strictly before *LeaseExpiredBefore.
 	LeaseExpiredBefore *time.Time
@@ -66,6 +69,9 @@ func (p DeletionPredicate) Matches(a *Agent) bool {
 		return false
 	}
 	if p.DeletedAtNull && !a.DeletedAt.IsZero() {
+		return false
+	}
+	if p.DeletedAtNotNull && a.DeletedAt.IsZero() {
 		return false
 	}
 	if p.LeaseExpiredBefore != nil {

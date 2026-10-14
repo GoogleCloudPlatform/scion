@@ -179,7 +179,7 @@ describe('chat-space-rail Unread DMs section', () => {
     expect(spaceBadges).toBe(SPACE.unreadCount);
   });
 
-  it('reserves the menu button width after the DM heading badge', async () => {
+  it('holds a hidden copy of the menu button after the DM heading badge', async () => {
     const el = await mount([SPACE], DMS);
     el.spaceFilter = 'unread';
     await el.updateComplete;
@@ -188,26 +188,37 @@ describe('chat-space-rail Unread DMs section', () => {
     const spacer = dmActions.lastElementChild as HTMLElement;
     expect(spacer.classList.contains('menu-spacer')).toBe(true);
     expect(spacer.previousElementSibling?.classList.contains('unread-badge')).toBe(true);
-    // The spacer is decoration only: hidden from assistive tech, not focusable.
+    // The spacer is decoration only: hidden from assistive tech, inert, and
+    // its copy of the button is out of the tab order.
     expect(spacer.getAttribute('aria-hidden')).toBe('true');
-    expect(spacer.hasAttribute('tabindex')).toBe(false);
-    expect(spacer.childElementCount).toBe(0);
-    expect(spacer.textContent).toBe('');
+    expect(spacer.hasAttribute('inert')).toBe(true);
+    expect(spacer.textContent?.trim()).toBe('');
 
-    // A space heading is unchanged: badge, then the menu, and no spacer.
+    // Its width comes from a copy of the real menu button: the same element
+    // and icon, inside .space-actions, so the same rules size it.
     const spaceActions = el.shadowRoot.querySelector(
       '.space-section:not(.dm-section) .space-actions'
     ) as HTMLElement;
+    const menuButton = spaceActions.querySelector('sl-dropdown sl-icon-button') as HTMLElement;
+    const copy = spacer.querySelector('sl-icon-button') as HTMLElement;
+    expect(spacer.childElementCount).toBe(1);
+    expect(copy.getAttribute('name')).toBe(menuButton.getAttribute('name'));
+    expect(copy.getAttribute('tabindex')).toBe('-1');
+    expect(copy.hasAttribute('label')).toBe(false);
+
+    // A space heading is unchanged: badge, then the menu, and no spacer.
     expect(spaceActions.querySelector('.menu-spacer')).toBeNull();
     expect(Array.from(spaceActions.children).map((c) => c.localName)).toEqual([
       'span',
       'sl-dropdown',
     ]);
     expect(spaceActions.firstElementChild?.classList.contains('unread-badge')).toBe(true);
+  });
 
-    // The spacer and the menu button take their width from one property,
-    // which the mobile breakpoint sets to the 44px touch target, so the
-    // badges stay in one column at both sizes.
+  it('keeps the space menu button sized as before the DM spacer existed', () => {
+    // The menu button keeps its own size: its natural width on desktop and
+    // the 44px touch target on mobile. The spacer follows it, not the
+    // other way round.
     const Rail = customElements.get('scion-chat-space-rail') as unknown as {
       styles: { cssText: string } | { cssText: string }[];
     };
@@ -215,19 +226,26 @@ describe('chat-space-rail Unread DMs section', () => {
       .flat()
       .map((s) => s.cssText)
       .join('\n');
+    expect(css).not.toContain('--space-menu-width');
     const topLevel = cssBlocks(css);
     const iconButton = declarationsFor(topLevel, '.space-actions sl-icon-button::part(base)');
-    expect(iconButton.get('width')).toBe('var(--space-menu-width)');
-    const spacerRule = declarationsFor(topLevel, '.space-actions .menu-spacer');
-    expect(
-      ['flex', 'flex-basis', 'width'].some((prop) =>
-        spacerRule.get(prop)?.includes('var(--space-menu-width)')
-      )
-    ).toBe(true);
+    expect(Object.fromEntries(iconButton)).toEqual({
+      'font-size': 'var(--chat-fs-base)',
+      padding: '0.125rem',
+    });
     const mobile = topLevel
       .filter((b) => /^@media\s*\(\s*max-width\s*:\s*768px\s*\)$/.test(b.prelude))
       .flatMap((b) => cssBlocks(b.body));
-    expect(declarationsFor(mobile, '.space-header').get('--space-menu-width')).toBe('44px');
+    const mobileButton = declarationsFor(mobile, '.space-actions sl-icon-button::part(base)');
+    expect(Object.fromEntries(mobileButton)).toEqual({ width: '44px', height: '44px' });
+
+    // The spacer keeps its button's width (overflow: hidden would otherwise
+    // let it shrink to nothing), takes no height, and is never painted.
+    const spacerRule = declarationsFor(topLevel, '.space-actions .menu-spacer');
+    expect(spacerRule.get('flex')).toBe('0 0 auto');
+    expect(spacerRule.get('height')).toBe('0');
+    expect(spacerRule.get('visibility')).toBe('hidden');
+    expect(spacerRule.get('overflow')).toBe('hidden');
   });
 
   it('keeps the spacer when the DM heading has no badge', async () => {
@@ -238,7 +256,9 @@ describe('chat-space-rail Unread DMs section', () => {
     expect(dmRows(el).map((r) => r.dataset.dmKey)).toEqual(['dm:read']);
     const dmActions = el.shadowRoot.querySelector('.dm-header .space-actions') as HTMLElement;
     expect(dmActions.querySelector('.unread-badge')).toBeNull();
-    expect(dmActions.querySelector('.menu-spacer')?.getAttribute('aria-hidden')).toBe('true');
+    const spacer = dmActions.querySelector('.menu-spacer');
+    expect(spacer?.getAttribute('aria-hidden')).toBe('true');
+    expect(spacer?.querySelector('sl-icon-button')).not.toBeNull();
   });
 
   it('shows unread DMs when no space has unread', async () => {

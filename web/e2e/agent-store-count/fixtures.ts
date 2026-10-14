@@ -107,7 +107,7 @@ export interface Hub {
   otherWalks(): number;
   /** Every agent-list request: walks, their later pages, and probes. */
   total(): number;
-  /** `GET /api/v1/users` requests (the chat sidebar's users walk). */
+  /** `GET /api/v1/users` requests (the chat sidebar's bounded recent-users page). */
   usersRequests(): number;
   /** The `cursor` of every store page request after a walk's first, in order. */
   storeCursors(): string[];
@@ -159,7 +159,7 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
 
   await installEventSourceStub(page);
   await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true, 'web.native_chat': true };
+    window.__SCION_FEATURES__ = { 'web.native_chat': true };
   });
 
   await page.route('**/auth/me', (route) =>

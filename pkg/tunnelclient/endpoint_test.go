@@ -22,17 +22,17 @@ import (
 
 func TestNormalizeEndpoint(t *testing.T) {
 	cases := map[string]string{
-		"https://hub.example.com":         "https://hub.example.com",
-		"https://hub.example.com/":        "https://hub.example.com",
-		"  https://Hub.Example.COM//  ":   "https://hub.example.com",
-		"HTTPS://hub.example.com:443":     "https://hub.example.com",
-		"http://hub.example.com:80/":      "http://hub.example.com",
-		"http://localhost:8080":           "http://localhost:8080",
-		"https://hub.example.com:8443/x/": "https://hub.example.com:8443/x",
-		"http://[::1]:80":                 "http://[::1]",
-		"http://[::1]:9000":               "http://[::1]:9000",
-		"https://hub.example.com:80":      "https://hub.example.com:80",
-		"not a url":                       "not a url",
+		"https://hub.example.com":                  "https://hub.example.com",
+		"https://hub.example.com/":                 "https://hub.example.com",
+		"  https://Hub.Example.COM//  ":            "https://hub.example.com",
+		"HTTPS://hub.example.com:443":              "https://hub.example.com",
+		"http://hub.example.com:80/":               "http://hub.example.com",
+		"http://localhost:8080":                    "http://localhost:8080",
+		"https://hub.example.com:8443/x/":          "https://hub.example.com:8443/x",
+		"http://[::1]:80":                          "http://[::1]",
+		"http://[::1]:9000":                        "http://[::1]:9000",
+		"https://hub.example.com:80":               "https://hub.example.com:80",
+		"https://u:p@Hub.Example.com/x/?token=1#f": "https://hub.example.com/x",
 	}
 	for in, want := range cases {
 		if got := NormalizeEndpoint(in); got != want {
@@ -115,10 +115,56 @@ func TestConduitURL(t *testing.T) {
 }
 
 func TestDefaultScope(t *testing.T) {
-	cases := map[string]string{CredentialOAuth: ScopeHub, CredentialDev: ScopeHub, CredentialToken: ScopeUnknown, "": ScopeUnknown}
+	cases := map[string]string{CredentialOAuth: ScopeHub, CredentialDev: ScopeUnknown, CredentialToken: ScopeUnknown, "": ScopeUnknown}
 	for kind, want := range cases {
 		if got := (DefaultScope{}).Scope(Credential{Kind: kind, Token: "secret"}); got != want {
 			t.Errorf("Scope(%q) = %q, want %q", kind, got, want)
 		}
+	}
+}
+
+func TestRedactEndpoint(t *testing.T) {
+	cases := map[string]string{
+		"https://hub.example.com":                          "https://hub.example.com",
+		"https://user:pw@Hub.example.com:8443/base/?t=1#x": "https://Hub.example.com:8443/base",
+		"http://user@127.0.0.1:9810/":                      "http://127.0.0.1:9810",
+		"hub.example.com":                                  "the configured hub endpoint",
+		"":                                                 "the configured hub endpoint",
+	}
+	for in, want := range cases {
+		if got := RedactEndpoint(in); got != want {
+			t.Errorf("RedactEndpoint(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestScrubEndpoint(t *testing.T) {
+	ep := "https://alice:s3cret@hub.example.com/?token=TOK123#frag"
+	in := `Get "https://alice:***@hub.example.com/api/v1/auth/me?token=TOK123": dial tcp: refused (alice:s3cret@ s3cret TOK123)`
+	got := scrubEndpoint(in, ep)
+	for _, secret := range []string{"alice", "s3cret", "TOK123"} {
+		if strings.Contains(got, secret) {
+			t.Errorf("scrubbed text %q still contains %q", got, secret)
+		}
+	}
+}
+
+// Different invalid endpoints never compare as the same hub, and their
+// keys hold none of the input's text.
+func TestNormalizeEndpointInvalidInputsDiffer(t *testing.T) {
+	a, b := NormalizeEndpoint("not a url"), NormalizeEndpoint("token=SECRET123 other")
+	if a == b {
+		t.Fatalf("two invalid endpoints share the key %q", a)
+	}
+	for _, k := range []string{a, b} {
+		if !strings.HasPrefix(k, "invalid:") || strings.Contains(k, "SECRET123") || strings.Contains(k, "url") {
+			t.Fatalf("key %q is not an opaque invalid key", k)
+		}
+	}
+	if NormalizeEndpoint("  NOT A URL/ ") != a {
+		t.Fatal("the same invalid input, trimmed and lowercased, gave a different key")
+	}
+	if RedactEndpoint("not a url") != "the configured hub endpoint" {
+		t.Fatal("RedactEndpoint lost its display string")
 	}
 }

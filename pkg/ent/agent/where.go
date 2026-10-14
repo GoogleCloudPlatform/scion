@@ -291,6 +291,16 @@ func RunIDUpdatedAt(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldRunIDUpdatedAt, v))
 }
 
+// SSHHostKey applies equality check predicate on the "ssh_host_key" field. It's identical to SSHHostKeyEQ.
+func SSHHostKey(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyRunID applies equality check predicate on the "ssh_host_key_run_id" field. It's identical to SSHHostKeyRunIDEQ.
+func SSHHostKeyRunID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSSHHostKeyRunID, v))
+}
+
 // LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
 func LaunchState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -334,6 +344,11 @@ func LaunchStep(v string) predicate.Agent {
 // LaunchError applies equality check predicate on the "launch_error" field. It's identical to LaunchErrorEQ.
 func LaunchError(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchError, v))
+}
+
+// LaunchCause applies equality check predicate on the "launch_cause" field. It's identical to LaunchCauseEQ.
+func LaunchCause(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchCause, v))
 }
 
 // DeletionState applies equality check predicate on the "deletion_state" field. It's identical to DeletionStateEQ.
@@ -3246,6 +3261,156 @@ func RunIDUpdatedAtNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldRunIDUpdatedAt))
 }
 
+// SSHHostKeyEQ applies the EQ predicate on the "ssh_host_key" field.
+func SSHHostKeyEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyNEQ applies the NEQ predicate on the "ssh_host_key" field.
+func SSHHostKeyNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyIn applies the In predicate on the "ssh_host_key" field.
+func SSHHostKeyIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSSHHostKey, vs...))
+}
+
+// SSHHostKeyNotIn applies the NotIn predicate on the "ssh_host_key" field.
+func SSHHostKeyNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSSHHostKey, vs...))
+}
+
+// SSHHostKeyGT applies the GT predicate on the "ssh_host_key" field.
+func SSHHostKeyGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyGTE applies the GTE predicate on the "ssh_host_key" field.
+func SSHHostKeyGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyLT applies the LT predicate on the "ssh_host_key" field.
+func SSHHostKeyLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyLTE applies the LTE predicate on the "ssh_host_key" field.
+func SSHHostKeyLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyContains applies the Contains predicate on the "ssh_host_key" field.
+func SSHHostKeyContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyHasPrefix applies the HasPrefix predicate on the "ssh_host_key" field.
+func SSHHostKeyHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyHasSuffix applies the HasSuffix predicate on the "ssh_host_key" field.
+func SSHHostKeyHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyIsNil applies the IsNil predicate on the "ssh_host_key" field.
+func SSHHostKeyIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldSSHHostKey))
+}
+
+// SSHHostKeyNotNil applies the NotNil predicate on the "ssh_host_key" field.
+func SSHHostKeyNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldSSHHostKey))
+}
+
+// SSHHostKeyEqualFold applies the EqualFold predicate on the "ssh_host_key" field.
+func SSHHostKeyEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyContainsFold applies the ContainsFold predicate on the "ssh_host_key" field.
+func SSHHostKeyContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldSSHHostKey, v))
+}
+
+// SSHHostKeyRunIDEQ applies the EQ predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDNEQ applies the NEQ predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDIn applies the In predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSSHHostKeyRunID, vs...))
+}
+
+// SSHHostKeyRunIDNotIn applies the NotIn predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSSHHostKeyRunID, vs...))
+}
+
+// SSHHostKeyRunIDGT applies the GT predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDGTE applies the GTE predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDLT applies the LT predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDLTE applies the LTE predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDContains applies the Contains predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDHasPrefix applies the HasPrefix predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDHasSuffix applies the HasSuffix predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDIsNil applies the IsNil predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldSSHHostKeyRunID))
+}
+
+// SSHHostKeyRunIDNotNil applies the NotNil predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldSSHHostKeyRunID))
+}
+
+// SSHHostKeyRunIDEqualFold applies the EqualFold predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldSSHHostKeyRunID, v))
+}
+
+// SSHHostKeyRunIDContainsFold applies the ContainsFold predicate on the "ssh_host_key_run_id" field.
+func SSHHostKeyRunIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldSSHHostKeyRunID, v))
+}
+
 // LaunchStateEQ applies the EQ predicate on the "launch_state" field.
 func LaunchStateEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
@@ -3834,6 +3999,81 @@ func LaunchErrorEqualFold(v string) predicate.Agent {
 // LaunchErrorContainsFold applies the ContainsFold predicate on the "launch_error" field.
 func LaunchErrorContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchError, v))
+}
+
+// LaunchCauseEQ applies the EQ predicate on the "launch_cause" field.
+func LaunchCauseEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchCause, v))
+}
+
+// LaunchCauseNEQ applies the NEQ predicate on the "launch_cause" field.
+func LaunchCauseNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchCause, v))
+}
+
+// LaunchCauseIn applies the In predicate on the "launch_cause" field.
+func LaunchCauseIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchCause, vs...))
+}
+
+// LaunchCauseNotIn applies the NotIn predicate on the "launch_cause" field.
+func LaunchCauseNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchCause, vs...))
+}
+
+// LaunchCauseGT applies the GT predicate on the "launch_cause" field.
+func LaunchCauseGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchCause, v))
+}
+
+// LaunchCauseGTE applies the GTE predicate on the "launch_cause" field.
+func LaunchCauseGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchCause, v))
+}
+
+// LaunchCauseLT applies the LT predicate on the "launch_cause" field.
+func LaunchCauseLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchCause, v))
+}
+
+// LaunchCauseLTE applies the LTE predicate on the "launch_cause" field.
+func LaunchCauseLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchCause, v))
+}
+
+// LaunchCauseContains applies the Contains predicate on the "launch_cause" field.
+func LaunchCauseContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchCause, v))
+}
+
+// LaunchCauseHasPrefix applies the HasPrefix predicate on the "launch_cause" field.
+func LaunchCauseHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchCause, v))
+}
+
+// LaunchCauseHasSuffix applies the HasSuffix predicate on the "launch_cause" field.
+func LaunchCauseHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchCause, v))
+}
+
+// LaunchCauseIsNil applies the IsNil predicate on the "launch_cause" field.
+func LaunchCauseIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchCause))
+}
+
+// LaunchCauseNotNil applies the NotNil predicate on the "launch_cause" field.
+func LaunchCauseNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchCause))
+}
+
+// LaunchCauseEqualFold applies the EqualFold predicate on the "launch_cause" field.
+func LaunchCauseEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchCause, v))
+}
+
+// LaunchCauseContainsFold applies the ContainsFold predicate on the "launch_cause" field.
+func LaunchCauseContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchCause, v))
 }
 
 // DeletionStateEQ applies the EQ predicate on the "deletion_state" field.

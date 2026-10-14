@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,16 @@ func newKeysDispatcherFixture(t *testing.T) (*HTTPAgentDispatcher, *mockKeysBrok
 	}
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+	// DispatchAgentKeys loads the target's agent row for its placement
+	// backstop, so the agent exists on that broker.
+	project := &store.Project{ID: tid("project-1"), Name: "keys-project", Slug: "keys-project"}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	agent := &store.Agent{ID: tid("agent-1"), Slug: "test-agent", Name: "test-agent", ProjectID: project.ID, RuntimeBrokerID: broker.ID}
+	if err := memStore.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
 	}
 
 	mockClient := &mockKeysBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
@@ -129,11 +140,29 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_PropagatesClientOutcome(t *testin
 // could have reached a broker — without ever calling the client.
 func TestHTTPAgentDispatcher_DispatchAgentKeys_UnknownBroker(t *testing.T) {
 	dispatcher, mockClient, target := newKeysDispatcherFixture(t)
-	target.RuntimeBrokerID = tid("no-such-broker")
+	// The agent row itself names the missing broker, so the placement
+	// backstop passes (an unpinned agent whose broker row is missing keeps
+	// today's path) and the endpoint lookup is what fails.
+	missing := tid("no-such-broker")
+	agent, err := dispatcher.store.GetAgent(context.Background(), target.AgentID)
+	if err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	agent.RuntimeBrokerID = missing
+	if err := dispatcher.store.UpdateAgent(context.Background(), agent); err != nil {
+		t.Fatalf("update agent: %v", err)
+	}
+	target.RuntimeBrokerID = missing
 
-	_, err := dispatcher.DispatchAgentKeys(context.Background(), target, "op-1", time.Now().Add(time.Minute), "C-c")
+	_, err = dispatcher.DispatchAgentKeys(context.Background(), target, "op-1", time.Now().Add(time.Minute), "C-c")
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if _, refused := placementRefusalOf(err); refused {
+		t.Fatalf("expected the broker lookup failure, not a placement refusal: %v", err)
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected the broker row lookup's not-found in the chain, got %v", err)
 	}
 	if mockClient.calls != 0 {
 		t.Fatalf("expected zero ExecuteKeys calls when the broker cannot be resolved, got %d", mockClient.calls)
@@ -150,12 +179,24 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_ClientWithoutKeysSupport(t *testi
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
+	// The agent row exists on broker-1, so the placement backstop passes and
+	// the wiring check is what refuses.
+	project := &store.Project{ID: tid("project-1"), Name: "keys-wiring", Slug: "keys-wiring"}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	if err := memStore.CreateAgent(ctx, &store.Agent{ID: tid("agent-1"), Slug: "a", Name: "a", ProjectID: project.ID, RuntimeBrokerID: broker.ID}); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
 
 	target := agentkeys.Target{RuntimeBrokerID: tid("broker-1"), AgentID: tid("agent-1"), AgentSlug: "a", ProjectID: tid("project-1")}
 	_, err := dispatcher.DispatchAgentKeys(ctx, target, "op-1", time.Now().Add(time.Minute), "C-c")
 	if !errors.Is(err, agentkeys.ErrNotDispatched) {
 		t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "does not support keys dispatch") {
+		t.Fatalf("expected the wiring-defect refusal, got %v", err)
 	}
 }
 
@@ -213,6 +254,25 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnInvalidInput(t *test
 			_, err := dispatcher.DispatchAgentKeys(context.Background(), tg, tc.operationID, tc.deadline, "C-c")
 			if !errors.Is(err, agentkeys.ErrNotDispatched) {
 				t.Fatalf("expected agentkeys.ErrNotDispatched, got %v", err)
+			}
+			// The placement backstop runs first and loads the agent row by
+			// target.AgentID: an empty agent ID is refused by that row load
+			// (no such row), which subsumes the input-shape check; every
+			// other case passes the backstop and is refused by its own check.
+			// Each case is refused by its own check: the input checks, or
+			// (empty agent ID) the backstop's row load, or (empty runtime
+			// broker ID) the backstop's broker-equality check.
+			want := map[string]string{
+				"zero deadline":           "execute-before deadline is zero or already past",
+				"already past":            "execute-before deadline is zero or already past",
+				"empty operation ID":      "operation ID is required",
+				"empty agent slug":        "are all required",
+				"empty agent ID":          "for the placement check",
+				"empty project ID":        "are all required",
+				"empty runtime broker ID": "the request names Runtime Broker",
+			}[tc.name]
+			if want == "" || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected the %s refusal (%q), got %v", tc.name, want, err)
 			}
 			if mockClient.calls != 0 {
 				t.Fatalf("expected zero ExecuteKeys calls for a %s, got %d", tc.name, mockClient.calls)

@@ -83,7 +83,8 @@ type AgentDelegationBoundary struct {
 }
 
 // AgentDelegationGrantResponse is grant metadata. It never carries a
-// credential. Name, purpose and labels are issuer-supplied descriptive text.
+// credential, a credential hash or a credential prefix. Name, purpose and
+// labels are issuer-supplied descriptive text, as UserSuppliedFields says.
 type AgentDelegationGrantResponse struct {
 	ID                      string                  `json:"id"`
 	AgentID                 string                  `json:"agentId"`
@@ -99,6 +100,18 @@ type AgentDelegationGrantResponse struct {
 	Created                 time.Time               `json:"created"`
 	LastExchangedAt         *time.Time              `json:"lastExchangedAt,omitempty"`
 	Status                  string                  `json:"status"`
+	// UserSuppliedFields names the fields above that carry issuer-supplied
+	// text: descriptive only, never an identity.
+	UserSuppliedFields []string `json:"userSuppliedFields"`
+	// RevokedAt, RevokedBy and RevokeReason are set once the grant is
+	// revoked.
+	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
+	RevokedBy    string     `json:"revokedBy,omitempty"`
+	RevokeReason string     `json:"revokeReason,omitempty"`
+	// ActiveCredentialCount and ActiveCredentials describe the grant's
+	// unrevoked, unexpired delegated credentials: IDs and times only.
+	ActiveCredentialCount int                               `json:"activeCredentialCount"`
+	ActiveCredentials     []AgentDelegatedCredentialSummary `json:"activeCredentials"`
 }
 
 // ExchangeAgentDelegationRequest is the body of
@@ -143,22 +156,28 @@ func agentDelegationGrantResponse(g *store.AgentDelegationGrant, now time.Time) 
 		Created:                 g.Created,
 		LastExchangedAt:         g.LastExchangedAt,
 		Status:                  status,
+		UserSuppliedFields:      append([]string(nil), agentDelegationUserSuppliedFields...),
+		ActiveCredentials:       []AgentDelegatedCredentialSummary{},
 	}
 }
 
-// handleAgentDelegations serves /api/v1/agents/{agentId}/delegations.
-// Only POST (issuance) exists in this phase. While hub.agent_delegation is
-// off the route answers 404 for every method.
+// handleAgentDelegations serves /api/v1/agents/{agentId}/delegations: GET
+// lists the agent's grants and answers while hub.agent_delegation is off
+// (.design/agent-delegation.md §10); POST issues a grant and answers 404
+// while the experiment is off.
 func (s *Server) handleAgentDelegations(w http.ResponseWriter, r *http.Request, agentID string) {
-	if !s.experimentEnabled(experiments.AgentDelegation) {
-		NotFound(w, "route")
-		return
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListAgentDelegations(w, r, agentID)
+	case http.MethodPost:
+		if !s.experimentEnabled(experiments.AgentDelegation) {
+			NotFound(w, "route")
+			return
+		}
+		s.handleCreateAgentDelegation(w, r, agentID)
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
-	if r.Method != http.MethodPost {
-		MethodNotAllowed(w, http.MethodPost)
-		return
-	}
-	s.handleCreateAgentDelegation(w, r, agentID)
 }
 
 // handleAgentDelegationExchange serves
@@ -243,7 +262,7 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 	// tokens (the same answer UAT mint gives). Delegation paths do not run
 	// the JWT row block that applies a test identity's expiry and feature
 	// switch, so they refuse test identities outright.
-	if issuerRow.IsTestFixture() || isReservedTestIdentityEmail(issuerRow.Email) || isReservedTestIdentityEmail(issuer.Email()) {
+	if !issuerRow.IsHumanKind() || isReservedTestIdentityEmail(issuerRow.Email) || isReservedTestIdentityEmail(issuer.Email()) {
 		s.recordAgentDelegationDeny(ctx, agentDelegationCreatePermission, agentRes, agentDelegationCodeIssuerTestIdentity)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "test identities cannot issue agent delegation grants",
 			map[string]interface{}{"reason": "test_identity_cannot_delegate"})
@@ -417,6 +436,22 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 			locked.Generation != agent.Generation || !locked.DeletedAt.IsZero() {
 			return errAgentDelegationAgentChanged
 		}
+		// Rule 8: at most 10 active grants per agent (counted under the
+		// agent row lock above) and 50 per issuer (under the issuer lock).
+		if err := tx.LockAgentDelegationIssuer(ctx, grant.IssuerUserID); err != nil {
+			return fmt.Errorf("lock issuer: %w", err)
+		}
+		perAgent, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, now)
+		if err != nil {
+			return fmt.Errorf("count agent grants: %w", err)
+		}
+		perIssuer, err := tx.CountActiveAgentDelegationGrants(ctx, store.AgentDelegationGrantFilter{IssuerUserID: grant.IssuerUserID}, now)
+		if err != nil {
+			return fmt.Errorf("count issuer grants: %w", err)
+		}
+		if perAgent >= agentDelegationMaxActiveGrantsPerAgent || perIssuer >= agentDelegationMaxActiveGrantsPerIssuer {
+			return errAgentDelegationGrantLimit
+		}
 		if err := tx.CreateAgentDelegationGrant(ctx, grant); err != nil {
 			return fmt.Errorf("create grant: %w", err)
 		}
@@ -441,6 +476,8 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 		switch {
 		case errors.Is(err, errAgentDelegationAgentChanged):
 			refuse(http.StatusConflict, errCodeAgentReincarnating, "the agent changed during issuance; retry", nil)
+		case errors.Is(err, errAgentDelegationGrantLimit):
+			refuse(http.StatusConflict, errCodeGrantLimitReached, "the agent or the issuer already has the maximum number of active grants", nil)
 		case errors.Is(err, errAgentDelegationAuditFailed):
 			slog.Error("agent delegation grant not issued: audit write failed", "agent_id", agent.ID, "error", err)
 			writeError(w, http.StatusInternalServerError, errCodeAuditFailed, "the grant could not be recorded; nothing was issued", nil)
@@ -456,6 +493,8 @@ func (s *Server) handleCreateAgentDelegation(w http.ResponseWriter, r *http.Requ
 var (
 	errAgentDelegationAgentChanged = errors.New("agent changed during agent delegation issuance")
 	errAgentDelegationAuditFailed  = errors.New("agent delegation audit write failed")
+	errAgentDelegationGrantLimit   = errors.New("agent delegation grant limit reached")
+	errAgentDelegationGrantEnded   = errors.New("agent delegation grant revoked or expired during exchange")
 )
 
 // handleExchangeAgentDelegation exchanges a grant for a delegated
@@ -560,7 +599,7 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 	// A test identity never holds delegation (issuer state, §8.2 step 9,
 	// checked as soon as the row is loaded): this path does not run the
 	// JWT row block that applies its expiry and feature switch.
-	if issuerRow.IsTestFixture() || isReservedTestIdentityEmail(issuerRow.Email) {
+	if !issuerRow.IsHumanKind() || isReservedTestIdentityEmail(issuerRow.Email) {
 		refuseWithReason(http.StatusForbidden, errCodeIssuerInvalid, agentDelegationCodeIssuerTestIdentity, "the grant issuer is not valid")
 		return
 	}
@@ -648,8 +687,11 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 15. Write the credential (hash only), last_exchanged_at and the
-	// mutation audit in one transaction.
+	// 13 and 15. Under the grant lock, re-check that the grant is still
+	// active, revoke the oldest active credentials beyond the per-grant cap
+	// (superseded, each with its own mutation audit), and write the
+	// credential (hash only), last_exchanged_at and the issue's mutation
+	// audit, all in one transaction.
 	token, hash, err := newDelegatedCredentialToken()
 	if err != nil {
 		InternalError(w)
@@ -668,6 +710,34 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		ExpiresAt:                 expiresAt,
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		locked, err := tx.LockAgentDelegationGrant(ctx, grant.ID)
+		if err != nil {
+			return fmt.Errorf("lock grant: %w", err)
+		}
+		if locked.RevokedAt != nil || !now.Before(locked.ExpiresAt) {
+			return errAgentDelegationGrantEnded
+		}
+		active, err := tx.ListActiveAgentDelegatedCredentials(ctx, []string{grant.ID}, now)
+		if err != nil {
+			return fmt.Errorf("list active credentials: %w", err)
+		}
+		for i := 0; i < len(active)+1-agentDelegationMaxActiveCredentialsPerGrant; i++ {
+			old := active[i]
+			revoked, err := tx.RevokeAgentDelegatedCredential(ctx, old.ID, revokeReasonSuperseded, now)
+			if err != nil {
+				return fmt.Errorf("supersede credential: %w", err)
+			}
+			if !revoked {
+				continue
+			}
+			record := agentDelegatedCredentialRevokeRecord(grant, old, revokeReasonSuperseded, now)
+			agentDelegationAuditBlock(record, grant, nil)
+			record.ActorKind = actorKindAgentDelegated
+			auditActorFromContext(ctx).ApplyActor(record)
+			if err := tx.CreateMutationAudit(ctx, record); err != nil {
+				return fmt.Errorf("%w: %w", errAgentDelegationAuditFailed, err)
+			}
+		}
 		if err := tx.CreateAgentDelegatedCredential(ctx, cred); err != nil {
 			return fmt.Errorf("create delegated credential: %w", err)
 		}
@@ -699,6 +769,10 @@ func (s *Server) handleExchangeAgentDelegation(w http.ResponseWriter, r *http.Re
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errAgentDelegationGrantEnded) {
+			refuse(http.StatusForbidden, errCodeGrantInactive, "the grant is not active")
+			return
+		}
 		if errors.Is(err, errAgentDelegationAuditFailed) {
 			slog.Error("delegated credential not issued: audit write failed", "grant_id", grant.ID, "error", err)
 			writeError(w, http.StatusInternalServerError, errCodeAuditFailed, "the credential could not be recorded; nothing was issued", nil)

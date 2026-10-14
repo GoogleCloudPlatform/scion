@@ -109,6 +109,7 @@ type CompositeStore struct {
 	*ProjectPreStartHookStore
 	*AgentSessionMetricsStore
 	*ConversationStore
+	*ThreadGroupStore
 	*RoleStore
 	*DelegationEdgeStore
 	*SAAssignmentStore
@@ -125,6 +126,7 @@ type CompositeStore struct {
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
 	*HubInstanceStore
+	*TestIdentityDelegationStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -162,12 +164,16 @@ type CompositeStore struct {
 	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
 
 	// schemaShadowGuard turns on the Postgres search_path shadow check at the
-	// top of Migrate; see EnableSchemaShadowGuard. Off by default, so only
-	// hub server startup runs it.
+	// top of Migrate; see EnableSchemaShadowGuard. Off by default; hub
+	// server startup and the cmd maintenance commands that migrate the hub
+	// database turn it on.
 	schemaShadowGuard bool
 	// allowShadowedSchema makes the shadow check log a warning and continue
 	// instead of refusing to migrate.
 	allowShadowedSchema bool
+	// schemaShadowMaintenance marks the shadow check's refusal as coming
+	// from a maintenance command; see EnableMaintenanceSchemaShadowGuard.
+	schemaShadowMaintenance bool
 	// schemaShadowLogger receives the shadow check's warning. Nil means
 	// slog.Default().
 	schemaShadowLogger *slog.Logger
@@ -179,10 +185,23 @@ type CompositeStore struct {
 // tables (ptone/scion#4348). When it would, Migrate fails with a
 // *SchemaShadowError, unless allowShadowed is set, in which case it logs a
 // warning and continues. The guard is off unless this is called; hub server
-// startup calls it before migrating. It has no effect on other dialects.
+// startup and every cmd maintenance command that migrates the hub database
+// call it before migrating (ptone/scion#4432). It has no effect on other
+// dialects.
 func (c *CompositeStore) EnableSchemaShadowGuard(allowShadowed bool) {
 	c.schemaShadowGuard = true
 	c.allowShadowedSchema = allowShadowed
+	c.schemaShadowMaintenance = false
+}
+
+// EnableMaintenanceSchemaShadowGuard is EnableSchemaShadowGuard for the
+// maintenance commands that migrate the hub database (ptone/scion#4432). The
+// check and the override are the same; the refusal's SchemaShadowError has
+// Maintenance set, so its message says it refuses to migrate rather than to
+// start.
+func (c *CompositeStore) EnableMaintenanceSchemaShadowGuard(allowShadowed bool) {
+	c.EnableSchemaShadowGuard(allowShadowed)
+	c.schemaShadowMaintenance = true
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -232,6 +251,8 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AccessConstraintStore.inTx = true
 	txStore.MembershipLossCheckStore.inTx = true
 	txStore.AgentHoldStore.inTx = true
+	txStore.ConversationStore.inTx = true
+	txStore.ThreadGroupStore.inTx = true
 	return txStore
 }
 
@@ -241,46 +262,48 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		AgentStore:                 NewAgentStore(client),
-		ProjectStore:               NewProjectStore(client),
-		UserStore:                  NewUserStore(client),
-		SecretStore:                NewSecretStore(client),
-		TemplateStore:              NewTemplateStore(client),
-		NotificationStore:          NewNotificationStore(client),
-		ScheduleStore:              NewScheduleStore(client),
-		MaintenanceStore:           NewMaintenanceStore(client),
-		MessageStore:               NewMessageStore(client),
-		ExternalStore:              NewExternalStore(client),
-		BrokerSecretStore:          NewBrokerSecretStore(client),
-		AllowListStore:             NewAllowListStore(client),
-		GroupStore:                 NewGroupStore(client),
-		BrokerDispatchStore:        NewBrokerDispatchStore(client),
-		LifecycleHookStore:         NewLifecycleHookStore(client),
-		SkillStore:                 NewSkillStore(client),
-		SkillRegistryStore:         NewSkillRegistryStore(client),
-		HubSettingStore:            NewHubSettingStore(client),
-		BrokerSettingStore:         NewBrokerSettingStore(client),
-		SkillInjectionStore:        NewSkillInjectionStore(client),
-		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
-		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
-		ConversationStore:          NewConversationStore(client),
-		RoleStore:                  NewRoleStore(client),
-		DelegationEdgeStore:        NewDelegationEdgeStore(client),
-		SAAssignmentStore:          NewSAAssignmentStore(client),
-		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
-		AgentHoldStore:             NewAgentHoldStore(client),
-		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
-		AgentCredentialStore:       NewAgentCredentialStore(client),
-		AgentDelegationStore:       NewAgentDelegationStore(client),
-		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
-		MutationAuditStore:         NewMutationAuditStore(client),
-		QuotaStore:                 NewQuotaStore(client),
-		AccessConstraintStore:      NewAccessConstraintStore(client),
-		ExternalIdentityStore:      NewExternalIdentityStore(client),
-		AgentReincarnationStore:    NewAgentReincarnationStore(client),
-		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
-		HubInstanceStore:           NewHubInstanceStore(client),
-		client:                     client,
+		AgentStore:                  NewAgentStore(client),
+		ProjectStore:                NewProjectStore(client),
+		UserStore:                   NewUserStore(client),
+		SecretStore:                 NewSecretStore(client),
+		TemplateStore:               NewTemplateStore(client),
+		NotificationStore:           NewNotificationStore(client),
+		ScheduleStore:               NewScheduleStore(client),
+		MaintenanceStore:            NewMaintenanceStore(client),
+		MessageStore:                NewMessageStore(client),
+		ExternalStore:               NewExternalStore(client),
+		BrokerSecretStore:           NewBrokerSecretStore(client),
+		AllowListStore:              NewAllowListStore(client),
+		GroupStore:                  NewGroupStore(client),
+		BrokerDispatchStore:         NewBrokerDispatchStore(client),
+		LifecycleHookStore:          NewLifecycleHookStore(client),
+		SkillStore:                  NewSkillStore(client),
+		SkillRegistryStore:          NewSkillRegistryStore(client),
+		HubSettingStore:             NewHubSettingStore(client),
+		BrokerSettingStore:          NewBrokerSettingStore(client),
+		SkillInjectionStore:         NewSkillInjectionStore(client),
+		ProjectPreStartHookStore:    NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore:    NewAgentSessionMetricsStore(client),
+		ConversationStore:           NewConversationStore(client),
+		ThreadGroupStore:            NewThreadGroupStore(client),
+		RoleStore:                   NewRoleStore(client),
+		DelegationEdgeStore:         NewDelegationEdgeStore(client),
+		SAAssignmentStore:           NewSAAssignmentStore(client),
+		DelegationAdoptionStore:     NewDelegationAdoptionStore(client),
+		AgentHoldStore:              NewAgentHoldStore(client),
+		MembershipLossCheckStore:    NewMembershipLossCheckStore(client),
+		AgentCredentialStore:        NewAgentCredentialStore(client),
+		AgentDelegationStore:        NewAgentDelegationStore(client),
+		AgentIdentityKeyStore:       NewAgentIdentityKeyStore(client),
+		MutationAuditStore:          NewMutationAuditStore(client),
+		QuotaStore:                  NewQuotaStore(client),
+		AccessConstraintStore:       NewAccessConstraintStore(client),
+		ExternalIdentityStore:       NewExternalIdentityStore(client),
+		AgentReincarnationStore:     NewAgentReincarnationStore(client),
+		UserTerminalWorkspaceStore:  NewUserTerminalWorkspaceStore(client),
+		HubInstanceStore:            NewHubInstanceStore(client),
+		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
+		client:                      client,
 	}
 }
 
@@ -443,6 +466,12 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
 		return err
 	}
+	// thread_groups and thread_group_members carry project_id as a plain
+	// column with no DB-level FK either, so a project's thread groups are
+	// removed explicitly in the same transaction (ptone/scion#4424).
+	if err := c.DeleteThreadGroupsForProject(ctx, id); err != nil {
+		return err
+	}
 	return c.ProjectStore.DeleteProject(ctx, id)
 }
 
@@ -501,6 +530,59 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	return c.purgeDeletedAgents(ctx, cutoff, nil, false)
+}
+
+// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents in
+// ids (ptone/scion#4744): only those of them still soft-deleted before
+// cutoff are removed, in the same transaction, lock order, eligibility
+// re-check and cascade. IDs that are not UUIDs, unknown, restored or not yet
+// past cutoff are skipped. An empty ids purges nothing.
+func (c *CompositeStore) PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error) {
+	only := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if uid, err := parseUUID(id); err == nil {
+			only = append(only, uid)
+		}
+	}
+	if len(only) == 0 {
+		return 0, nil
+	}
+	return c.purgeDeletedAgents(ctx, cutoff, only, true)
+}
+
+// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents whose
+// deleted_at is before cutoff and whose ID sorts after afterID ("" starts at
+// the lowest), in ascending ID order, so a caller can page through them
+// (ptone/scion#4744). A non-positive limit returns nothing.
+func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*store.Agent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	q := c.client.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if afterID != "" {
+		uid, err := parseUUID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(agent.IDGT(uid))
+	}
+	rows, err := q.Order(ent.Asc(agent.FieldID)).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.Agent, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, entAgentToStore(a))
+	}
+	return out, nil
+}
+
+// purgeDeletedAgents is the purge behind PurgeDeletedAgents and
+// PurgeDeletedAgentsByID. With restrict set, only agents in only are
+// candidates.
+func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
@@ -513,8 +595,12 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 	// batch. Otherwise a later batch could lock a lower ID than an earlier
 	// one and deadlock against DeleteProject, which locks a project's agents
 	// in one ascending pass.
-	candidateIDs, err := tx.Agent.Query().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+	candidateQuery := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if restrict {
+		candidateQuery = candidateQuery.Where(agent.IDIn(only...))
+	}
+	candidateIDs, err := candidateQuery.
 		Order(ent.Asc(agent.FieldID)).
 		IDs(ctx)
 	if err != nil {
@@ -643,9 +729,9 @@ func (c *CompositeStore) Ping(ctx context.Context) error {
 func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// Before anything reads or creates tables: on Postgres, refuse to build a
 	// new table set that would shadow an existing one later on the
-	// search_path. Only enabled for hub server startup.
+	// search_path. Enabled by EnableSchemaShadowGuard.
 	if c.schemaShadowGuard {
-		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowLogger); err != nil {
+		if err := checkSchemaShadowing(ctx, c.Dialect(), c.DB(), c.allowShadowedSchema, c.schemaShadowMaintenance, c.schemaShadowLogger); err != nil {
 			return err
 		}
 	}

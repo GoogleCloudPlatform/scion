@@ -524,3 +524,68 @@ describe('scion-page-admin-integrations — cleared config save (ptone/scion#392
     }
   );
 });
+
+describe('scion-page-admin-integrations — Telegram webhook secret requirement (ptone/scion#4541)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function renderTelegram(inboundMode: string) {
+    const detail = {
+      name: 'telegram',
+      platform: 'telegram',
+      self_managed: false,
+      settings: { inbound_mode: inboundMode },
+      has_secrets: { bot_token: true },
+      status: { connected: true, version: '0.1.0' },
+    };
+    Object.defineProperty(window, 'location', {
+      value: { pathname: '/admin/integrations/telegram' },
+      writable: true,
+    });
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(detail)));
+    await import('./admin-integrations.js');
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+    const el = element as any;
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await el.updateComplete;
+    return el as HTMLElement & { updateComplete: Promise<boolean> };
+  }
+
+  function webhookSecretRequired(el: HTMLElement): boolean {
+    const row = queryAll(el, '.secret-row').find((r) =>
+      r.querySelector('.secret-key')?.textContent?.includes('Webhook Secret')
+    );
+    expect(row, 'Webhook Secret row').toBeDefined();
+    return row!.querySelector('.required-tag') !== null;
+  }
+
+  it('marks Webhook Secret required when inbound mode is webhook', async () => {
+    const el = await renderTelegram('webhook');
+    expect(webhookSecretRequired(el)).toBe(true);
+  });
+
+  it('does not mark Webhook Secret required in poll mode', async () => {
+    const el = await renderTelegram('poll');
+    expect(webhookSecretRequired(el)).toBe(false);
+  });
+
+  it('follows an edit of the inbound mode field', async () => {
+    const el = await renderTelegram('poll');
+    const field = queryAll(el, '.form-field').find((f) =>
+      f.querySelector('label')?.textContent?.includes('Inbound Mode')
+    );
+    const input = field?.querySelector('sl-input') as (HTMLElement & { value: string }) | null;
+    expect(input).not.toBeNull();
+    input!.value = 'webhook';
+    input!.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(webhookSecretRequired(el)).toBe(true);
+  });
+});

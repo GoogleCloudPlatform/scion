@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"testing"
 	"time"
 
@@ -1455,4 +1456,1576 @@ func TestGovernanceError_Interface(t *testing.T) {
 	// Verify it satisfies the error interface.
 	var e error = err
 	assert.NotNil(t, e)
+}
+
+// ---------------------------------------------------------------------------
+// 11c. Constraint-admin lockout on role-binding delete paths
+// ---------------------------------------------------------------------------
+
+func requireBindingExists(t *testing.T, s store.Store, bindingID string, want bool) {
+	t.Helper()
+	_, err := s.GetRoleBinding(context.Background(), bindingID)
+	if want {
+		assert.NoError(t, err, "binding %s should be kept", bindingID)
+	} else {
+		assert.ErrorIs(t, err, store.ErrNotFound, "binding %s should be deleted", bindingID)
+	}
+}
+
+func requireLockoutRefusal(t *testing.T, code int, body []byte) {
+	t.Helper()
+	require.Equal(t, http.StatusConflict, code, string(body))
+	assert.Equal(t, ErrCodeConstraintAdminLockout, decodeErrorCode(t, body))
+}
+
+// lockoutSystemBinding creates a system-scoped binding of the named
+// built-in role for a new active user.
+func lockoutSystemBinding(t *testing.T, s store.Store, roleName, name string) *store.RoleBinding {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      pvSeedUser(t, s, name),
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        store.SystemReconcileCreatedBy,
+	})
+	require.NoError(t, err)
+	return b
+}
+
+// lockoutSuspendDevUser keeps the dev user's own super-admin binding out of
+// the system-scope admin count. The request still runs as the dev user.
+func lockoutSuspendDevUser(t *testing.T, srv *Server, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	dev := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, dev.ID)
+	dev.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, dev))
+}
+
+// DELETE /admin/role-bindings/{id}, system scope, non-super-admin role.
+func TestConstraintAdminLockout_RoleBindingDeleteSystem(t *testing.T) {
+	srv, s := testServer(t)
+	lockoutSuspendDevUser(t, srv, s)
+	a := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-sys-a")
+	b := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-sys-b")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, a.ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+b.ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
+	requireBindingExists(t, s, b.ID, true)
+}
+
+// DELETE /admin/role-bindings/{id}, system super-admin binding. The
+// last-super-admin guard passes; the remaining super-admin is restricted
+// by a scheduled constraint, so the lockout check refuses.
+func TestConstraintAdminLockout_RoleBindingDeleteSuperAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	lockoutSuspendDevUser(t, srv, s)
+	a := lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-a")
+	b := lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-b")
+	future := time.Now().Add(24 * time.Hour)
+	_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 "lockout-rb-sa-scheduled",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(b.PrincipalID),
+		ScopeType:            store.RoleScopeSystem,
+		MaximumPermissions:   []string{"agent.read"},
+		NotBefore:            &future,
+		Purpose:              "scheduled restriction",
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "when scheduled constraints activate")
+	requireBindingExists(t, s, a.ID, true)
+
+	// With an unrestricted super-admin remaining, the delete succeeds.
+	lockoutSystemBinding(t, s, store.SystemRoleSuperAdmin, "lockout-rb-sa-c")
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+a.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, a.ID, false)
+}
+
+// DELETE /admin/role-bindings/{id}, project scope (membership service).
+func TestConstraintAdminLockout_RoleBindingDeleteProject(t *testing.T) {
+	srv, s := testServer(t)
+	_, _, bindings := lockoutProjectAdmins(t, s, "lockout-rb-proj", 2)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+bindings[0].ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+bindings[1].ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// DELETE /projects/{id}/members/{bindingID}.
+func TestConstraintAdminLockout_ProjectMemberDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "lockout-member-del", 2)
+	path := "/api/v1/projects/" + projectID + "/members/"
+
+	rec := doRequest(t, srv, http.MethodDelete, path+bindings[0].ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, path+bindings[1].ID, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// DELETE /projects/{id}/members/principals/user/{userID}.
+func TestConstraintAdminLockout_ProjectMemberPrincipalDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "lockout-principal-del", 2)
+	path := "/api/v1/projects/" + projectID + "/members/principals/user/"
+
+	rec := doRequest(t, srv, http.MethodDelete, path+users[0], nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodDelete, path+users[1], nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	assert.Contains(t, rec.Body.String(), "removing this role binding")
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// PUT /projects/{id}/members/principals/user/{userID} with a role set that
+// no longer carries access_constraint.admin.
+func TestConstraintAdminLockout_ProjectMemberPrincipalPut(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "lockout-principal-put", 2)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	path := "/api/v1/projects/" + projectID + "/members/principals/user/"
+	body := setMemberRolesRequestBody{RoleDefinitionIDs: []string{memberRD.ID}}
+
+	rec := doRequest(t, srv, http.MethodPut, path+users[0], body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodPut, path+users[1], body)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// lockoutProjectBinding creates a project-scoped binding and returns it.
+func lockoutProjectBinding(t *testing.T, s store.Store, roleDefID, principalType, principalID, projectID string) *store.RoleBinding {
+	t.Helper()
+	b, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+		RoleDefinitionID: roleDefID,
+		PrincipalType:    principalType,
+		PrincipalID:      principalID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	return b
+}
+
+// Removing a group binding that carries access_constraint.admin counts the
+// group's members as losing that authority.
+func TestConstraintAdminLockout_GroupBindingDelete(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-grp-rb-project")
+	rd := createTestRoleDefinition(t, s, "lockout-grp-rb-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	groupID := pvSeedGroup(t, s, "lockout-grp-rb")
+	groupBinding := lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	member := pvSeedUser(t, s, "lockout-grp-rb-member")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, member)
+
+	err := checkRoleBindingRemovalAdminLockout(ctx, s, now, groupBinding)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "the only admin group binding cannot be removed")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+
+	other := pvSeedUser(t, s, "lockout-grp-rb-other")
+	pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, groupBinding))
+}
+
+// Only admin bindings at the removed binding's scope count as keeping the
+// user an admin there.
+func TestConstraintAdminLockout_OtherScopeAdminNotCounted(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-scope-p1")
+	otherProjectID := pvSeedProject(t, s, "lockout-scope-p2")
+	rd := createTestRoleDefinition(t, s, "lockout-scope-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	user := pvSeedUser(t, s, "lockout-scope-user")
+	binding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+	pvSeedRoleBinding(t, s, rd.ID, "user", user, store.RoleScopeProject, otherProjectID)
+
+	err := checkRoleBindingRemovalAdminLockout(ctx, s, now, binding)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, "an admin binding at another scope does not count")
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+
+	other := pvSeedUser(t, s, "lockout-scope-other")
+	pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+	assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, binding))
+}
+
+// Only admin bindings active at the check time count as keeping the user
+// an admin at the removed binding's scope. A binding that is not yet
+// valid or has expired keeps no admin.
+func TestConstraintAdminLockout_InactiveSameScopeAdminNotCounted(t *testing.T) {
+	now := time.Now()
+	future := now.Add(24 * time.Hour)
+	past := now.Add(-24 * time.Hour)
+	tests := []struct {
+		name      string
+		notBefore *time.Time
+		expiresAt *time.Time
+		refused   bool
+	}{
+		{name: "scheduled", notBefore: &future, refused: true},
+		{name: "expired", expiresAt: &past, refused: true},
+		{name: "active", notBefore: &past, expiresAt: &future, refused: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			prefix := "lockout-inactive-" + tc.name
+			projectID := pvSeedProject(t, s, prefix+"-project")
+			rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			otherRD := createTestRoleDefinition(t, s, prefix+"-other-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			user := pvSeedUser(t, s, prefix+"-user")
+			binding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: otherRD.ID,
+				PrincipalType:    "user",
+				PrincipalID:      user,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          projectID,
+				NotBefore:        tc.notBefore,
+				ExpiresAt:        tc.expiresAt,
+				CreatedBy:        "test",
+			})
+			require.NoError(t, err)
+
+			err = checkRoleBindingRemovalAdminLockout(ctx, s, now, binding)
+			if !tc.refused {
+				assert.NoError(t, err)
+				return
+			}
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge)
+			assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+		})
+	}
+}
+
+// Only a binding active at the check time makes another user a remaining
+// admin, through a user binding or a group binding at the scope. The
+// check time is whole seconds so stored times compare exactly; the
+// window bounds follow isBindingActive (NotBefore is inclusive and
+// ExpiresAt is exclusive, so a binding that expires at the check time
+// is no longer active).
+func TestConstraintAdminLockout_InactiveOtherAdminNotCounted(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(d time.Duration) *time.Time {
+		v := now.Add(d)
+		return &v
+	}
+	windows := []struct {
+		name      string
+		notBefore *time.Time
+		expiresAt *time.Time
+		refused   bool
+	}{
+		{name: "no-window"},
+		{name: "scheduled", notBefore: at(time.Hour), refused: true},
+		{name: "starts-in-1s", notBefore: at(time.Second), refused: true},
+		{name: "starts-now", notBefore: at(0)},
+		{name: "expires-in-1s", expiresAt: at(time.Second)},
+		{name: "expires-now", expiresAt: at(0), refused: true},
+		{name: "expired-1s-ago", expiresAt: at(-time.Second), refused: true},
+		{name: "expired", expiresAt: at(-time.Hour), refused: true},
+	}
+	for _, route := range []string{"user", "group"} {
+		for _, w := range windows {
+			t.Run(route+"/"+w.name, func(t *testing.T) {
+				_, _, _, s := govTestSetup(t)
+				ctx := context.Background()
+				prefix := "lockout-other-" + route + "-" + w.name
+				projectID := pvSeedProject(t, s, prefix+"-project")
+				rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+					store.RoleScopeProject, []string{PermissionConstraintAdmin})
+				removed := lockoutProjectBinding(t, s, rd.ID, "user",
+					pvSeedUser(t, s, prefix+"-removed"), projectID)
+				other := pvSeedUser(t, s, prefix+"-other")
+				principalType, principalID := "user", other
+				if route == "group" {
+					principalType = "group"
+					principalID = pvSeedGroup(t, s, prefix+"-group")
+					pvSeedGroupMember(t, s, principalID, store.GroupMemberTypeUser, other)
+				}
+				_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+					RoleDefinitionID: rd.ID,
+					PrincipalType:    principalType,
+					PrincipalID:      principalID,
+					ScopeType:        store.RoleScopeProject,
+					ScopeID:          projectID,
+					NotBefore:        w.notBefore,
+					ExpiresAt:        w.expiresAt,
+					CreatedBy:        "test",
+				})
+				require.NoError(t, err)
+
+				err = checkRoleBindingRemovalAdminLockout(ctx, s, now, removed)
+				if !w.refused {
+					assert.NoError(t, err)
+					return
+				}
+				var ge *GovernanceError
+				require.ErrorAs(t, err, &ge)
+				assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+			})
+		}
+	}
+}
+
+// lockoutReadErrStore fails the named reads. roleDefNotFoundID makes
+// GetRoleDefinition report ErrNotFound for that role only. When
+// scopeErrFromCall is above zero, ListRoleBindingsForScope fails from
+// that call on (counted in scopeCalls); otherwise scopeErr fails every
+// call.
+type lockoutReadErrStore struct {
+	store.Store
+	roleDefErr         error
+	roleDefNotFoundID  string
+	scopeErr           error
+	scopeErrFromCall   int
+	scopeCalls         *int
+	groupMembersErr    error
+	effectiveGroupsErr error
+	userErr            error
+}
+
+func (s lockoutReadErrStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
+	if s.roleDefErr != nil {
+		return nil, s.roleDefErr
+	}
+	if id != "" && id == s.roleDefNotFoundID {
+		return nil, fmt.Errorf("role %s: %w", id, store.ErrNotFound)
+	}
+	return s.Store.GetRoleDefinition(ctx, id)
+}
+
+func (s lockoutReadErrStore) ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*store.RoleBinding, error) {
+	if s.scopeErr != nil {
+		if s.scopeErrFromCall <= 0 {
+			return nil, s.scopeErr
+		}
+		*s.scopeCalls++
+		if *s.scopeCalls >= s.scopeErrFromCall {
+			return nil, s.scopeErr
+		}
+	}
+	return s.Store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+}
+
+func (s lockoutReadErrStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
+	if s.groupMembersErr != nil {
+		return nil, s.groupMembersErr
+	}
+	return s.Store.GetGroupMembers(ctx, groupID)
+}
+
+func (s lockoutReadErrStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
+	if s.effectiveGroupsErr != nil {
+		return nil, s.effectiveGroupsErr
+	}
+	return s.Store.GetEffectiveGroups(ctx, userID)
+}
+
+func (s lockoutReadErrStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.userErr != nil {
+		return nil, s.userErr
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+// A failed role definition or scope binding read refuses the change.
+func TestConstraintAdminLockout_ReadFailureRefuses(t *testing.T) {
+	readErr := errors.New("read failed")
+	for _, tc := range []struct {
+		name string
+		st   func(store.Store) store.Store
+	}{
+		{name: "role-definition", st: func(s store.Store) store.Store {
+			return lockoutReadErrStore{Store: s, roleDefErr: readErr}
+		}},
+		{name: "scope-bindings", st: func(s store.Store) store.Store {
+			return lockoutReadErrStore{Store: s, scopeErr: readErr}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			projectID, users, _ := lockoutProjectAdmins(t, s, "lockout-readerr-"+tc.name, 2)
+			rm := adminRemoval{userID: users[0], userAction: userRemovalSuspend}
+			require.NoError(t, checkConstraintAdminLockout(ctx, s, time.Now(),
+				store.RoleScopeProject, projectID, rm), "control: reads succeed")
+
+			err := checkConstraintAdminLockout(ctx, tc.st(s), time.Now(),
+				store.RoleScopeProject, projectID, rm)
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge)
+			assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+		})
+	}
+}
+
+// Removing a user whose constraint-admin bindings at the scope are all
+// outside their activation window still has the scope judged over the
+// active admins: with none left, or none once scheduled constraints
+// activate, the removal is refused. A user with no constraint-admin
+// binding at the scope runs no check.
+func TestConstraintAdminLockout_UserRemovalInactiveAdmin(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Hour)
+	tests := []struct {
+		name      string
+		route     string // how the removed user holds the admin binding
+		notBefore *time.Time
+		expiresAt *time.Time
+		other     string // "", "active" or "blocked"
+		refused   bool
+	}{
+		{name: "expired-only-admin", route: "user", expiresAt: &past, refused: true},
+		{name: "scheduled-only-admin", route: "user", notBefore: &future, refused: true},
+		{name: "group-expired-only-admin", route: "group", expiresAt: &past, refused: true},
+		{name: "scheduled-other-blocked", route: "user", notBefore: &future, other: "blocked", refused: true},
+		{name: "expired-other-active", route: "user", expiresAt: &past, other: "active"},
+		{name: "no-admin-binding", route: "none"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			prefix := "lockout-urm-" + tc.name
+			projectID := pvSeedProject(t, s, prefix+"-project")
+			rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			user := pvSeedUser(t, s, prefix+"-user")
+			principalType, principalID := "user", user
+			if tc.route == "group" {
+				principalType = "group"
+				principalID = pvSeedGroup(t, s, prefix+"-group")
+				pvSeedGroupMember(t, s, principalID, store.GroupMemberTypeUser, user)
+			}
+			if tc.route != "none" {
+				_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+					RoleDefinitionID: rd.ID,
+					PrincipalType:    principalType,
+					PrincipalID:      principalID,
+					ScopeType:        store.RoleScopeProject,
+					ScopeID:          projectID,
+					NotBefore:        tc.notBefore,
+					ExpiresAt:        tc.expiresAt,
+					CreatedBy:        "test",
+				})
+				require.NoError(t, err)
+			}
+			if tc.other != "" {
+				other := pvSeedUser(t, s, prefix+"-other")
+				pvSeedRoleBinding(t, s, rd.ID, "user", other, store.RoleScopeProject, projectID)
+				if tc.other == "blocked" {
+					_, err := s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+						Name:                 prefix + "-scheduled",
+						SubjectKind:          store.ConstraintSubjectPrincipal,
+						SubjectPrincipalType: pvStrPtr("user"),
+						SubjectPrincipalID:   pvStrPtr(other),
+						ScopeType:            store.RoleScopeProject,
+						ScopeID:              projectID,
+						MaximumPermissions:   []string{"agent.read"},
+						NotBefore:            &future,
+						Purpose:              "scheduled restriction",
+						CreatedBy:            "test",
+					})
+					require.NoError(t, err)
+				}
+			}
+
+			err := checkConstraintAdminLockout(ctx, s, now, store.RoleScopeProject, projectID,
+				adminRemoval{userID: user, userAction: userRemovalSuspend})
+			if !tc.refused {
+				assert.NoError(t, err)
+				return
+			}
+			var ge *GovernanceError
+			require.ErrorAs(t, err, &ge)
+			assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+		})
+	}
+}
+
+// A role definition read error while listing the scopes a removed user
+// administers refuses the removal.
+func TestConstraintAdminLockout_UserRemovalRoleReadFailureRefuses(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	_, users, _ := lockoutProjectAdmins(t, s, "lockout-urm-readerr", 2)
+	require.NoError(t, checkUserRemovalAdminLockout(ctx, s, time.Now(), users[0], userRemovalSuspend),
+		"control: reads succeed")
+
+	st := lockoutReadErrStore{Store: s, roleDefErr: errors.New("read failed")}
+	assert.Error(t, checkUserRemovalAdminLockout(ctx, st, time.Now(), users[0], userRemovalSuspend))
+}
+
+// A failed read for a user who holds an admin binding at the scope only
+// outside its activation window fails the admin resolution.
+func TestConstraintAdminLockout_InactiveBindingReadFailureRefuses(t *testing.T) {
+	readErr := errors.New("read failed")
+	for _, tc := range []struct {
+		name  string
+		route string
+		fault func(*lockoutReadErrStore)
+	}{
+		{name: "group-members", route: "group", fault: func(s *lockoutReadErrStore) { s.groupMembersErr = readErr }},
+		{name: "user", route: "user", fault: func(s *lockoutReadErrStore) { s.userErr = readErr }},
+		{name: "effective-groups", route: "user", fault: func(s *lockoutReadErrStore) { s.effectiveGroupsErr = readErr }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			now := time.Now()
+			past := now.Add(-time.Hour)
+			prefix := "lockout-inactive-readerr-" + tc.name
+			projectID := pvSeedProject(t, s, prefix+"-project")
+			rd := createTestRoleDefinition(t, s, prefix+"-admin-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin})
+			user := pvSeedUser(t, s, prefix+"-user")
+			principalType, principalID := "user", user
+			if tc.route == "group" {
+				principalType = "group"
+				principalID = pvSeedGroup(t, s, prefix+"-group")
+				pvSeedGroupMember(t, s, principalID, store.GroupMemberTypeUser, user)
+			}
+			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: rd.ID,
+				PrincipalType:    principalType,
+				PrincipalID:      principalID,
+				ScopeType:        store.RoleScopeProject,
+				ScopeID:          projectID,
+				ExpiresAt:        &past,
+				CreatedBy:        "test",
+			})
+			require.NoError(t, err)
+
+			admins, inactiveOnly, err := resolveConstraintAdmins(ctx, s, now, store.RoleScopeProject, projectID)
+			require.NoError(t, err, "control: reads succeed")
+			assert.Empty(t, admins)
+			assert.True(t, inactiveOnly[user], "control: the user holds only an inactive binding")
+
+			st := lockoutReadErrStore{Store: s}
+			tc.fault(&st)
+			_, _, err = resolveConstraintAdmins(ctx, st, now, store.RoleScopeProject, projectID)
+			assert.ErrorIs(t, err, readErr)
+		})
+	}
+}
+
+// A binding whose role definition does not exist grants nothing: the
+// resolution and the user removal skip it rather than refuse.
+func TestConstraintAdminLockout_MissingRoleDefinitionSkipped(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-missing-role-project")
+	rdA := createTestRoleDefinition(t, s, "lockout-missing-role-a",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	rdB := createTestRoleDefinition(t, s, "lockout-missing-role-b",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	userA := pvSeedUser(t, s, "lockout-missing-role-user-a")
+	userB := pvSeedUser(t, s, "lockout-missing-role-user-b")
+	lockoutProjectBinding(t, s, rdA.ID, "user", userA, projectID)
+	lockoutProjectBinding(t, s, rdB.ID, "user", userB, projectID)
+	st := lockoutReadErrStore{Store: s, roleDefNotFoundID: rdB.ID}
+
+	admins, _, err := resolveConstraintAdmins(ctx, st, now, store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	require.Len(t, admins, 1)
+	assert.Equal(t, userA, admins[0].userID)
+
+	// userB administers no scope once its role is missing, so removing
+	// userB runs no check; removing userA, the only remaining admin, is
+	// refused.
+	assert.NoError(t, checkUserRemovalAdminLockout(ctx, st, now, userB, userRemovalSuspend))
+	var ge *GovernanceError
+	require.ErrorAs(t, checkUserRemovalAdminLockout(ctx, st, now, userA, userRemovalSuspend), &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+}
+
+// A failed read of the removed binding's scope bindings, after the admins
+// resolve, counts every covered admin as losing authority.
+func TestConstraintAdminLockout_SurvivorScopeReadFailureRefuses(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now()
+	projectID := pvSeedProject(t, s, "lockout-survivor-readerr-project")
+	rd := createTestRoleDefinition(t, s, "lockout-survivor-readerr-role",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	otherRD := createTestRoleDefinition(t, s, "lockout-survivor-readerr-other",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	user := pvSeedUser(t, s, "lockout-survivor-readerr-user")
+	binding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+	lockoutProjectBinding(t, s, otherRD.ID, "user", user, projectID)
+	require.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, now, binding),
+		"control: the other binding keeps the user an admin")
+
+	calls := 0
+	st := lockoutReadErrStore{Store: s, scopeErr: errors.New("read failed"),
+		scopeErrFromCall: 2, scopeCalls: &calls}
+	err := checkRoleBindingRemovalAdminLockout(ctx, st, now, binding)
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+	assert.Equal(t, 2, calls, "the admin resolution read succeeded and the second read failed")
+}
+
+// The lockout preview counts only active bindings toward the remaining
+// admins, and a role definition read error leaves it undetermined.
+func TestConstraintAdminLockout_PreviewCountsActiveBindings(t *testing.T) {
+	ps, authz, s := previewTestSetup(t)
+	ctx := context.Background()
+	now := ps.nowFunc()
+	past := now.Add(-time.Hour)
+	projectID := pvSeedProject(t, s, "lockout-preview-project")
+	rd := createTestRoleDefinition(t, s, "lockout-preview-admin-role",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	inactive := pvSeedUser(t, s, "lockout-preview-inactive")
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "user",
+		PrincipalID:      inactive,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		ExpiresAt:        &past,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	draft := &store.AccessConstraint{
+		Name:                 "lockout-preview-draft",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(pvSeedUser(t, s, "lockout-preview-subject")),
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectID,
+		MaximumPermissions:   []string{"agent.read"},
+	}
+	assess := func(p *PreviewService) LockoutAssessment {
+		return p.assessLockout(ctx, PreviewRequest{Operation: "create", Draft: draft,
+			Actor: pvTestActor(inactive)}, nil, storeToHubAccessConstraint(draft), now)
+	}
+
+	l := assess(ps)
+	require.NotNil(t, l.Safe)
+	assert.False(t, *l.Safe, "an admin with only an expired binding does not count")
+	require.NotNil(t, l.RemainingActiveDirectAdmins)
+	assert.Equal(t, 0, *l.RemainingActiveDirectAdmins)
+
+	pvSeedRoleBinding(t, s, rd.ID, "user", pvSeedUser(t, s, "lockout-preview-active"),
+		store.RoleScopeProject, projectID)
+	l = assess(ps)
+	require.NotNil(t, l.Safe)
+	assert.True(t, *l.Safe, "control: an active admin counts")
+	require.NotNil(t, l.RemainingActiveDirectAdmins)
+	assert.Equal(t, 1, *l.RemainingActiveDirectAdmins)
+
+	eps := NewPreviewServiceWithKey(lockoutReadErrStore{Store: s, roleDefErr: errors.New("read failed")},
+		authz, slog.Default(), []byte("test-preview-hmac-key-32-bytes!!"))
+	l = assess(eps)
+	assert.Nil(t, l.Safe, "a role definition read error leaves the assessment undetermined")
+	assert.NotEmpty(t, l.UndeterminedReason)
+}
+
+// DELETE /projects/{id}/members/principals/group/{groupID}.
+func TestConstraintAdminLockout_ProjectMemberGroupPrincipalDelete(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := pvSeedProject(t, s, "lockout-grp-principal-project")
+	rd := createTestRoleDefinition(t, s, "lockout-grp-principal-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	groupID := pvSeedGroup(t, s, "lockout-grp-principal")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, pvSeedUser(t, s, "lockout-grp-principal-member"))
+	groupBinding := lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	path := "/api/v1/projects/" + projectID + "/members/principals/group/" + groupID
+
+	rec := doRequest(t, srv, http.MethodDelete, path, nil)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, groupBinding.ID, true)
+
+	lockoutProjectBinding(t, s, rd.ID, "user", pvSeedUser(t, s, "lockout-grp-principal-other"), projectID)
+	rec = doRequest(t, srv, http.MethodDelete, path, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, groupBinding.ID, false)
+}
+
+// PATCH /projects/{id}/members/{bindingID} from a custom role carrying
+// access_constraint.admin to project-member.
+func TestConstraintAdminLockout_ProjectMemberRoleChange(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "lockout-role-change", 2)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	path := "/api/v1/projects/" + projectID + "/members/"
+	body := updateProjectMemberRequest{RoleDefinitionID: memberRD.ID}
+
+	rec := doRequest(t, srv, http.MethodPatch, path+bindings[0].ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, bindings[0].ID, false)
+
+	rec = doRequest(t, srv, http.MethodPatch, path+bindings[1].ID, body)
+	requireLockoutRefusal(t, rec.Code, rec.Body.Bytes())
+	requireBindingExists(t, s, bindings[1].ID, true)
+}
+
+// A user who stays a constraint admin through a group binding at the
+// project can drop their own constraint-admin role.
+func TestConstraintAdminLockout_ProjectMemberPrincipalPutGroupKeepsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := pvSeedProject(t, s, "lockout-put-grp-project")
+	rd := createTestRoleDefinition(t, s, "lockout-put-grp-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	user := pvSeedUser(t, s, "lockout-put-grp-user")
+	userBinding := lockoutProjectBinding(t, s, rd.ID, "user", user, projectID)
+	groupID := pvSeedGroup(t, s, "lockout-put-grp")
+	pvSeedGroupMember(t, s, groupID, store.GroupMemberTypeUser, user)
+	lockoutProjectBinding(t, s, rd.ID, "group", groupID, projectID)
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+projectID+"/members/principals/user/"+user,
+		setMemberRolesRequestBody{RoleDefinitionIDs: []string{memberRD.ID}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	requireBindingExists(t, s, userBinding.ID, false)
+}
+
+// requireLockoutErr asserts err is a constraint-admin lockout refusal.
+func requireLockoutErr(t *testing.T, err error, msgAndArgs ...interface{}) {
+	t.Helper()
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge, msgAndArgs...)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+}
+
+// ---------------------------------------------------------------------------
+// Replace path: one transaction, admin-guard lock
+// ---------------------------------------------------------------------------
+
+// replaceTxStore counts admin-guard locks taken on a transaction handle,
+// counts the lockout reads made on the transaction handle (txReads) and
+// on the outer handle (outerReads), and fails DeleteRoleBinding with
+// deleteErr, inside or outside a transaction.
+type replaceTxStore struct {
+	store.Store
+	inTx       bool
+	txLocks    *int
+	txReads    *int
+	outerReads *int
+	deleteErr  error
+}
+
+func (s replaceTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		inner := s
+		inner.Store, inner.inTx = tx, true
+		return fn(inner)
+	})
+}
+
+// read counts one lockout read on the handle it is made through.
+func (s replaceTxStore) read() {
+	if s.inTx && s.txReads != nil {
+		*s.txReads++
+	}
+	if !s.inTx && s.outerReads != nil {
+		*s.outerReads++
+	}
+}
+
+func (s replaceTxStore) GetRoleBinding(ctx context.Context, id string) (*store.RoleBinding, error) {
+	s.read()
+	return s.Store.GetRoleBinding(ctx, id)
+}
+
+func (s replaceTxStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
+	s.read()
+	return s.Store.GetRoleDefinition(ctx, id)
+}
+
+func (s replaceTxStore) ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*store.RoleBinding, error) {
+	s.read()
+	return s.Store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+}
+
+func (s replaceTxStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
+	s.read()
+	return s.Store.GetGroupMembers(ctx, groupID)
+}
+
+func (s replaceTxStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
+	s.read()
+	return s.Store.GetEffectiveGroups(ctx, userID)
+}
+
+func (s replaceTxStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	s.read()
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s replaceTxStore) ListConstraintsForScope(ctx context.Context, scopeType, scopeID string) ([]*store.AccessConstraint, error) {
+	s.read()
+	return s.Store.ListConstraintsForScope(ctx, scopeType, scopeID)
+}
+
+func (s replaceTxStore) GetRoleDefinitionByName(ctx context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	s.read()
+	return s.Store.GetRoleDefinitionByName(ctx, name, scopeType)
+}
+
+func (s replaceTxStore) LockRoleDefinitionForAdminGuard(ctx context.Context, id string) error {
+	if s.inTx {
+		*s.txLocks++
+	}
+	return s.Store.LockRoleDefinitionForAdminGuard(ctx, id)
+}
+
+func (s replaceTxStore) DeleteRoleBinding(ctx context.Context, id string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	return s.Store.DeleteRoleBinding(ctx, id)
+}
+
+// replaceGovernance returns a GovernanceService over st.
+func replaceGovernance(t *testing.T, st store.Store, authz *AuthzService) *GovernanceService {
+	t.Helper()
+	ps := NewPreviewServiceWithKey(st, authz, slog.Default(), []byte("test-governance-hmac-key-32byte!"))
+	return NewGovernanceService(st, ps, authz, slog.Default())
+}
+
+// replaceDowngrade returns a non-admin binding for b's principal at b's
+// scope.
+func replaceDowngrade(t *testing.T, s store.Store, name string, b *store.RoleBinding) *store.RoleBinding {
+	t.Helper()
+	basic := createTestRoleDefinition(t, s, name+"-basic", store.RoleScopeProject, []string{"agent.read"})
+	return &store.RoleBinding{
+		RoleDefinitionID: basic.ID,
+		PrincipalType:    b.PrincipalType,
+		PrincipalID:      b.PrincipalID,
+		ScopeType:        b.ScopeType,
+		ScopeID:          b.ScopeID,
+		CreatedBy:        "test",
+	}
+}
+
+// A downgrade from an admin role takes the admin-guard lock on the
+// transaction handle the replacement writes through, and the lockout
+// check reads through that handle only.
+func TestConstraintAdminLockout_ReplaceTakesGuardLockInTx(t *testing.T) {
+	_, _, authz, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "replace-lock", 2)
+	group := pvSeedGroup(t, s, "replace-lock-group")
+	pvSeedGroupMember(t, s, group, store.GroupMemberTypeUser,
+		pvSeedUser(t, s, "replace-lock-group-member"))
+	lockoutProjectBinding(t, s, bindings[0].RoleDefinitionID, "group", group, projectID)
+	newBinding := replaceDowngrade(t, s, "replace-lock", bindings[0])
+	locks, txReads, outerReads := 0, 0, 0
+	gs := replaceGovernance(t, replaceTxStore{Store: s, txLocks: &locks,
+		txReads: &txReads, outerReads: &outerReads}, authz)
+
+	created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+	require.NoError(t, err)
+	assert.Positive(t, locks, "the lockout check runs under the admin-guard lock in the transaction")
+	assert.Positive(t, txReads, "the lockout reads go through the transaction handle")
+	assert.Zero(t, outerReads, "no lockout read goes through the outer handle")
+	requireBindingExists(t, s, bindings[0].ID, false)
+	requireBindingExists(t, s, created.ID, true)
+}
+
+// When the old binding cannot be deleted, the replacement binding is not
+// kept: the create and the delete commit together or not at all.
+func TestConstraintAdminLockout_ReplaceDeleteFailureRollsBack(t *testing.T) {
+	_, _, authz, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID, _, bindings := lockoutProjectAdmins(t, s, "replace-rollback", 2)
+	locks := 0
+	gs := replaceGovernance(t, replaceTxStore{Store: s, txLocks: &locks,
+		deleteErr: errors.New("delete failed")}, authz)
+	newBinding := replaceDowngrade(t, s, "replace-rollback", bindings[0])
+
+	_, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+	require.ErrorContains(t, err, "failed to delete old binding")
+	requireBindingExists(t, s, bindings[0].ID, true)
+	scope, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	for _, b := range scope {
+		assert.NotEqual(t, newBinding.RoleDefinitionID, b.RoleDefinitionID,
+			"the replacement binding is not kept")
+	}
+}
+
+// requireReplaceOutcome checks a ReplaceRoleBinding result. An allowed
+// replace deletes old and keeps the created binding. A refused replace
+// fails with ErrCodeConstraintAdminLockout, keeps old, and writes no
+// binding for newBinding's role and principal at newBinding's scope.
+func requireReplaceOutcome(t *testing.T, s store.Store, err error, created, old, newBinding *store.RoleBinding, allowed bool) {
+	t.Helper()
+	if allowed {
+		require.NoError(t, err)
+		requireBindingExists(t, s, old.ID, false)
+		requireBindingExists(t, s, created.ID, true)
+		return
+	}
+	var ge *GovernanceError
+	require.ErrorAs(t, err, &ge)
+	assert.Equal(t, ErrCodeConstraintAdminLockout, ge.Code)
+	requireBindingExists(t, s, old.ID, true)
+	scope, lerr := s.ListRoleBindingsForScope(context.Background(), newBinding.ScopeType, newBinding.ScopeID)
+	require.NoError(t, lerr)
+	for _, b := range scope {
+		if b.ID == old.ID {
+			continue
+		}
+		assert.False(t, b.RoleDefinitionID == newBinding.RoleDefinitionID &&
+			b.PrincipalType == newBinding.PrincipalType &&
+			b.PrincipalID == newBinding.PrincipalID,
+			"the replacement binding is not kept")
+	}
+}
+
+// replaceMoved returns a binding with b's role at the given principal and
+// project scope.
+func replaceMoved(b *store.RoleBinding, principalType, principalID, projectID string) *store.RoleBinding {
+	return &store.RoleBinding{
+		RoleDefinitionID: b.RoleDefinitionID,
+		PrincipalType:    principalType,
+		PrincipalID:      principalID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		CreatedBy:        "test",
+	}
+}
+
+// A replace that hands the admin role to another principal at the same
+// scope is judged like a binding delete at that scope: with no other
+// active admin it is refused, and the new binding does not count as a
+// remaining admin. Control: another active admin at the scope.
+func TestConstraintAdminLockout_ReplaceMovesAdminToOtherPrincipal(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		t.Run(fmt.Sprintf("other-admins-%d", others), func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := fmt.Sprintf("replace-move-principal-%d", others)
+			projectID, _, bindings := lockoutProjectAdmins(t, s, name, 1+others)
+			target := pvSeedUser(t, s, name+"-target")
+			newBinding := replaceMoved(bindings[0], "user", target, projectID)
+
+			created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, others > 0)
+		})
+	}
+}
+
+// A replace that moves the admin role to another scope is judged at the
+// original scope: with no other active admin there it is refused.
+// Control: another active admin at the original scope.
+func TestConstraintAdminLockout_ReplaceMovesAdminToOtherScope(t *testing.T) {
+	for _, others := range []int{0, 1} {
+		t.Run(fmt.Sprintf("other-admins-%d", others), func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := fmt.Sprintf("replace-move-scope-%d", others)
+			_, users, bindings := lockoutProjectAdmins(t, s, name, 1+others)
+			otherProjectID := pvSeedProject(t, s, name+"-other")
+			newBinding := replaceMoved(bindings[0], "user", users[0], otherProjectID)
+
+			created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, others > 0)
+		})
+	}
+}
+
+// A replace that keeps an admin role for the same principal at the same
+// scope, over a window that covers the old one, removes no admin, so the
+// sole admin may make it.
+func TestConstraintAdminLockout_ReplaceSamePrincipalAdminRoleAllowed(t *testing.T) {
+	gs, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID, users, bindings := lockoutProjectAdmins(t, s, "replace-same-admin", 1)
+	otherAdmin := createTestRoleDefinition(t, s, "replace-same-admin-other-role",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin, "agent.list"})
+	newBinding := replaceMoved(bindings[0], "user", users[0], projectID)
+	newBinding.RoleDefinitionID = otherAdmin.ID
+
+	created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+	requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, true)
+}
+
+// replaceReadErrStore is a lockoutReadErrStore whose WithTx hands the
+// callback a transaction handle with the same read errors.
+type replaceReadErrStore struct {
+	lockoutReadErrStore
+}
+
+func (s replaceReadErrStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		inner := s
+		inner.Store = tx
+		return fn(inner)
+	})
+}
+
+// A replace that moves an admin binding refuses when the scope bindings
+// cannot be read in the transaction. Control: the same replace with the
+// reads succeeding is allowed, as another active admin remains.
+func TestConstraintAdminLockout_ReplaceMoveReadFailureRefuses(t *testing.T) {
+	for _, move := range []string{"principal", "scope"} {
+		for _, readErr := range []error{nil, errors.New("read failed")} {
+			t.Run(fmt.Sprintf("%s-err-%t", move, readErr != nil), func(t *testing.T) {
+				_, _, authz, s := govTestSetup(t)
+				ctx := context.Background()
+				name := fmt.Sprintf("replace-move-readerr-%s-%t", move, readErr != nil)
+				projectID, users, bindings := lockoutProjectAdmins(t, s, name, 2)
+				newBinding := replaceMoved(bindings[0], "user", pvSeedUser(t, s, name+"-target"), projectID)
+				if move == "scope" {
+					newBinding = replaceMoved(bindings[0], "user", users[0], pvSeedProject(t, s, name+"-other"))
+				}
+				gs := replaceGovernance(t, replaceReadErrStore{lockoutReadErrStore{Store: s, scopeErr: readErr}}, authz)
+
+				created, err := gs.ReplaceRoleBinding(ctx, bindings[0].ID, newBinding, "")
+				requireReplaceOutcome(t, s, err, created, bindings[0], newBinding, readErr == nil)
+			})
+		}
+	}
+}
+
+// A replace that keeps an admin role for the same principal at the same
+// scope but narrows the validity window removes admin authority for the
+// time the new window leaves out, so the sole admin's replace is refused.
+// Control: another active admin at the scope. A widened or equal window
+// removes nothing and is allowed for the sole admin.
+func TestConstraintAdminLockout_ReplaceNarrowedWindow(t *testing.T) {
+	const later, sooner, earlier = 24 * time.Hour, time.Hour, -time.Hour
+	// Window bounds are offsets from the pinned gs.nowFunc(); zero leaves
+	// the bound unset.
+	for _, tc := range []struct {
+		name          string
+		oldNB, oldExp time.Duration
+		newNB, newExp time.Duration
+		others        int
+		allowed       bool
+	}{
+		{name: "expiry-added", newExp: sooner},
+		{name: "expiry-added-other-admin", newExp: sooner, others: 1, allowed: true},
+		{name: "expiry-earlier", oldExp: later, newExp: sooner},
+		{name: "not-before-later", newNB: sooner},
+		{name: "not-before-later-other-admin", newNB: sooner, others: 1, allowed: true},
+		{name: "expiry-removed", oldExp: later, allowed: true},
+		{name: "expiry-later", oldExp: sooner, newExp: later, allowed: true},
+		{name: "window-equal", oldNB: earlier, oldExp: later, newNB: earlier, newExp: later, allowed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gs, _, _, s := govTestSetup(t)
+			ctx := context.Background()
+			name := "replace-window-" + tc.name
+			now := gs.nowFunc()
+			at := func(d time.Duration) *time.Time {
+				if d == 0 {
+					return nil
+				}
+				v := now.Add(d)
+				return &v
+			}
+			projectID, _, _ := lockoutProjectAdmins(t, s, name, tc.others)
+			user := pvSeedUser(t, s, name+"-user")
+			old, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: createTestRoleDefinition(t, s, name+"-role",
+					store.RoleScopeProject, []string{PermissionConstraintAdmin}).ID,
+				PrincipalType: "user",
+				PrincipalID:   user,
+				ScopeType:     store.RoleScopeProject,
+				ScopeID:       projectID,
+				NotBefore:     at(tc.oldNB),
+				ExpiresAt:     at(tc.oldExp),
+				CreatedBy:     "test",
+			})
+			require.NoError(t, err)
+			// A second admin role: the store keeps one binding per role,
+			// principal and scope, and the replace creates before it
+			// deletes.
+			newBinding := replaceMoved(old, "user", user, projectID)
+			newBinding.RoleDefinitionID = createTestRoleDefinition(t, s, name+"-new-role",
+				store.RoleScopeProject, []string{PermissionConstraintAdmin}).ID
+			newBinding.NotBefore, newBinding.ExpiresAt = at(tc.newNB), at(tc.newExp)
+
+			created, err := gs.ReplaceRoleBinding(ctx, old.ID, newBinding, "")
+			requireReplaceOutcome(t, s, err, created, old, newBinding, tc.allowed)
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Nested groups: effective (transitive) membership
+// ---------------------------------------------------------------------------
+
+// nestedAdminFixture is a project with an admin role bound to group outer,
+// group inner nested in outer when nested is true, and user member in
+// inner.
+type nestedAdminFixture struct {
+	projectID, roleID, outer, inner, member string
+}
+
+func newNestedAdminFixture(t *testing.T, s store.Store, name string, nested bool) nestedAdminFixture {
+	t.Helper()
+	f := nestedAdminFixture{projectID: pvSeedProject(t, s, name+"-project")}
+	f.roleID = createTestRoleDefinition(t, s, name+"-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin}).ID
+	f.outer = pvSeedGroup(t, s, name+"-outer")
+	f.inner = pvSeedGroup(t, s, name+"-inner")
+	if nested {
+		pvSeedGroupMember(t, s, f.outer, store.GroupMemberTypeGroup, f.inner)
+	}
+	lockoutProjectBinding(t, s, f.roleID, "group", f.outer, f.projectID)
+	f.member = pvSeedUser(t, s, name+"-member")
+	pvSeedGroupMember(t, s, f.inner, store.GroupMemberTypeUser, f.member)
+	return f
+}
+
+// A user in a group nested in an admin-bound group is a remaining admin
+// when another admin's binding is removed. Control: with the group not
+// nested, the user is no admin and the removal is refused.
+func TestConstraintAdminLockout_NestedGroupSurvivorCounted(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		name := "nested-survivor-flat"
+		if nested {
+			name = "nested-survivor"
+		}
+		t.Run(name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			f := newNestedAdminFixture(t, s, name, nested)
+			other := pvSeedUser(t, s, name+"-other")
+			b := lockoutProjectBinding(t, s, f.roleID, "user", other, f.projectID)
+
+			err := checkRoleBindingRemovalAdminLockout(context.Background(), s, time.Now(), b)
+			if nested {
+				assert.NoError(t, err, "the nested member keeps an admin")
+				return
+			}
+			requireLockoutErr(t, err, "no admin remains without the nesting")
+		})
+	}
+}
+
+// Suspending a user who is the only admin, through a nested group, is
+// judged and refused.
+func TestConstraintAdminLockout_NestedGroupAdminRemovalJudged(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	f := newNestedAdminFixture(t, s, "nested-removal", true)
+	err := checkConstraintAdminLockout(context.Background(), s, time.Now(),
+		store.RoleScopeProject, f.projectID,
+		adminRemoval{userID: f.member, userAction: userRemovalSuspend})
+	requireLockoutErr(t, err)
+}
+
+// nestedGroupErrStore fails GetGroupMembers for one group.
+type nestedGroupErrStore struct {
+	store.Store
+	groupID string
+}
+
+func (s nestedGroupErrStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
+	if groupID == s.groupID {
+		return nil, errors.New("read failed")
+	}
+	return s.Store.GetGroupMembers(ctx, groupID)
+}
+
+// A failed member read of a nested group fails the admin resolution and
+// refuses the change: a binding removal, and the suspension of the user
+// who is an admin through that group.
+func TestConstraintAdminLockout_NestedGroupReadFailureRefuses(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	f := newNestedAdminFixture(t, s, "nested-readerr", true)
+	other := pvSeedUser(t, s, "nested-readerr-other")
+	b := lockoutProjectBinding(t, s, f.roleID, "user", other, f.projectID)
+	suspend := adminRemoval{userID: f.member, userAction: userRemovalSuspend}
+	require.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, time.Now(), b),
+		"control: reads succeed")
+	require.NoError(t, checkConstraintAdminLockout(ctx, s, time.Now(),
+		store.RoleScopeProject, f.projectID, suspend),
+		"control: the other admin remains")
+
+	st := nestedGroupErrStore{Store: s, groupID: f.inner}
+	err := checkRoleBindingRemovalAdminLockout(ctx, st, time.Now(), b)
+	requireLockoutErr(t, err)
+	assert.ErrorContains(t, err, "failed to resolve admin users")
+
+	err = checkConstraintAdminLockout(ctx, st, time.Now(),
+		store.RoleScopeProject, f.projectID, suspend)
+	requireLockoutErr(t, err)
+	assert.ErrorContains(t, err, "failed to resolve admin users")
+}
+
+// Two groups nested in each other end the resolution, and a user in
+// them counts once.
+func TestConstraintAdminLockout_NestedGroupCycleTerminates(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	projectID := pvSeedProject(t, s, "nested-cycle-project")
+	rd := createTestRoleDefinition(t, s, "nested-cycle-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	a := pvSeedGroup(t, s, "nested-cycle-a")
+	b := pvSeedGroup(t, s, "nested-cycle-b")
+	pvSeedGroupMember(t, s, b, store.GroupMemberTypeGroup, a)
+	pvSeedGroupMember(t, s, a, store.GroupMemberTypeGroup, b)
+	user := pvSeedUser(t, s, "nested-cycle-user")
+	pvSeedGroupMember(t, s, b, store.GroupMemberTypeUser, user)
+	lockoutProjectBinding(t, s, rd.ID, "group", a, projectID)
+
+	type result struct {
+		admins []adminUserInfo
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		admins, err := resolveConstraintAdminUsers(context.Background(), s, time.Now(),
+			store.RoleScopeProject, projectID)
+		done <- result{admins, err}
+	}()
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		require.Len(t, r.admins, 1)
+		assert.Equal(t, user, r.admins[0].userID)
+	case <-time.After(30 * time.Second):
+		t.Fatal("resolution did not finish on nested groups that form a cycle")
+	}
+}
+
+// The admin resolution and isConstraintAdmin agree on who holds
+// access_constraint.admin through two levels of nesting, including test
+// identities: at system scope the clamp removes a test fixture's grant
+// and the resolution does not count it; at project scope both count it.
+func TestConstraintAdminLockout_NestedGroupMatchesIsConstraintAdmin(t *testing.T) {
+	gs, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	role := tiCustomSystemRole(t, s, "nested-agree-role", PermissionConstraintAdmin)
+	outer := tiGroupWithSystemRole(t, s, "nested-agree-outer", role, DevUserID)
+	mid := pvSeedGroup(t, s, "nested-agree-mid")
+	inner := pvSeedGroup(t, s, "nested-agree-inner")
+	pvSeedGroupMember(t, s, outer.ID, store.GroupMemberTypeGroup, mid)
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeGroup, inner)
+	deep := pvSeedUser(t, s, "nested-agree-deep")
+	pvSeedGroupMember(t, s, inner, store.GroupMemberTypeUser, deep)
+	middle := pvSeedUser(t, s, "nested-agree-middle")
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeUser, middle)
+	fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	pvSeedGroupMember(t, s, inner, store.GroupMemberTypeUser, fixture.ID)
+	outsider := pvSeedUser(t, s, "nested-agree-outsider")
+
+	admins, err := resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	resolved := map[string]bool{}
+	for _, a := range admins {
+		resolved[a.userID] = true
+	}
+	var fromResolver, fromAllow []string
+	for _, id := range []string{deep, middle, fixture.ID, outsider} {
+		if resolved[id] {
+			fromResolver = append(fromResolver, id)
+		}
+		ok, err := gs.isConstraintAdmin(ctx, id)
+		require.NoError(t, err)
+		if ok {
+			fromAllow = append(fromAllow, id)
+		}
+	}
+	want := []string{deep, middle}
+	sort.Strings(want)
+	sort.Strings(fromResolver)
+	sort.Strings(fromAllow)
+	assert.Equal(t, want, fromResolver)
+	assert.Equal(t, want, fromAllow)
+
+	// Project scope: a test fixture in a nested group counts on both.
+	projectID := pvSeedProject(t, s, "nested-agree-project")
+	projectRole := createTestRoleDefinition(t, s, "nested-agree-project-role",
+		store.RoleScopeProject, []string{PermissionConstraintAdmin})
+	pOuter := pvSeedGroup(t, s, "nested-agree-p-outer")
+	pMid := pvSeedGroup(t, s, "nested-agree-p-mid")
+	pInner := pvSeedGroup(t, s, "nested-agree-p-inner")
+	pvSeedGroupMember(t, s, pOuter, store.GroupMemberTypeGroup, pMid)
+	pvSeedGroupMember(t, s, pMid, store.GroupMemberTypeGroup, pInner)
+	lockoutProjectBinding(t, s, projectRole.ID, "group", pOuter, projectID)
+	pHuman := pvSeedUser(t, s, "nested-agree-p-human")
+	pvSeedGroupMember(t, s, pInner, store.GroupMemberTypeUser, pHuman)
+	pFixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+	pvSeedGroupMember(t, s, pInner, store.GroupMemberTypeUser, pFixture.ID)
+	pOutsider := pvSeedUser(t, s, "nested-agree-p-outsider")
+
+	admins, err = resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	resolved = map[string]bool{}
+	for _, a := range admins {
+		resolved[a.userID] = true
+	}
+	fromResolver, fromAllow = nil, nil
+	for _, id := range []string{pHuman, pFixture.ID, pOutsider} {
+		if resolved[id] {
+			fromResolver = append(fromResolver, id)
+		}
+		ok, err := gs.isConstraintAdmin(ctx, id)
+		require.NoError(t, err)
+		if ok {
+			fromAllow = append(fromAllow, id)
+		}
+	}
+	want = []string{pHuman, pFixture.ID}
+	sort.Strings(want)
+	sort.Strings(fromResolver)
+	sort.Strings(fromAllow)
+	assert.Equal(t, want, fromResolver)
+	assert.Equal(t, want, fromAllow)
+}
+
+// A test identity that holds admin only through a nested group is not a
+// remaining admin, so removing the last human admin's binding is refused:
+// a test fixture at system scope, and an admin-kind identity at project
+// scope. Control: a human in the nested group keeps an admin.
+func TestConstraintAdminLockout_NestedGroupTestIdentityNotCounted(t *testing.T) {
+	t.Run("fixture-system", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+		lockoutSuspendDevUser(t, srv, s)
+		role := tiCustomSystemRole(t, s, "nested-ti-sys-role", PermissionConstraintAdmin)
+		rd, err := s.GetRoleDefinitionByName(ctx, role, store.RoleScopeSystem)
+		require.NoError(t, err)
+		outer := tiGroupWithSystemRole(t, s, "nested-ti-sys-outer", role, DevUserID)
+		inner := pvSeedGroup(t, s, "nested-ti-sys-inner")
+		pvSeedGroupMember(t, s, outer.ID, store.GroupMemberTypeGroup, inner)
+		fixture := tiStoreFixture(t, s, generateID(), time.Now().Add(time.Hour))
+		pvSeedGroupMember(t, s, inner, store.GroupMemberTypeUser, fixture.ID)
+		human, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      pvSeedUser(t, s, "nested-ti-sys-human"),
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+
+		requireLockoutErr(t, checkRoleBindingRemovalAdminLockout(ctx, s, time.Now(), human))
+
+		pvSeedGroupMember(t, s, inner, store.GroupMemberTypeUser,
+			pvSeedUser(t, s, "nested-ti-sys-other"))
+		assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, time.Now(), human),
+			"control: a human in the nested group keeps an admin")
+	})
+
+	t.Run("admin-kind-project", func(t *testing.T) {
+		_, _, _, s := govTestSetup(t)
+		ctx := context.Background()
+		hubAdmin, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		expires := time.Now().Add(time.Hour)
+		issuer, issuance, purpose := DevUserID, generateID(), "nested lockout test"
+		identity := &store.User{
+			ID:          generateID(),
+			Email:       "nested-ti-admin@" + store.TestHubAdminEmailDomain,
+			DisplayName: "nested-ti-admin",
+			Role:        store.TestAdminRole(store.UserKindTestHubAdmin),
+			Status:      store.UserStatusActive,
+			Kind:        store.UserKindTestHubAdmin,
+			ExpiresAt:   &expires,
+			IssuedBy:    &issuer,
+			Purpose:     &purpose,
+			IssuanceID:  &issuance,
+			Created:     time.Now(),
+		}
+		_, err = s.CreateTestAdminUser(ctx, identity, hubAdmin.ID)
+		require.NoError(t, err)
+
+		f := newNestedAdminFixture(t, s, "nested-ti-admin", true)
+		pvSeedGroupMember(t, s, f.inner, store.GroupMemberTypeUser, identity.ID)
+		require.NoError(t, s.RemoveGroupMember(ctx, f.inner, store.GroupMemberTypeUser, f.member))
+		human := lockoutProjectBinding(t, s, f.roleID, "user",
+			pvSeedUser(t, s, "nested-ti-admin-human"), f.projectID)
+
+		requireLockoutErr(t, checkRoleBindingRemovalAdminLockout(ctx, s, time.Now(), human))
+
+		pvSeedGroupMember(t, s, f.inner, store.GroupMemberTypeUser, f.member)
+		assert.NoError(t, checkRoleBindingRemovalAdminLockout(ctx, s, time.Now(), human),
+			"control: a human in the nested group keeps an admin")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled constraints: binding validity at the activation time
+// ---------------------------------------------------------------------------
+
+// scheduledFixture seeds a project with admin binding removed for one
+// user and an admin binding for another that expires at survivorExpiry,
+// plus a constraint without access_constraint.admin for a third,
+// non-admin user that takes effect at notBefore (nil: in effect now).
+func scheduledFixture(t *testing.T, s store.Store, name string, survivorExpiry time.Time, notBefore *time.Time) (string, *store.RoleBinding) {
+	t.Helper()
+	ctx := context.Background()
+	projectID := pvSeedProject(t, s, name+"-project")
+	rd := createTestRoleDefinition(t, s, name+"-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin, "agent.read"})
+	removed := lockoutProjectBinding(t, s, rd.ID, "user", pvSeedUser(t, s, name+"-removed"), projectID)
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    "user",
+		PrincipalID:      pvSeedUser(t, s, name+"-survivor"),
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+		ExpiresAt:        &survivorExpiry,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	_, err = s.CreateAccessConstraint(ctx, &store.AccessConstraint{
+		Name:                 name + "-constraint",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: pvStrPtr("user"),
+		SubjectPrincipalID:   pvStrPtr(pvSeedUser(t, s, name+"-subject")),
+		ScopeType:            store.RoleScopeProject,
+		ScopeID:              projectID,
+		MaximumPermissions:   []string{"agent.read"},
+		NotBefore:            notBefore,
+		Purpose:              "scheduled validity test",
+		CreatedBy:            "test",
+	})
+	require.NoError(t, err)
+	return projectID, removed
+}
+
+// When a scheduled constraint takes effect, a remaining admin counts only
+// through a binding still valid at that activation time.
+func TestConstraintAdminLockout_ScheduledSurvivorValidAtActivation(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	activation := now.Add(48 * time.Hour)
+	for _, tc := range []struct {
+		name      string
+		expiry    time.Time
+		notBefore *time.Time
+		refused   bool
+	}{
+		{name: "expires-before-activation", expiry: now.Add(24 * time.Hour), notBefore: &activation, refused: true},
+		{name: "valid-at-activation", expiry: now.Add(72 * time.Hour), notBefore: &activation},
+		{name: "constraint-in-effect", expiry: now.Add(24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, s := govTestSetup(t)
+			_, removed := scheduledFixture(t, s, "sched-valid-"+tc.name, tc.expiry, tc.notBefore)
+			err := checkRoleBindingRemovalAdminLockout(context.Background(), s, now, removed)
+			if !tc.refused {
+				assert.NoError(t, err)
+				return
+			}
+			requireLockoutErr(t, err)
+			assert.Contains(t, err.Error(), "when scheduled constraints activate")
+		})
+	}
+}
+
+// A failed scope binding read for the activation-time check refuses a
+// user removal.
+func TestConstraintAdminLockout_ScheduledScopeReadFailureRefuses(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	activation := now.Add(48 * time.Hour)
+	projectID, removed := scheduledFixture(t, s, "sched-readerr", now.Add(72*time.Hour), &activation)
+	rm := adminRemoval{userID: removed.PrincipalID, userAction: userRemovalSuspend}
+	require.NoError(t, checkConstraintAdminLockout(ctx, s, now, store.RoleScopeProject, projectID, rm),
+		"control: reads succeed")
+
+	calls := 0
+	st := lockoutReadErrStore{Store: s, scopeErr: errors.New("read failed"),
+		scopeErrFromCall: 2, scopeCalls: &calls}
+	requireLockoutErr(t, checkConstraintAdminLockout(ctx, st, now, store.RoleScopeProject, projectID, rm))
+	assert.Equal(t, 2, calls, "the admin resolution read succeeded and the second read failed")
+}
+
+// Every user the admin resolution reaches from a bound group, walking
+// group members down, has that group among the user's effective groups
+// (GetEffectiveGroups, which walks parent groups up). The graph nests
+// three groups in a cycle and nests a project_agents group (agent
+// members only) in the middle one; the admin role is bound to the outer
+// group and to the project_agents group.
+func TestConstraintAdminLockout_GroupWalksAgree(t *testing.T) {
+	_, _, _, s := govTestSetup(t)
+	ctx := context.Background()
+	projectID := pvSeedProject(t, s, "walk-agree-project")
+	rd := createTestRoleDefinition(t, s, "walk-agree-admin-role", store.RoleScopeProject,
+		[]string{PermissionConstraintAdmin})
+	outer := pvSeedGroup(t, s, "walk-agree-outer")
+	mid := pvSeedGroup(t, s, "walk-agree-mid")
+	inner := pvSeedGroup(t, s, "walk-agree-inner")
+	pvSeedGroupMember(t, s, outer, store.GroupMemberTypeGroup, mid)
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeGroup, inner)
+	pvSeedGroupMember(t, s, inner, store.GroupMemberTypeGroup, outer)
+	agents := tid("walk-agree-agents")
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{
+		ID:        agents,
+		Name:      "walk-agree-agents",
+		Slug:      "project:walk-agree:agents",
+		GroupType: store.GroupTypeProjectAgents,
+		ProjectID: projectID,
+	}))
+	pvSeedGroupMember(t, s, mid, store.GroupMemberTypeGroup, agents)
+	var users []string
+	for i, g := range []string{outer, mid, inner} {
+		u := pvSeedUser(t, s, fmt.Sprintf("walk-agree-user-%d", i))
+		pvSeedGroupMember(t, s, g, store.GroupMemberTypeUser, u)
+		users = append(users, u)
+	}
+	lockoutProjectBinding(t, s, rd.ID, "group", outer, projectID)
+	lockoutProjectBinding(t, s, rd.ID, "group", agents, projectID)
+
+	admins, err := resolveConstraintAdminUsers(ctx, s, time.Now(), store.RoleScopeProject, projectID)
+	require.NoError(t, err)
+	var reached []string
+	for _, a := range admins {
+		reached = append(reached, a.userID)
+		groups, err := s.GetEffectiveGroups(ctx, a.userID)
+		require.NoError(t, err)
+		assert.Contains(t, groups, outer,
+			"user %s reached from the bound group has it among its effective groups", a.userID)
+	}
+	assert.ElementsMatch(t, users, reached, "the walk reaches every user in the cycle")
 }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -62,7 +62,7 @@ func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *tes
 	require.Empty(t, req.ResolvedSecrets)
 	require.NotContains(t, req.ResolvedEnv, "API_KEY")
 
-	require.NoError(t, migrateTestStore(ctx, s))
+	require.NoError(t, s.Migrate(ctx))
 
 	child, err = s.GetAgent(ctx, child.ID)
 	require.NoError(t, err)

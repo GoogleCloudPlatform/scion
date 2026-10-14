@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -341,7 +341,7 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 // still marshal the key and would make the broker-side rung "fire" with zero
 // values, which is how file-mode parity would silently break.
 func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
-	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil); got != nil {
+	if got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, nil); got != nil {
 		t.Errorf("want nil for empty section, got %+v", got)
 	}
 	// The two hub-resolved fields alone must not put the field on the wire:
@@ -349,23 +349,94 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 	d := opsettings.AgentDefaultsSettings{}
 	d.DefaultTemplate = "team-default"
 	d.DefaultHarnessConfig = "claude-vertex"
-	if got := remoteHubAgentDefaults(d, nil, nil); got != nil {
+	if got := remoteHubAgentDefaults(d, nil, nil, nil); got != nil {
 		t.Errorf("template/harness-config defaults must not travel here, got %+v", got)
 	}
 	// A single limit is enough to send.
 	d = opsettings.AgentDefaultsSettings{}
 	d.DefaultMaxTurns = 50
-	if got := remoteHubAgentDefaults(d, nil, nil); got == nil || got.MaxTurns != 50 {
+	if got := remoteHubAgentDefaults(d, nil, nil, nil); got == nil || got.MaxTurns != 50 {
 		t.Errorf("want MaxTurns 50 on the wire, got %+v", got)
 	}
 	// The hub auto-expose default alone is enough to send, false included.
 	off := false
-	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil)
+	got := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, &off, nil, nil)
 	if got == nil || got.AutoExposePorts == nil || *got.AutoExposePorts {
 		t.Errorf("want autoExposePorts=false on the wire, got %+v", got)
 	}
 	off = true
 	if *got.AutoExposePorts {
 		t.Error("the wire value must be a copy, not the provider's pointer")
+	}
+}
+
+// TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart: hub
+// agent_defaults.resources and limits ride the start and restart wires as
+// well as create, because the broker applies them per start and no longer
+// persists them into the agent config (ptone/scion#4561, ptone/scion#623).
+// A changed hub value reaches the next start and restart.
+func TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart(t *testing.T) {
+	ctx := context.Background()
+	d, client, ag := autoExposeDispatchFixture(t)
+	defaults := opsettings.AgentDefaultsSettings{
+		DefaultMaxTurns:      50,
+		DefaultMaxModelCalls: 500,
+		DefaultMaxDuration:   "2h",
+		DefaultResources:     &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}},
+	}
+	d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings { return defaults })
+
+	check := func(label string, hd *RemoteHubAgentDefaults, wantCPU string, wantTurns, wantCalls int, wantDuration string) {
+		t.Helper()
+		if hd == nil || hd.Resources == nil || hd.Resources.Limits.CPU != wantCPU {
+			t.Fatalf("%s: hub defaults = %+v, want resources limits.cpu %q", label, hd, wantCPU)
+		}
+		if hd.MaxTurns != wantTurns || hd.MaxModelCalls != wantCalls || hd.MaxDuration != wantDuration {
+			t.Errorf("%s: limits = (%d, %d, %q), want (%d, %d, %q)", label,
+				hd.MaxTurns, hd.MaxModelCalls, hd.MaxDuration, wantTurns, wantCalls, wantDuration)
+		}
+	}
+
+	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart: %v", err)
+	}
+	check("start", client.lastStartExtras.HubAgentDefaults, "3", 50, 500, "2h")
+	// The limits ride only the low-precedence hubAgentDefaults field, never
+	// the top-of-chain inline config (rejected alternative A5).
+	if ic := client.lastInlineConfig; ic != nil && (ic.MaxTurns != 0 || ic.MaxModelCalls != 0 || ic.MaxDuration != "") {
+		t.Errorf("start inline config carries hub limits: %+v", ic)
+	}
+	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
+		t.Fatalf("DispatchAgentRestart: %v", err)
+	}
+	check("restart", client.lastRestartExtras.HubAgentDefaults, "3", 50, 500, "2h")
+
+	defaults.DefaultResources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "5"}}
+	defaults.DefaultMaxTurns = 60
+	defaults.DefaultMaxModelCalls = 600
+	defaults.DefaultMaxDuration = "3h"
+	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart: %v", err)
+	}
+	check("start after change", client.lastStartExtras.HubAgentDefaults, "5", 60, 600, "3h")
+	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
+		t.Fatalf("DispatchAgentRestart: %v", err)
+	}
+	check("restart after change", client.lastRestartExtras.HubAgentDefaults, "5", 60, 600, "3h")
+
+	// The broker decodes the same names.
+	blob, err := json.Marshal(client.lastRestartExtras.HubAgentDefaults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got api.HubAgentDefaults
+	if err := json.Unmarshal(blob, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Resources == nil || got.Resources.Limits.CPU != "5" {
+		t.Errorf("broker side does not see the resources in %s", blob)
+	}
+	if got.MaxTurns != 60 || got.MaxModelCalls != 600 || got.MaxDuration != "3h" {
+		t.Errorf("broker side does not see the limits in %s", blob)
 	}
 }

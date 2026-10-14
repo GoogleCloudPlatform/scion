@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -981,7 +981,8 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Template = template.Slug
 		a.AppliedConfig.TemplateHash = "old-template-hash"
-		// No explicit image in CreateInputs -> template image applies fresh.
+		// No explicit image in CreateInputs, and the template image is an
+		// environment key the hub no longer copies (ptone/scion#4222).
 	})
 	beforeVersion := agent.StateVersion
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -998,7 +999,7 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 	assert.Equal(t, "old-template-hash", resp.Plan.Template.Old)
 	assert.Equal(t, "new-template-hash", resp.Plan.Template.New)
 	assert.Equal(t, "old-image:v1", resp.Plan.Image.Old)
-	assert.Equal(t, "template-image:v2", resp.Plan.Image.New)
+	assert.Empty(t, resp.Plan.Image.New, "a template image is not copied into the agent config (ptone/scion#4222)")
 
 	// Nothing changed: state_version, generation, reincarnation_state, and
 	// the reincarnation history are all exactly as before.
@@ -1103,12 +1104,12 @@ func TestReincarnateAgent_PlanFillsImageFromHarnessConfig(t *testing.T) {
 		"the plan must fall back to the harness config's image when neither an explicit image nor a template supplied one")
 }
 
-// TestReincarnateAgent_TemplateImageBeatsHarnessConfig proves the
-// harness-config image fallback (A11.1a) never outranks a template image:
-// the broker's own precedence is explicit inline, then template, then
-// harness config (pkg/agent/provision.go), so a template image must win here
-// even though a harness config with a different image is also in play.
-func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
+// TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown: a template
+// image is an environment key the hub no longer copies into the agent
+// config (ptone/scion#4222, ptone/scion#4524), so the plan shows the
+// harness-config image fallback (A11.1a) even when the template row has an
+// image.
+func TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
@@ -1142,8 +1143,7 @@ func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 		a.AppliedConfig.HarnessConfig = hc.Slug
 		// HarnessConfig is explicit-only (design §3.3 Amendment A1), driven by
 		// CreateInputs.HarnessConfig — record what the requester actually asked
-		// for, so it outranks the template for HarnessConfigID resolution while
-		// still losing to the template for Image.
+		// for, so it outranks the template for HarnessConfigID resolution.
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
 	})
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1155,8 +1155,8 @@ func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "template-image:v1", resp.Plan.Image.New,
-		"a template image must beat the harness-config fallback")
+	assert.Equal(t, "harness-config-image:v1", resp.Plan.Image.New,
+		"a template image is ignored; the harness-config fallback shows")
 }
 
 // TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig pins
@@ -1840,10 +1840,12 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	// The plan's env diff must show TEMPLATE_ENV_KEY changing v1 -> v2 (via
-	// the "changed" key name), and AGENT_SPECIFIC_KEY surviving untouched
+	// The plan's env diff must show TEMPLATE_ENV_KEY removed: the legacy
+	// residue is dropped, and the hub no longer copies the template's env
+	// into the agent config (ptone/scion#4222); the template's own file
+	// supplies it on the broker. AGENT_SPECIFIC_KEY survives untouched
 	// (absent from added/removed/changed).
-	assert.Contains(t, resp.Plan.EnvKeys.Changed, "TEMPLATE_ENV_KEY")
+	assert.Contains(t, resp.Plan.EnvKeys.Removed, "TEMPLATE_ENV_KEY")
 	assert.NotContains(t, resp.Plan.EnvKeys.Changed, "AGENT_SPECIFIC_KEY")
 	assert.NotContains(t, resp.Plan.EnvKeys.Removed, "AGENT_SPECIFIC_KEY")
 
@@ -1852,26 +1854,26 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	for _, w := range resp.Plan.Warnings {
 		// The old value ("v1") must NEVER appear in the plan — it
 		// came from a legacy agent's live env, indistinguishable from a
-		// genuine per-agent secret that happens to share this key name. Only
-		// the template's own new value is safe to surface.
-		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY", `new="v2"`) {
-			assert.NotContains(t, w, `old="v1"`, "the old value must be masked, never shown in the plan")
+		// genuine per-agent secret that happens to share this key name. The
+		// template's value is not shown either: the hub no longer supplies it.
+		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY") {
+			assert.NotContains(t, w, "v1", "the old value must be masked, never shown in the plan")
+			assert.NotContains(t, w, "v2", "the template value is not part of the plan")
 			foundDroppedWarning = true
 		}
 		if containsAll(w, "kept", "AGENT_SPECIFIC_KEY") {
 			foundKeptWarning = true
 		}
 	}
-	assert.True(t, foundDroppedWarning, "expected a warning naming TEMPLATE_ENV_KEY's old/new values, got %v", resp.Plan.Warnings)
+	assert.True(t, foundDroppedWarning, "expected a warning naming dropped TEMPLATE_ENV_KEY, got %v", resp.Plan.Warnings)
 	assert.True(t, foundKeptWarning, "expected a warning flagging AGENT_SPECIFIC_KEY as kept-but-uncertain, got %v", resp.Plan.Warnings)
 }
 
 // TestReincarnateAgent_FreshConfigDoesNotAliasEnv proves design §3.3 A1
 // addendum 2 rule 3: the reincarnate builder's fresh AppliedConfig.Env and
-// InlineConfig.Env must be separate maps, so a template env default that
-// resolveDerivedConfig merges into AppliedConfig.Env does not silently also
-// appear in the new generation's InlineConfig.Env (which is dispatched to
-// the broker as part of the persisted config, not just as resolved env).
+// InlineConfig.Env must be separate maps, so a value later merged into
+// AppliedConfig.Env does not silently also appear in the new generation's
+// InlineConfig.Env. The template's env reaches neither (ptone/scion#4222).
 func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -1902,10 +1904,11 @@ func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 	require.NoError(t, err)
 
-	require.Contains(t, fresh.Env, "TEMPLATE_DEFAULT_KEY", "template env default must reach AppliedConfig.Env")
+	assert.NotContains(t, fresh.Env, "TEMPLATE_DEFAULT_KEY", "template env is not copied into AppliedConfig.Env (ptone/scion#4222)")
+	require.Equal(t, "explicit-value", fresh.Env["EXPLICIT_KEY"])
 	require.NotNil(t, fresh.InlineConfig)
 	assert.NotContains(t, fresh.InlineConfig.Env, "TEMPLATE_DEFAULT_KEY",
-		"template env default must NOT leak into the new generation's InlineConfig.Env (no aliasing in the fresh config)")
+		"template env must NOT appear in the new generation's InlineConfig.Env")
 	assert.Equal(t, "explicit-value", fresh.InlineConfig.Env["EXPLICIT_KEY"])
 
 	// Mutating AppliedConfig.Env after the fact must not reach InlineConfig.Env.
@@ -3492,7 +3495,9 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 			a.Template = template.Slug
 			a.AppliedConfig.TemplateHash = "old-template-hash"
-			// No explicit image in CreateInputs -> template image applies fresh.
+			// No image either side: the template image is an environment
+			// key the hub no longer copies (ptone/scion#4222).
+			a.AppliedConfig.Image = ""
 		})
 		self := agentIdentityFor(agent.ID, project.ID)
 
@@ -3508,7 +3513,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		assert.Equal(t, "error", final.Phase)
 
 		assert.Contains(t, final.AppliedConfig.Task,
-			"Changes: template old-template-hash->new-template-hash, image old-image:v1->template-image:v2\n",
+			"Changes: template old-template-hash->new-template-hash\n",
 			"the Changes: line must reflect the actual old->new diff, not a self-diff or swapped arguments")
 
 		// Amendment A26.5 O1: pin the by-construction property Amendment
@@ -3551,7 +3556,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 			a.Template = template.Slug
 			a.AppliedConfig.TemplateHash = "same-template-hash"
-			a.AppliedConfig.Image = "old-image:v1"
+			a.AppliedConfig.Image = ""
 		})
 		self := agentIdentityFor(agent.ID, project.ID)
 
@@ -5122,7 +5127,7 @@ func TestReincarnateAgent_AC2b_ProjectDefaultModelBeatsTemplate(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-ac2b",
-		Config:      &store.TemplateConfig{Model: "template-model"},
+		AgentConfig: &api.ScionConfig{Model: "template-model"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -5411,7 +5416,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 					ContentHash:          "matrix-template-hash",
 					Scope:                store.TemplateScopeGlobal,
 					Status:               store.TemplateStatusActive,
-					Config:               &store.TemplateConfig{Model: tc.templateModel},
+					AgentConfig:          &api.ScionConfig{Model: tc.templateModel},
 				}
 				require.NoError(t, s.CreateTemplate(ctx, template))
 				templateSlug = template.Slug

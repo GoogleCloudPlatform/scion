@@ -20,7 +20,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -246,6 +245,16 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			wantError: `invalid memory request "bad"`,
 		},
 		{
+			name:      "overflowing memory limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "8192Pi"}},
+			wantError: `invalid memory limit "8192Pi"`,
+		},
+		{
+			name:      "non-finite memory request",
+			resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "NaNGi"}},
+			wantError: `invalid memory request "NaNGi"`,
+		},
+		{
 			name:      "invalid cpu limit",
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "bad"}},
 			wantError: `invalid cpu limit "bad"`,
@@ -257,7 +266,7 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			got, err := appendContainerResourceArgs([]string{"run", "-t"}, test.resources)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
-					t.Fatalf("appendContainerResourceArgs() error = %v, want %q", err, test.wantError)
+					t.Fatalf("appendContainerResourceArgs() error = %v, want %q; args = %v", err, test.wantError, got)
 				}
 				return
 			}
@@ -1131,21 +1140,10 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 func TestRunSimpleCommand_NoSecretsInDebugLog(t *testing.T) {
 	const sentinel = "FAKE-KEY-SENTINEL-not-a-real-credential"
 
-	// runtimeLog captured slog.Default() at package init, before any custom
-	// handler was installed (#1339). Its handler bridges to the stdlib log
-	// package. We capture that output here and lower the level gate so Debug
-	// lines reach the buffer.
+	// runtimeLog() resolves slog.Default() at each call (#1339), so install a
+	// debug-level handler that writes to a buffer.
 	var buf bytes.Buffer
-	origWriter := log.Writer()
-	origFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0) // drop date/time prefix for simpler assertions
-	t.Cleanup(func() {
-		log.SetOutput(origWriter)
-		log.SetFlags(origFlags)
-	})
-	origLevel := slog.SetLogLoggerLevel(slog.LevelDebug)
-	t.Cleanup(func() { slog.SetLogLoggerLevel(origLevel) })
+	setRuntimeLogHandler(t, slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// --- Success path ---
 	// "echo" succeeds; its args include the sentinel via --env.
@@ -2806,7 +2804,7 @@ func (h *taskArgHarness) GetCommand(task string, _ bool, args []string) []string
 // tasks.
 func TestQuotedTaskBytes(t *testing.T) {
 	startCmd := func(task string) string {
-		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task})
+		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task}, harnessCmdLineOptions{})
 		if !ok {
 			t.Fatal("harnessCmdLine: no command line")
 		}

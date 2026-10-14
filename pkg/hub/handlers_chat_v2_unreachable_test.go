@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 // Tests for nc-delivery-unreachable: chat v2 must not report "Delivered" for
 // a message routed to a primary agent that is unreachable — soft-deleted, or

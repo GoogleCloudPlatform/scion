@@ -28,12 +28,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
-// Default harness-readiness wait timings. See waitHarnessReady.
+// Default harness-readiness wait timings. See waitHarnessReady. They apply
+// when the init-run file has no line 2 (an image older than the ready
+// spec); otherwise line 2's settle and deadline are used.
 const (
 	defaultReadyPollInterval  = 500 * time.Millisecond
-	defaultReadyDeadline      = 90 * time.Second
-	defaultReadySettle        = 1500 * time.Millisecond
-	defaultReadySettleSession = 8 * time.Second
+	defaultReadyDeadline      = state.ReadyDeadline
+	defaultReadySettle        = state.ReadySettleHook
+	defaultReadySettleSession = state.ReadySettleSession
 	readyProbeExecTimeout     = 5 * time.Second
 )
 
@@ -75,8 +77,10 @@ const readyModeNoInitRun = "no-init-run"
 // readinessProbeArgv is the single command run per probe. It reports whether
 // tmux session "scion" exists and when it was created, the container's
 // current time (so every age uses one clock), the first line of each
-// readiness file, size-capped, and the ready marker's mtime (stat -c %Y,
-// which busybox and coreutils both support). Either file is read only when
+// readiness file and the second line of the init-run file (the ready spec),
+// size-capped, and the ready marker's mtime (stat -c %Y, which busybox and
+// coreutils both support). The initrun line is unchanged from hosts that
+// predate the ready spec, which read only it. Either file is read only when
 // it is a regular file and not a symlink; see regularFileGuard. It always exits 0; missing
 // pieces show up as empty values.
 func readinessProbeArgv() []string {
@@ -85,6 +89,7 @@ func readinessProbeArgv() []string {
 		`else echo "session="; fi; ` +
 		`echo "now=$(date +%s)"; ` +
 		`echo "initrun=$(` + regularFileGuard(state.HarnessInitRunFile) + ` && head -c 256 ` + state.HarnessInitRunFile + ` 2>/dev/null | head -n 1)"; ` +
+		`echo "initspec=$(` + regularFileGuard(state.HarnessInitRunFile) + ` && head -c 256 ` + state.HarnessInitRunFile + ` 2>/dev/null | sed -n 2p)"; ` +
 		`echo "ready=$(` + regularFileGuard(state.HarnessReadyFile) + ` && head -c 256 ` + state.HarnessReadyFile + ` 2>/dev/null | head -n 1)"; ` +
 		`echo "readymtime=$(` + regularFileGuard(state.HarnessReadyFile) + ` && stat -c %Y ` + state.HarnessReadyFile + ` 2>/dev/null)"`
 	return []string{"sh", "-c", script}
@@ -112,6 +117,12 @@ type readinessProbe struct {
 	// less than the settle period ago, so the harness may still be mounting
 	// its input and delivery should settle first even on the first probe.
 	MarkerFresh bool
+	// Settle is the post-marker settle this probe used: line 2's for hook
+	// mode when the init-run file has one, otherwise the caller's.
+	Settle time.Duration
+	// Deadline is line 2's hook-mode deadline; zero when the probe has no
+	// line 2 or is not in hook mode, which keeps the caller's deadline.
+	Deadline time.Duration
 }
 
 // parseReadinessProbe interprets readinessProbeArgv's output.
@@ -122,6 +133,12 @@ type readinessProbe struct {
 // init-run file (an older image), is ready when the session exists and is
 // at least settleFallback old. In hook mode, MarkerFresh is set when the
 // marker's mtime is less than settle before the container's current time.
+//
+// When the init-run file has a line 2 (the ready spec init wrote), its
+// values replace the caller's: the settle is the session age in settle mode
+// and the post-marker settle in hook mode, and the hook deadline is
+// returned in Deadline. Without a line 2 (an older image) the caller's
+// timings apply, as before.
 func parseReadinessProbe(out string, settleFallback, settle time.Duration) readinessProbe {
 	fields := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
@@ -133,9 +150,18 @@ func parseReadinessProbe(out string, settleFallback, settle time.Duration) readi
 	}
 
 	res := readinessProbe{Mode: readyModeNoInitRun}
-	if nonce, mode, ok := state.ParseInitRun(fields["initrun"]); ok {
-		res.Mode, res.Nonce = mode, nonce
+	if run, ok := state.ParseInitRunSpec(fields["initrun"] + "\n" + fields["initspec"]); ok {
+		res.Mode, res.Nonce = run.Mode, run.Nonce
+		if run.HasSpec {
+			if run.Mode == state.ReadyModeHook {
+				settle = run.Spec.Settle
+				res.Deadline = run.Spec.Timeout
+			} else {
+				settleFallback = run.Spec.Settle
+			}
+		}
 	}
+	res.Settle = settle
 
 	created, err := strconv.ParseInt(strings.TrimSpace(fields["session"]), 10, 64)
 	if err != nil || created <= 0 {
@@ -199,6 +225,11 @@ func parseReadinessProbe(out string, settleFallback, settle time.Duration) readi
 // warning and returns, and the message is pasted as before; that is not a
 // delivery failure.
 //
+// The settle and deadline come from the init-run file's line 2 when the
+// image writes one (see parseReadinessProbe), checked on every probe; the
+// deadline is still measured from the start of the flush. Otherwise the
+// manager's timings apply.
+//
 // Outcomes are remembered per init-run nonce (see readyMemoStore): once a
 // hook-mode wait for nonce N reaches the deadline, later flushes paste as
 // soon as a probe shows the same nonce still not ready, and the warning is
@@ -213,8 +244,15 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 	start := time.Now()
 	deadline := start.Add(timings.Deadline)
 
-	target, err := m.findMessageTarget(ctx, agentID, projectID)
+	target, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
+		return
+	}
+	// An owned manager never probes among several same-named agents of
+	// different projects: return before any probe, and delivery then
+	// refuses the name (deliverImmediate).
+	if err := m.refuseAmbiguousOwnedTarget(agentID, projectID, matches); err != nil {
+		slog.Debug("harness readiness not waited for: ambiguous target", "agent", agentID, "error", err)
 		return
 	}
 
@@ -239,6 +277,9 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 	var memo readyMemo
 	for first := true; ; first = false {
 		res, perr := probe()
+		if res.Deadline > 0 {
+			deadline = start.Add(res.Deadline)
+		}
 		if res.Nonce != "" {
 			if res.Nonce != lastNonce {
 				memo = m.readyMemos.get(target.ContainerID, res.Nonce)
@@ -252,7 +293,7 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 			if !res.MarkerFresh && (first || memo.ready) {
 				return
 			}
-			if !sleepCtx(ctx, timings.Settle) {
+			if !sleepCtx(ctx, res.Settle) {
 				return
 			}
 			slog.Info("message delivery waited for harness readiness",

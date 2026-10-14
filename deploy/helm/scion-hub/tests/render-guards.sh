@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=187   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check).
+EXPECTED_TOTAL=207   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 14 (workspaceStorage.nfs: eleven refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1012,6 +1012,111 @@ else
   failed=$((failed + 1))
 fi
 unset _sb _sd
+
+echo "== workspaceStorage.nfs =="
+# One value drives both server.workspace_storage and the hub pod's NFS mount,
+# because with backend nfs the hub's /readyz fails unless
+# <mount_root>/<shares[0].id> is a mounted volume in the hub container. These
+# rows pin the guards in scion-hub.nfsWorkspace and the shape the two consumers
+# render. NFS is the minimum that enables it; placeholders only (RFC 5737 IP).
+NFS=(--set workspaceStorage.nfs.enabled=true --set-string workspaceStorage.nfs.server=192.0.2.10
+  --set-string workspaceStorage.nfs.export=/rg_share --set-string workspaceStorage.nfs.shareId=rg-share
+  --set-string workspaceStorage.nfs.pvName=rg-pv)
+reject "enabled without server" "requires workspaceStorage.nfs.server" "${NFS[@]}" --set-string workspaceStorage.nfs.server=
+reject "enabled without export" "requires workspaceStorage.nfs.export" "${NFS[@]}" --set-string workspaceStorage.nfs.export=
+reject "enabled without shareId" "requires workspaceStorage.nfs.shareId" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=
+reject "enabled without pvName" "requires workspaceStorage.nfs.pvName" "${NFS[@]}" --set-string workspaceStorage.nfs.pvName=
+reject "enabled with config.extra.server.workspace_storage" "config.extra also sets server.workspace_storage" \
+  "${NFS[@]}" --set-string config.extra.server.workspace_storage.backend=local
+reject "enabled with config.existingSecret" "inline settings values (workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${NFS[@]}"
+reject "share field set while disabled" "workspaceStorage.nfs.server set while workspaceStorage.nfs.enabled is false" \
+  --set-string workspaceStorage.nfs.server=192.0.2.10
+reject "shareId with a slash" "workspaceStorage.nfs.shareId is" "${NFS[@]}" --set-string workspaceStorage.nfs.shareId=a/b
+reject "relative mountRoot" "workspaceStorage.nfs.mountRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=mnt/nfs
+reject "subpathRoot escaping with .." "workspaceStorage.nfs.subpathRoot is" "${NFS[@]}" --set-string workspaceStorage.nfs.subpathRoot=../escape
+reject "relative export" "workspaceStorage.nfs.export is" "${NFS[@]}" --set-string workspaceStorage.nfs.export=rg_share
+accept "the minimal enabled set" "${NFS[@]}"
+
+# THE POSITIVE SHAPE, and the one assertion the runtime owner asked for: the hub
+# container's mountPath must equal the RENDERED mount_root + "/" + shares[0].id,
+# both read back out of the manifest - not compared against the values that were
+# set, which would pass for a template that hardcoded the same literal twice.
+# Non-default mountRoot and shareId so a default leaking into either side shows.
+# uid/gid are not values: they must render as the non-default securityContext.
+executed=$((executed + 1))
+_nf="$(render "${NFS[@]}" --set-string workspaceStorage.nfs.mountRoot=/srv/rg-root \
+  --set-string workspaceStorage.nfs.shareId=rg-other --set-string workspaceStorage.nfs.subpathRoot=team/projects \
+  --set hub.securityContext.runAsUser=2001 --set hub.securityContext.runAsGroup=2002)"
+_nf_root="$(printf '%s\n' "$_nf" | sed -n 's/^          mount_root: //p')"
+_nf_id="$(printf '%s\n' "$_nf" | sed -n 's/^            id: //p')"
+_nf_mount="$(printf '%s\n' "$_nf" | grep -A1 -E '^            - name: workspace-nfs$' | sed -n 's/^              mountPath: "\(.*\)"$/\1/p')"
+_nf_vol="$(printf '%s\n' "$_nf" | grep -A4 -E '^        - name: workspace-nfs$')"
+if ! printf '%s\n' "$_nf" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS shape: the render produced no Deployment, so nothing was inspected"
+  printf '        got: %s\n' "$(printf '%s' "$_nf" | tr '\n' ' ' | cut -c1-200)"
+  failed=$((failed + 1))
+elif [ -n "$_nf_root" ] && [ -n "$_nf_id" ] && [ "$_nf_mount" = "${_nf_root}/${_nf_id}" ] \
+  && [ "$_nf_mount" = "/srv/rg-root/rg-other" ] \
+  && printf '%s\n' "$_nf" | grep -qE '^      workspace_storage:$' \
+  && printf '%s\n' "$_nf" | grep -qE '^        backend: nfs$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          subpath_root: team/projects$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          uid: 2001$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          gid: 2002$' \
+  && printf '%s\n' "$_nf" | grep -qE '^            pv_name: rg-pv$' \
+  && printf '%s\n' "$_nf" | grep -qE '^            server: 192\.0\.2\.10$' \
+  && printf '%s\n' "$_nf" | grep -qE '^          - export: /rg_share$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^          nfs:$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            server: "192\.0\.2\.10"$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            path: "/rg_share"$' \
+  && printf '%s\n' "$_nf_vol" | grep -qE '^            readOnly: false$'; then
+  echo "ok    NFS renders server.workspace_storage and an inline nfs volume mounted at mount_root/shares[0].id (${_nf_mount})"
+else
+  echo "FAIL  NFS shape: mountPath=${_nf_mount:-<none>} mount_root=${_nf_root:-<none>} shares[0].id=${_nf_id:-<none>}, or a settings or volume field is missing"
+  failed=$((failed + 1))
+fi
+unset _nf _nf_root _nf_id _nf_mount _nf_vol
+# Disabled (the default) renders neither half.
+executed=$((executed + 1))
+_nd="$(render)"
+if ! printf '%s\n' "$_nd" | grep -qE '^kind: Deployment$'; then
+  echo "FAIL  NFS disabled: the render produced no Deployment, so nothing was inspected"
+  failed=$((failed + 1))
+elif ! printf '%s\n' "$_nd" | grep -qE 'workspace_storage:|workspace-nfs|^ +nfs:$'; then
+  echo "ok    NFS disabled renders no workspace_storage and no NFS volume or mount"
+else
+  echo "FAIL  NFS disabled still rendered a workspace_storage block or an NFS volume"
+  failed=$((failed + 1))
+fi
+unset _nd
+
+echo "== runtime.gke =="
+# runtimes.kubernetes.gke was hardcoded true; runtime.gke keeps that default and
+# makes false reachable. The chart writes the key, so config.extra stays refused.
+reject "config.extra overriding runtimes.kubernetes.gke" "config.extra overwrites runtimes.kubernetes.gke" \
+  --set config.extra.runtimes.kubernetes.gke=false
+reject "gke false with config.existingSecret" "inline settings values (runtime.gke)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned --set runtime.gke=false
+reject "gke string \"false\" with config.existingSecret, schema skipped" "inline settings values (runtime.gke)" \
+  --skip-schema-validation --set agents.imageRegistry= --set auth.proxy.iap.audience= \
+  --set config.existingSecret=operator-owned --set-string runtime.gke=false
+reject "gke not a boolean, schema layer" "runtime.gke" --set-string runtime.gke=false
+reject "gke not a boolean, template layer" "runtime.gke is \"false\"; it must be a boolean" \
+  --skip-schema-validation --set-string runtime.gke=false
+executed=$((executed + 1))
+_gf="$(render --set runtime.gke=false --show-only templates/secret-settings.yaml)"
+_gt="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_gf" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_gt" | grep -q '^kind: Secret$'; then
+  echo "FAIL  runtime.gke shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_gf" | grep -A1 -E '^      kubernetes:$' | grep -qE '^        gke: false$' \
+  && printf '%s\n' "$_gt" | grep -A1 -E '^      kubernetes:$' | grep -qE '^        gke: true$'; then
+  echo "ok    runtime.gke=false renders runtimes.kubernetes.gke: false; the default renders true"
+else
+  echo "FAIL  runtime.gke shape: false did not render gke: false, or the default did not render gke: true"
+  failed=$((failed + 1))
+fi
+unset _gf _gt
 
 echo "== Deployment selector labels are a contract =="
 # CONTRACT, NOT STYLE. A Terraform-owned NEG Service selects the hub's pods by

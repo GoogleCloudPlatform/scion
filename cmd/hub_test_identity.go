@@ -32,15 +32,25 @@ import (
 )
 
 // scion hub test-identity (ptone/scion#4240): issue, re-issue tokens for,
-// list and delete hub test identities. Available in human mode only: the
-// "hub" subtree is not in agentAllowed (cli_mode.go), since issuance needs
-// a user or issuer credential that agents do not hold.
+// mint web-login codes for, list and delete hub test identities, tear down
+// a run, and (human only) manage workload issuer delegations.
 //
-// A token is a secret. It is written only to the file named by --out,
-// created exclusively (never overwriting an existing path or following a
-// symlink) with mode 0600. Standard output and standard error carry only
-// non-secret facts: the identity's ID, email, role, expiry and the token
-// file path.
+// Without a hub profile the commands use the CLI's usual hub credential
+// and are human only. With a target-hub profile (hub_profile.go) they act
+// as the profile's issuer delegation, keep issued identities in the run
+// cache, and also run in agent mode, but only against a target whose
+// endpoint is not the agent's own hub. delegate is the human consent step
+// on the target: human mode only, never with a profile. web-code with a
+// profile mints the code through the issuer delegation, for an identity
+// that delegation issued; in agent mode it runs only with such a profile.
+//
+// A token or web-login code is a secret. Without a profile it is written
+// only to the file named by --out, created exclusively (never overwriting
+// an existing path or following a symlink) with mode 0600; with a profile
+// a token goes only to the run cache (0600, exclusive, symlinks refused)
+// and a web-login code still only to --out.
+// Standard output and standard error carry only non-secret facts: the
+// identity's ID, email, role, expiry, the code ID and the output file path.
 
 var hubTestIdentityCmd = &cobra.Command{
 	Use:   "test-identity",
@@ -48,7 +58,7 @@ var hubTestIdentityCmd = &cobra.Command{
 	Long: `Manage hub test identities: short-lived synthetic member or viewer
 users for testing on a test hub.
 
-The hub must run with --enable-test-identities, and you need the
+The hub must run with --test-mode=member (or admin), and you need the
 test_identity.issue permission: an admin session, or a hub-bound access
 token carrying the test_identity:issue scope (the intended credential for
 CI and operators, set in SCION_HUB_TOKEN).
@@ -56,6 +66,14 @@ CI and operators, set in SCION_HUB_TOKEN).
 The access token of a test identity is written only to the file named by
 --out, which must not exist yet; it is created with mode 0600. The token is
 never printed.
+
+With a target-hub profile (see 'scion hub profile'), the commands act as the
+profile's issuer delegation on another test hub, issued identities go to the
+run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
+removes a whole run, and the commands also run in agent mode, but only
+against a profile for another hub. 'web-code' with a profile mints the code
+through the issuer delegation, for an identity issued through it. 'delegate'
+is the human consent step on the target hub.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
@@ -67,8 +85,17 @@ Examples:
   # List your live test identities
   scion hub test-identity list
 
+  # Mint a single-use web-login code for a browser session; it goes to ./code.txt
+  scion hub test-identity web-code <id> --out ./code.txt
+
   # Delete a test identity when the run is done
-  scion hub test-identity delete <id>`,
+  scion hub test-identity delete <id>
+
+  # With a target-hub profile: issue into the run cache, mint a web-login
+  # code for the identity, then tear the run down
+  scion --hub-profile t1 hub test-identity issue --as owner --run r1
+  scion --hub-profile t1 hub test-identity web-code <id> --out ./code.txt
+  scion --hub-profile t1 hub test-identity teardown --run r1`,
 }
 
 var hubTestIdentityIssueCmd = &cobra.Command{
@@ -92,15 +119,20 @@ Examples:
 }
 
 var hubTestIdentityTokenCmd = &cobra.Command{
-	Use:   "token ID --out FILE",
+	Use:   "token [ID] [--out FILE]",
 	Short: "Issue a new token for a live test identity",
 	Long: `Issue a new access token for a live test identity you issued, and
 write it to --out (which must not exist; created with mode 0600).
 
+With a hub profile and --as <alias> (and --run), the token of that cached
+identity is re-issued through the profile's issuer delegation and stored in
+the run cache instead (no ID, no --out).
+
 Examples:
   scion hub test-identity token 6f1c... --out ./fixture-2.token
-  scion hub test-identity token 6f1c... --ttl 10m --out ./short.token`,
-	Args: cobra.ExactArgs(1),
+  scion hub test-identity token 6f1c... --ttl 10m --out ./short.token
+  scion --hub-profile t1 hub test-identity token --as owner --run r1`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runHubTestIdentityToken,
 }
 
@@ -119,19 +151,67 @@ Examples:
 }
 
 var hubTestIdentityDeleteCmd = &cobra.Command{
-	Use:   "delete ID",
+	Use:   "delete [ID]",
 	Short: "Delete a test identity",
 	Long: `Delete a test identity. Its role bindings and group memberships go
 with it and its tokens stop working at once.
 
 The delete is refused while the identity still owns agents, or is the
-last owner of a project: delete those first. Deleting an identity that no
-longer exists succeeds with a notice.
+last owner of a project: delete those first, or use --purge. Deleting an
+identity that no longer exists succeeds with a notice.
+
+With --purge the hub also removes what the identity created, directly or
+through its agents: its agents (with their files on the broker), schedules,
+groups and projects. Only resources the hub recorded as created under the
+identity are removed. A project that has another owner, or resources from
+someone else, is kept (the identity's own access to it is removed). Agents
+the identity owns without that record are listed as unproven and never
+removed. When the purge cannot finish (for example a broker is offline) it
+lists what is left and exits non-zero; run it again to finish.
+
+With a hub profile and --as <alias> (and --run), the cached identity is
+deleted and removed from the run cache (no ID).
 
 Examples:
-  scion hub test-identity delete 6f1c...`,
-	Args: cobra.ExactArgs(1),
+  scion hub test-identity delete 6f1c...
+  scion hub test-identity delete 6f1c... --purge
+  scion --hub-profile t1 hub test-identity delete --as owner --run r1`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runHubTestIdentityDelete,
+}
+
+var hubTestIdentityWebCodeCmd = &cobra.Command{
+	Use:   "web-code ID --out FILE",
+	Short: "Mint a single-use web-login code for a browser session as a test identity",
+	Long: `Mint a single-use web-login code for a live test identity you issued, and
+write it to --out. A browser (for example a Playwright test) redeems the
+code with POST /auth/test-identity/redeem and then holds a web session as
+the test identity until the identity expires.
+
+The code is valid for 5 minutes and can be redeemed once. Minting a new
+code replaces any earlier code that was not redeemed yet. The hub must run
+with test identities enabled at the member level and carry the test
+infrastructure marker ("scion server test-infra mark"), which holds the
+hub-local web session key; otherwise the hub answers that web sessions are
+not available.
+
+--out must name a path that does not exist yet: an existing file, a
+symlink, or a path under a symlinked directory is refused. The file is
+created with mode 0600 and holds only the code. The code is never printed;
+only the identity ID, the code ID, the code expiry and the file path are.
+
+With a target-hub profile (--hub-profile or SCION_HUB_PROFILE), the code is
+minted on the target hub through the profile's issuer delegation, for a
+member identity issued through that delegation ('scion hub test-identity
+list' shows their IDs); --as does not apply. In agent mode web-code runs
+only with a profile for another hub, never this agent's own.
+
+Examples:
+  scion hub test-identity web-code 6f1c... --out ./code.txt
+  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json
+  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt`,
+	Args: cobra.ExactArgs(1),
+	RunE: runHubTestIdentityWebCode,
 }
 
 // Flag values.
@@ -144,6 +224,7 @@ var (
 	testIdentityJSON           bool
 	testIdentityListLimit      int
 	testIdentityIncludeExpired bool
+	testIdentityPurge          bool
 )
 
 func init() {
@@ -152,19 +233,23 @@ func init() {
 	hubTestIdentityCmd.AddCommand(hubTestIdentityTokenCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityListCmd)
 	hubTestIdentityCmd.AddCommand(hubTestIdentityDeleteCmd)
+	hubTestIdentityCmd.AddCommand(hubTestIdentityWebCodeCmd)
+	hubTestIdentityDeleteCmd.Flags().BoolVar(&testIdentityPurge, "purge", false, "Also remove the agents, schedules, groups and projects the identity created")
 
 	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityRole, "role", "member", `Role of the identity: "member" or "viewer"`)
 	hubTestIdentityIssueCmd.Flags().DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 30m (default: the hub's, 30m)")
 	hubTestIdentityIssueCmd.Flags().DurationVar(&testIdentityLifetime, "lifetime", 0, "Identity lifetime, e.g. 2h (default: the hub's, 1h; at most 8h)")
 	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityPurpose, "purpose", "", "Short label recorded on the identity and in the audit log")
-	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required; must not exist; created 0600)")
+	hubTestIdentityIssueCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required without a hub profile; must not exist; created 0600)")
 	hubTestIdentityIssueCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
-	_ = hubTestIdentityIssueCmd.MarkFlagRequired("out")
 
 	hubTestIdentityTokenCmd.Flags().DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 30m (default: the hub's, 30m)")
-	hubTestIdentityTokenCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required; must not exist; created 0600)")
+	hubTestIdentityTokenCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the token to (required unless --as names a cached identity; must not exist; created 0600)")
 	hubTestIdentityTokenCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the identity as JSON (never the token)")
-	_ = hubTestIdentityTokenCmd.MarkFlagRequired("out")
+
+	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the code to (required; must not exist; created 0600)")
+	hubTestIdentityWebCodeCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the code ID, expiry and file as JSON (never the code)")
+	_ = hubTestIdentityWebCodeCmd.MarkFlagRequired("out")
 
 	hubTestIdentityListCmd.Flags().IntVar(&testIdentityListLimit, "limit", 0, "Maximum number of identities to list (default: the hub's, 100)")
 	hubTestIdentityListCmd.Flags().BoolVar(&testIdentityIncludeExpired, "include-expired", false, "Also list expired identities")
@@ -181,6 +266,13 @@ type testIdentityIssueOptions struct {
 	JSON     bool
 }
 
+// testIdentityWebCodeOptions are the inputs of mintTestIdentityWebCode.
+type testIdentityWebCodeOptions struct {
+	ID   string
+	Out  string
+	JSON bool
+}
+
 // testIdentityTokenOptions are the inputs of reissueTestIdentityToken.
 type testIdentityTokenOptions struct {
 	ID   string
@@ -190,6 +282,12 @@ type testIdentityTokenOptions struct {
 }
 
 func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
+	if hubProfileSelected() {
+		return runProfileTestIdentityIssue(cmd)
+	}
+	if testIdentityOut == "" {
+		return newUsageError("--out is required: the token is written only to a file")
+	}
 	_, client, err := loadHubClient()
 	if err != nil {
 		return err
@@ -203,7 +301,16 @@ func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
 }
 
 func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	if hubProfileSelected() && hubProfileAs != "" {
+		return runProfileTestIdentityReissue(cmd, args)
+	}
+	if len(args) != 1 {
+		return newUsageError("name the test identity: token ID --out FILE")
+	}
+	if testIdentityOut == "" {
+		return newUsageError("--out is required: the token is written only to a file")
+	}
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -214,8 +321,40 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
+func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
+	// With a profile: the issuer delegation on the target hub (--as is
+	// refused); without one: the CLI's usual hub client.
+	client, err := testIdentityIssuerClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	return mintTestIdentityWebCode(ctx, cmd.OutOrStdout(), client.TestIdentities(), testIdentityWebCodeOptions{
+		ID: args[0], Out: testIdentityOut, JSON: testIdentityJSON,
+	})
+}
+
+// testIdentityIssuerClient returns the client test identity commands act
+// with: the profile's issuer delegation when a profile is selected (and
+// --as is refused), the CLI's usual hub client otherwise.
+func testIdentityIssuerClient() (hubclient.Client, error) {
+	if hubProfileSelected() {
+		if hubProfileAs != "" {
+			return nil, errors.New("--as does not apply to this command: test identity commands act as the profile's issuer delegation")
+		}
+		s, err := openHubProfileSession(false)
+		if err != nil {
+			return nil, err
+		}
+		return s.IssuerClient()
+	}
 	_, client, err := loadHubClient()
+	return client, err
+}
+
+func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -227,13 +366,71 @@ func runHubTestIdentityList(cmd *cobra.Command, _ []string) error {
 }
 
 func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	if hubProfileSelected() && hubProfileAs != "" {
+		return runProfileTestIdentityDeleteAlias(cmd, args)
+	}
+	if len(args) != 1 {
+		return newUsageError("name the test identity: delete ID")
+	}
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
+	}
+	if testIdentityPurge {
+		// A purge waits for each agent's delete on its broker.
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Minute)
+		defer cancel()
+		return purgeTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 	return deleteTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+}
+
+// purgeTestIdentity purges a test identity and prints the hub's report.
+// An incomplete purge prints what is left and returns an error.
+func purgeTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
+	report, err := svc.Purge(ctx, id)
+	if report != nil {
+		printTestIdentityPurgeReport(out, report)
+	}
+	if err != nil {
+		if report != nil {
+			return fmt.Errorf("purge of test identity %s did not complete; run the command again to finish", id)
+		}
+		return fmt.Errorf("failed to purge test identity %s: %w", id, err)
+	}
+	return nil
+}
+
+func printTestIdentityPurgeReport(out io.Writer, r *hubclient.TestIdentityPurgeReport) {
+	d := r.Deleted
+	_, _ = fmt.Fprintf(out, "Purge of test identity %s: removed %d agents, %d schedules, %d groups, %d projects.\n",
+		r.IdentityID, d.Agents, d.Schedules, d.Groups, d.Projects)
+	if r.IdentityDeleted {
+		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", r.IdentityID)
+	} else if r.IdentityKeptReason != "" {
+		_, _ = fmt.Fprintf(out, "Test identity %s was kept: %s.\n", r.IdentityID, r.IdentityKeptReason)
+	}
+	for _, p := range r.KeptProjects {
+		line := fmt.Sprintf("  kept project %s (%s); the identity's access was removed", p.ID, p.Reason)
+		if p.Ownerless {
+			line += "; the project now has no owner"
+		}
+		_, _ = fmt.Fprintln(out, line)
+	}
+	for _, it := range r.NotDone {
+		_, _ = fmt.Fprintf(out, "  not done: %s %s: %s %s\n", it.Type, it.ID, it.Status, it.Reason)
+	}
+	for _, it := range r.Unproven {
+		_, _ = fmt.Fprintf(out, "  unproven: %s %s in project %s (not recorded as created by the identity; a real administrator must decide)\n", it.Type, it.ID, it.ProjectID)
+	}
+	if r.UnprovenTruncated {
+		_, _ = fmt.Fprintln(out, "  more unproven agents exist than are listed")
+	}
+	if r.Truncated {
+		_, _ = fmt.Fprintln(out, "  more resources remain; run the command again")
+	}
 }
 
 // wholeSeconds converts a flag duration to the API's whole seconds. A
@@ -293,17 +490,25 @@ func (t *tokenFile) abandon() {
 	_ = os.Remove(t.path)
 }
 
-// write writes the token and closes the file.
+// write writes the token and a newline, and closes the file.
 func (t *tokenFile) write(token string) error {
-	if _, err := io.WriteString(t.f, token+"\n"); err != nil {
-		_ = t.f.Close()
-		return err
+	return t.writeExact(token + "\n")
+}
+
+// writeExact writes content as is, syncs and closes the file. On any
+// failure it closes and removes the file, so no partial secret is left.
+func (t *tokenFile) writeExact(content string) error {
+	_, err := io.WriteString(t.f, content)
+	if err == nil {
+		err = t.f.Sync()
 	}
-	if err := t.f.Sync(); err != nil {
-		_ = t.f.Close()
-		return err
+	if cerr := t.f.Close(); err == nil {
+		err = cerr
 	}
-	return t.f.Close()
+	if err != nil {
+		_ = os.Remove(t.path)
+	}
+	return err
 }
 
 // testIdentityOutput is the --json output of issue and token. It has no
@@ -375,7 +580,6 @@ func issueTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient
 		return fmt.Errorf("failed to issue test identity: %w", err)
 	}
 	if err := file.write(resp.AccessToken); err != nil {
-		_ = os.Remove(file.path)
 		_, _ = fmt.Fprintf(errOut, "Test identity %s was issued, but its token could not be written; run \"scion hub test-identity token %s --out <file>\" for a new one, or delete it.\n", resp.Identity.ID, resp.Identity.ID)
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}
@@ -399,11 +603,87 @@ func reissueTestIdentityToken(ctx context.Context, out, errOut io.Writer, svc hu
 		return fmt.Errorf("failed to issue a token for test identity %s: %w", opts.ID, err)
 	}
 	if err := file.write(resp.AccessToken); err != nil {
-		_ = os.Remove(file.path)
 		_, _ = fmt.Fprintf(errOut, "A token for test identity %s was issued, but could not be written; run this command again with a new --out.\n", opts.ID)
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}
 	return printTestIdentityToken(out, "New token for", resp, file.path, opts.JSON)
+}
+
+// refuseSymlinkedParents refuses path when any directory component of it
+// is a symlink, so the file cannot land somewhere other than the directory
+// named. Components are checked on the absolute path; a component that does
+// not exist is left to the exclusive create, which then fails.
+func refuseSymlinkedParents(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("cannot use --out %s: %w", path, err)
+	}
+	dir := filepath.Dir(abs)
+	for {
+		fi, err := os.Lstat(dir)
+		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			hint := ""
+			if resolved, rerr := filepath.EvalSymlinks(filepath.Dir(abs)); rerr == nil {
+				hint = fmt.Sprintf(" (use the resolved directory %s)", resolved)
+			}
+			return fmt.Errorf("refusing --out %s: directory %s is a symlink; name a path without symlinked directories%s", path, dir, hint)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
+// testIdentityWebCodeOutput is the --json output of web-code. It has no
+// code field.
+type testIdentityWebCodeOutput struct {
+	IdentityID string    `json:"identityId"`
+	CodeID     string    `json:"codeId"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	CodeFile   string    `json:"codeFile"`
+}
+
+// mintTestIdentityWebCode mints a web-login code for a live test identity
+// and writes only the code to opts.Out. The code never reaches out or an
+// error.
+func mintTestIdentityWebCode(ctx context.Context, out io.Writer, svc hubclient.TestIdentityService, opts testIdentityWebCodeOptions) error {
+	if opts.Out == "" {
+		return newUsageError("--out is required: the code is written only to a file")
+	}
+	if err := refuseSymlinkedParents(opts.Out); err != nil {
+		return err
+	}
+	file, err := createTokenFile(opts.Out)
+	if err != nil {
+		return err
+	}
+	resp, err := svc.WebLoginCode(ctx, opts.ID)
+	if err != nil {
+		file.abandon()
+		if apiclient.IsNotFoundError(err) {
+			return fmt.Errorf("failed to mint a web-login code for test identity %s (not found, not one you issued, or web sessions are not available on this hub): %w", opts.ID, err)
+		}
+		return fmt.Errorf("failed to mint a web-login code for test identity %s: %w", opts.ID, err)
+	}
+	if err := file.writeExact(resp.Code); err != nil {
+		return fmt.Errorf("failed to write --out %s; mint a new code with a new --out: %w", file.path, err)
+	}
+	absPath := file.path
+	if abs, err := filepath.Abs(file.path); err == nil {
+		absPath = abs
+	}
+	if opts.JSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(testIdentityWebCodeOutput{IdentityID: opts.ID, CodeID: resp.CodeID, ExpiresAt: resp.ExpiresAt, CodeFile: absPath})
+	}
+	_, _ = fmt.Fprintf(out, "Web-login code for test identity %s\n", opts.ID)
+	_, _ = fmt.Fprintf(out, "  Code ID:       %s\n", resp.CodeID)
+	_, _ = fmt.Fprintf(out, "  Expires:       %s (single use)\n", formatTestIdentityTime(resp.ExpiresAt))
+	_, _ = fmt.Fprintf(out, "  Code file:     %s (mode 0600)\n", absPath)
+	return nil
 }
 
 // listTestIdentities lists test identities as the hub returns them: the
@@ -465,7 +745,7 @@ func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclien
 			}
 		}
 		if len(projects) > 0 {
-			fmt.Fprintf(&b, "test identity %s is the last owner of these projects; delete them first (a later release adds a purge that removes them):\n", id)
+			fmt.Fprintf(&b, "test identity %s is the last owner of these projects; delete them first, or use --purge:\n", id)
 			for _, p := range projects {
 				fmt.Fprintf(&b, "  project %s (%s)\n", p.Name, p.ID)
 			}

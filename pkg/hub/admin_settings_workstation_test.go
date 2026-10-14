@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -139,7 +140,7 @@ func TestWorkstation_PutServerConfig_MixedSplit(t *testing.T) {
 		t.Error("the co-located broker runtime reload did not run")
 	}
 	for _, want := range []string{"quotas", "log_level", "broker_runtime"} {
-		if !containsString(resp.Reload.Applied, want) {
+		if !slices.Contains(resp.Reload.Applied, want) {
 			t.Errorf("reload.applied = %v, want %q", resp.Reload.Applied, want)
 		}
 	}

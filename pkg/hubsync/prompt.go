@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -160,19 +161,6 @@ func ShowLinkPrompt(projectName string, autoConfirm bool) bool {
 	return ConfirmAction("Link project with Hub?", true, autoConfirm)
 }
 
-// ShowInitLinkPrompt displays the post-init link prompt.
-// Returns true if the user confirms, false otherwise.
-func ShowInitLinkPrompt(autoConfirm bool) bool {
-	return ConfirmAction("Project initialized. Link to Hub?", true, autoConfirm)
-}
-
-// ShowInitProvidePrompt displays a confirmation to add this broker as a provider.
-// Returns true if the user confirms, false otherwise.
-func ShowInitProvidePrompt(brokerName, projectName string, autoConfirm bool) bool {
-	_, _ = fmt.Fprintf(promptOut, "This host (%s) is registered as a broker.\n", brokerName)
-	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", projectName), true, autoConfirm)
-}
-
 // ProjectChoice represents the user's choice when matching projects exist.
 type ProjectChoice int
 
@@ -287,6 +275,46 @@ func ShowMatchingProjectsPrompt(projectName string, matches []ProjectMatch, next
 	}
 }
 
+// ChooseOption shows title and the numbered options, and asks the user to
+// pick one. It returns the index of the chosen option, or -1 when the user
+// cancels ('c', or the end of input). An invalid answer is asked again.
+// Without a terminal it does not read stdin and returns ErrNoTerminal:
+// there is no default to pick, so the caller reports the choice instead.
+func ChooseOption(title string, options []string) (int, error) {
+	if len(options) == 0 {
+		return -1, errors.New("no options to choose from")
+	}
+	if !stdinIsTerminal() {
+		return -1, ErrNoTerminal
+	}
+	_, _ = fmt.Fprintln(promptOut, title)
+	for i, o := range options {
+		_, _ = fmt.Fprintf(promptOut, "  %d) %s\n", i+1, o)
+	}
+	reader := bufio.NewReader(promptIn)
+	for {
+		_, _ = fmt.Fprintf(promptOut, "Enter choice 1-%d (or 'c' to cancel): ", len(options))
+		input, err := reader.ReadString('\n')
+		atEnd := err != nil
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" && atEnd {
+			_, _ = fmt.Fprintln(promptOut)
+			return -1, nil
+		}
+		if input == "c" || input == "cancel" {
+			return -1, nil
+		}
+		n, convErr := strconv.Atoi(input)
+		if convErr == nil && n >= 1 && n <= len(options) {
+			return n - 1, nil
+		}
+		_, _ = fmt.Fprintf(promptOut, "Invalid choice. Please enter 1-%d.\n", len(options))
+		if atEnd {
+			return -1, nil
+		}
+	}
+}
+
 // NextSlugFromMatches computes a proposed next serial slug from a list of
 // existing project matches. This is a client-side estimate for display purposes;
 // the server computes the authoritative slug at creation time.
@@ -382,6 +410,8 @@ func ShowProjectUnlinkPrompt(projectName string, autoConfirm bool) bool {
 }
 
 // LinkOrDisableChoice represents the user's choice when project is not linked.
+// The disable choice was removed together with the route into local-only mode
+// from this prompt; the name stays until the prompt itself is removed.
 type LinkOrDisableChoice int
 
 const (
@@ -389,20 +419,19 @@ const (
 	LinkOrDisableCancel LinkOrDisableChoice = iota
 	// LinkOrDisableLink means the user chose to link the project.
 	LinkOrDisableLink
-	// LinkOrDisableDisable means the user chose to disable Hub.
-	LinkOrDisableDisable
 )
 
-// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but project is not linked.
-// Returns the user's choice. Without a terminal (and without autoConfirm) it
-// does not read stdin and returns LinkOrDisableCancel.
+// ShowProjectLinkOrDisablePrompt displays a prompt when Hub is enabled but
+// project is not linked. It offers two choices, link or cancel, and returns
+// the user's choice. Without a terminal (and without autoConfirm) it does not
+// read stdin and returns LinkOrDisableCancel.
 func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOrDisableChoice {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "Hub is enabled but this project is not linked.")
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "Choose an option:")
 	_, _ = fmt.Fprintln(promptOut, "  [1] Link and sync project now")
-	_, _ = fmt.Fprintln(promptOut, "  [2] Disable Hub for this project")
+	_, _ = fmt.Fprintln(promptOut, "  [2] Cancel")
 	_, _ = fmt.Fprintln(promptOut)
 
 	if autoConfirm {
@@ -418,7 +447,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 
 	reader := bufio.NewReader(promptIn)
 	for {
-		_, _ = fmt.Fprint(promptOut, "Enter choice (or 'c' to cancel): ")
+		_, _ = fmt.Fprint(promptOut, "Enter choice: ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return LinkOrDisableCancel
@@ -439,7 +468,7 @@ func ShowProjectLinkOrDisablePrompt(projectName string, autoConfirm bool) LinkOr
 		case 1:
 			return LinkOrDisableLink
 		case 2:
-			return LinkOrDisableDisable
+			return LinkOrDisableCancel
 		default:
 			_, _ = fmt.Fprintln(promptOut, "Invalid choice. Please enter 1 or 2.")
 		}
@@ -544,16 +573,21 @@ type ProjectProviders interface {
 }
 
 // ShowProjectDeletePrompt displays the project deletion confirmation.
-// Returns true if the user confirms, false otherwise.
-func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
+// agentCount is the project's agent count, soft-deleted agents included.
+// force reports whether the delete is forced: without it the Hub refuses
+// while agents that are not deleted remain, with it their records are
+// removed and their runtime deletes are best-effort. Returns true if the
+// user confirms, false otherwise.
+func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, force, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "The following will be removed:")
-	if agentCount > 0 {
-		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (will be stopped and deleted)\n", agentCount)
-	} else {
+	switch {
+	case agentCount == 0:
 		_, _ = fmt.Fprintln(promptOut, "  - 0 agents")
+	case force:
+		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (--force: records removed, runtime deletes are best-effort)\n", agentCount)
 	}
 	if providers != nil && providers.ProviderCount() > 0 {
 		_, _ = fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
@@ -562,6 +596,13 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 		}
 	}
 	_, _ = fmt.Fprintln(promptOut)
+	if agentCount > 0 && !force {
+		// Not a removal: without --force the Hub refuses the delete while
+		// any agent is not deleted. agentCount also counts soft-deleted
+		// agents, which do not block, so the warning is conditional.
+		_, _ = fmt.Fprintf(promptOut, "Warning: the project has %d agent record(s). The Hub refuses this delete if any of these agents is not deleted yet; delete them first, or use --force.\n", agentCount)
+		_, _ = fmt.Fprintln(promptOut)
+	}
 	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
 	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation

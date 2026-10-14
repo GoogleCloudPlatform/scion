@@ -45,8 +45,14 @@ var ErrHomeGrantAdmin = errors.New("artifacts: the home scope's grant may only b
 
 // ErrReviewGrantRefused is returned by PutReviewGrant when the artifact's
 // home or owner changed since the caller's authority was checked, or the
-// subject already holds a grant the review grant would lower.
+// subject already holds a principal grant other than review.
 var ErrReviewGrantRefused = errors.New("artifacts: review grant refused")
+
+// ErrReviewReplacesAccess is returned by PutGrant for a review grant to a
+// user who holds a principal read, write or admin grant on the artifact:
+// the review grant would take that grant's row, and with it the user's
+// read.
+var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot replace a read, write or admin grant")
 
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
@@ -94,11 +100,17 @@ const (
 	SubjectLink = "link"
 )
 
-// Grant permissions, weakest first.
+// Grant permissions. Read, write and admin are each stronger than the one
+// before. Review (ptone/scion#4538), for a user principal only, is apart
+// from that ladder: it appends versions of kind review only, gives no read
+// of its own, and counts only while its holder reads the artifact through
+// another path (the home project or a grant to one of the holder's
+// projects).
 const (
-	GrantRead  = "read"
-	GrantWrite = "write"
-	GrantAdmin = "admin"
+	GrantRead   = "read"
+	GrantReview = "review"
+	GrantWrite  = "write"
+	GrantAdmin  = "admin"
 )
 
 // PrincipalRef is the subject ref of a principal grant.
@@ -121,6 +133,9 @@ type Artifact struct {
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	DeletedAt  *time.Time
+	// OrphanedAt is when the owner liveness reconciler found the owner
+	// gone, or nil while the owner is live (or was never checked).
+	OrphanedAt *time.Time
 }
 
 // Version is a row of the artifact_version table.
@@ -137,7 +152,30 @@ type Version struct {
 	CreatedByRef  string
 	CreatedAt     time.Time
 	State         string
+	// FailReason is why a failed version stopped being pending (one of the
+	// FailReason constants), or "" for a version that is not failed or was
+	// failed before reasons were recorded.
+	FailReason string
 }
+
+// Reasons a version stopped being pending without becoming ready
+// (ptone/scion#4577). They are fixed codes, shown as they are in the API.
+const (
+	// FailReasonUnmarkedChanges: a review changed text outside its marks.
+	FailReasonUnmarkedChanges = "unmarked_changes"
+	// FailReasonStaleReview: the version a review was started from was no
+	// longer the latest.
+	FailReasonStaleReview = "stale_review"
+	// FailReasonNewerPublishPending: a newer publish was in progress when
+	// the review was finalized.
+	FailReasonNewerPublishPending = "newer_publish_pending"
+	// FailReasonExpired: the upload was abandoned and reaped after
+	// PendingVersionTTL.
+	FailReasonExpired = "expired"
+	// FailReasonDiscarded is reported for a failed version recorded before
+	// reasons were stored.
+	FailReasonDiscarded = "discarded"
+)
 
 // File origins.
 const (
@@ -265,17 +303,25 @@ type Store interface {
 	// version, if the version still holds the given claim. The artifact's
 	// current version does not change. It returns ErrConflict when the
 	// claim no longer holds.
-	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time) error
+	// reason (a FailReason constant) is recorded on the version.
+	DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time, reason string) error
 
 	// ListVersions returns up to limit ready versions of an artifact,
 	// newest first, with a seq below before (0 = from the newest).
 	ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
 
+	// ListVersionHistory returns up to limit versions of an artifact that
+	// are no longer pending (ready and failed), newest first, with a seq
+	// below before (0 = from the newest). A failed version carries its
+	// FailReason.
+	ListVersionHistory(ctx context.Context, artifactID string, before, limit int) ([]Version, error)
+
 	// ReapPending marks every version still pending or finalizing that was
-	// created before cutoff as failed and drops its manifest, so its blobs are no
-	// longer referenced. An artifact left with neither a ready nor a
-	// pending version is soft-deleted, which frees its key. It handles at
-	// most limit versions per call and returns how many it reaped.
+	// created before cutoff as failed (reason FailReasonExpired) and drops
+	// its manifest, so its blobs are no longer referenced. An artifact left
+	// with neither a ready nor a pending version is soft-deleted, which
+	// frees its key. It handles at most limit versions per call and returns
+	// how many it reaped.
 	ReapPending(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
 	// GetArtifact returns the artifact with id unless it is absent or
@@ -327,9 +373,10 @@ type Store interface {
 	// exists and is unexpired at now.
 	LinkActive(ctx context.Context, artifactID, linkID string, now time.Time) (bool, error)
 
-	// RevokeLink deletes link grant linkID of artifact artifactID. It
-	// returns ErrNotFound when no such link grant exists.
-	RevokeLink(ctx context.Context, artifactID, linkID string) error
+	// RevokeLink deletes link grant linkID of the live artifact
+	// artifactID and records a link_revoked event by actor in the same
+	// transaction. It returns ErrNotFound when no such link grant exists.
+	RevokeLink(ctx context.Context, artifactID, linkID string, actor *Actor) error
 
 	// PutGrant adds the principal or scope grant g to its artifact, or,
 	// when the artifact already has a grant for the same subject, sets
@@ -337,18 +384,19 @@ type Store interface {
 	// stored grant's). created reports which. Under the artifact's lock it
 	// reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
-	// other scope (ErrCrossScopeDisabled). It refuses with
-	// ErrTooManyGrants when adding would exceed maxGrants principal and
-	// scope grants, and returns ErrNotFound when the artifact is absent or
-	// deleted.
+	// other scope (ErrCrossScopeDisabled), and a review grant over a
+	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
+	// refuses with ErrTooManyGrants when adding would exceed maxGrants
+	// principal and scope grants, and returns ErrNotFound when the artifact
+	// is absent or deleted.
 	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
 
-	// PutReviewGrant is PutGrant for a review grant: g must be a write
-	// grant to a user principal. Under the artifact's lock it also refuses,
-	// with ErrReviewGrantRefused and writing nothing, when the artifact is
-	// no longer homed in home or not owned by an agent, or when the user
-	// already holds a grant other than read or write on it (an admin grant
-	// is never lowered this way).
+	// PutReviewGrant is PutGrant for a review grant (design D24): g must
+	// be a review grant to a user principal. Under the artifact's lock it
+	// also refuses, with ErrReviewGrantRefused and writing nothing, when
+	// the artifact is no longer homed in home or not owned by an agent, or
+	// when the user already holds a principal grant other than review on it
+	// (a read, write or admin grant is never replaced this way).
 	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
@@ -356,11 +404,13 @@ type Store interface {
 	// ErrConflict, deleting nothing, when the grant is the scope grant of
 	// the artifact's current home scope (checked under the artifact's
 	// lock, so a concurrent move cannot slip between check and delete).
-	DeleteGrant(ctx context.Context, artifactID, grantID string) error
+	// It records a grant_removed event by actor in the same transaction.
+	DeleteGrant(ctx context.Context, artifactID, grantID string, actor *Actor) error
 
-	// SetExpiry sets (or, with nil, clears) a live artifact's expiry and
-	// returns the updated artifact, or ErrNotFound.
-	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time) (*Artifact, error)
+	// SetExpiry sets (or, with nil, clears) a live artifact's expiry,
+	// recording the change by actor, and returns the updated artifact, or
+	// ErrNotFound.
+	SetExpiry(ctx context.Context, artifactID string, expiresAt *time.Time, actor *Actor) (*Artifact, error)
 
 	// UpdateArtifact applies u to a live artifact in one transaction under
 	// the artifact's lock and returns the updated artifact. It returns
@@ -368,13 +418,48 @@ type Store interface {
 	// a move would give the owner two live artifacts with the same key in
 	// the new scope, ErrTooManyGrants when a move would exceed u.MaxGrants
 	// principal and scope grants, and ErrHomeGrantAdmin when the new scope
-	// holds an admin grant on the artifact (lower it first).
+	// holds an admin grant on the artifact (lower it first). In the same
+	// transaction it records, by u.Actor (required), an expiry_set or
+	// expiry_cleared event for an expiry change and a moved event for a
+	// move.
 	UpdateArtifact(ctx context.Context, artifactID string, u ArtifactUpdate) (*Artifact, error)
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
-	// at or before now, deleting their grants and share links in the same
-	// transaction, and returns how many it deleted.
+	// at or before now through DeleteArtifact (actor system, authority
+	// retention), and returns how many it deleted.
 	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
+
+	// DeleteArtifact is the one soft delete of an artifact. In one
+	// transaction it sets deleted_at, removes every grant and share link of
+	// the artifact, and records a deleted event by opts.Actor (required)
+	// with what it removed. Message references then resolve as
+	// unavailable, and the blob sweep reclaims the bytes after its grace
+	// period. It returns ErrNotFound when the artifact is absent, already
+	// deleted, (with opts.ExpiredAt) not expired at that instant, or (with
+	// opts.ScopeRef) no longer homed in that scope.
+	DeleteArtifact(ctx context.Context, artifactID string, opts DeleteOptions) (DeleteResult, error)
+
+	// ListLiveOwners returns up to limit distinct owners of live (not
+	// deleted) artifacts in (kind, ref) order, strictly after after (nil
+	// = from the start), each with how many of its live artifacts are and
+	// are not marked orphaned. The owner liveness reconciler pages through
+	// them.
+	ListLiveOwners(ctx context.Context, after *Owner, limit int) ([]Owner, error)
+
+	// CountLiveOwners counts the distinct owners ListLiveOwners would
+	// return after after, without a limit.
+	CountLiveOwners(ctx context.Context, after *Owner) (int, error)
+
+	// SetOwnerOrphaned sets (orphaned true) orphaned_at to now on up to
+	// limit live artifacts of owner that are not marked, or clears it
+	// (orphaned false) on up to limit that are, recording one orphaned or
+	// unorphaned event per artifact in the same transaction. It returns
+	// how many it changed; fewer than limit means none is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) (int, error)
+
+	// ListEvents returns the artifact_event rows of an artifact, oldest
+	// first.
+	ListEvents(ctx context.Context, artifactID string) ([]Event, error)
 
 	// TouchBlob records that a write is about to store blob digest at now,
 	// so the blob sweep leaves the blob alone for the grace period. It
@@ -434,6 +519,8 @@ type ArtifactUpdate struct {
 	// SetExpiry applies ExpiresAt, which nil clears.
 	SetExpiry bool
 	ExpiresAt *time.Time
+	// Actor is who makes the change; required for any change.
+	Actor *Actor
 }
 
 // CandidateQuery selects rows for ListCandidates.

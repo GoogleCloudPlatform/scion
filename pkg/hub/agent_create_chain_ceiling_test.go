@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -192,10 +192,11 @@ func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
 
 // expectedReadsBeforeDeliverEligibility is the edge-read order of an agent
 // create up to the parent's delivery-eligibility read: the create
-// authorization walk, the creating agent's standing check
+// authorization walk (walkDelegationChainHops, the frame that reads the
+// edges for every walk entry point), the creating agent's standing check
 // (ptone/scion#3433), then the parent's active edge and its coverage.
 var expectedReadsBeforeDeliverEligibility = []string{
-	"walkDelegationChainWithCause",
+	"walkDelegationChainHops",
 	"resolveChainRoot",
 	"agentSourceEffectCeiling",
 	"ceilingFilteredAgentScopes",
@@ -208,7 +209,7 @@ func edgeReadCaller() string {
 		"parentDeliverEligibility",
 		"ceilingFilteredAgentScopes",
 		"agentSourceEffectCeiling",
-		"walkDelegationChainWithCause",
+		"walkDelegationChainHops",
 		"AuthorizeAgentToken",
 		"resolveChainRoot",
 	}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -162,6 +162,7 @@ func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
 		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
 		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
 		"user.list": true, "agent.log_append": true,
+		"test_identity.issue_super_admin": true,
 	}, legacyChainExcludedPermissions)
 
 	unrecorded := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}

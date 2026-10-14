@@ -76,11 +76,13 @@ func fixturePrincipalFromContext(ctx context.Context) fixturePrincipal {
 // resolveFixtureRoot computes the stamp for a resource created by p,
 // reading through st (the create's transaction where there is one):
 //
-//   - a user whose stored kind is test_fixture: (user ID, its issued_by). A
-//     test identity without an issuer fails the create.
+//   - a user whose stored kind is a test identity kind (test_fixture,
+//     test_hub_admin or test_super_admin): (user ID, its issued_by). A test
+//     identity without an issuer fails the create.
 //   - any other user, or a user ID with no row: no stamp. The kind is read
-//     from the store (lookupUserForKind, the read the test identity clamp
-//     uses), never from token claims. The one exception refuses rather than
+//     from the store (kindAndRowForPrincipal, the read behind
+//     kindForPrincipal), never from token claims; an unrecognized kind
+//     fails the create. The one exception refuses rather than
 //     grants: a user ID with no row whose email is in the reserved test
 //     identity domain is a test identity deleted after it authenticated, and
 //     the create fails (only test identities are in that domain).
@@ -97,14 +99,16 @@ func resolveFixtureRoot(ctx context.Context, st store.Store, p fixturePrincipal)
 	case fixturePrincipalNone:
 		return store.FixtureProvenance{}, nil
 	case fixturePrincipalUser:
-		u, found, err := lookupUserForKind(ctx, st, p.ID)
+		k, u, err := kindAndRowForPrincipal(ctx, st, p.ID)
 		if err != nil {
 			return store.FixtureProvenance{}, fmt.Errorf("%w: user %s: %w", errFixtureRootUnresolved, p.ID, err)
 		}
-		if !found && isReservedTestIdentityEmail(p.Email) {
+		if !k.Found && isReservedTestIdentityEmail(p.Email) {
 			return store.FixtureProvenance{}, fmt.Errorf("%w: test identity %s has no user row: %w", errFixtureRootUnresolved, p.ID, store.ErrNotFound)
 		}
-		if !found || !u.IsTestFixture() {
+		// Every test identity kind is a root: test_fixture and the admin
+		// kinds (test_hub_admin, test_super_admin).
+		if !k.isTestIdentity() {
 			return store.FixtureProvenance{}, nil
 		}
 		if u.IssuedBy == nil || *u.IssuedBy == "" {

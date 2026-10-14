@@ -406,6 +406,8 @@ func saMappingText(m hubclient.GCPServiceAccountProfileMapping, state string) st
 		notes = append(notes, "the broker's report is too old a version to tell")
 	case "report_missing":
 		notes = append(notes, "no stored report from the broker")
+	case "ambiguous_mapping":
+		// The ambiguous note below says it, once.
 	default:
 		notes = append(notes, strings.ReplaceAll(m.UnknownReason, "_", " "))
 	}

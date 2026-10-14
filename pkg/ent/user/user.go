@@ -48,6 +48,16 @@ const (
 	FieldIssuedBy = "issued_by"
 	// FieldPurpose holds the string denoting the purpose field in the database.
 	FieldPurpose = "purpose"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
+	// FieldIssuerCredentialID holds the string denoting the issuer_credential_id field in the database.
+	FieldIssuerCredentialID = "issuer_credential_id"
+	// FieldFederatedEmail holds the string denoting the federated_email field in the database.
+	FieldFederatedEmail = "federated_email"
+	// FieldHomeIssuer holds the string denoting the home_issuer field in the database.
+	FieldHomeIssuer = "home_issuer"
+	// FieldIssuerDelegationID holds the string denoting the issuer_delegation_id field in the database.
+	FieldIssuerDelegationID = "issuer_delegation_id"
 	// EdgeOwnedGroups holds the string denoting the owned_groups edge name in mutations.
 	EdgeOwnedGroups = "owned_groups"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -58,6 +68,8 @@ const (
 	EdgeExternalIdentities = "external_identities"
 	// EdgeTerminalWorkspace holds the string denoting the terminal_workspace edge name in mutations.
 	EdgeTerminalWorkspace = "terminal_workspace"
+	// EdgeTestIdentityLoginCode holds the string denoting the test_identity_login_code edge name in mutations.
+	EdgeTestIdentityLoginCode = "test_identity_login_code"
 	// Table holds the table name of the user in the database.
 	Table = "users"
 	// OwnedGroupsTable is the table that holds the owned_groups relation/edge.
@@ -95,6 +107,13 @@ const (
 	TerminalWorkspaceInverseTable = "user_terminal_workspaces"
 	// TerminalWorkspaceColumn is the table column denoting the terminal_workspace relation/edge.
 	TerminalWorkspaceColumn = "user_id"
+	// TestIdentityLoginCodeTable is the table that holds the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeInverseTable is the table name for the TestIdentityLoginCode entity.
+	// It exists in this package in order to avoid circular dependency with the "testidentitylogincode" package.
+	TestIdentityLoginCodeInverseTable = "test_identity_login_codes"
+	// TestIdentityLoginCodeColumn is the table column denoting the test_identity_login_code relation/edge.
+	TestIdentityLoginCodeColumn = "user_id"
 )
 
 // Columns holds all SQL columns for user fields.
@@ -116,6 +135,11 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldIssuedBy,
 	FieldPurpose,
+	FieldIssuanceID,
+	FieldIssuerCredentialID,
+	FieldFederatedEmail,
+	FieldHomeIssuer,
+	FieldIssuerDelegationID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -177,6 +201,7 @@ const (
 	StatusActive    Status = "active"
 	StatusSuspended Status = "suspended"
 	StatusInvited   Status = "invited"
+	StatusPending   Status = "pending"
 )
 
 func (s Status) String() string {
@@ -186,7 +211,7 @@ func (s Status) String() string {
 // StatusValidator is a validator for the "status" field enum values. It is called by the builders before save.
 func StatusValidator(s Status) error {
 	switch s {
-	case StatusActive, StatusSuspended, StatusInvited:
+	case StatusActive, StatusSuspended, StatusInvited, StatusPending:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for status field: %q", s)
@@ -201,8 +226,11 @@ const DefaultKind = KindHuman
 
 // Kind values.
 const (
-	KindHuman       Kind = "human"
-	KindTestFixture Kind = "test_fixture"
+	KindHuman          Kind = "human"
+	KindTestFixture    Kind = "test_fixture"
+	KindTestHubAdmin   Kind = "test_hub_admin"
+	KindTestSuperAdmin Kind = "test_super_admin"
+	KindFederated      Kind = "federated"
 )
 
 func (k Kind) String() string {
@@ -212,7 +240,7 @@ func (k Kind) String() string {
 // KindValidator is a validator for the "kind" field enum values. It is called by the builders before save.
 func KindValidator(k Kind) error {
 	switch k {
-	case KindHuman, KindTestFixture:
+	case KindHuman, KindTestFixture, KindTestHubAdmin, KindTestSuperAdmin, KindFederated:
 		return nil
 	default:
 		return fmt.Errorf("user: invalid enum value for kind field: %q", k)
@@ -302,6 +330,31 @@ func ByPurpose(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPurpose, opts...).ToFunc()
 }
 
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
+}
+
+// ByIssuerCredentialID orders the results by the issuer_credential_id field.
+func ByIssuerCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerCredentialID, opts...).ToFunc()
+}
+
+// ByFederatedEmail orders the results by the federated_email field.
+func ByFederatedEmail(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFederatedEmail, opts...).ToFunc()
+}
+
+// ByHomeIssuer orders the results by the home_issuer field.
+func ByHomeIssuer(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHomeIssuer, opts...).ToFunc()
+}
+
+// ByIssuerDelegationID orders the results by the issuer_delegation_id field.
+func ByIssuerDelegationID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuerDelegationID, opts...).ToFunc()
+}
+
 // ByOwnedGroupsCount orders the results by owned_groups count.
 func ByOwnedGroupsCount(opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -364,6 +417,13 @@ func ByTerminalWorkspaceField(field string, opts ...sql.OrderTermOption) OrderOp
 		sqlgraph.OrderByNeighborTerms(s, newTerminalWorkspaceStep(), sql.OrderByField(field, opts...))
 	}
 }
+
+// ByTestIdentityLoginCodeField orders the results by test_identity_login_code field.
+func ByTestIdentityLoginCodeField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newTestIdentityLoginCodeStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newOwnedGroupsStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -397,5 +457,12 @@ func newTerminalWorkspaceStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(TerminalWorkspaceInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
+	)
+}
+func newTestIdentityLoginCodeStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(TestIdentityLoginCodeInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, TestIdentityLoginCodeTable, TestIdentityLoginCodeColumn),
 	)
 }

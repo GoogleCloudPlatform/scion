@@ -75,14 +75,63 @@ export interface ArtifactResponse {
   warnings?: string[];
   /** On a GET: the caller may share and change the artifact. */
   canManage?: boolean;
-  /** On a GET: the caller may publish new versions (edit, upload, review). */
+  /** On a GET: the caller may publish new versions of any kind (edit, upload, review). */
   canPublish?: boolean;
+  /**
+   * On a GET: the caller may publish reviews only, through a review grant
+   * (ptone/scion#4538). Never set with canPublish.
+   */
+  canReview?: boolean;
+  /**
+   * On a GET: the caller may not manage the artifact but may give a user
+   * review access (a review grant): the delegating user of the agent that
+   * owns it, the project owners and admins of its home project, and
+   * super-admins. Never set with canManage.
+   */
+  canGrantReview?: boolean;
+  /**
+   * On a GET: the artifact's home project was deleted. Advisory: absent when
+   * the hub cannot tell.
+   */
+  scopeDeleted?: boolean;
 }
 
 /** GET /api/v1/artifacts/{id}/versions: ready versions, newest first, without files. */
 export interface VersionListResponse {
   versions: ArtifactVersion[];
+  /**
+   * Versions of the same page that stopped being pending without becoming
+   * ready (ptone/scion#4577): only their number, state, reason code and the
+   * time their number was taken.
+   */
+  discarded?: DiscardedVersion[];
   nextBefore?: number;
+}
+
+/** A discarded version as GET .../versions lists it. */
+export interface DiscardedVersion {
+  seq: number;
+  state: string;
+  /** unmarked_changes, stale_review, newer_publish_pending, expired or discarded. */
+  reason: string;
+  /** When the version number was taken. */
+  createdAt: string;
+}
+
+/** Describes a discarded version's reason code for people. */
+export function discardReasonText(reason: string): string {
+  switch (reason) {
+    case 'unmarked_changes':
+      return 'the review changed text outside its marks';
+    case 'stale_review':
+      return 'the review was of an older version';
+    case 'newer_publish_pending':
+      return 'a newer version was being published';
+    case 'expired':
+      return 'the upload was not finished in time';
+    default:
+      return 'no reason recorded';
+  }
 }
 
 /** POST /api/v1/artifacts/{id}/versions/{seq}/view. */
@@ -550,6 +599,11 @@ export interface ArtifactListResponse {
   artifacts: ArtifactListItem[];
   /** Opaque cursor of the next page; absent on the last page. */
   nextCursor?: string;
+  /**
+   * On a list narrowed to a project (scope=): the caller may publish
+   * artifacts there. Absent otherwise.
+   */
+  canCreate?: boolean;
 }
 
 /** Filters of the artifact list. */
@@ -617,8 +671,12 @@ export interface CreateLinkResponse {
   clampedToArtifactExpiry?: boolean;
 }
 
-/** Grant permissions, weakest first. */
-export type GrantPermission = 'read' | 'write' | 'admin';
+/**
+ * Grant permissions. Review (a user only) lets someone who can already read
+ * the artifact publish reviews of it, and nothing else; it gives no read
+ * access (ptone/scion#4538).
+ */
+export type GrantPermission = 'read' | 'review' | 'write' | 'admin';
 
 /** A grant to a user or agent ("principal") or a project ("scope"). */
 export interface ArtifactGrant {
@@ -647,27 +705,83 @@ export interface PatchArtifactResponse {
   grantsRemoved?: number;
 }
 
-/** The lifetimes a share link can be created with. */
-export const LINK_LIFETIMES: ReadonlyArray<{ label: string; hours: number }> = [
+/** A share link lifetime the Share dialog offers. */
+export interface LinkLifetime {
+  label: string;
+  hours: number;
+}
+
+/**
+ * The preset share link lifetimes. The Share dialog offers those up to the
+ * hub's maximum (see linkLifetimeChoices).
+ */
+export const LINK_LIFETIMES: ReadonlyArray<LinkLifetime> = [
   { label: '1 day', hours: 24 },
   { label: '7 days', hours: 7 * 24 },
   { label: '30 days', hours: 30 * 24 },
 ];
 
-/** The default share link lifetime, in hours. */
+/** The share link lifetime preselected when the hub does not say, in hours. */
 export const DEFAULT_LINK_HOURS = 7 * 24;
+
+/** A label for a link lifetime: whole days in days, otherwise hours. */
+export function linkLifetimeLabel(hours: number): string {
+  if (hours % 24 === 0) return hours === 24 ? '1 day' : `${hours / 24} days`;
+  return hours === 1 ? '1 hour' : `${hours} hours`;
+}
+
+/**
+ * The share link lifetimes to offer, shortest first, and the one to
+ * preselect, from the hub's default and maximum on GET /links
+ * (ptone/scion#4585): the presets up to the maximum, plus the default and
+ * the maximum when they are not presets. The hub refuses a longer lifetime,
+ * and applies its default when none is given. Without both values (an older
+ * hub) it is the presets with DEFAULT_LINK_HOURS.
+ */
+export function linkLifetimeChoices(
+  defaultHours?: number,
+  maxHours?: number
+): { options: LinkLifetime[]; selected: number } {
+  const valid = (h?: number): h is number => typeof h === 'number' && Number.isInteger(h) && h > 0;
+  if (!valid(defaultHours) || !valid(maxHours)) {
+    return { options: [...LINK_LIFETIMES], selected: DEFAULT_LINK_HOURS };
+  }
+  const selected = Math.min(defaultHours, maxHours);
+  const hours = new Set(LINK_LIFETIMES.map((l) => l.hours).filter((h) => h <= maxHours));
+  hours.add(selected);
+  hours.add(maxHours);
+  const sorted = [...hours].sort((a, b) => a - b);
+  return { options: sorted.map((h) => ({ label: linkLifetimeLabel(h), hours: h })), selected };
+}
 
 /** Labels of the grant permissions. */
 export const PERMISSION_LABELS: Record<GrantPermission, string> = {
   read: 'Can view',
+  review: 'Can review',
   write: 'Can edit',
   admin: 'Can manage',
 };
 
-/** Lists an artifact's unexpired share links. */
-export async function listLinks(id: string): Promise<ShareLink[]> {
-  const body = await okJSON<{ links: ShareLink[] }>(await apiFetch(`${artifactPath(id)}/links`));
-  return body.links ?? [];
+/**
+ * The permissions the Share dialog's permission menus offer, weakest first.
+ * Review is given through Grant review access, and a review grant is shown
+ * with its label only.
+ */
+export const SELECTABLE_PERMISSIONS: readonly GrantPermission[] = ['read', 'write', 'admin'];
+
+/** Body of GET /api/v1/artifacts/{id}/links. */
+export interface ShareLinkList {
+  links: ShareLink[];
+  /** Lifetime, in hours, of a link created without one; absent from older hubs. */
+  defaultTtlHours?: number;
+  /** Longest lifetime, in hours, the hub accepts; absent from older hubs. */
+  maxTtlHours?: number;
+}
+
+/** Lists an artifact's unexpired share links, with the hub's link lifetimes. */
+export async function listLinks(id: string): Promise<ShareLinkList> {
+  const body = await okJSON<ShareLinkList>(await apiFetch(`${artifactPath(id)}/links`));
+  return { ...body, links: body.links ?? [] };
 }
 
 /** Creates a share link that lasts ttlHours. */

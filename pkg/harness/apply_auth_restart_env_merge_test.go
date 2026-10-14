@@ -303,3 +303,35 @@ func TestApplyAuthSettings_RestartVertexSwitchThroughResolveAuth(t *testing.T) {
 		})
 	}
 }
+
+// Env-secret merging is per key: on a restart through the real ResolveAuth,
+// an ambient region (with a project) and the recorded API key must both
+// reach the container (ptone/scion#4557).
+func TestApplyAuthSettings_RestartAmbientRegionAndRecordedKeyBothSurvive(t *testing.T) {
+	f := newRestartFixture(t)
+	first, err := f.h.ResolveAuth(api.AuthConfig{EnvVars: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-first-0123456789"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.ApplyAuthSettings(f.agentHome, first); err != nil {
+		t.Fatal(err)
+	}
+	rec := map[string][]byte{"ANTHROPIC_API_KEY": []byte("sk-ant-first-0123456789")}
+
+	second, err := f.h.ResolveAuth(api.AuthConfig{GoogleCloudProject: "p", GoogleCloudRegion: "us-east5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := f.restartResolved(rec, second)
+	for _, k := range []string{"ANTHROPIC_API_KEY", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("%s missing after restart: %v", k, got)
+		}
+	}
+	if v := f.secretValue("ANTHROPIC_API_KEY"); v != "sk-ant-first-0123456789" {
+		t.Errorf("ANTHROPIC_API_KEY = %q, want the recorded value", v)
+	}
+	if v := f.secretValue("GOOGLE_CLOUD_LOCATION"); v != "us-east5" {
+		t.Errorf("GOOGLE_CLOUD_LOCATION = %q, want %q", v, "us-east5")
+	}
+}

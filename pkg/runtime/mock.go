@@ -37,6 +37,17 @@ type MockRuntime struct {
 	ExecFunc             func(ctx context.Context, id string, cmd []string) (string, error)
 	ExecWithStdinFunc    func(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error)
 	GetWorkspacePathFunc func(ctx context.Context, id string) (string, error)
+	// ResourceAbsentFunc answers ResourceAbsent; nil confirms nothing
+	// (every object reads as present).
+	ResourceAbsentFunc func(ctx context.Context, h api.ResourceHandle) (bool, error)
+}
+
+// ResourceAbsent implements ResourceAbsenceChecker for tests.
+func (m *MockRuntime) ResourceAbsent(ctx context.Context, h api.ResourceHandle) (bool, error) {
+	if m.ResourceAbsentFunc != nil {
+		return m.ResourceAbsentFunc(ctx, h)
+	}
+	return false, nil
 }
 
 func (m *MockRuntime) Name() string {

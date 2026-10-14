@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 package hub
 
@@ -90,7 +90,7 @@ func TestRevokedTokenDeniedBeforeExpiry(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestDeletedAgentTokenDenied verifies that tokens for deleted agents are denied.
@@ -124,7 +124,7 @@ func TestDeletedAgentTokenDenied(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestSuspendedAgentTokenDenied verifies that tokens for suspended agents are denied.
@@ -151,7 +151,7 @@ func TestSuspendedAgentTokenDenied(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Contains(t, rec.Body.String(), "revoked")
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // TestRefreshFromRevokedTokenFails verifies that refreshing a revoked token fails.

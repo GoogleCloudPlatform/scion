@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -74,6 +74,28 @@ func TestRequireWorkstation_Enabled(t *testing.T) {
 	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200 when workstation enabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The onboarding status must not report image presence it never checks
+// (ptone/scion#4640); the remaining fields keep their JSON names.
+func TestSystemStatus_NoUncheckedImagesPresent(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if _, ok := body["imagesPresent"]; ok {
+		t.Errorf("status reports imagesPresent, which is never checked: %s", rec.Body.String())
+	}
+	for _, key := range []string{"initialized", "identitySet", "runtimeOK", "harnessesSeeded", "hasWorkspace", "complete"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("status is missing %q: %s", key, rec.Body.String())
+		}
 	}
 }
 

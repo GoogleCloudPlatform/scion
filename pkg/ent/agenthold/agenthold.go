@@ -149,6 +149,7 @@ const (
 	TriggerSystemScopeChange     Trigger = "system_scope_change"
 	TriggerRestoreCheck          Trigger = "restore_check"
 	TriggerReconcile             Trigger = "reconcile"
+	TriggerTestIdentityExpiry    Trigger = "test_identity_expiry"
 )
 
 func (t Trigger) String() string {
@@ -158,7 +159,7 @@ func (t Trigger) String() string {
 // TriggerValidator is a validator for the "trigger" field enum values. It is called by the builders before save.
 func TriggerValidator(t Trigger) error {
 	switch t {
-	case TriggerMemberRemove, TriggerMemberRoleChange, TriggerMemberPrincipalDelete, TriggerAdminBindingDelete, TriggerOwnershipTransfer, TriggerGroupChange, TriggerBindingExpiry, TriggerSystemScopeChange, TriggerRestoreCheck, TriggerReconcile:
+	case TriggerMemberRemove, TriggerMemberRoleChange, TriggerMemberPrincipalDelete, TriggerAdminBindingDelete, TriggerOwnershipTransfer, TriggerGroupChange, TriggerBindingExpiry, TriggerSystemScopeChange, TriggerRestoreCheck, TriggerReconcile, TriggerTestIdentityExpiry:
 		return nil
 	default:
 		return fmt.Errorf("agenthold: invalid enum value for trigger field: %q", t)

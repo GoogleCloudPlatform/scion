@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
@@ -424,7 +425,7 @@ func (h *CommandHandler) handleAgents(msg *TGMessage) {
 		emoji := activityEmoji(agent.Activity)
 		label := agent.Slug
 		if agent.Activity != "" {
-			label += " — " + agent.Activity
+			label += " — " + state.Activity(agent.Activity).DisplayLabel()
 		}
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
@@ -1134,6 +1135,8 @@ func (c *httpHubClient) signRequest(req *http.Request) error {
 // activityEmoji returns an emoji for an agent activity state, matching the web UI.
 func activityEmoji(activity string) string {
 	switch strings.ToLower(activity) {
+	case "initializing":
+		return "🚀"
 	case "idle":
 		return "💤"
 	case "executing":

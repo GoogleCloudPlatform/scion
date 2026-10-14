@@ -67,11 +67,9 @@ allowed_paths=(
   "^pkg/config/project_discovery_test.go$"
   "^pkg/config/project_marker_test.go$"
   "^pkg/config/settings_v1_get_value_test.go$"
-  "^pkg/config/settings_v1_global_settings_test.go$"
   "^pkg/config/settings_v1_migrate_test.go$"
   "^pkg/config/settings_v1_test.go$"
   "^pkg/config/settings_v1_update_test.go$"
-  "^pkg/config/shared_dirs_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
   # Mixes concurrent legacy "grove" and canonical "project" clone requests

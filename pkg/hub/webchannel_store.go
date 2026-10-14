@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -159,8 +160,25 @@ type WebChatStore interface {
 	// Returns defaults (activity sort) if no row exists.
 	GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error)
 
-	// SetUserPrefs upserts the user's rail preferences.
+	// SetUserPrefs upserts the user's rail preferences. When the write
+	// changes thread_groups, it also clears thread_groups_migrated_at in the
+	// same statement, so the personal groups are migrated again
+	// (ptone/scion#4424, design section 5a). ThreadGroupsMigrated is ignored.
 	SetUserPrefs(ctx context.Context, userID string, prefs WebChatUserPrefs) error
+
+	// ListUserPrefsPendingThreadGroupMigration returns the rail preferences
+	// whose personal thread groups still need the automatic migration to
+	// project thread groups: thread_groups is non-empty and
+	// thread_groups_migrated_at is NULL. Ordered by user ID.
+	ListUserPrefsPendingThreadGroupMigration(ctx context.Context) ([]WebChatUserPrefs, error)
+
+	// MarkUserPrefsThreadGroupsMigrated sets thread_groups_migrated_at and
+	// writes newThreadOrder, but only if the row is still unmarked and its
+	// thread_groups and thread_order still equal the values the migration
+	// read (a compare-and-set). It reports whether the row was written; on
+	// false, a concurrent write (a user-prefs PUT or another hub's pass)
+	// won and the row is left for the next pass, if still unmarked.
+	MarkUserPrefsThreadGroupsMigrated(ctx context.Context, userID, threadGroups, oldThreadOrder, newThreadOrder string) (bool, error)
 
 	// --- Wave-2 DM methods ---
 
@@ -402,6 +420,11 @@ type WebChatUserPrefs struct {
 	ThreadSortMode string `json:"threadSortMode"`         // "activity", "alpha", "custom"
 	ThreadOrder    string `json:"threadOrder,omitempty"`  // JSON {"projectId": ["threadId1", ...]}
 	ThreadGroups   string `json:"threadGroups,omitempty"` // JSON {"projectId": [{"id":"..","name":"..","threadIds":[..]}]}
+	// ThreadGroupsMigrated reports whether thread_groups_migrated_at is set:
+	// the automatic migration has copied these personal groups into project
+	// thread groups (design section 5a). It is read-only and not part of the
+	// API.
+	ThreadGroupsMigrated bool `json:"-"`
 }
 
 // WebChatDM represents one side of a DM conversation.
@@ -569,7 +592,8 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     space_order     TEXT,
     thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
     thread_order    TEXT,
-    thread_groups   TEXT
+    thread_groups   TEXT,
+    thread_groups_migrated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -1428,14 +1452,15 @@ DO UPDATE SET muted = excluded.muted
 func (s *sqliteWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
 SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
-       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
+       COALESCE(thread_order, ''), COALESCE(thread_groups, ''),
+       thread_groups_migrated_at IS NOT NULL
   FROM webchat_user_prefs
  WHERE user_id = ?
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
 		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
-		&p.ThreadOrder, &p.ThreadGroups)
+		&p.ThreadOrder, &p.ThreadGroups, &p.ThreadGroupsMigrated)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -1460,7 +1485,12 @@ DO UPDATE SET
     space_order = excluded.space_order,
     thread_sort_mode = excluded.thread_sort_mode,
     thread_order = excluded.thread_order,
-    thread_groups = excluded.thread_groups
+    thread_groups = excluded.thread_groups,
+    thread_groups_migrated_at = CASE
+        WHEN webchat_user_prefs.thread_groups IS excluded.thread_groups
+        THEN webchat_user_prefs.thread_groups_migrated_at
+        ELSE NULL
+    END
 `
 	_, err := s.db.ExecContext(ctx, query, userID, prefs.SpaceSortMode,
 		nullableString(prefs.SpaceOrder), prefs.ThreadSortMode,
@@ -1469,6 +1499,60 @@ DO UPDATE SET
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
 	return nil
+}
+
+// ListUserPrefsPendingThreadGroupMigration returns the rows whose personal
+// thread groups are not migrated yet.
+func (s *sqliteWebChatStore) ListUserPrefsPendingThreadGroupMigration(ctx context.Context) ([]WebChatUserPrefs, error) {
+	const query = `
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), thread_groups
+  FROM webchat_user_prefs
+ WHERE thread_groups IS NOT NULL AND thread_groups <> ''
+   AND thread_groups_migrated_at IS NULL
+ ORDER BY user_id
+`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []WebChatUserPrefs
+	for rows.Next() {
+		var p WebChatUserPrefs
+		if err := rows.Scan(&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+			&p.ThreadOrder, &p.ThreadGroups); err != nil {
+			return nil, fmt.Errorf("webchat store: scan user prefs: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("webchat store: list user prefs pending thread group migration: %w", err)
+	}
+	return out, nil
+}
+
+// MarkUserPrefsThreadGroupsMigrated marks a row migrated and writes its new
+// thread order if the row is unchanged since it was read.
+func (s *sqliteWebChatStore) MarkUserPrefsThreadGroupsMigrated(ctx context.Context, userID, threadGroups, oldThreadOrder, newThreadOrder string) (bool, error) {
+	const query = `
+UPDATE webchat_user_prefs
+   SET thread_order = ?, thread_groups_migrated_at = ?
+ WHERE user_id = ?
+   AND thread_groups_migrated_at IS NULL
+   AND COALESCE(thread_groups, '') = ?
+   AND COALESCE(thread_order, '') = ?
+`
+	res, err := s.db.ExecContext(ctx, query, nullableString(newThreadOrder),
+		time.Now().UTC().Format(time.RFC3339Nano), userID, threadGroups, oldThreadOrder)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("webchat store: mark thread groups migrated: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1569,8 +1653,11 @@ func (s *sqliteWebChatStore) SearchChatMessages(ctx context.Context, filter Chat
 	}
 
 	// Check if the messages table exists.
-	var tableExists int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists); err != nil || tableExists == 0 {
+	tableExists, err := s.tableExists(ctx, "messages")
+	if err != nil {
+		return nil, "", err
+	}
+	if !tableExists {
 		return nil, "", nil
 	}
 
@@ -1762,6 +1849,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
+	if err := s.addUserPrefsThreadGroupsMigratedAt(); err != nil {
+		return fmt.Errorf("user prefs thread_groups_migrated_at column: %w", err)
+	}
 	return nil
 }
 
@@ -1785,6 +1875,28 @@ func (s *sqliteWebChatStore) addUserPrefsThreadColumns() error {
 	}
 	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups TEXT")
 	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return s.markMigrationCompleted(migrationName)
+}
+
+// addUserPrefsThreadGroupsMigratedAt adds the thread_groups_migrated_at
+// column (ptone/scion#4424, design section 5a) to webchat_user_prefs for
+// existing databases that lack it.
+func (s *sqliteWebChatStore) addUserPrefsThreadGroupsMigratedAt() error {
+	migrationName := "add_user_prefs_thread_groups_migrated_at"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	_, err = s.db.Exec("ALTER TABLE webchat_user_prefs ADD COLUMN thread_groups_migrated_at TEXT")
+	if err != nil {
+		// The column exists if the table was created fresh with the new DDL.
 		if !strings.Contains(err.Error(), "duplicate column") {
 			return err
 		}
@@ -1968,12 +2080,16 @@ func (s *sqliteWebChatStore) migrateThreadIDs(batchSize int) error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		// No messages table — nothing to backfill; mark as complete.
-		return s.markMigrationCompleted("thread_id_backfill")
+	// messages is Ent-managed and may not exist yet. With no table there is
+	// nothing to backfill, so leave the migration unrecorded: the next Init
+	// runs it once the table exists.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id backfill deferred: messages table does not exist yet")
+		return nil
 	}
 
 	for {
@@ -2683,6 +2799,19 @@ func (s *sqliteWebChatStore) CountMessages(ctx context.Context, threadID string)
 	return count, nil
 }
 
+// tableExists reports whether the named table exists. A failed check is
+// returned as an error, not reported as "absent", so callers that record
+// work as done when the table is absent do not do so on a query failure.
+func (s *sqliteWebChatStore) tableExists(ctx context.Context, table string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?", table).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("webchat store: check table %s exists: %w", table, err)
+	}
+	return count > 0, nil
+}
+
 // addThreadIDIndex creates an index on messages.thread_id for query performance.
 func (s *sqliteWebChatStore) addThreadIDIndex() error {
 	done, err := s.migrationCompleted("thread_id_index")
@@ -2693,11 +2822,15 @@ func (s *sqliteWebChatStore) addThreadIDIndex() error {
 		return nil
 	}
 
-	// Check if the messages table exists (it's Ent-managed and may not exist in tests).
-	var tableExists int
-	err = s.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='messages'").Scan(&tableExists)
-	if err != nil || tableExists == 0 {
-		return s.markMigrationCompleted("thread_id_index")
+	// As in migrateThreadIDs: with no messages table there is nothing to
+	// index, so leave the migration unrecorded for the next Init.
+	tableExists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		slog.Debug("Webchat thread_id index deferred: messages table does not exist yet")
+		return nil
 	}
 
 	_, err = s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages (thread_id)`)

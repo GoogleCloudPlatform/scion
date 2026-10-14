@@ -30,9 +30,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -50,7 +53,23 @@ import (
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
 // If profileName is empty, ActiveProfile is used. If the config name is not found in the
 // settings map, an empty HarnessConfigEntry is used as the base (profile overrides still apply).
+//
+// On a flat instance view (ForFlatInstance) the instance's agent_defaults
+// take the profile's place: its volumes and its harness_overrides.<hc> are
+// applied over the same harness_configs.<hc> base, and profileName is not
+// used.
 func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName string) (HarnessConfigEntry, error) {
+	if vs != nil && vs.flat != nil {
+		result := vs.HarnessConfigs[harnessConfigName]
+		d := vs.flat.Defaults
+		if d.Volumes != nil {
+			result.Volumes = append(result.Volumes, d.Volumes...)
+		}
+		if override, ok := d.HarnessOverrides[harnessConfigName]; ok {
+			result = applyHarnessOverride(result, override)
+		}
+		return result, nil
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
@@ -95,53 +114,76 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 	// Apply harness overrides from the profile
 	if profile.HarnessOverrides != nil {
 		if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
-			if override.Image != "" {
-				result.Image = override.Image
-			}
-			if override.ImagePullPolicy != "" {
-				result.ImagePullPolicy = override.ImagePullPolicy
-			}
-			if override.User != "" {
-				result.User = override.User
-			}
-			if override.AuthSelectedType != "" {
-				result.AuthSelectedType = override.AuthSelectedType
-			}
-			// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
-			// removed profiles.<name>.env above but deliberately stopped here.
-			//
-			// This is now the only profiles-scoped env injection point left, and it
-			// is the TOP-RANKED env source in this function — merged after the base,
-			// so it outranks harness_configs.<hc>.env. Removing it too was ruled
-			// against on reversibility: retiring this rank later is additive, while
-			// restoring it after shipping would be a revert of a documented breaking
-			// change.
-			//
-			// It is NOT the migration path for the removed profiles.<name>.env.
-			// That is harness_configs.<hc>.env, a different, top-level key, which
-			// survives independently of this one.
-			if override.Env != nil {
-				result.Env = mergeMaps(result.Env, override.Env)
-			}
-			if override.Volumes != nil {
-				result.Volumes = append(result.Volumes, override.Volumes...)
-			}
+			result = applyHarnessOverride(result, override)
 		}
 	}
 
 	return result, nil
 }
 
+// applyHarnessOverride returns result with one harness override applied:
+// a profile's harness_overrides.<hc>, or on a flat instance its
+// agent_defaults.harness_overrides.<hc>. override is only read.
+func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride) HarnessConfigEntry {
+	if override.Image != "" {
+		result.Image = override.Image
+	}
+	if override.ImagePullPolicy != "" {
+		result.ImagePullPolicy = override.ImagePullPolicy
+	}
+	if override.User != "" {
+		result.User = override.User
+	}
+	if override.AuthSelectedType != "" {
+		result.AuthSelectedType = override.AuthSelectedType
+	}
+	// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
+	// removed profiles.<name>.env (see ResolveHarnessConfig) but deliberately
+	// stopped here.
+	//
+	// This is now the only profiles-scoped env injection point left, and it
+	// is the TOP-RANKED env source in ResolveHarnessConfig — merged after the
+	// base, so it outranks harness_configs.<hc>.env. Removing it too was ruled
+	// against on reversibility: retiring this rank later is additive, while
+	// restoring it after shipping would be a revert of a documented breaking
+	// change. A flat instance's agent_defaults.harness_overrides.<hc>.env
+	// takes the same rank.
+	//
+	// It is NOT the migration path for the removed profiles.<name>.env.
+	// That is harness_configs.<hc>.env, a different, top-level key, which
+	// survives independently of this one.
+	if override.Env != nil {
+		result.Env = mergeMaps(result.Env, override.Env)
+	}
+	if override.Volumes != nil {
+		result.Volumes = append(result.Volumes, override.Volumes...)
+	}
+	return result
+}
+
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -182,10 +224,22 @@ func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (stora
 // returns the settings key the size came from
 // ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
 // an error about the value can name where it is set. sizeKey is empty when
-// size is empty.
+// size is empty. On a flat instance view (ForFlatInstance) the values come
+// from the instance's runtime_target instead, and sizeKey is
+// "server.broker.instances[KEY].runtime_target.shared_dir_size".
 func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
 	if vs == nil {
 		return "", "", ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; no profile is consulted. There is no
+		// lower settings rung, so unset means the runtime default.
+		t := vs.flat.Target
+		if t.SharedDirSize != "" {
+			sizeKey = vs.flat.path("runtime_target.shared_dir_size")
+		}
+		return t.SharedDirStorageClass, t.SharedDirSize, sizeKey
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -282,6 +336,10 @@ const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
 //
 // A dispatch-time NFS mount check should choose the backend through this
 // method too, so it agrees with the start path.
+//
+// On a flat instance view (ForFlatInstance) the instance's
+// runtime_target.shared_dir_storage_backend takes the place of the profile
+// and runtime entry, and no profile is consulted.
 func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
 	if vs == nil {
 		return nil, ""
@@ -290,9 +348,18 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	if vs.Server != nil {
 		global = vs.Server.SharedDirStorage
 	}
-	backend, source := vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
-		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
-		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	var backend string
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; unset falls through to the global block.
+		if b := vs.flat.Target.SharedDirStorageBackend; b != "" {
+			backend, source = b, vs.flat.path("runtime_target.shared_dir_storage_backend")
+		}
+	} else {
+		backend, source = vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
+			func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+			func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	}
 	if backend == "" {
 		if global == nil {
 			return nil, ""
@@ -322,10 +389,24 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 //
 // For a dir no per-dir entry names, the result matches the backend of
 // ResolveSharedDirStorage. Call this only on global settings, as for
-// ResolveSharedDirStorage.
+// ResolveSharedDirStorage. On a flat instance view the order is the
+// instance's runtime_target.shared_dir_storage_backends entry, its
+// shared_dir_storage_backend, then server.shared_dir_storage.backend.
 func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
 	if vs == nil {
 		return "", "", false
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's per-dir entry, else its single
+		// value, else the global backend. No profile is consulted.
+		t := vs.flat.Target
+		if v := t.SharedDirStorageBackends[dirName]; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backends." + dirName), true
+		}
+		if v := t.SharedDirStorageBackend; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backend"), false
+		}
+		return vs.globalSharedDirStorageBackend()
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -346,6 +427,12 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 			}
 		}
 	}
+	return vs.globalSharedDirStorageBackend()
+}
+
+// globalSharedDirStorageBackend is the server.shared_dir_storage.backend
+// rung of ResolveSharedDirStorageBackend.
+func (vs *VersionedSettings) globalSharedDirStorageBackend() (backend, source string, perDir bool) {
 	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
 		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
 	}
@@ -353,7 +440,8 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 }
 
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
-// runtime or profile override selects nfs, and returns the nfs-backed
+// runtime, profile or flat Runtime Broker instance override selects nfs
+// (server.broker.instances[].runtime_target), and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
 // when no setting selects nfs. Like ResolveSharedDirStorage, call it only
 // on global settings.
@@ -377,6 +465,13 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	for _, p := range vs.Profiles {
 		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
+		}
+	}
+	if vs.Server != nil && vs.Server.Broker != nil {
+		for _, inst := range vs.Server.Broker.Instances {
+			if t := inst.RuntimeTarget; t != nil && (t.SharedDirStorageBackend == "nfs" || mapSelectsNFS(t.SharedDirStorageBackends)) {
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -947,9 +1042,20 @@ func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
 // ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
 // settings key the value came from ("profiles.NAME.safe_to_evict" or
 // "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
-// The returned pointer is a fresh copy, never one held by vs.
+// The returned pointer is a fresh copy, never one held by vs. On a flat
+// instance view the value is the instance's runtime_target.safe_to_evict,
+// with source "server.broker.instances[KEY].runtime_target.safe_to_evict".
 func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
 	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung, false and true as written. There is no
+		// lower settings rung, so nil stays nil.
+		if v := vs.flat.Target.SafeToEvict; v != nil {
+			return copyBoolPtr(v), vs.flat.path("runtime_target.safe_to_evict")
+		}
 		return nil, ""
 	}
 	if profileName == "" {
@@ -978,8 +1084,19 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 // This is a default only: a template's or agent's clone_depth wins over
 // it. The value is returned as written; callers validate it with
 // api.CloneDepth.GitDepth so the error can name its source.
+//
+// On a flat instance view (ForFlatInstance) the value is the instance's
+// agent_defaults.clone_depth, with source
+// "server.broker.instances[KEY].agent_defaults.clone_depth". There is no
+// lower settings rung, so unset means the default shallow clone.
 func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
 	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if d := vs.flat.Defaults.CloneDepth; d != "" {
+			return d, vs.flat.path("agent_defaults.clone_depth")
+		}
 		return "", ""
 	}
 	if profileName == "" {
@@ -1077,11 +1194,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-func (vs *VersionedSettings) IsHubLocalOnly() bool {
-	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
-}
-
 // IsImageRegistryConfigured returns true if image_registry is set at any level
 // (top-level or in any profile).
 func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
@@ -1090,7 +1202,16 @@ func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool 
 
 // ResolveImageRegistry returns the effective image_registry for the given profile.
 // Profile-level image_registry takes precedence over the top-level setting.
+// On a flat instance view (ForFlatInstance) the instance's
+// agent_defaults.image_registry takes the profile's place, over the same
+// top-level setting.
 func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
+	if vs != nil && vs.flat != nil {
+		if r := vs.flat.Defaults.ImageRegistry; r != "" {
+			return r
+		}
+		return vs.ImageRegistry
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
@@ -1098,6 +1219,177 @@ func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
 		return profile.ImageRegistry
 	}
 	return vs.ImageRegistry
+}
+
+// The Tier* accessors read the Runtime Broker Profile tier for the callers
+// that used to index Profiles directly. In legacy resolution each runs the
+// former call site's profile lookup, including its guard (an empty name,
+// after the active profile fallback, finds nothing). On a flat instance
+// view (ForFlatInstance) each reads the instance's agent_defaults instead,
+// whatever the name, so a flat request (whose profile name is always
+// empty) gets the instance's value at the profile's rung
+// (.design/flat-runtime-brokers/contract-appendix-p3.md FC5). The returned
+// values may share memory with the settings or the policy and must not be
+// modified. source names where the values are set ("" when none are).
+
+// TierResources returns the tier's resources and its
+// harness_overrides.<harnessConfigName>.resources (either may be nil), and
+// the settings path of the block holding them. An empty profileName means
+// the active profile. The legacy lookup has no empty-name guard, as the
+// former resolveEnvironmentResources lookup had none.
+func (vs *VersionedSettings) TierResources(profileName, harnessConfigName string) (resources, harnessOverrideResources *api.ResourceSpec, source string) {
+	if vs == nil {
+		return nil, nil, ""
+	}
+	if vs.flat != nil {
+		d := vs.flat.Defaults
+		resources, harnessOverrideResources = d.Resources, d.HarnessOverrides[harnessConfigName].Resources
+		if resources == nil && harnessOverrideResources == nil {
+			return nil, nil, ""
+		}
+		return resources, harnessOverrideResources, vs.flat.path("agent_defaults")
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, nil, ""
+	}
+	return p.Resources, p.HarnessOverrides[harnessConfigName].Resources, "profiles." + profileName
+}
+
+// TierSecrets returns the tier's secret declarations (required-env step
+// 3c, between the settings harness_configs secrets and the template's) and
+// their settings path. An empty profileName means the active profile.
+func (vs *VersionedSettings) TierSecrets(profileName string) ([]api.RequiredSecret, string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		if s := vs.flat.Defaults.Secrets; len(s) > 0 {
+			return s, vs.flat.path("agent_defaults.secrets")
+		}
+		return nil, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok || len(p.Secrets) == 0 {
+		return nil, ""
+	}
+	return p.Secrets, "profiles." + profileName + ".secrets"
+}
+
+// TierHarnessOverride returns the tier's harness_overrides.<harnessConfigName>,
+// whether it is set, and its settings path. An empty profileName means the
+// active profile.
+func (vs *VersionedSettings) TierHarnessOverride(profileName, harnessConfigName string) (V1HarnessOverride, bool, string) {
+	if vs == nil {
+		return V1HarnessOverride{}, false, ""
+	}
+	if vs.flat != nil {
+		o, ok := vs.flat.Defaults.HarnessOverrides[harnessConfigName]
+		if !ok {
+			return V1HarnessOverride{}, false, ""
+		}
+		return o, true, vs.flat.path("agent_defaults.harness_overrides." + harnessConfigName)
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return V1HarnessOverride{}, false, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	o, ok := p.HarnessOverrides[harnessConfigName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	return o, true, "profiles." + profileName + ".harness_overrides." + harnessConfigName
+}
+
+// TierAllHarnessOverrideEnvKeys returns the env keys that any of the tier's
+// harness overrides (not only the active harness config's) sets to an
+// empty value, which required-env extraction asks the user to supply, and
+// the settings path of those overrides. An empty profileName means the
+// active profile. The returned set is never shared.
+func (vs *VersionedSettings) TierAllHarnessOverrideEnvKeys(profileName string) (map[string]struct{}, string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		keys := emptyHarnessOverrideEnvKeys(vs.flat.Defaults.HarnessOverrides)
+		if len(keys) == 0 {
+			return nil, ""
+		}
+		return keys, vs.flat.path("agent_defaults.harness_overrides")
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	keys := emptyHarnessOverrideEnvKeys(p.HarnessOverrides)
+	if len(keys) == 0 {
+		return nil, ""
+	}
+	return keys, "profiles." + profileName + ".harness_overrides"
+}
+
+// emptyHarnessOverrideEnvKeys returns the env keys any of overrides sets to
+// an empty value.
+func emptyHarnessOverrideEnvKeys(overrides map[string]V1HarnessOverride) map[string]struct{} {
+	keys := map[string]struct{}{}
+	for _, override := range overrides {
+		for k, v := range override.Env {
+			if v == "" {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+// TierDefaultHarnessConfig returns the tier's default_harness_config (rung
+// 6 of ResolveHarnessConfigName, above the top-level
+// default_harness_config) and a label naming where it is set: in legacy
+// resolution "profile-NAME", the label rung 6 has always logged; on a flat
+// instance "server.broker.instances[KEY].agent_defaults.default_harness_config".
+// An empty profileName means the active profile. Unset returns "", so the
+// top-level default still applies.
+func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (string, string) {
+	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if hc := vs.flat.Defaults.DefaultHarnessConfig; hc != "" {
+			return hc, vs.flat.path("agent_defaults.default_harness_config")
+		}
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return "", ""
+	}
+	if p, ok := vs.Profiles[profileName]; ok && p.DefaultHarnessConfig != "" {
+		return p.DefaultHarnessConfig, "profile-" + profileName
+	}
+	return "", ""
 }
 
 // RequireImageRegistry checks that image_registry is configured and returns an
@@ -1182,6 +1474,21 @@ type VersionedSettings struct {
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
+
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
 	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty" yaml:"default_max_model_calls,omitempty" koanf:"default_max_model_calls"`
@@ -1246,6 +1553,12 @@ type VersionedSettings struct {
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	// HubConnections holds named Hub connections for a Runtime Broker.
 	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
+
+	// flat is the flat Runtime Broker instance policy of a view returned by
+	// ForFlatInstance; nil on loaded settings. The resolvers' flat branches
+	// read it in place of the profile and runtime-entry tier. It is never
+	// serialized.
+	flat *FlatInstancePolicy
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1509,6 +1822,19 @@ type V1PluginEntry struct {
 	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
+// V1TestIdentitiesConfig is server.hub.test_identities in the versioned
+// settings layout.
+type V1TestIdentitiesConfig struct {
+	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+}
+
+// V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
+// entry.
+type V1TestIdentityWorkloadIssuer struct {
+	Sub     string `json:"sub" yaml:"sub" koanf:"sub"`
+	MaxTier string `json:"max_tier" yaml:"max_tier" koanf:"max_tier"`
+}
+
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
 	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
@@ -1519,6 +1845,10 @@ type V1ServerHubConfig struct {
 	// HubClass is server.hub.class (see HubServerConfig.HubClass). It is
 	// file/env only: the server-config API refuses it in every mode.
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
+	// TestIdentities is server.hub.test_identities (see
+	// HubServerConfig.TestIdentities). It is file/env only: the
+	// server-config API refuses it in every mode.
+	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -1568,8 +1898,6 @@ type V1ServerHubConfig struct {
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
-	// AsyncAgentLaunch is the non-blocking agent create kill switch.
-	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
@@ -1588,6 +1916,20 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+}
+
+// V1ServerHubObservabilityConfig holds the switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset: the hub then keeps the rule that applied before the switch existed
+// (see HubObservabilityConfig).
+type V1ServerHubObservabilityConfig struct {
+	// MetricsEnabled turns the hub metrics exporter on or off.
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
+	// TracingEnabled turns the hub trace exporter on or off.
+	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1709,15 +2051,86 @@ type V1RuntimeBrokerInstanceConfig struct {
 	Name string `json:"name" yaml:"name" koanf:"name"`
 	// RuntimeTarget declares the instance's single runtime target.
 	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+	// AgentDefaults are the workload defaults of the agents this instance
+	// runs. Local operator policy, read from the global settings file only.
+	AgentDefaults *V1InstanceAgentDefaults `json:"agent_defaults,omitempty" yaml:"agent_defaults,omitempty" koanf:"agent_defaults"`
+}
+
+// V1InstanceAgentDefaults are a flat Runtime Broker instance's workload
+// defaults (.design/flat-runtime-brokers/contract-appendix-p3.md FC1, FC5).
+// Field names and types are exactly those of the V1ProfileConfig fields
+// they replace, so a profile's workload block converts by copy. Each value
+// takes the rung the profile's value took in that field's own precedence
+// chain: a template, the agent's own config or a request still wins
+// wherever it won over the profile, and an unset value falls through to the
+// same lower settings rungs.
+type V1InstanceAgentDefaults struct {
+	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
+	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
-// Context and Namespace are Kubernetes-only (defined, not implemented).
+// Context, Namespace and Kubeconfig are Kubernetes-only. Kubeconfig is an
+// optional absolute path to this instance's own kubeconfig file; it stays
+// local (never sent to the Hub, never identity).
 type V1RuntimeTargetConfig struct {
 	Type        string `json:"type" yaml:"type" koanf:"type"`
 	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
+	// KubernetesBlockServiceAccount and KubernetesServiceAccountMappings are
+	// this Kubernetes instance's own GCP identity policy (the "block"
+	// ServiceAccount and the "assign" GSA-to-KSA mapping), the flat
+	// counterparts of the runtime entry settings of the same name. They are
+	// local operator policy: never part of the Hub's runtime target
+	// descriptor or the persisted target identity. Kubernetes only.
+	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// SharedDirStorageClass and SharedDirSize are this Kubernetes
+	// instance's defaults for the ReadWriteMany PVCs backing project shared
+	// dirs: the flat counterparts of the runtime entry and profile settings
+	// of the same name, at the same rung (the agent's own kubernetes
+	// block wins over them). Local operator policy: never part
+	// of the persisted target identity. Kubernetes only.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// GKE forces GKE mode on this Kubernetes instance's runtime; false
+	// means auto-detect, as for the runtime entry's gke. PriorityClassName
+	// is the instance's default pod spec.priorityClassName, below the
+	// agent's own (inline or persisted) kubernetes.priorityClassName.
+	// Kubernetes only.
+	GKE               bool   `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SafeToEvict is the instance's safe_to_evict default: nil is unset,
+	// and an explicit false or true is kept as written. The agent's own
+	// kubernetes.safeToEvict wins over it. Kubernetes only.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend and SharedDirStorageBackends ("local" or
+	// "nfs", the second per shared dir name) choose the shared-dir storage
+	// backend of the instance's new agents, between the agent's recorded
+	// backend and server.shared_dir_storage.backend. Docker and Kubernetes.
+	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
+	// HomeStorageBackend ("local" or "nfs") and HomeStorageLeaf ("pod" or
+	// "broker") choose the home storage of the instance's new agents, above
+	// server.home_storage. Kubernetes only.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf    string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+}
+
+// KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
+// target, which a flat instance's runtime is built from: its context,
+// namespace, GKE mode and default priority class. ListAllNamespaces stays
+// false, because an instance is one cluster and namespace.
+func (t *V1RuntimeTargetConfig) KubernetesRuntimeConfig() V1RuntimeConfig {
+	return V1RuntimeConfig{Type: RuntimeTargetTypeKubernetes, Context: t.Context, Namespace: t.Namespace,
+		GKE: t.GKE, PriorityClassName: t.PriorityClassName}
 }
 
 // V1DatabaseConfig holds database settings.
@@ -1728,8 +2141,9 @@ type V1DatabaseConfig struct {
 	MaxIdleConns    int    `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty" koanf:"max_idle_conns"`
 	ConnMaxLifetime string `json:"conn_max_lifetime,omitempty" yaml:"conn_max_lifetime,omitempty" koanf:"conn_max_lifetime"`
 	ConnMaxIdleTime string `json:"conn_max_idle_time,omitempty" yaml:"conn_max_idle_time,omitempty" koanf:"conn_max_idle_time"`
-	// AllowShadowedSchema lets the hub start on PostgreSQL when its startup
-	// migration would create a new table set that hides existing hub tables
+	// AllowShadowedSchema lets the hub start (and the maintenance commands
+	// that migrate its database run) on PostgreSQL when the migration would
+	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
 }
@@ -2356,6 +2770,10 @@ type V1TelemetryTLSConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty" koanf:"insecure_skip_verify"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// CertFile and KeyFile are paths, inside the agent container, to a
+	// PEM-encoded client certificate and key for OTLP mTLS. Set both or neither.
+	CertFile string `json:"cert_file,omitempty" yaml:"cert_file,omitempty" koanf:"cert_file"`
+	KeyFile  string `json:"key_file,omitempty" yaml:"key_file,omitempty" koanf:"key_file"`
 }
 
 // V1TelemetryBatchConfig holds batch export settings.
@@ -2673,6 +3091,8 @@ type HarnessConfigEntry struct {
 	InterruptKey      string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
 	InterruptSequence []string                         `json:"interrupt_sequence,omitempty" yaml:"interrupt_sequence,omitempty" koanf:"interrupt_sequence"`
 	InterruptSignal   string                           `json:"interrupt_signal,omitempty" yaml:"interrupt_signal,omitempty" koanf:"interrupt_signal"`
+	Ready             *HarnessReadyConfig              `json:"ready,omitempty" yaml:"ready,omitempty" koanf:"ready"`
+	Delivery          *HarnessDeliveryConfig           `json:"delivery,omitempty" yaml:"delivery,omitempty" koanf:"delivery"`
 	InstructionsFile  string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
 	SystemPromptFile  string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
 	SystemPromptMode  string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
@@ -2728,6 +3148,302 @@ func (t *HarnessThinkingConfig) Validate() error {
 		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
 	}
 	return nil
+}
+
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
+const (
+	// ReadyStrategyHook means the harness is ready once the ready marker for
+	// the current run is written (by a session-start hook) plus the settle.
+	ReadyStrategyHook = state.ReadyStrategyHook
+	// ReadyStrategyDelay means the harness is ready once its tmux session has
+	// existed for the settle period.
+	ReadyStrategyDelay = state.ReadyStrategyDelay
+)
+
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
+const (
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
+	defaultDeliverySubmitKey  = "Enter"
+	defaultDeliveryExtras     = 2
+	defaultDeliveryExtraDelay = 300 * time.Millisecond
+	maxDeliverySubmitKeys     = 4
+	maxDeliverySubmitKeyBytes = 32
+	maxDeliveryExtraSubmits   = 5
+	maxDeliveryExtraDelay     = 5 * time.Second
+)
+
+// ReadySpec and DeliverySpec are the resolved, defaults-applied forms of the
+// ready and delivery blocks. They are defined in pkg/api so api.Harness can
+// return them without an import cycle.
+type ReadySpec = api.ReadySpec
+
+type DeliverySpec = api.DeliverySpec
+
+// HarnessReadyConfig declares how a harness's readiness for a pasted message
+// is decided. The rule is: ready = signal time + settle. Durations are Go
+// duration strings. All fields are optional; see ResolvedReady for defaults.
+type HarnessReadyConfig struct {
+	// Strategy is "hook" or "delay" (the default).
+	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty" koanf:"strategy"`
+	// Settle is the wait after the signal, 0 to 60s. Defaults to 8s for
+	// delay and 1.5s for hook.
+	Settle string `json:"settle,omitempty" yaml:"settle,omitempty" koanf:"settle"`
+	// Timeout is the deadline from launch for the hook strategy, 10s to
+	// 10m, default 90s. It is rejected for the delay strategy.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+}
+
+// HarnessDeliveryConfig declares how a message is submitted after it is
+// pasted into the harness's terminal. All fields are optional; see
+// ResolvedDelivery for defaults.
+type HarnessDeliveryConfig struct {
+	// SubmitKeys are tmux key names sent after the paste, one send-keys call
+	// each. 1 to 4 entries; default [Enter].
+	SubmitKeys []string `json:"submit_keys,omitempty" yaml:"submit_keys,omitempty" koanf:"submit_keys"`
+	// ExtraSubmits is how many more times SubmitKeys is sent after the first
+	// submit, 0 to 5, default 2. A pointer so an explicit 0 differs from
+	// unset.
+	ExtraSubmits *int `json:"extra_submits,omitempty" yaml:"extra_submits,omitempty" koanf:"extra_submits"`
+	// ExtraSubmitDelay is the wait before each extra submit, 0 to 5s,
+	// default 300ms.
+	ExtraSubmitDelay string `json:"extra_submit_delay,omitempty" yaml:"extra_submit_delay,omitempty" koanf:"extra_submit_delay"`
+}
+
+// DefaultReadySpec returns the ready spec used for strategy when no value is
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
+func DefaultReadySpec(strategy string) ReadySpec {
+	return state.DefaultReadySpec(strategy)
+}
+
+// DefaultDeliverySpec returns the delivery spec used when no value is
+// configured. Each call returns a fresh SubmitKeys slice.
+func DefaultDeliverySpec() DeliverySpec {
+	return DeliverySpec{
+		SubmitKeys:       []string{defaultDeliverySubmitKey},
+		ExtraSubmits:     defaultDeliveryExtras,
+		ExtraSubmitDelay: defaultDeliveryExtraDelay,
+	}
+}
+
+// parseBoundedDuration parses a Go duration string and checks it lies in
+// [lo, hi].
+func parseBoundedDuration(field, value string, lo, hi time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", field, value, err)
+	}
+	if d < lo || d > hi {
+		return 0, fmt.Errorf("%s must be between %s and %s, got %s", field, lo, hi, value)
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) strategy() (string, error) {
+	switch r.Strategy {
+	case "":
+		return ReadyStrategyDelay, nil
+	case ReadyStrategyHook, ReadyStrategyDelay:
+		return r.Strategy, nil
+	}
+	return ReadyStrategyDelay, fmt.Errorf("ready.strategy must be %q or %q, got %q", ReadyStrategyHook, ReadyStrategyDelay, r.Strategy)
+}
+
+func (r *HarnessReadyConfig) settle(strategy string) (time.Duration, error) {
+	if r.Settle == "" {
+		return DefaultReadySpec(strategy).Settle, nil
+	}
+	d, err := parseBoundedDuration("ready.settle", r.Settle, 0, maxReadySettle)
+	if err != nil {
+		return DefaultReadySpec(strategy).Settle, err
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) timeout(strategy string) (time.Duration, error) {
+	def := DefaultReadySpec(strategy).Timeout
+	if r.Timeout == "" {
+		return def, nil
+	}
+	if strategy == ReadyStrategyDelay {
+		return def, fmt.Errorf("ready.timeout is not allowed with strategy %q", ReadyStrategyDelay)
+	}
+	d, err := parseBoundedDuration("ready.timeout", r.Timeout, minReadyTimeout, maxReadyTimeout)
+	if err != nil {
+		return def, err
+	}
+	return d, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: duration ranges
+// and that timeout is not set for the delay strategy. A nil block is valid.
+func (r *HarnessReadyConfig) Validate() error {
+	if r == nil {
+		return nil
+	}
+	strategy, err := r.strategy()
+	if err != nil {
+		return err
+	}
+	if _, err := r.settle(strategy); err != nil {
+		return err
+	}
+	if _, err := r.timeout(strategy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) submitKeys() ([]string, error) {
+	if len(d.SubmitKeys) == 0 {
+		return DefaultDeliverySpec().SubmitKeys, nil
+	}
+	if len(d.SubmitKeys) > maxDeliverySubmitKeys {
+		return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys must have 1 to %d entries, got %d", maxDeliverySubmitKeys, len(d.SubmitKeys))
+	}
+	for i, key := range d.SubmitKeys {
+		if err := validateSubmitKey(key); err != nil {
+			return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys[%d]: %w", i, err)
+		}
+	}
+	return slices.Clone(d.SubmitKeys), nil
+}
+
+// validateSubmitKey checks one tmux key name: 1 to 32 bytes with no
+// whitespace or control characters, no leading "-" and no trailing ";", so it
+// is passed to send-keys as exactly one key. tmux would parse a leading "-"
+// as a send-keys option, and it strips a trailing ";" from an argument and
+// treats it as a command separator, so the key would be cut short or lost.
+func validateSubmitKey(key string) error {
+	if key == "" || len(key) > maxDeliverySubmitKeyBytes {
+		return fmt.Errorf("key must be 1 to %d bytes, got %d", maxDeliverySubmitKeyBytes, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		return fmt.Errorf("key %q must not start with \"-\"", key)
+	}
+	if strings.HasSuffix(key, ";") {
+		return fmt.Errorf("key %q must not end with \";\"", key)
+	}
+	for _, r := range key {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("key %q must not contain whitespace or control characters", key)
+		}
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmits() (int, error) {
+	if d.ExtraSubmits == nil {
+		return defaultDeliveryExtras, nil
+	}
+	if n := *d.ExtraSubmits; n < 0 || n > maxDeliveryExtraSubmits {
+		return defaultDeliveryExtras, fmt.Errorf("delivery.extra_submits must be between 0 and %d, got %d", maxDeliveryExtraSubmits, n)
+	}
+	return *d.ExtraSubmits, nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmitDelay() (time.Duration, error) {
+	if d.ExtraSubmitDelay == "" {
+		return defaultDeliveryExtraDelay, nil
+	}
+	v, err := parseBoundedDuration("delivery.extra_submit_delay", d.ExtraSubmitDelay, 0, maxDeliveryExtraDelay)
+	if err != nil {
+		return defaultDeliveryExtraDelay, err
+	}
+	return v, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: key contents and
+// duration ranges. A nil block is valid. On load paths the schema runs first
+// and is the stricter gate for an empty submit_keys list and for a bare "0"
+// duration, both of which Validate treats as acceptable. Validate is the
+// stricter gate for key length, which it counts in bytes where the schema
+// counts code points, and for non-ASCII whitespace and control characters,
+// which the schema's ASCII-only character classes let through.
+func (d *HarnessDeliveryConfig) Validate() error {
+	if d == nil {
+		return nil
+	}
+	if _, err := d.submitKeys(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmits(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmitDelay(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// resolveWarned records which invalid harness-config fields have already been
+// logged by ResolvedReady and ResolvedDelivery, so each is warned once per
+// process.
+var resolveWarned sync.Map
+
+func warnResolveFallback(harness string, err error) {
+	key := harness + "\x00" + err.Error()
+	if _, loaded := resolveWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("Invalid harness-config value; using the default", "harness", harness, "error", err)
+}
+
+// ResolvedReady returns the ready spec with defaults applied. It never fails:
+// a field that is invalid (for example from a path that skips Validate) falls
+// back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedReady() ReadySpec {
+	if e == nil || e.Ready == nil {
+		return DefaultReadySpec(ReadyStrategyDelay)
+	}
+	r := e.Ready
+	strategy, strategyErr := r.strategy()
+	if strategyErr != nil {
+		warnResolveFallback(e.Harness, strategyErr)
+	}
+	spec := DefaultReadySpec(strategy)
+	var err error
+	if spec.Settle, err = r.settle(strategy); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	// After a strategy fallback the timeout check would describe a strategy
+	// the author never wrote, so keep the fallback's default timeout and rely
+	// on the strategy warning alone.
+	if strategyErr == nil {
+		if spec.Timeout, err = r.timeout(strategy); err != nil {
+			warnResolveFallback(e.Harness, err)
+		}
+	}
+	return spec
+}
+
+// ResolvedDelivery returns the delivery spec with defaults applied. It never
+// fails: a field that is invalid (for example from a path that skips
+// Validate) falls back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedDelivery() DeliverySpec {
+	if e == nil || e.Delivery == nil {
+		return DefaultDeliverySpec()
+	}
+	d := e.Delivery
+	var spec DeliverySpec
+	var err error
+	if spec.SubmitKeys, err = d.submitKeys(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmits, err = d.extraSubmits(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmitDelay, err = d.extraSubmitDelay(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	return spec
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -2922,6 +3638,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {
@@ -2949,9 +3666,14 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// 4. Load environment variables (SCION_ prefix)
 	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
 		// An exported but empty variable is treated as unset, so it never
-		// blanks a value from the settings files. This also keeps an empty
-		// SCION_OTEL_INSECURE from being mapped onto tls.enabled.
+		// blanks a value from the settings files.
 		if value == "" {
+			return "", nil
+		}
+		// SCION_OTEL_INSECURE is applied below, inverted. Mapped here as
+		// is, a value that is not a bool would stay on tls.enabled and
+		// replace the configured value.
+		if key == "SCION_OTEL_INSECURE" {
 			return "", nil
 		}
 		return versionedEnvKeyMapper(key), value
@@ -2960,11 +3682,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
 	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
 	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
-		plaintext, err := strconv.ParseBool(raw)
-		if err != nil {
-			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		if plaintext, err := strconv.ParseBool(raw); err != nil {
+			warnUnparseableSettingOnce("SCION_OTEL_INSECURE",
+				"settings: value does not parse; ignoring SCION_OTEL_INSECURE and using the configured telemetry.cloud.tls.enabled")
+		} else {
+			_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 		}
-		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
 	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
@@ -2992,9 +3715,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		tls := settings.Telemetry.Cloud.TLS
-		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
-			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
 		}
 	}
 
@@ -3006,6 +3728,8 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 // koanf decoder is weakly typed and would turn clone_depth: true into "1";
 // normalizing first gives the settings loader the same value the schema
 // validator and the template loader see (true stays "true", 5.0 is "5").
+// A clone_depth value that cannot be normalized (a list, for example) is
+// dropped with a warning, so the profile falls back to the default depth.
 func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) error {
 	normalized := map[string]interface{}{}
 	for _, key := range k.Keys() {
@@ -3015,7 +3739,9 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 		}
 		cd, err := api.CloneDepthFromValue(k.Get(key))
 		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
+			warnUnparseableSetting(key)
+			k.Delete(key)
+			continue
 		}
 		normalized[key] = string(cd)
 	}
@@ -3024,7 +3750,120 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	return k.Unmarshal("", settings)
+	if err := k.Unmarshal("", settings); err == nil {
+		return nil
+	}
+	return unmarshalSkippingBadSettings(k, settings)
+}
+
+// unmarshalSkippingBadSettings handles a decode failure in
+// unmarshalVersionedSettings. One value that does not parse (for example
+// SCION_SERVER_BROKER_PORT=abc) must not discard the whole settings struct:
+// callers skip the entire section on error, which silently turns off hub
+// features. Each key whose value does not decode on its own is reset to its
+// embedded default, or dropped when there is none, with a warning that names
+// the key. The value is never logged, since it may be a secret. The rest of
+// the settings then decode as usual.
+func unmarshalSkippingBadSettings(k *koanf.Koanf, settings *VersionedSettings) error {
+	bad := undecodableSettingsKeys(k)
+	if len(bad) == 0 {
+		// The failure is not tied to a single key. The decoder's error
+		// quotes the offending value, so it is not returned as is.
+		return errSettingsDoNotDecode
+	}
+
+	defaults := koanf.New(".")
+	if data, err := GetDefaultSettingsDataYAML(); err == nil {
+		_ = defaults.Load(rawbytes.Provider(data), yaml.Parser())
+	}
+	for _, key := range bad {
+		warnUnparseableSetting(key)
+		// Delete resolves key through koanf's own key parts, so it removes
+		// exactly the entry the probe found. Set splits key on ".", which
+		// is safe here: the embedded defaults have no map keys with a dot,
+		// so a key with a dot inside one part never exists in defaults.
+		k.Delete(key)
+		if defaults.Exists(key) {
+			if err := k.Set(key, defaults.Get(key)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The failed attempt may have partly filled settings. Decode again into
+	// the same empty maps both callers start from.
+	*settings = VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+	if err := k.Unmarshal("", settings); err != nil {
+		return errSettingsDoNotDecode
+	}
+	return nil
+}
+
+// errSettingsDoNotDecode reports a decode failure that no single setting
+// explains. It names no values, since callers log it.
+var errSettingsDoNotDecode = errors.New("settings: values do not decode into the settings structure")
+
+// warnedUnparseableSettings records the settings keys already warned about
+// in this process. Settings are loaded several times per CLI invocation and
+// hub startup, so one bad value would otherwise be reported once per load.
+var warnedUnparseableSettings sync.Map
+
+// resetWarnedUnparseableSettingsCache clears the unparseable-setting warning
+// dedup cache. Tests that assert whether this warning fires must call this
+// first, so that an earlier test in the same process cannot suppress it.
+func resetWarnedUnparseableSettingsCache() {
+	warnedUnparseableSettings.Clear()
+}
+
+// warnUnparseableSetting logs, once per process, that the setting named by
+// key has a value that does not parse and is ignored, so the field falls
+// back to its embedded default or to unset. The value itself is never
+// logged, since it may be a secret.
+func warnUnparseableSetting(key string) {
+	warnUnparseableSettingOnce(key, "settings: value does not parse; ignoring it and using the default for this setting")
+}
+
+// warnUnparseableSettingOnce logs msg with key the first time key is
+// reported in this process.
+func warnUnparseableSettingOnce(key, msg string) {
+	if _, seen := warnedUnparseableSettings.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	slog.Warn(msg, "key", key)
+}
+
+// undecodableSettingsKeys returns the keys of k whose value fails to decode
+// into VersionedSettings when decoded alone. Each probe is built from
+// koanf's own key parts, not by splitting the flat key on ".", so a map
+// entry whose key contains a dot (a service account email, for example)
+// keeps its real shape.
+func undecodableSettingsKeys(k *koanf.Koanf) []string {
+	keyMap := k.KeyMap()
+	var bad []string
+	for _, key := range k.Keys() {
+		parts, ok := keyMap[key]
+		if !ok || len(parts) == 0 {
+			continue // Every key from k.Keys() is in KeyMap; never re-split on ".".
+		}
+		nested := map[string]interface{}{parts[len(parts)-1]: k.Get(key)}
+		for i := len(parts) - 2; i >= 0; i-- {
+			nested = map[string]interface{}{parts[i]: nested}
+		}
+		probe := koanf.New(".")
+		// An empty delimiter loads nested as is, with no unflattening.
+		if err := probe.Load(confmap.Provider(nested, ""), nil); err != nil {
+			bad = append(bad, key)
+			continue
+		}
+		if err := probe.Unmarshal("", &VersionedSettings{}); err != nil {
+			bad = append(bad, key)
+		}
+	}
+	return bad
 }
 
 // settingsExcludedEnvVars lists SCION_* variables that are never settings
@@ -3039,10 +3878,17 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 // key "hub" as a string and collides with the struct-typed hub settings.
 // Hub settings come from the SCION_HUB_* variables (e.g.
 // SCION_HUB_ENDPOINT), which are unaffected.
+//
+// SCION_HUB_PROFILE and SCION_HUB_RUN select a CLI target-hub profile and
+// its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
+// directly; left mapped they would land on hub.profile and hub.run, which
+// are not settings.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
+	"SCION_HUB_PROFILE",
+	"SCION_HUB_RUN",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -3152,6 +3998,8 @@ var knownCompoundFields = []string{
 	"platform_auth_sa",
 	"interval_seconds",
 	"public_key_file",
+	"metrics_enabled",
+	"tracing_enabled",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
@@ -3184,6 +4032,16 @@ var knownCompoundFields = []string{
 	"max_age",
 }
 
+// collapsedCompoundFields maps the canonical env spelling of a compound
+// field, which drops the field's underscores (METRICSENABLED), to the field
+// name. Only fields listed here accept that spelling in this mapper; the
+// underscored spelling (METRICS_ENABLED) is accepted through
+// knownCompoundFields.
+var collapsedCompoundFields = map[string]string{
+	"metricsenabled": "metrics_enabled",
+	"tracingenabled": "tracing_enabled",
+}
+
 // mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
 // known multi-word snake_case fields so they are not incorrectly split.
 // For example: "hub_read_timeout" -> "hub.read_timeout"
@@ -3206,6 +4064,9 @@ func mapEnvKeyRecursive(key string) string {
 		if key == compound {
 			return key
 		}
+	}
+	if field, ok := collapsedCompoundFields[key]; ok {
+		return field
 	}
 
 	// Try to match the longest known compound field at the end,
@@ -3330,6 +4191,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
 //	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
+//	"cert_file" -> "telemetry.cloud.tls.cert_file"
+//	"key_file" -> "telemetry.cloud.tls.key_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
 	case "endpoint":
@@ -3344,6 +4207,10 @@ func mapOtelEnvKey(key string) string {
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"
+	case "cert_file":
+		return "telemetry.cloud.tls.cert_file"
+	case "key_file":
+		return "telemetry.cloud.tls.key_file"
 	default:
 		return "telemetry.cloud." + key
 	}
@@ -3396,6 +4263,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.TestIdentities != nil {
+			ti := &TestIdentitiesConfig{}
+			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
+				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
+			}
+			gc.Hub.TestIdentities = ti
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -3445,9 +4319,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			if d, err := time.ParseDuration(v1.Hub.StalledThreshold); err == nil {
 				gc.Hub.StalledThreshold = d
 			}
-		}
-		if v1.Hub.AsyncAgentLaunch != nil {
-			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
 		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
@@ -3509,6 +4380,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		}
+		if o := v1.Hub.Observability; o != nil {
+			gc.Hub.Observability = HubObservabilityConfig{
+				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+				TracingEnabled: copyBoolPtr(o.TracingEnabled),
+			}
 		}
 	}
 
@@ -3828,6 +4705,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			MaxAge:         gc.Hub.CORSMaxAge,
 		},
 	}
+	if gc.Hub.TestIdentities != nil {
+		ti := &V1TestIdentitiesConfig{}
+		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
+			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
+		}
+		v1Hub.TestIdentities = ti
+	}
 	if gc.Hub.SoftDeleteRetention > 0 {
 		v1Hub.SoftDeleteRetention = gc.Hub.SoftDeleteRetention.String()
 	}
@@ -3860,6 +4744,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
+	if o := gc.Hub.Observability; !o.IsZero() {
+		v1Hub.Observability = &V1ServerHubObservabilityConfig{
+			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+			TracingEnabled: copyBoolPtr(o.TracingEnabled),
+		}
+	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}
@@ -3879,10 +4769,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
-	}
-	if gc.Hub.AsyncAgentLaunch {
-		asyncLaunch := true
-		v1Hub.AsyncAgentLaunch = &asyncLaunch
 	}
 	if gc.Hub.PerfTrace {
 		perfTrace := true
@@ -4055,7 +4941,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}
@@ -4527,7 +5413,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 //     internally by LoadVersionedSettings/LoadSettingsKoanf/
 //     detectHierarchyFormat, treats WHATEVER path it is given as if it
 //     might be a project directory: if ~/.scion itself contains a
-//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     project-id file (plausible — a broker's ~/.scion can
 //     double as its own hub-side project identity), it resolves to
 //     GetProjectConfigDir(globalDir), i.e.
 //     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
@@ -4623,7 +5509,7 @@ func GlobalSettingsMentions(substr string) bool {
 // did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
 // actually global-only — it calls resolveEffectiveProjectPath(globalDir)
 // internally, which treats the global directory as if it might itself be a
-// project directory and, if ~/.scion contains a project-id or grove-id
+// project directory and, if ~/.scion contains a project-id
 // file, resolves to a completely unrelated project's split-storage
 // settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
 // merges its format in too. detectDirSettingsFormat never calls

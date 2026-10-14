@@ -109,8 +109,12 @@ func (s *Server) handleChatSpaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get user prefs.
+	// Get user prefs. They are the caller's own project-less record, so a
+	// token sees them only with inbox:read on a hub boundary.
 	prefs, _ := wcs.GetUserPrefs(ctx, user.ID())
+	if token := chatToken(ctx); token != nil && !s.newSelfScopeCheck(ctx, token, permInboxRead).allows("") {
+		prefs = nil
+	}
 
 	// Unread is tracked only in the projects the caller is a member of. A
 	// failed lookup tracks none, as a degraded rail shows no unread rather
@@ -642,11 +646,16 @@ func validDMKey(key string) bool {
 	return dmKeyRegexp.MatchString(key)
 }
 
-// handleCreateThread creates a new thread in a space.
+// handleCreateThread creates a new thread in a space. A token also needs
+// inbox:write for the space's project.
 func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, projectID string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
 		return
 	}
 
@@ -656,6 +665,9 @@ func (s *Server) handleCreateThread(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
 		return
 	}
 
@@ -778,11 +790,16 @@ func (s *Server) handleTopicGet(w http.ResponseWriter, r *http.Request, topicID 
 	writeJSON(w, http.StatusOK, topic)
 }
 
-// handleTopicPatch handles PATCH /api/v1/chat/topics/{topicId}.
+// handleTopicPatch handles PATCH /api/v1/chat/topics/{topicId}. A token
+// also needs inbox:write for the topic's project.
 func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicID string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
 		return
 	}
 
@@ -808,6 +825,9 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
 		return
 	}
 
@@ -889,11 +909,16 @@ func (s *Server) handleTopicPatch(w http.ResponseWriter, r *http.Request, topicI
 	writeJSON(w, http.StatusOK, updated)
 }
 
-// handleTopicDelete handles DELETE /api/v1/chat/topics/{topicId}.
+// handleTopicDelete handles DELETE /api/v1/chat/topics/{topicId}. A token
+// also needs inbox:write for the topic's project.
 func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topicID string) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
 		return
 	}
 
@@ -920,6 +945,9 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
 		return
 	}
+	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+		return
+	}
 
 	if err := wcs.DeleteTopic(r.Context(), topicID); err != nil {
 		if strings.Contains(err.Error(), "last thread") {
@@ -932,6 +960,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
+	s.removeDeletedTopicFromThreadGroups(r.Context(), topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -1052,6 +1081,12 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	ctx := r.Context()
 
+	// A token posts on its holder's behalf only with inbox:write.
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
+
 	// --- Authorize ---
 	// Checked here first so an unauthorized caller is refused before it
 	// spends rate-limit allowance or the hub reads its body.
@@ -1060,6 +1095,21 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	if serr != nil {
 		serr.write(w)
 		return
+	}
+	// A token also needs inbox:write for the conversation's project: the
+	// topic's project, or the project of the peer agent of a DM. A DM
+	// between users has no project and needs a hub boundary. A refusal is
+	// answered as a missing thread, as authorizeChatSend answers.
+	if token != nil {
+		allowed, err := s.chatTokenMaySend(ctx, token, key, target.ProjectID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !allowed {
+			writeChatTokenRefusal(w, r, token, permInboxWrite, chatRefuseNotFound)
+			return
+		}
 	}
 
 	// --- Rate limit (#1054) ---
@@ -1607,7 +1657,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// denied send does no artifact lookups.
 	var artifactRefs []artifacts.MessageRef
 	var artifactWarning string
-	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata)
+	msg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, msg.Metadata, directAgentRecipient(primaryAgent, ""))
 	msg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Phase gate (nc-delivery-unreachable): a primary that is soft-deleted or
@@ -1940,6 +1990,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
+	// The hub's message record for the primary, written before the phase
+	// gate and the dispatch outcome (see logMessageRecord).
+	logMessageRecord(s.recordLog(), primaryAgent, msg)
+
 	// Dispatch to the primary agent — skipped entirely when the phase gate
 	// above already marked the row failed or deferred.
 	dispatcher := s.GetDispatcher()
@@ -1965,8 +2019,12 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// Interrupt delivery is synchronous at the broker for each
 		// recipient, so an interrupted send to a primary plus k mentions
 		// blocks this request for up to k+1 deliveries.
+		// A running agent that is still initializing (does not accept
+		// input yet) is downgraded to the buffered dispatch inside
+		// dispatchWithBrokerRetry (effectiveInterrupt), the single place
+		// that decides it.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
+		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
 			// Mirror the store update above in storeMsg so the response
@@ -2102,6 +2160,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				}
 				s.events.PublishUserMessage(ctx, mentionStoreMsg, attachmentRefs, nil)
 			}
+			// The mention's record, written before the migration and hold
+			// gates and the dispatch outcome (see logMessageRecord).
+			logMessageRecord(s.recordLog(), mentionAgent, mentionMsg)
 
 			// Phase 9b(ii): render the delivery envelope for the mention.
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
@@ -2166,7 +2227,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				// stopped and error secondaries also take the buffered
 				// non-interrupt dispatch.
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
-				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
+				if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
 					// Like the primary: a synchronous dispatch failure must
@@ -2501,6 +2562,10 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		Forbidden(w)
 		return
 	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
 
 	ctx := r.Context()
 
@@ -2515,6 +2580,10 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 
 	// Fetch the message.
 	msg, err := s.store.GetMessage(ctx, messageID)
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, "Message")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
 		return
@@ -2533,6 +2602,11 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 	// Verify conversation key matches.
 	if msg.ThreadID != key {
 		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
+	// A token is re-checked against the conversation the message is in.
+	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
 		return
 	}
 
@@ -2601,6 +2675,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		Forbidden(w)
 		return
 	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
 
 	ctx := r.Context()
 
@@ -2615,6 +2693,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 
 	// Fetch the message.
 	msg, err := s.store.GetMessage(ctx, messageID)
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, "Message")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch message", nil)
 		return
@@ -2633,6 +2715,11 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	// Verify conversation key matches.
 	if msg.ThreadID != key {
 		BadRequest(w, "message does not belong to this conversation")
+		return
+	}
+
+	// A token is re-checked against the conversation the message is in.
+	if !s.authorizeChatTokenMessageTarget(w, r, token, wcs, key) {
 		return
 	}
 
@@ -2737,6 +2824,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
 	if isDM {
+		// A DM is the caller's own record: a token needs inbox:read.
+		token, ok := s.requireChatSelector(w, r, permInboxRead)
+		if !ok {
+			return
+		}
 		if !validDMKey(key) {
 			BadRequest(w, "invalid DM key format")
 			return
@@ -2745,6 +2837,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// Answered as a missing thread; the reason is logged.
 			logReferenceRefused(ctx, logging.RequestPath(r), "caller is not a participant of this DM", user)
 			NotFound(w, "Thread")
+			return
+		}
+		if !s.authorizeChatTokenConversation(w, r, token, permInboxRead, key, "", chatRefuseNotFound) {
 			return
 		}
 	} else {
@@ -3295,7 +3390,7 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	}
 
 	isDM := strings.HasPrefix(key, "dm:")
-	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID(), chatConversationPermission(r.Method, key)) {
 		return
 	}
 
@@ -3524,7 +3619,7 @@ func (s *Server) handleConversationMarkUnread(w http.ResponseWriter, r *http.Req
 	}
 
 	isDM := strings.HasPrefix(key, "dm:")
-	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID(), permInboxWrite) {
 		return
 	}
 
@@ -3566,13 +3661,25 @@ func (s *Server) handleConversationMarkUnread(w http.ResponseWriter, r *http.Req
 // its project. It writes the error response itself and returns false when
 // access is refused.
 //
+// A token also needs the self permission permissionID (empty for none) for
+// the conversation (chatTokenMayUse): the selector is checked before any
+// lookup and refused with 403; the conversation check is refused as a
+// missing thread, as the route answers every caller it refuses.
+//
 // The read, mute and pin handlers all call this rather than each carrying a
 // copy. They have to agree — you should not be able to mute a conversation you
 // cannot read — and three copies of the same twenty lines agree only until
 // someone edits one of them.
 func (s *Server) authorizeConversationAccess(
-	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID string,
+	w http.ResponseWriter, r *http.Request, wcs WebChatStore, key, userID, permissionID string,
 ) bool {
+	var token *ScopedUserIdentity
+	if permissionID != "" {
+		var ok bool
+		if token, ok = s.requireChatSelector(w, r, permissionID); !ok {
+			return false
+		}
+	}
 	if strings.HasPrefix(key, "dm:") {
 		if !validDMKey(key) {
 			BadRequest(w, "invalid DM key format")
@@ -3583,7 +3690,7 @@ func (s *Server) authorizeConversationAccess(
 			NotFound(w, "Thread")
 			return false
 		}
-		return true
+		return s.authorizeChatTokenConversation(w, r, token, permissionID, key, "", chatRefuseNotFound)
 	}
 
 	ctx := r.Context()
@@ -3601,7 +3708,24 @@ func (s *Server) authorizeConversationAccess(
 	// Mute, pin and read state are per-user settings on a conversation the
 	// caller can read, so read access is the check; a caller without it gets
 	// the same answer as for a missing thread.
-	return s.authorizeRead(w, r, projectResource(project), "Thread")
+	if !s.authorizeRead(w, r, projectResource(project), "Thread") {
+		return false
+	}
+	return s.authorizeChatTokenConversation(w, r, token, permissionID, key, topic.ProjectID, chatRefuseNotFound)
+}
+
+// chatConversationPermission is the self permission a token needs on the
+// read-state route of a conversation: none to read a topic's read state
+// (project:read decides), inbox:read to read a DM's, and inbox:write to
+// move either.
+func chatConversationPermission(method, key string) string {
+	if method != http.MethodGet {
+		return permInboxWrite
+	}
+	if strings.HasPrefix(key, "dm:") {
+		return permInboxRead
+	}
+	return ""
 }
 
 // handleConversationMute handles PUT /api/v1/chat/conversations/{key}/mute.
@@ -3646,7 +3770,7 @@ func (s *Server) handleConversationFlag(
 		return
 	}
 
-	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID()) {
+	if !s.authorizeConversationAccess(w, r, wcs, key, user.ID(), permInboxWrite) {
 		return
 	}
 
@@ -3695,10 +3819,14 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 1. Auth: extract user
+	// 1. Auth: extract user. A token needs inbox:write.
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
+		return
+	}
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
 		return
 	}
 
@@ -3739,6 +3867,11 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+	// A token also needs inbox:write under the DM rule: the agent's project
+	// inside its boundary and agent:read on the agent.
+	if !s.authorizeChatTokenConversation(w, r, token, permInboxWrite, key, "", chatRefuseForbidden) {
 		return
 	}
 
@@ -3935,12 +4068,22 @@ func (s *Server) handleSpaceRead(w http.ResponseWriter, r *http.Request, project
 
 	ctx := r.Context()
 
+	// Read state is written on the caller's behalf: a token needs
+	// inbox:write for the space's project.
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
+
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		NotFound(w, "Project")
 		return
 	}
 	if !s.authorize(w, r, projectResource(project), ActionRead) {
+		return
+	}
+	if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
 		return
 	}
 
@@ -4154,6 +4297,13 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// DMs are the caller's own records: a token needs inbox:read, and
+	// lists only the DMs it may read (chatTokenDMVisible).
+	token, ok := s.requireChatSelector(w, r, permInboxRead)
+	if !ok {
+		return
+	}
+
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
@@ -4167,6 +4317,16 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list DMs", nil)
 		return
+	}
+	if token != nil {
+		check := s.newSelfScopeCheck(ctx, token, permInboxRead)
+		visible := dms[:0]
+		for _, dm := range dms {
+			if s.chatTokenDMVisible(ctx, token, check, dm.ConversationKey) {
+				visible = append(visible, dm)
+			}
+		}
+		dms = visible
 	}
 
 	// Every per-DM lookup below is batched across the whole list, so the
@@ -4460,6 +4620,21 @@ func (s *Server) handleChatUserPrefs(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Rail prefs are the caller's own project-less record: a token needs
+	// inbox:read to read them and inbox:write to write them, on a hub
+	// boundary.
+	permissionID := permInboxRead
+	if r.Method == http.MethodPut {
+		permissionID = permInboxWrite
+	}
+	token, ok := s.requireChatSelector(w, r, permissionID)
+	if !ok {
+		return
+	}
+	if !s.authorizeChatTokenProject(w, r, token, permissionID, "", chatRefuseForbidden) {
+		return
+	}
+
 	s.mu.RLock()
 	wcs := s.webChatStore
 	s.mu.RUnlock()
@@ -4567,6 +4742,12 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
+	// Typing is posted on the caller's behalf: a token needs inbox:write.
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
+
 	s.mu.RLock()
 	wcs := s.webChatStore
 	pm := s.presenceManager
@@ -4582,6 +4763,9 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 		}
 		if !isDMParticipant(key, user.ID()) {
 			Forbidden(w)
+			return
+		}
+		if !s.authorizeChatTokenConversation(w, r, token, permInboxWrite, key, "", chatRefuseForbidden) {
 			return
 		}
 		// No project fan-out for DMs — see the publish below.
@@ -4603,6 +4787,9 @@ func (s *Server) handleConversationTyping(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
+			return
+		}
+		if !s.authorizeChatTokenConversation(w, r, token, permInboxWrite, key, projectID, chatRefuseForbidden) {
 			return
 		}
 	}
@@ -4664,13 +4851,8 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 	if !requireProfileWriter(w, r) {
 		return
 	}
-
-	s.mu.RLock()
-	pm := s.presenceManager
-	s.mu.RUnlock()
-
-	if pm == nil {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	// Presence is posted on the caller's behalf: a token needs inbox:write.
+	if _, ok := s.requireChatSelector(w, r, permInboxWrite); !ok {
 		return
 	}
 
@@ -4684,14 +4866,52 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
+	s.mu.RLock()
+	pm := s.presenceManager
+	s.mu.RUnlock()
+
+	if pm == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
 	displayName := user.DisplayName()
 	if displayName == "" {
 		displayName = user.Email()
 	}
 
-	pm.Heartbeat(r.Context(), user.ID(), displayName, body.ProjectIDs)
+	pm.Heartbeat(r.Context(), user.ID(), displayName, s.chatPresenceProjects(r.Context(), GetIdentityFromContext(r.Context()), body.ProjectIDs))
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// chatPresenceProjects returns the projects a presence heartbeat fans out
+// on: the named projects the caller can read (project:read), each once, in
+// the order named. A project the caller cannot read, or one that does not
+// exist, is left out, and the heartbeat still counts for the rest. At most
+// chatVisibleSpacesMaxProjects distinct IDs are considered, the most spaces
+// the chat rail lists.
+func (s *Server) chatPresenceProjects(ctx context.Context, identity Identity, ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		if len(seen) >= chatVisibleSpacesMaxProjects {
+			break
+		}
+		seen[id] = true
+		project, err := s.store.GetProject(ctx, id)
+		if err != nil {
+			continue
+		}
+		if !s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead).Allowed {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // handleChatSearch handles GET /api/v1/chat/search.
@@ -4763,12 +4983,21 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		// Scope to one conversation — authorize access.
 		isDM := strings.HasPrefix(conversationKey, "dm:")
 		if isDM {
+			// A DM is the caller's own record: a token needs inbox:read
+			// under the DM rule.
+			token, ok := s.requireChatSelector(w, r, permInboxRead)
+			if !ok {
+				return
+			}
 			if !validDMKey(conversationKey) {
 				BadRequest(w, "invalid DM key format")
 				return
 			}
 			if !isDMParticipant(conversationKey, user.ID()) {
 				Forbidden(w)
+				return
+			}
+			if !s.authorizeChatTokenConversation(w, r, token, permInboxRead, conversationKey, "", chatRefuseForbidden) {
 				return
 			}
 		} else {
@@ -4836,6 +5065,20 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	results = filterSearchDMs(results, filter)
+	// A project or unscoped search by a token keeps a DM row only when the
+	// token may read that DM under inbox:read; with no inbox:read it keeps
+	// none.
+	if token := chatToken(ctx); token != nil && filter.ConversationKey == "" {
+		check := s.newSelfScopeCheck(ctx, token, permInboxRead)
+		kept := results[:0]
+		for _, res := range results {
+			if strings.HasPrefix(res.ConversationKey, "dm:") && !s.chatTokenDMVisible(ctx, token, check, res.ConversationKey) {
+				continue
+			}
+			kept = append(kept, res)
+		}
+		results = kept
+	}
 
 	// Enrich results with thread/DM names.
 	s.enrichSearchResults(ctx, wcs, results)
@@ -5616,6 +5859,13 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		Forbidden(w)
 		return
 	}
+	// An upload is a write on the caller's behalf: a token needs
+	// inbox:write, for the space's project, or on a hub boundary for a
+	// project-less upload.
+	token, ok := s.requireChatSelector(w, r, permInboxWrite)
+	if !ok {
+		return
+	}
 
 	ctx := r.Context()
 
@@ -5652,7 +5902,12 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		if !s.authorize(w, r, projectResource(project), ActionRead) {
 			return
 		}
+		if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, project.ID, chatRefuseForbidden) {
+			return
+		}
 	} else if !requireProfileWriter(w, r) {
+		return
+	} else if !s.authorizeChatTokenProject(w, r, token, permInboxWrite, "", chatRefuseForbidden) {
 		return
 	}
 
@@ -5842,7 +6097,15 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// readers of its project, and for anyone who can read a message it is
 	// attached to. Anyone else gets the same answer as for an unknown
 	// attachment; the reason is logged.
-	if !s.canReadAttachment(ctx, user, meta) {
+	// A token reads a file of a project through project:read on that
+	// project only.
+	var allowed bool
+	if token := chatToken(ctx); token != nil && meta.ProjectID != "" {
+		allowed = s.canReadProject(ctx, token, meta.ProjectID)
+	} else {
+		allowed = s.canReadAttachment(ctx, user, meta)
+	}
+	if !allowed {
 		logReferenceRefused(ctx, logging.RequestPath(r), "caller may not read this attachment", user)
 		NotFound(w, "Attachment")
 		return

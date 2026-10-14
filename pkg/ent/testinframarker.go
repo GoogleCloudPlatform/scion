@@ -28,8 +28,10 @@ type TestInfraMarker struct {
 	// Host name the offline mark command ran on
 	CreatedByHost string `json:"created_by_host,omitempty"`
 	// Operator-attested substrate facts (bucket, secret-backend project, broker ids); declared, not verified
-	Attested     json.RawMessage `json:"attested,omitempty"`
-	selectValues sql.SelectValues
+	Attested json.RawMessage `json:"attested,omitempty"`
+	// Hub-local test-identity web session key (64 random bytes); never logged or returned
+	WebSessionKey []byte `json:"-"`
+	selectValues  sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -37,7 +39,7 @@ func (*TestInfraMarker) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case testinframarker.FieldAttested:
+		case testinframarker.FieldAttested, testinframarker.FieldWebSessionKey:
 			values[i] = new([]byte)
 		case testinframarker.FieldID, testinframarker.FieldHubID, testinframarker.FieldClass, testinframarker.FieldCreatedByHost:
 			values[i] = new(sql.NullString)
@@ -96,6 +98,12 @@ func (_m *TestInfraMarker) assignValues(columns []string, values []any) error {
 					return fmt.Errorf("unmarshal field attested: %w", err)
 				}
 			}
+		case testinframarker.FieldWebSessionKey:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field web_session_key", values[i])
+			} else if value != nil {
+				_m.WebSessionKey = *value
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -146,6 +154,8 @@ func (_m *TestInfraMarker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("attested=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Attested))
+	builder.WriteString(", ")
+	builder.WriteString("web_session_key=<sensitive>")
 	builder.WriteByte(')')
 	return builder.String()
 }

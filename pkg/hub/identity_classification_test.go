@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_1
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -435,6 +433,13 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				name:               "FederatedServiceIdentity",
 				identity:           NewFederatedServiceIdentity("https://issuer.example", "sub", "sa@example.com", nil),
 				wantPrincipalKind:  PrincipalKindFederatedService,
+				wantCredentialKind: CredentialKindFederation,
+				wantAttested:       false,
+			},
+			{
+				name:               "VisitorIdentity",
+				identity:           NewVisitorIdentity(tid("classify-visitor"), "https://issuer.example", "sub", "v@example.com", "V"),
+				wantPrincipalKind:  PrincipalKindVisitor,
 				wantCredentialKind: CredentialKindFederation,
 				wantAttested:       false,
 			},
@@ -1213,6 +1218,8 @@ func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
 				identity = (*FederatedAgentIdentity)(nil)
 			case "FederatedServiceIdentity":
 				identity = (*FederatedServiceIdentity)(nil)
+			case "VisitorIdentity":
+				identity = (*VisitorIdentity)(nil)
 			default:
 				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
 			}

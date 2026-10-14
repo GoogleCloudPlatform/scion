@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
+	agentstate "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -497,14 +498,14 @@ func (r *CommandRouter) handleAgentAction(ctx context.Context, event *ChatEvent,
 		card := Card{
 			Header: CardHeader{
 				Title:    agent.Name,
-				Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agent.Activity),
+				Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agentstate.Activity(agent.Activity).DisplayLabel()),
 			},
 			Sections: []CardSection{
 				{
 					Widgets: []Widget{
 						{Type: WidgetKeyValue, Label: "Slug", Content: agent.Slug},
 						{Type: WidgetKeyValue, Label: "Phase", Content: agent.Phase},
-						{Type: WidgetKeyValue, Label: "Activity", Content: agent.Activity},
+						{Type: WidgetKeyValue, Label: "Activity", Content: agentstate.Activity(agent.Activity).DisplayLabel()},
 						{Type: WidgetKeyValue, Label: "Template", Content: agent.Template},
 					},
 				},
@@ -617,7 +618,7 @@ func (r *CommandRouter) cmdList(ctx context.Context, event *ChatEvent, args []st
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("*Agents in %s:*\n", proj.Slug))
 	for _, a := range agents.Agents {
-		status := a.Activity
+		status := agentstate.Activity(a.Activity).DisplayLabel()
 		if status == "" {
 			status = a.Phase
 		}
@@ -668,14 +669,14 @@ func (r *CommandRouter) cmdStatus(ctx context.Context, event *ChatEvent, args []
 	card := Card{
 		Header: CardHeader{
 			Title:    agent.Name,
-			Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agent.Activity),
+			Subtitle: fmt.Sprintf("Project: %s | %s", link.ProjectSlug, agentstate.Activity(agent.Activity).DisplayLabel()),
 		},
 		Sections: []CardSection{
 			{
 				Widgets: []Widget{
 					{Type: WidgetKeyValue, Label: "Slug", Content: agent.Slug},
 					{Type: WidgetKeyValue, Label: "Phase", Content: agent.Phase},
-					{Type: WidgetKeyValue, Label: "Activity", Content: agent.Activity},
+					{Type: WidgetKeyValue, Label: "Activity", Content: agentstate.Activity(agent.Activity).DisplayLabel()},
 					{Type: WidgetKeyValue, Label: "Template", Content: agent.Template},
 				},
 			},
@@ -1022,7 +1023,7 @@ func (r *CommandRouter) showDeleteConfirmation(ctx context.Context, event *ChatE
 					{Type: WidgetText, Content: fmt.Sprintf("Are you sure you want to delete agent *%s*?\n\nThis action cannot be undone.", agent.Slug)},
 					{Type: WidgetKeyValue, Label: "Name", Content: agent.Name},
 					{Type: WidgetKeyValue, Label: "Phase", Content: agent.Phase},
-					{Type: WidgetKeyValue, Label: "Activity", Content: agent.Activity},
+					{Type: WidgetKeyValue, Label: "Activity", Content: agentstate.Activity(agent.Activity).DisplayLabel()},
 				},
 			},
 		},

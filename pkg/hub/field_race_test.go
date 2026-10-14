@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -100,9 +100,8 @@ func TestChannelRegistryRace(t *testing.T) {
 
 	// Build a ChannelRegistry with one noop channel so Len() > 0.
 	registry := &ChannelRegistry{
-		channels: []NotificationChannel{noopChannel{}},
-		configs:  []ChannelConfig{{Type: "noop"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: noopChannel{}, config: ChannelConfig{Type: "noop"}}},
+		log:     slog.Default(),
 	}
 
 	// Disable the per-sender rate limiter so high concurrency does not 429.

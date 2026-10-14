@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -888,7 +889,7 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 		emoji := agentStatusEmoji(agent.Activity, agent.Phase)
 		label := agent.Slug
 		if agent.Activity != "" {
-			label += " -- " + agent.Activity
+			label += " -- " + state.Activity(agent.Activity).DisplayLabel()
 		}
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
@@ -1006,7 +1007,7 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
 			emoji := agentStatusEmoji(agent.Activity, agent.Phase)
-			activity := agent.Activity
+			activity := state.Activity(agent.Activity).DisplayLabel()
 			if activity == "" {
 				activity = "unknown"
 			}
@@ -2063,6 +2064,8 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 func agentStatusEmoji(activity, phase string) string {
 	// Activity icons (priority)
 	switch strings.ToLower(activity) {
+	case "initializing":
+		return "\U0001f680" // rocket (shown as starting)
 	case "working":
 		return "⚙️" // gear
 	case "thinking":

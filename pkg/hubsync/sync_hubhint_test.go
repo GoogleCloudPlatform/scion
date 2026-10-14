@@ -30,14 +30,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const localOnlyHintText = "\n\nTo use local-only mode, use: scion --no-hub <command>"
+// remoteHubCheckHint is the hint for an endpoint that is not the local
+// workstation hub; these tests run with no dev token, so every endpoint is.
+const remoteHubCheckHint = "\n\nCheck the hub with 'scion hub status'."
 
 // newHintTestHubCtx returns a HubContext whose real hubclient talks to an
 // httptest hub driven by handler, with HOME and agent context isolated.
 func newHintTestHubCtx(t *testing.T, handler http.HandlerFunc) (*HubContext, *httptest.Server) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("SCION_AGENT_ID", "")
+	clearHubCredentialEnv(t)
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
@@ -64,7 +65,7 @@ func noContentHub(w http.ResponseWriter, _ *http.Request) {
 
 // TestWrapHubError_EmptyResponseOnSyncPaths drives each sync and register
 // call against a hub that answers 204. The rendered message must carry the
-// empty-response note and no local-only hint, and the error chain must still
+// empty-response note and no hub-check hint, and the error chain must still
 // reach apiclient.ErrNoContent (ptone/scion#3785).
 //
 // The register project, compare agents and sync agents subtests call the
@@ -81,30 +82,30 @@ func TestWrapHubError_EmptyResponseOnSyncPaths(t *testing.T) {
 		hubCtx, _ := newHintTestHubCtx(t, noContentHub)
 		err := registerProject(context.Background(), hubCtx, "proj", true)
 		require.Error(t, err)
-		got := wrapHubError(fmt.Errorf("failed to register project: %w", err))
+		got := wrapHubError(hubCtx.Endpoint, fmt.Errorf("failed to register project: %w", err))
 		assert.Equal(t, "failed to register project: server returned no content (status: 204)"+note, got.Error())
 		assert.ErrorIs(t, got, apiclient.ErrNoContent)
-		assert.NotContains(t, got.Error(), "local-only")
+		assert.NotContains(t, got.Error(), "scion hub status")
 	})
 
 	t.Run("compare agents", func(t *testing.T) {
 		hubCtx, _ := newHintTestHubCtx(t, noContentHub)
 		_, err := CompareAgents(context.Background(), hubCtx)
 		require.Error(t, err)
-		got := wrapHubError(fmt.Errorf("failed to compare agents: %w", err))
+		got := wrapHubError(hubCtx.Endpoint, fmt.Errorf("failed to compare agents: %w", err))
 		assert.Equal(t, "failed to compare agents: failed to list Hub agents: server returned no content (status: 204)"+note, got.Error())
 		assert.ErrorIs(t, got, apiclient.ErrNoContent)
-		assert.NotContains(t, got.Error(), "local-only")
+		assert.NotContains(t, got.Error(), "scion hub status")
 	})
 
 	t.Run("sync agents", func(t *testing.T) {
 		hubCtx, _ := newHintTestHubCtx(t, noContentHub)
 		err := ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: []string{"a1"}}, true)
 		require.Error(t, err)
-		got := wrapHubError(fmt.Errorf("failed to sync agents: %w", err))
+		got := wrapHubError(hubCtx.Endpoint, fmt.Errorf("failed to sync agents: %w", err))
 		assert.Equal(t, "failed to sync agents: failed to register agent 'a1': server returned no content (status: 204)"+note, got.Error())
 		assert.ErrorIs(t, got, apiclient.ErrNoContent)
-		assert.NotContains(t, got.Error(), "local-only")
+		assert.NotContains(t, got.Error(), "scion hub status")
 	})
 
 	t.Run("global project lookup", func(t *testing.T) {
@@ -113,7 +114,7 @@ func TestWrapHubError_EmptyResponseOnSyncPaths(t *testing.T) {
 		require.Error(t, err)
 		assert.Equal(t, "failed to look up the Global project on hub "+srv.URL+": server returned no content (status: 204)"+note, err.Error())
 		assert.ErrorIs(t, err, apiclient.ErrNoContent)
-		assert.NotContains(t, err.Error(), "local-only")
+		assert.NotContains(t, err.Error(), "scion hub status")
 	})
 
 	t.Run("hub-managed agent also gets the note", func(t *testing.T) {
@@ -121,7 +122,7 @@ func TestWrapHubError_EmptyResponseOnSyncPaths(t *testing.T) {
 		t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
 		err := registerProject(context.Background(), hubCtx, "proj", true)
 		require.Error(t, err)
-		got := wrapHubError(fmt.Errorf("failed to register project: %w", err))
+		got := wrapHubError(hubCtx.Endpoint, fmt.Errorf("failed to register project: %w", err))
 		assert.Equal(t, "failed to register project: server returned no content (status: 204)"+note, got.Error())
 		assert.ErrorIs(t, got, apiclient.ErrNoContent)
 	})
@@ -129,7 +130,7 @@ func TestWrapHubError_EmptyResponseOnSyncPaths(t *testing.T) {
 
 // TestWrapHubError_OtherErrorsUnchanged pins the rendering of the other
 // error classes on the same paths so the empty-response branch does not
-// swallow them: a connection failure and an API error keep the local-only
+// swallow them: a connection failure and an API error keep the hub-check
 // hint, a 401 keeps the login guidance, and a 401 inside a hub-managed agent
 // keeps the "hub rejected this agent's credentials" message.
 func TestWrapHubError_OtherErrorsUnchanged(t *testing.T) {
@@ -139,8 +140,8 @@ func TestWrapHubError_OtherErrorsUnchanged(t *testing.T) {
 		err := registerProject(context.Background(), hubCtx, "proj", true)
 		require.Error(t, err)
 		wrapped := fmt.Errorf("failed to register project: %w", err)
-		got := wrapHubError(wrapped)
-		assert.Equal(t, wrapped.Error()+localOnlyHintText, got.Error())
+		got := wrapHubError(hubCtx.Endpoint, wrapped)
+		assert.Equal(t, wrapped.Error()+remoteHubCheckHint, got.Error())
 		assert.NotContains(t, got.Error(), "empty response")
 	})
 
@@ -152,7 +153,7 @@ func TestWrapHubError_OtherErrorsUnchanged(t *testing.T) {
 		})
 		_, err := CompareAgents(context.Background(), hubCtx)
 		require.Error(t, err)
-		got := wrapHubError(fmt.Errorf("failed to compare agents: %w", err))
+		got := wrapHubError(hubCtx.Endpoint, fmt.Errorf("failed to compare agents: %w", err))
 		assert.Equal(t, "authentication failed, login to hub with 'scion hub auth login'", got.Error())
 	})
 
@@ -166,7 +167,7 @@ func TestWrapHubError_OtherErrorsUnchanged(t *testing.T) {
 		_, err := CompareAgents(context.Background(), hubCtx)
 		require.Error(t, err)
 		wrapped := fmt.Errorf("failed to compare agents: %w", err)
-		got := wrapHubError(wrapped)
+		got := wrapHubError(hubCtx.Endpoint, wrapped)
 		assert.Equal(t, "hub rejected this agent's credentials: "+wrapped.Error(), got.Error())
 		assert.True(t, apiclient.IsUnauthorizedError(got), "the 401 must stay in the error chain")
 		assert.NotContains(t, got.Error(), "empty response")
@@ -182,8 +183,8 @@ func TestWrapHubError_OtherErrorsUnchanged(t *testing.T) {
 		err := ExecuteSync(context.Background(), hubCtx, &SyncResult{ToRegister: []string{"a1"}}, true)
 		require.Error(t, err)
 		wrapped := fmt.Errorf("failed to sync agents: %w", err)
-		got := wrapHubError(wrapped)
-		assert.Equal(t, wrapped.Error()+localOnlyHintText, got.Error())
+		got := wrapHubError(hubCtx.Endpoint, wrapped)
+		assert.Equal(t, wrapped.Error()+remoteHubCheckHint, got.Error())
 		assert.NotContains(t, got.Error(), "empty response")
 	})
 }

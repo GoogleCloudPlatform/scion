@@ -156,6 +156,18 @@ interface V1ServerHubConfig {
   stalled_threshold?: string;
   gcp_iam_check_mode?: string;
   gcp_iam_deny_unknown_policy?: string;
+  observability?: V1ServerHubObservabilityConfig;
+}
+
+/**
+ * The hub's own metrics and trace export switches
+ * (server.hub.observability, ptone/scion#4914). Absent means unset: the
+ * hub keeps the rule that applied before the switch existed. null in a save
+ * clears a stored switch.
+ */
+interface V1ServerHubObservabilityConfig {
+  metrics_enabled?: boolean | null;
+  tracing_enabled?: boolean | null;
 }
 
 interface V1BrokerConfig {
@@ -239,6 +251,31 @@ interface V1GitHubAppConfig {
   api_base_url?: string;
   webhooks_enabled?: boolean;
   installation_url?: string;
+}
+
+/**
+ * The server.github_app block echoed by the main Server Config save. Every
+ * non-secret field is present, so an empty one goes as an explicit clear (0
+ * or ""): the server keeps the stored value for an omitted key, so dropping
+ * an empty field would restore it.
+ *
+ * The echo is the state when the card last loaded or saved, so a save from a
+ * stale tab can clear a value set elsewhere since then. That last-write-wins
+ * risk applies to every field on this page; optimistic concurrency is
+ * tracked in ptone/scion#3922.
+ */
+function githubAppEcho(
+  appId: number | undefined,
+  apiBaseUrl: string | undefined,
+  installationUrl: string | undefined,
+  webhooksEnabled: boolean
+): V1GitHubAppConfig {
+  return {
+    app_id: appId || 0,
+    api_base_url: apiBaseUrl || '',
+    webhooks_enabled: webhooksEnabled,
+    installation_url: installationUrl || '',
+  };
 }
 
 interface V1ServerConfig {
@@ -402,6 +439,8 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  public_url_status?: PublicURLStatus;
+  observability_export?: HubObservabilityExport;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -416,6 +455,11 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
+interface SkippedKey {
+  key: string;
+  reason: string;
+}
+
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
@@ -424,10 +468,53 @@ interface ReloadResult {
   // a hub restart (registry restart_required flag).
   applied_keys?: string[];
   pending_restart?: string[];
+  // Changed keys that were saved but are not in use (for example a
+  // notification channel that fails validation), each with a reason. They
+  // are not in applied_keys (ptone/scion#4466).
+  skipped?: SkippedKey[];
   // Workstation hubs: the settings.yaml changes applied live (also listed
   // in applied, next to the section names).
   file_applied?: string[];
   error?: string;
+}
+
+/**
+ * How the hub resolved its endpoint (server.hub.public_url) at startup
+ * (ptone/scion#3905). The endpoint is restart-required, so after a save the
+ * value in effect can differ from the stored value until the next restart.
+ */
+interface PublicURLStatus {
+  effective: string;
+  source: string; // "env" | "flag" | "database" | "file" | a fallback label
+  pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
+}
+
+/** The export project of the hub's own metrics and traces, as resolved at startup. */
+interface HubExportProject {
+  id?: string;
+  source?: string; // "env" | "file" | "metadata"; absent when none resolved
+  detail?: string; // why no project resolved
+}
+
+/** The startup state of one hub exporter (pkg/observability/hubexport.Decision). */
+interface HubExportDecision {
+  exporter: string;
+  setting: boolean | null;
+  enabled: boolean;
+  basis: string; // "setting" | "legacy" | "no_project" | "exporter_error"
+  reason: string;
+  project?: HubExportProject;
+}
+
+/**
+ * The hub's own metrics and trace exporters as started, and the export
+ * project with its source (ptone/scion#4914). Read-only: the export project
+ * is not a settings key.
+ */
+interface HubObservabilityExport {
+  project?: HubExportProject;
+  metrics?: HubExportDecision;
+  tracing?: HubExportDecision;
 }
 
 /** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
@@ -442,7 +529,7 @@ interface SectionMetadataInfo {
 /** A bootstrap-material key whose value differs from the DB value in a managed section. */
 interface SupersededKeyInfo {
   key: string;
-  source: string; // "seed_env" | "yaml" | "server_env"
+  source: string; // "seed_env" | "yaml" | "server_env" | "default"
 }
 
 /** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
@@ -530,6 +617,9 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   // gcp iam section
   'server.hub.gcp_iam_check_mode': 'IAM Check Mode',
   'server.hub.gcp_iam_deny_unknown_policy': 'Deny Policy Fallback',
+  // hub_observability section
+  'server.hub.observability.metrics_enabled': 'Hub Metrics Export',
+  'server.hub.observability.tracing_enabled': 'Hub Trace Export',
   // auto_expose_ports section
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
@@ -593,22 +683,38 @@ const KEYS_REJECTED_CODES = new Set([
 ]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+
+/** The koanf key of the hub's public URL. */
+const PUBLIC_URL_KEY = 'server.hub.public_url';
+const HUB_METRICS_ENABLED_KEY = 'server.hub.observability.metrics_enabled';
+const HUB_TRACING_ENABLED_KEY = 'server.hub.observability.tracing_enabled';
 
 /**
  * Workstation fields that `scion server start` overrides at every start
  * (workstation defaults and flags such as --enable-runtime-broker,
  * --dev-auth, --host, --storage-bucket), so a settings.yaml value has no
- * effect. Shown read-only on workstation hubs.
+ * effect. Shown read-only on workstation hubs. server.broker.host is not
+ * listed: --host sets only the hub and web listeners, and the runtime
+ * broker uses server.broker.host (see WORKSTATION_BROKER_HOST_DEFAULT).
  */
 const WORKSTATION_FLAG_MANAGED_KEYS: Set<string> = new Set([
   'server.broker.enabled',
-  'server.broker.host',
   'server.hub.host',
   'server.auth.dev_mode',
   'server.storage.provider',
   'server.secrets.backend',
 ]);
+
+/**
+ * Runtime broker listen host on a workstation hub when server.broker.host is
+ * unset. An empty value or 0.0.0.0 counts as unset (applyServerListenHosts
+ * in cmd/server_foreground.go).
+ */
+const WORKSTATION_BROKER_HOST_DEFAULT = '127.0.0.1';
+
+/** Whether a server.broker.host value counts as unset in workstation mode. */
+const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.0.0.0';
 
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
@@ -811,6 +917,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GitHub App
   @state() private githubAppConfigured = false;
+  /**
+   * True once GET /api/v1/github-app has succeeded, false after one fails.
+   * Until it is true the card's fields hold defaults, not the stored config,
+   * so the card cannot be saved and the main save does not echo
+   * server.github_app: either would send the defaults as explicit clears
+   * and wipe the stored App. A reload keeps the previous value while it is
+   * in flight (so the reload after a card save does not flash the "did not
+   * load" hint) and sets it from the result.
+   */
+  @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
@@ -851,6 +967,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private publicUrlStatus: PublicURLStatus | null = null;
+  @state() private observabilityExport: HubObservabilityExport | null = null;
+
+  // ── Hub observability export switches (ptone/scion#4914) ──
+  // null = unset (the earlier rule applies). Sent only when changed.
+  @state() private hubMetricsEnabled: boolean | null = null;
+  @state() private hubTracingEnabled: boolean | null = null;
+  private loadedHubMetricsEnabled: boolean | null = null;
+  private loadedHubTracingEnabled: boolean | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
@@ -1227,6 +1352,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .reload-info .restart {
       color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped {
+      color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
     }
 
     .loading-container {
@@ -1898,6 +2032,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Agent Secrets — absent means permissive (agents may write project scope).
     this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
 
+    // Hub observability export switches — absent means unset.
+    const obs = data.server?.hub?.observability;
+    this.hubMetricsEnabled = obs?.metrics_enabled ?? null;
+    this.hubTracingEnabled = obs?.tracing_enabled ?? null;
+    this.loadedHubMetricsEnabled = this.hubMetricsEnabled;
+    this.loadedHubTracingEnabled = this.hubTracingEnabled;
+
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes
       ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
@@ -1925,7 +2066,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.publicUrlStatus = data.public_url_status || null;
+    this.observabilityExport = data.observability_export || null;
     this.sectionMetadata = data.section_metadata || null;
+    // The hub leaves a pinned public URL out of superseded_keys
+    // (computeSupersededKeys), so the list is shown as it is.
     this.supersededKeys = data.superseded_keys || null;
     this.deprecatedEnvKeys =
       data.deprecated_env_keys && data.deprecated_env_keys.length > 0
@@ -2025,6 +2170,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    // The public URL is pinned by an operator setting on this node: the hub
+    // uses that value and ignores a saved one (ptone/scion#3905).
+    if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -2049,12 +2197,50 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderReadOnlyBadge(reason: ReadOnlyReason): ReturnType<typeof html> {
     const text =
-      reason === 'bootstrap'
-        ? '🔒 Managed via deployment configuration'
-        : reason === 'flag'
-          ? '🔒 Set by workstation startup defaults / server flags'
-          : '🔒 Set via environment variable';
+      reason === 'pinned'
+        ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
+        : reason === 'bootstrap'
+          ? '🔒 Managed via deployment configuration'
+          : reason === 'flag'
+            ? '🔒 Set by workstation startup defaults / server flags'
+            : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
+  }
+
+  /**
+   * Runtime broker host. On a workstation hub an unset value (empty or
+   * 0.0.0.0) shows the address the broker binds to instead. An env-pinned
+   * value shows as loaded, with no effective hint: the page does not see
+   * the environment value.
+   */
+  private renderBrokerHostField(): ReturnType<typeof html> {
+    const onInput = (e: Event) => {
+      this.brokerHost = (e.target as HTMLInputElement).value;
+    };
+    if (!this.layer0Editable) {
+      return this.renderFieldValue(
+        'server.broker.host',
+        this.brokerHost || '0.0.0.0',
+        html`<sl-input value=${this.brokerHost || '0.0.0.0'} @sl-input=${onInput}></sl-input>`
+      );
+    }
+    if (this.readOnlyReason('server.broker.host') === 'env') {
+      return this.renderFieldValue('server.broker.host', this.brokerHost, html``);
+    }
+    const unset = isUnsetBrokerHost(this.brokerHost);
+    return html`${this.renderFieldValue(
+      'server.broker.host',
+      unset ? WORKSTATION_BROKER_HOST_DEFAULT : this.brokerHost,
+      html`<sl-input
+        value=${this.brokerHost}
+        placeholder=${WORKSTATION_BROKER_HOST_DEFAULT}
+        @sl-input=${onInput}
+      ></sl-input>`
+    )}${unset
+      ? html`<span class="hint broker-host-effective"
+          >Effective: ${WORKSTATION_BROKER_HOST_DEFAULT} (empty or 0.0.0.0 counts as unset)</span
+        >`
+      : ''}`;
   }
 
   private renderFieldValue(
@@ -2198,6 +2384,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
     )
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2229,7 +2416,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ncDb && !containsMaskedValue(ncDb)) {
       server.notification_channels = ncDb;
     }
-    const ghDb = this.rawConfig?.server?.github_app;
+    // github_app is echoed only once the card has loaded it (see
+    // githubAppLoaded); left out, the server keeps what it has stored.
+    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghDb && !containsMaskedValue(ghDb)) {
       server.github_app = ghDb;
     }
@@ -2290,6 +2479,23 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
+  }
+
+  /**
+   * Adds the hub observability export switches to a hub payload block, each
+   * only when it changed: a switch stays unset until an admin sets it, and
+   * null (Use default) clears a stored switch so the earlier rule applies
+   * again. Both apply at the next hub restart (ptone/scion#4914).
+   */
+  private addHubObservability(hub: Record<string, unknown>, ok: (key: string) => boolean): void {
+    const obs: Record<string, unknown> = {};
+    if (ok(HUB_METRICS_ENABLED_KEY) && this.hubMetricsEnabled !== this.loadedHubMetricsEnabled) {
+      obs.metrics_enabled = this.hubMetricsEnabled;
+    }
+    if (ok(HUB_TRACING_ENABLED_KEY) && this.hubTracingEnabled !== this.loadedHubTracingEnabled) {
+      obs.tracing_enabled = this.hubTracingEnabled;
+    }
+    if (Object.keys(obs).length > 0) hub.observability = obs;
   }
 
   /**
@@ -2530,6 +2736,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
     if (ok('server.hub.gcp_iam_deny_unknown_policy'))
       hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
+    this.addHubObservability(hub, ok);
     server.hub = hub;
 
     // Broker
@@ -2619,7 +2826,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (oauthFile && !containsMaskedValue(oauthFile)) {
       server.oauth = oauthFile;
     }
-    const ghFile = this.rawConfig?.server?.github_app;
+    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghFile && !containsMaskedValue(ghFile)) {
       server.github_app = ghFile;
     }
@@ -2923,6 +3130,19 @@ export class ScionPageAdminServerConfig extends LitElement {
     return overridden ? this.envBadgeTemplate() : nothing;
   }
 
+  /**
+   * The hub URL in effect on this hub and where it came from, as resolved at
+   * startup. Not shown when an operator setting pins the field (the
+   * read-only value is then the value in effect).
+   */
+  private renderPublicUrlInEffect(): typeof nothing | ReturnType<typeof html> {
+    const st = this.publicUrlStatus;
+    if (!st || st.pinned_by || !st.effective) return nothing;
+    return html`<span class="hint public-url-in-effect"
+      >In effect: <code>${st.effective}</code> (from ${st.source})</span
+    >`;
+  }
+
   /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
   private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
@@ -3024,6 +3244,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           return 'settings.yaml';
         case 'server_env':
           return 'SCION_SERVER_*';
+        case 'default':
+          return 'built-in default';
         default:
           return s;
       }
@@ -3292,6 +3514,14 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${r.pending_restart && r.pending_restart.length > 0
           ? html`<div class="restart pending-restart">
               Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
+          : nothing}
+        ${r.skipped && r.skipped.length > 0
+          ? html`<div class="skipped skipped-keys">
+              Saved but not applied:
+              <ul>
+                ${r.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+              </ul>
             </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
@@ -3919,9 +4149,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block, except on the Kubernetes runtime, which does not
-                    offer Block — those agents get Passthrough instead. Assign requires a verified
-                    hub-scoped service account and gcpIamCheckMode=enforce.</span
+                    on any other broker get the runtime default: Block, or Passthrough on the
+                    Kubernetes runtime. Block set here applies on every runtime, Kubernetes
+                    included. Assign requires a verified hub-scoped service account and
+                    gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
@@ -4294,18 +4525,20 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            <span class="hint">Endpoint URL for agents to call back to the Hub</span>
+            <span class="hint"
+              >The Hub URL for agents, invite links and integrations. Applies after a restart.</span
+            >
             ${this.renderFieldValue(
-              'server.hub.public_url',
-              this.hubPublicUrl,
-              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+              PUBLIC_URL_KEY,
+              this.publicUrlStatus?.pinned_by ? this.publicUrlStatus.effective : this.hubPublicUrl,
+              html`${this.renderEnvBadge(PUBLIC_URL_KEY)}<sl-input
                   value=${this.hubPublicUrl}
                   placeholder="https://hub.example.com"
                   @sl-input=${(e: Event) => {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
-            )}
+            )}${this.renderPublicUrlInEffect()}
           </div>
           <div class="form-field full-width">
             <label>Monitoring Dashboard URL</label>
@@ -4451,9 +4684,112 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
-      ${this.renderNativeChatSection()} ${this.renderMessageBrokerSection()}
-      ${this.renderCrossProjectMessagingSection()}
+      ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
+      ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
     `;
+  }
+
+  /**
+   * The hub's own metrics and trace export: one switch per exporter (applies
+   * after a restart) and, read-only, the exporters as started with the
+   * export project and its source (ptone/scion#4914). The export project is
+   * not editable here.
+   */
+  private renderHubObservabilitySection(): ReturnType<typeof html> {
+    return html`
+      <div class="section hub-observability">
+        ${this.renderSectionHeader('Hub Observability Export', 'hub_observability')}
+        ${this.renderSectionMeta('hub_observability')}
+        <div class="form-grid">
+          ${this.renderHubExportSwitch('metrics')} ${this.renderHubExportSwitch('tracing')}
+          <div class="form-field full-width">
+            <label>Export Project</label>
+            ${this.renderHubExportProject()}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderHubExportSwitch(exporter: 'metrics' | 'tracing'): ReturnType<typeof html> {
+    const isMetrics = exporter === 'metrics';
+    const key = isMetrics ? HUB_METRICS_ENABLED_KEY : HUB_TRACING_ENABLED_KEY;
+    const value = isMetrics ? this.hubMetricsEnabled : this.hubTracingEnabled;
+    const loaded = isMetrics ? this.loadedHubMetricsEnabled : this.loadedHubTracingEnabled;
+    const running = this.observabilityExport?.[exporter];
+    const set = (v: boolean | null) => {
+      if (isMetrics) this.hubMetricsEnabled = v;
+      else this.hubTracingEnabled = v;
+    };
+    // An unset switch is drawn in the state the earlier rule gave at
+    // startup, or off when the hub did not report it; the label next to
+    // the toggle says the switch is unset either way.
+    const unsetChecked = running?.enabled ?? false;
+    const checked = value ?? unsetChecked;
+    // Toggling a switch that is not stored back to the state it showed
+    // while unset leaves it unset, so toggling twice sends nothing.
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
+    const defaultRule = isMetrics
+      ? 'on when SCION_SERVER_HUB_GCPPROJECTID is set'
+      : 'on when SCION_TRACING_ENABLED and SCION_SERVER_HUB_GCPPROJECTID are set';
+    const defaultLabel = running
+      ? `Default (${running.enabled ? 'on' : 'off'})`
+      : 'Default (state not reported)';
+    const display = value === null ? defaultLabel : value ? 'Enabled' : 'Disabled';
+    return html`<div class="form-field full-width">
+      ${this.renderFieldValue(
+        key,
+        display,
+        html`${this.renderEnvBadge(key)}<sl-switch
+            class="hub-export-switch"
+            data-key=${key}
+            ?checked=${checked}
+            @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
+            >${isMetrics ? 'Export hub metrics' : 'Export hub traces'}</sl-switch
+          >${value !== null
+            ? html`<sl-button
+                size="small"
+                variant="text"
+                class="hub-export-default"
+                data-key=${key}
+                @click=${() => set(null)}
+                >Use default</sl-button
+              >`
+            : html`<span class="hint hub-export-default-state" data-key=${key}
+                >${defaultLabel}</span
+              >`}`
+      )}
+      <span class="hint hub-export-restart" data-key=${key}
+        >${value === null ? `Not set: ${defaultRule}. ` : ''}Applies after restart.</span
+      >
+      ${running
+        ? html`<span class="hint hub-export-in-effect" data-key=${key}
+            >In effect: ${running.enabled ? 'on' : 'off'} (${running.reason})</span
+          >`
+        : nothing}
+    </div>`;
+  }
+
+  /** The export project resolved at startup and its source; read-only. */
+  private renderHubExportProject(): ReturnType<typeof html> {
+    const project = this.observabilityExport?.project;
+    if (!this.observabilityExport) {
+      return html`<span class="hint hub-export-project">Not reported by this hub.</span>`;
+    }
+    if (!project?.id) {
+      return html`<span class="read-only-value hub-export-project">None resolved</span>
+        <span class="hint">${project?.detail ?? ''}</span>
+        <span class="hint hub-export-project-remedy"
+          >Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud. Not editable here.</span
+        >`;
+    }
+    return html`<span class="read-only-value hub-export-project"
+        ><code>${project.id}</code> (source: ${project.source})</span
+      >
+      <span class="hint"
+        >SCION_SERVER_HUB_GCPPROJECTID when set, else the project of the Google Cloud metadata
+        server. Not editable here.</span
+      >`;
   }
 
   private renderCrossProjectMessagingSection() {
@@ -5492,16 +5828,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            ${this.renderFieldValue(
-              'server.broker.host',
-              this.brokerHost || '0.0.0.0',
-              html`<sl-input
-                value=${this.brokerHost || '0.0.0.0'}
-                @sl-input=${(e: Event) => {
-                  this.brokerHost = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
+            ${this.renderBrokerHostField()}
           </div>
           <div class="form-field full-width">
             <label>Hub Endpoint</label>
@@ -6361,18 +6688,27 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.githubAppSaving}
+            ?disabled=${!this.githubAppLoaded}
+            data-action="save-github-app"
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
             Save GitHub App Configuration
           </sl-button>
-          ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                >Configured</span
+          ${!this.githubAppLoaded
+            ? html`<span
+                class="hint"
+                data-github-app-not-loaded
+                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
               >`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Not configured</span
-              >`}
+            : this.githubAppConfigured
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Configured</span
+                >`
+              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                  >Not configured</span
+                >`}
         </div>
       </div>
 
@@ -6469,20 +6805,24 @@ export class ScionPageAdminServerConfig extends LitElement {
           if (!this.rawConfig.server) {
             this.rawConfig.server = {};
           }
-          const ghApp: V1GitHubAppConfig = { webhooks_enabled: data.webhooks_enabled };
-          if (data.app_id) ghApp.app_id = data.app_id;
-          if (data.api_base_url) ghApp.api_base_url = data.api_base_url;
-          if (data.installation_url) ghApp.installation_url = data.installation_url;
-          this.rawConfig.server.github_app = ghApp;
+          this.rawConfig.server.github_app = githubAppEcho(
+            data.app_id,
+            data.api_base_url,
+            data.installation_url,
+            data.webhooks_enabled
+          );
         }
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
+        this.githubAppLoaded = true;
       } else {
+        this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
-    } catch (e) {
-      // Non-critical — tab just shows unconfigured state
+    } catch {
+      this.githubAppLoaded = false;
+      this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
 
@@ -6618,17 +6958,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveGitHubApp(): Promise<void> {
+    // The fields hold defaults, not the stored config, until the load
+    // succeeds; saving them would clear the stored App (see githubAppLoaded).
+    if (!this.githubAppLoaded) return;
     this.githubAppSaving = true;
     this.githubAppError = null;
     this.githubAppSaveError = null;
     this.githubAppSuccess = null;
 
     try {
+      // Every non-secret field is sent, so a cleared one goes as an
+      // explicit clear (0 or ""). The endpoint reads null as "keep the
+      // stored value", so null cannot be used here.
       const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || undefined,
-        api_base_url: this.githubAppApiBaseUrl || undefined,
+        app_id: this.githubAppId || 0,
+        api_base_url: this.githubAppApiBaseUrl,
         webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl || undefined,
+        installation_url: this.githubAppInstallationUrl,
       };
 
       // Only send secrets if the user provided new values
@@ -6667,11 +7013,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         if (!this.rawConfig.server) {
           this.rawConfig.server = {};
         }
-        const ghApp: V1GitHubAppConfig = { webhooks_enabled: this.githubAppWebhooksEnabled };
-        if (this.githubAppId) ghApp.app_id = this.githubAppId;
-        if (this.githubAppApiBaseUrl) ghApp.api_base_url = this.githubAppApiBaseUrl;
-        if (this.githubAppInstallationUrl) ghApp.installation_url = this.githubAppInstallationUrl;
-        this.rawConfig.server.github_app = ghApp;
+        this.rawConfig.server.github_app = githubAppEcho(
+          this.githubAppId,
+          this.githubAppApiBaseUrl,
+          this.githubAppInstallationUrl,
+          this.githubAppWebhooksEnabled
+        );
       }
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();

@@ -16,22 +16,23 @@
  * Experiments tab E2E spec (ptone/scion#2217), under the main Playwright
  * config, against the real hub started by global-setup.
  *
- * Flow: toggle `web.terminal_workspace` off through the Experiments tab
- * (proving the Go<->TS contract end to end), confirm the legacy terminal
- * route stays put, re-enable through the API, and confirm the rewrite to
- * the persistent workspace route happens.
+ * Flow: toggle `web.agent_edit` (default off) on through the Experiments
+ * tab (proving the Go<->TS contract end to end), confirm a fresh page load
+ * receives it on, reset it through the API, and confirm the next load
+ * receives the registry default (off) again.
  *
  * State hygiene: all main-suite specs share one hub with one worker. This
  * spec (1) asserts up front that the flag has no stored override, failing
  * fast otherwise, so a leftover from a previous failed run is never
  * silently built on; and (2) always sends a `null` PUT in `finally`, so a
- * failure here cannot leak `false` into later specs.
+ * failure here cannot leak an override into later specs.
  */
 
 import { test, expect } from '@playwright/test';
 import { getE2EEnv } from './harness/env.js';
 
-const EXPERIMENT_NAME = 'web.terminal_workspace';
+const EXPERIMENT_NAME = 'web.agent_edit';
+const EXPERIMENT_TITLE = 'Edit agent';
 
 interface AdminExperimentEntry {
   name: string;
@@ -84,7 +85,7 @@ test.describe('Experiments tab', () => {
   const env = getE2EEnv();
   test.use({ storageState: env.adminStorageState, baseURL: env.baseURL });
 
-  test('toggles web.terminal_workspace through the tab; legacy route stays until re-enabled via the API', async ({
+  test('toggles web.agent_edit on through the tab; a reset through the API restores the default', async ({
     page,
   }) => {
     // Precondition: fail fast if a previous run left an override behind.
@@ -114,15 +115,16 @@ test.describe('Experiments tab', () => {
       // `toHaveAccessibleName` on the host element locator does not, since
       // the host and its shadow <input> are different accessibility nodes.
       await expect(
-        page.getByRole('switch', { name: /Enable Persistent terminal workspace/ })
+        page.getByRole('switch', { name: new RegExp(`Enable ${EXPERIMENT_TITLE}`) })
       ).toHaveCount(1);
 
-      // Only one experiment is registered as of this phase
-      // (web.terminal_workspace, ptone/scion#2217), so the tab has a
-      // single row and a single switch. Click the host custom element, not
-      // the raw shadow <input> (which Shoelace's visual control span
-      // intercepts pointer events for).
-      const toggleSwitch = page.locator('scion-admin-experiments sl-switch').first();
+      // The tab lists every registered experiment, so pick this row's switch
+      // by its slotted label. Click the host custom element, not the raw
+      // shadow <input> (which Shoelace's visual control span intercepts
+      // pointer events for).
+      const toggleSwitch = page
+        .locator('scion-admin-experiments sl-switch')
+        .filter({ hasText: `Enable ${EXPERIMENT_TITLE}` });
 
       const putResponse = page.waitForResponse(
         (res) => res.url().includes('/api/v1/admin/experiments') && res.request().method() === 'PUT'
@@ -132,25 +134,28 @@ test.describe('Experiments tab', () => {
       expect(res.status()).toBe(200);
       const body = (await res.json()) as AdminExperimentsResponse;
       currentRevision = body.revision;
+      expect(body.experiments.find((e) => e.name === EXPERIMENT_NAME)?.enabled).toBe(true);
 
       await expect(page.getByText(/Last changed by/)).toBeVisible({ timeout: 15_000 });
 
-      // The flag is now off hub-wide: a fresh page load keeps the legacy
-      // terminal route instead of rewriting it to /terminals/{id}. The
-      // rewrite happens before any agent lookup, so no agent needs to exist.
-      const agentId = crypto.randomUUID();
-      await page.goto(`/agents/${agentId}/terminal`, { waitUntil: 'domcontentloaded' });
-      await expect(page).toHaveURL(new RegExp(`/agents/${agentId}/terminal$`));
+      // The flag is now on hub-wide: a fresh page load receives it from
+      // GET /api/v1/experiments into the feature-flag bag.
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      await expect
+        .poll(() => page.evaluate((name) => window.__SCION_FEATURES__?.[name], EXPERIMENT_NAME))
+        .toBe(true);
 
-      // Re-enable through the API (not the tab) and confirm the rewrite.
-      const reEnabled = await putOverride(env.baseURL, env.devToken, null, currentRevision);
-      currentRevision = reEnabled.revision;
+      // Reset through the API (not the tab): the next load gets the default.
+      const reset = await putOverride(env.baseURL, env.devToken, null, currentRevision);
+      currentRevision = reset.revision;
 
-      await page.goto(`/agents/${agentId}/terminal`, { waitUntil: 'domcontentloaded' });
-      await expect(page).toHaveURL(new RegExp(`/terminals/${agentId}$`));
+      await page.goto('/', { waitUntil: 'domcontentloaded' });
+      await expect
+        .poll(() => page.evaluate((name) => window.__SCION_FEATURES__?.[name], EXPERIMENT_NAME))
+        .toBe(false);
     } finally {
       // Cleanup: always reset to "no override" so later main-suite specs
-      // never see this flag disabled, even if an assertion above failed.
+      // never see this flag enabled, even if an assertion above failed.
       const latest = await getAdminExperiments(env.baseURL, env.devToken);
       const latestEntry = latest.experiments.find((e) => e.name === EXPERIMENT_NAME);
       if (latestEntry?.override !== null) {

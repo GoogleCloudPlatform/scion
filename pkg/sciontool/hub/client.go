@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -159,6 +161,12 @@ type StatusUpdate struct {
 
 	// Exit tracking
 	ExitCode *int `json:"exitCode,omitempty"`
+
+	// SSHHostKey is the public key (authorized_keys line) of the agent's
+	// conduit SSH server host key. The hub records it with the conduit
+	// experiment on; the reported host key is bound to the reporting
+	// agent's current run.
+	SSHHostKey string `json:"sshHostKey,omitempty"`
 }
 
 // Client is a Hub API client for sciontool.
@@ -339,6 +347,12 @@ func (c *Client) UpdateStatus(ctx context.Context, status StatusUpdate) error {
 	return c.postJSONWithRetry(ctx, endpoint, body)
 }
 
+// ReportSSHHostKey sends the conduit SSH server's public host key
+// (authorized_keys line) in a status update carrying nothing else.
+func (c *Client) ReportSSHHostKey(ctx context.Context, publicKey string) error {
+	return c.UpdateStatus(ctx, StatusUpdate{SSHHostKey: publicKey})
+}
+
 func (c *Client) postJSONWithRetry(ctx context.Context, endpoint string, body []byte) error {
 	if err := c.writes.allow(); err != nil {
 		return err
@@ -499,7 +513,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ExposedPort
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -526,7 +540,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	var out ListPortsResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -555,9 +569,28 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+		return &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 	return nil
+}
+
+// StatusError is returned by the port API methods when the hub answers
+// with an unexpected HTTP status. Its message keeps the
+// "hub returned error <code>: <body>" form used by the other methods.
+type StatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// IsUnauthorized reports whether err carries an HTTP 401 from the hub,
+// meaning the hub did not accept the agent's current credential.
+func IsUnauthorized(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized
 }
 
 func (c *Client) absoluteURL(path string) string {
@@ -1100,22 +1133,24 @@ const (
 
 // tokenRefreshBackoff returns the delay before the next refresh retry after the
 // given number of consecutive failures, using exponential backoff (starting at
-// base, doubling each attempt) capped at max.
-func tokenRefreshBackoff(consecutiveFailures int, base, max time.Duration) time.Duration {
-	if consecutiveFailures < 1 {
-		consecutiveFailures = 1
-	}
-	delay := base
+// base, doubling each attempt) capped at limit. It is the delay the refresh
+// loop gets from the shared backoff helper after that many failures. Unlike
+// the helper-free version it replaced, it returns base when limit < base and
+// starts from the helper's default base when base <= 0; the loop reaches
+// neither case (its base is always positive and its limit at least its base).
+func tokenRefreshBackoff(consecutiveFailures int, base, limit time.Duration) time.Duration {
+	b := newTokenRefreshBackoff(base, limit)
+	d := b.Failure()
 	for i := 1; i < consecutiveFailures; i++ {
-		delay *= 2
-		if delay >= max {
-			return max
-		}
+		d = b.Failure()
 	}
-	if delay > max {
-		delay = max
-	}
-	return delay
+	return d
+}
+
+// newTokenRefreshBackoff returns the refresh loop's retry policy: doubling
+// from base to limit, without jitter.
+func newTokenRefreshBackoff(base, limit time.Duration) *backoff.Backoff {
+	return &backoff.Backoff{Base: base, Max: limit}
 }
 
 // StartTokenRefresh starts a background goroutine that refreshes the agent token
@@ -1183,6 +1218,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		// adjustRefreshForTransportTokens picks the earlier deadline.
 		refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 		consecutiveFailures := 0
+		retry := newTokenRefreshBackoff(retryBase, retryMax)
 		authLostNotified := false
 
 		for {
@@ -1242,13 +1278,14 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				}
 
 				consecutiveFailures++
-				refreshAt = clk.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
+				refreshAt = clk.Now().Add(retry.Failure())
 				continue
 			}
 
 			// Successful refresh: reset failure tracking and clear any prior
 			// auth-lost state so a later loss is reported again.
 			consecutiveFailures = 0
+			retry.Reset()
 			authLostNotified = false
 			tokenExpiry = newExpiry
 
@@ -2107,12 +2144,19 @@ func ChownTokenFile(uid, gid int) error {
 }
 
 // tokenFileMaxBytes bounds readTokenFileGuarded's read: the agent token is
-// a compact JWT-style string, so anything this long already isn't a token
-// this process (or the host-side agent manager) wrote.
+// a compact JWT-style string, so anything longer already isn't a token
+// this process (or the host-side agent manager) wrote. A longer file is
+// refused, not truncated.
 const tokenFileMaxBytes = 8192
 
+// warnTokenFile reports a token file that exists but was refused (for
+// example because it exceeds tokenFileMaxBytes), so a refusal is visible
+// rather than a silent empty token. A package var so tests can observe it.
+var warnTokenFile = log.Warn
+
 // ReadTokenFile reads the agent token from the canonical token file.
-// Returns empty string if the file doesn't exist or can't be read.
+// Returns empty string if the file doesn't exist or can't be read; a file
+// that exceeds the size limit is also refused, with a warning.
 //
 // This runs inside sciontool init, which is root for its whole life, so
 // the read goes through the same symlink-safe path WriteFileNoFollowChown
@@ -2123,6 +2167,10 @@ const tokenFileMaxBytes = 8192
 func ReadTokenFile() string {
 	token, err := readTokenFileGuarded(TokenFilePath())
 	if err != nil {
+		if errors.Is(err, dirfd.ErrTooLarge) {
+			// err already names the path.
+			warnTokenFile("Ignoring token file: %v", err)
+		}
 		return ""
 	}
 	token = strings.TrimSpace(token)
@@ -2130,6 +2178,32 @@ func ReadTokenFile() string {
 		return ""
 	}
 	return token
+}
+
+// ReadTokenFileUnder reads an agent token file at base/rel, for a caller
+// (the scion CLI) that resolves the file from its own home directory
+// rather than from TokenFilePath. base is trusted and opened normally, so
+// a home directory reached through a linked prefix still works; every
+// component of rel is opened without following a symbolic link. The file
+// itself gets exactly the checks ReadTokenFile applies (single-link regular
+// file, size limit, and the optional owner check), through the same
+// implementation.
+//
+// It returns the trimmed token, or an error: fs.ErrNotExist (wrapped) when
+// the file or a directory on the way to it does not exist, and
+// dirfd.ErrTooLarge or dirfd.ErrNotSingleLinkRegular (wrapped) when the
+// file is refused.
+func ReadTokenFileUnder(base, rel string) (string, error) {
+	dirFd, leaf, err := dirfd.OpenParentNoFollowUnder(base, rel)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	token, err := readTokenAt(dirFd, leaf, filepath.Join(base, rel))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(token), nil
 }
 
 // readTokenFileGuarded resolves path through the dirfd parent-directory
@@ -2152,32 +2226,23 @@ func readTokenFileGuarded(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
+	return readTokenAt(dirFd, leaf, path)
+}
 
+// readTokenAt applies the token-file checks to leaf, relative to the
+// already-resolved parent directory dirFd; path is used only in errors.
+func readTokenAt(dirFd int, leaf, path string) (string, error) {
 	var dirSt syscall.Stat_t
 	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
 		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
 	}
 
-	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	data, st, err := dirfd.ReadAtNoFollowStat(dirFd, leaf, tokenFileMaxBytes)
 	if err != nil {
-		return "", err
-	}
-	defer func() { _ = f.Close() }()
-
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
-		return "", fmt.Errorf("failed to stat %s: %w", path, err)
-	}
-	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
-		return "", fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+		return "", fmt.Errorf("%s: %w", path, err)
 	}
 	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
 		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
-	}
-
-	data, err := io.ReadAll(io.LimitReader(f, tokenFileMaxBytes))
-	if err != nil {
-		return "", fmt.Errorf("failed to read %s: %w", path, err)
 	}
 	return string(data), nil
 }
@@ -2438,6 +2503,9 @@ type AgentSelf struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
+	// MessageMode is the agent's effective message mode (none, lineage,
+	// branch, project, hub) as stored on the Hub.
+	MessageMode string `json:"messageMode,omitempty"`
 	// CreatedBy is the ID of the principal (user or agent) that created
 	// this agent.
 	CreatedBy string `json:"createdBy,omitempty"`
@@ -2484,6 +2552,59 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 	}
 
 	return &result, nil
+}
+
+// GetExperiments fetches the hub's experiment map, read live from GET
+// /api/v1/experiments: every registered web-layer experiment and whether it
+// is on now (this includes server-checked ones such as hub.artifacts). It
+// returns the enabled names, sorted. Unlike SCION_HUB_EXPERIMENTS, which is
+// fixed at start and lists only the experiments dispatched to the agent,
+// the answer is current (ptone/scion#4573).
+func (c *Client) GetExperiments(ctx context.Context) ([]string, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := strings.TrimSuffix(c.hubURL, "/") + "/api/v1/experiments"
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.setAgentAuth(req.Header, currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Experiments map[string]bool `json:"experiments"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	enabled := []string{}
+	for name, on := range result.Experiments {
+		if on {
+			enabled = append(enabled, name)
+		}
+	}
+	sort.Strings(enabled)
+	return enabled, nil
 }
 
 // --- Agent secret fetch (P2d, #127) ---

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // nc-promote-busy: "Promote to thread" always failed with "Agent is still
@@ -79,7 +78,7 @@ func setupPromoteBusyFixture(t *testing.T) (*Server, store.Store, WebChatStore, 
 	if !ok {
 		t.Fatal("store does not expose DB()")
 	}
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}

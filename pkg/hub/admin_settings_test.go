@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -114,7 +112,7 @@ func TestApplySettingsUpdates_PreservesServerKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applySettingsUpdatesFromBody(raw, &req, rawServerObject(body))
+	applySettingsUpdatesFromBody(raw, &req, body)
 
 	serverMap, ok := raw["server"].(map[string]interface{})
 	if !ok {

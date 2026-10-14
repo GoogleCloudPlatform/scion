@@ -129,6 +129,9 @@ type agentDeletionPlan struct {
 	// skipDispatch: a re-claim of a lease-expired finalizing row. Teardown
 	// already ran, so the engine goes straight to finalize.
 	skipDispatch bool
+	// fallback: req was derived because the finalizing row had no usable
+	// stored request, so what its teardown kept is unknown.
+	fallback bool
 }
 
 // agentDeleteParams are the caller's request parameters.
@@ -137,6 +140,12 @@ type agentDeleteParams struct {
 	removeBranch bool
 	force        bool
 	requestedBy  string
+	// hard always removes the row, whatever the soft-delete retention,
+	// without force's skipping of broker failures. Exception: a finalizing
+	// re-claim with a stored request keeps that request
+	// (ptone/scion#4183). Only the test identity purge (fixture_purge.go)
+	// sets it; no request parameter maps to it.
+	hard bool
 }
 
 // deleteClaimStopping reports whether a claim moves a's phase to stopping
@@ -164,6 +173,13 @@ func deleteClaimStopping(a *store.Agent) bool {
 // It returns the plan when this request now holds the claim, or nil when the
 // claim affected no row (the caller re-reads to decide).
 func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agentDeleteParams) (*agentDeletionPlan, error) {
+	// Flat placement pre-check (requirePinnedPlacement), before the claim
+	// writes anything: an agent whose saved placement is inconsistent is
+	// refused with a *PlacementConflictError (409), force or not, and its
+	// row and accounting are kept. A failed check is not observed absence.
+	if err := s.deletePlacementPreCheck(ctx, agentID); err != nil {
+		return nil, err
+	}
 	now := deleteClock()
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
@@ -178,6 +194,9 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		claim    int64
 		oldState string
 		req      store.DeletionRequestInfo
+		// fallback: req was derived because a finalizing row had no
+		// usable stored request (logged once the claim is confirmed).
+		fallback bool
 	)
 	set := store.DeletionFields{
 		State:         &deleting,
@@ -190,6 +209,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			claim = cur.DeletionClaim + 1
 			oldState = cur.DeletionState
+			fallback = false
 			// Capture prior once per delete attempt: a re-claim of an
 			// abandoned row keeps the original prior.
 			if cur.DeletionState == store.DeletionStateNone || cur.DeletionState == store.DeletionStateFailed {
@@ -221,22 +241,49 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 					post.Phase = stopping
 				}
 			}
-			// Soft unless force, no retention, or an incomplete async create
-			// (T1 §0c, evaluated on the post-claim row): those are always
-			// hard-deleted so the name can be reused.
-			req = store.DeletionRequestInfo{
-				DeleteFiles:  p.deleteFiles,
-				RemoveBranch: p.removeBranch,
-				Force:        p.force,
-				RequestedBy:  p.requestedBy,
-				Soft:         retention > 0 && !p.force && !post.IsIncompleteCreate(),
+			// writeRequest stores a newly derived request.
+			writeRequest := func() {
+				if b, err := json.Marshal(req); err == nil {
+					rs := string(b)
+					f.Request = &rs
+				}
 			}
-			if req.Soft && retainFiles {
-				req.DeleteFiles = false
-			}
-			if b, err := json.Marshal(req); err == nil {
-				rs := string(b)
-				f.Request = &rs
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				if stored, ok := storedDeletionRequest(cur); ok {
+					// Teardown ran under the stored request, so the
+					// finish keeps its soft/hard decision (and the whole
+					// request), whatever this retry asked for and
+					// whatever retention says now (ptone/scion#4183), as
+					// the in_doubt re-claim does; even a hard (purge)
+					// claim keeps it. The column is left untouched.
+					req = stored
+				} else {
+					// No usable stored request: decide from the current
+					// configuration and p.hard only, never from this
+					// retry's force, deleteFiles or removeBranch (the
+					// dispatch is skipped).
+					fallback = true
+					req = store.DeletionRequestInfo{
+						RequestedBy: p.requestedBy,
+						Soft:        retention > 0 && !p.hard && !post.IsIncompleteCreate(),
+					}
+					writeRequest()
+				}
+			} else {
+				// Soft unless force, hard, no retention, or an incomplete
+				// async create (T1 §0c, evaluated on the post-claim row):
+				// those are always hard-deleted so the name can be reused.
+				req = store.DeletionRequestInfo{
+					DeleteFiles:  p.deleteFiles,
+					RemoveBranch: p.removeBranch,
+					Force:        p.force,
+					RequestedBy:  p.requestedBy,
+					Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
+				}
+				if req.Soft && retainFiles {
+					req.DeleteFiles = false
+				}
+				writeRequest()
 			}
 		},
 	}
@@ -262,15 +309,59 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// lease expired); treat as not claimed.
 			return nil, nil
 		}
+		if fallback {
+			s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
+				"agent_id", agentID, "claim", claim)
+		}
 		return &agentDeletionPlan{
 			claim:        claim,
 			snapshot:     row,
 			req:          req,
 			prior:        row.ParseDeletionPrior(),
 			skipDispatch: oldState == store.DeletionStateFinalizing,
+			fallback:     fallback,
 		}, nil
 	}
 	return nil, nil
+}
+
+// deletePlacementPreCheck is claimAgentDeletion's placement check on the
+// current row. It is skipped where the delete reaches no Runtime Broker or
+// has already torn down: a managed runtime, a soft-deleted row (the claim
+// does not match it), and a finalizing row (its re-claim skips the
+// dispatch, ptone/scion#2890). A deleting row is skipped too: it reaches
+// the claim only once its lease has expired (an abandoned engine), and the
+// re-claim's dispatch check then refuses it with a rollback that restores
+// its prior phase (the run intent the abandoned engine recorded stays
+// stopped), where a refusal here would leave it stuck in deleting and
+// stopping. A row that is gone is left to the claim,
+// which then affects nothing. An unpinned agent with no Runtime Broker
+// passes, as before (checkAgentPinnedPlacement).
+func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) error {
+	row, err := s.store.GetAgent(ctx, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() ||
+		row.DeletionState == store.DeletionStateFinalizing || row.DeletionState == store.DeletionStateDeleting {
+		return nil
+	}
+	_, err = checkAgentPinnedPlacement(ctx, s.store, row)
+	return err
+}
+
+// storedDeletionRequest decodes a's stored delete request. ok is false when
+// it is missing or unreadable; unlike Agent.ParseDeletionRequest, that is
+// never read as the zero (hard) request.
+func storedDeletionRequest(a *store.Agent) (store.DeletionRequestInfo, bool) {
+	var req store.DeletionRequestInfo
+	if a.DeletionRequest == "" || json.Unmarshal([]byte(a.DeletionRequest), &req) != nil {
+		return store.DeletionRequestInfo{}, false
+	}
+	return req, true
 }
 
 // runAgentDeletion starts the engine for plan on a context detached from
@@ -664,6 +755,29 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		return e.rollback(store.DeletionCodeRuntimeError, managedDeleteFailedPrefix+err.Error()), false
 	}
 
+	// Placement check on the claimed snapshot, before the shortcuts below:
+	// the best-effort path finalizes without a dispatch when the Runtime
+	// Broker looks unreachable, so the dispatcher's backstop would never
+	// run for it, and an abandoned deleting row reaches here without the
+	// claim's pre-check. A refusal is handled as the backstop's would be
+	// (see below). For a pinned agent, a check that could not read the
+	// Runtime Broker row fails the delete too: force and best-effort
+	// finalize on a dispatch error, and a failed check is not evidence of
+	// teardown. An unpinned agent's store failure is left to the dispatch,
+	// as before.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		if refusal, ok := placementRefusalOf(err); ok {
+			s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; not dispatching, not finalizing",
+				"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
+			return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		}
+		if agent.IsPinned() {
+			s.agentLifecycleLog.Error("delete engine: could not check the pinned agent's placement; not dispatching, not finalizing",
+				"agent_id", agent.ID, "claim", e.plan.claim, "force", req.Force, "error", err)
+			return e.rollback(store.DeletionCodeRuntimeError, "Failed to check the agent's saved placement: "+err.Error()), false
+		}
+	}
+
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil || agent.RuntimeBrokerID == "" {
 		return deletionOutcome{}, true
@@ -711,6 +825,18 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		s.agentLifecycleLog.Warn("delete engine: dispatch refused as stale; abandoning the claim",
 			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
 		return e.abandonWith(staleDispatchMessage), false
+	}
+	if refusal, ok := placementRefusalOf(err); ok {
+		// The dispatcher's placement backstop refused the delete before
+		// sending anything: the agent's saved placement is inconsistent
+		// (requirePinnedPlacement). As for a run mismatch, finalizing
+		// could orphan a running workload and release its capacity with
+		// no evidence of teardown, so the delete fails as a conflict and
+		// restores the prior phase, under force and best-effort too.
+		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; nothing was dispatched, not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code,
+			"force", req.Force, "best_effort", bestEffort)
+		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
 	}
 	var refused *DeleteRunMismatchError
 	if errors.As(err, &refused) && refuseDeleteRunMismatch(req.Force, bestEffort) {

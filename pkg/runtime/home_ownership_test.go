@@ -737,13 +737,11 @@ func TestAdvertisedHostOwnerIDs_MatchesRunArgs(t *testing.T) {
 	}
 }
 
-// captureRuntimeLog sends runtimeLog to a buffer for the rest of the test.
+// captureRuntimeLog sends runtime log lines to a buffer for the rest of the test.
 func captureRuntimeLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logs bytes.Buffer
-	prev := runtimeLog
-	runtimeLog = slog.New(slog.NewTextHandler(&logs, nil))
-	t.Cleanup(func() { runtimeLog = prev })
+	setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 

@@ -40,6 +40,7 @@ func addUsage(t *testing.T, store *FileSessionState, u telemetry.SessionUsage) b
 // are left out, so no call is counted twice, and turn and tool counts are
 // the same as without usage.
 func TestAddUsage_NativeUsageAccumulatesAcrossHookProcesses(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 	store := NewFileSessionState(t.TempDir())
 
@@ -84,6 +85,7 @@ func TestAddUsage_NativeUsageAccumulatesAcrossHookProcesses(t *testing.T) {
 // With hook usage (or no source set), model-end events still carry the
 // session's usage, as before.
 func TestAddUsage_HookSourceModelEndStillCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for _, source := range []string{"hooks", ""} {
 		t.Run("source="+source, func(t *testing.T) {
 			t.Setenv("SCION_USAGE_SOURCE", source)
@@ -104,6 +106,7 @@ func TestAddUsage_HookSourceModelEndStillCounts(t *testing.T) {
 // A harness that supplies no usage at all still reports its session, with
 // zero calls and tokens and its turn and tool counts.
 func TestAddUsage_NoUsageReportsZero(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
@@ -123,6 +126,7 @@ func TestAddUsage_NoUsageReportsZero(t *testing.T) {
 // state yet, a session already closed at shutdown (the tombstone is left
 // as it was), or a zero increment.
 func TestAddUsage_NoOpenSession(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	if addUsage(t, store, telemetry.SessionUsage{Calls: 1}) {
 		t.Error("usage added with no state")
@@ -157,6 +161,7 @@ func TestAddUsage_NoOpenSession(t *testing.T) {
 // Usage added while hook processes run concurrently is neither lost nor
 // loses their counts.
 func TestAddUsage_ConcurrentWithHooksLosesNoCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 	store := NewFileSessionState(t.TempDir())
 	store.lockTimeout = testLockTimeoutGenerous
@@ -195,6 +200,7 @@ func TestAddUsage_ConcurrentWithHooksLosesNoCounts(t *testing.T) {
 // AddUsage runs as root in the init daemon, so like CloseOpenSession it
 // refuses a symlinked state file instead of writing through it.
 func TestAddUsage_SymlinkRefused(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	target := filepath.Join(t.TempDir(), "elsewhere.json")

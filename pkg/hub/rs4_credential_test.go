@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -964,10 +964,12 @@ func TestRS4_AST_MutationCallSites(t *testing.T) {
 	}
 
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards user access token create/revoke/delete calls, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards user access token create/revoke/delete calls.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards user access token create/revoke/delete calls, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(hubDir)
+	// scanned through guardScanSubdirs; guards user access token create/revoke/delete calls.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards user access token create/revoke/delete calls.
+	entries, err := readGuardScanDirs(hubDir)
 	require.NoError(t, err)
 
 	fset := token.NewFileSet()

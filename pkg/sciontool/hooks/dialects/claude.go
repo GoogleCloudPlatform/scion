@@ -27,7 +27,7 @@ func (d *ClaudeDialect) Name() string {
 // Claude Code sends events with the following format:
 //
 //	{
-//	  "hook_event_name": "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | etc.,
+//	  "hook_event_name": "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "UserPromptSubmit" | etc.,
 //	  "tool_name": "...",
 //	  "prompt": "...",
 //	  "message": "...",
@@ -100,7 +100,9 @@ func (d *ClaudeDialect) normalizeEventName(name string) string {
 		return hooks.EventPromptSubmit
 	case "PreToolUse":
 		return hooks.EventToolStart
-	case "PostToolUse":
+	case "PostToolUse", "PostToolUseFailure":
+		// A failed tool call arrives as PostToolUseFailure. It ends the tool
+		// call just like PostToolUse; Parse carries its error string.
 		return hooks.EventToolEnd
 	case "Stop":
 		return hooks.EventAgentEnd

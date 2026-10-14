@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -95,6 +96,10 @@ const (
 	// failure: the ref could not be resolved for a reason none of the codes
 	// above describes. The create path keeps it on the 5xx path.
 	SkillErrCodeResolveFailed = "resolve_failed"
+	// SkillErrCodeInstallFailed is the code for a required skill that was
+	// resolved but could not be downloaded, verified or installed into the
+	// agent home. The create path keeps it on the 5xx path.
+	SkillErrCodeInstallFailed = "install_failed"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
@@ -115,7 +120,52 @@ type SkillResolutionError struct {
 }
 
 func (e *SkillResolutionError) Error() string {
+	if e.Code == SkillErrCodeInstallFailed {
+		return fmt.Sprintf("required skill %q could not be installed: %s", e.URI, e.Message)
+	}
 	return fmt.Sprintf("required skill %q could not be resolved: %s", e.URI, e.Message)
+}
+
+// SkippedSkill records an optional skill that was resolved but could not be
+// installed, and so was left out of the agent. installResolvedSkills returns
+// them so a caller can surface them to the user; provisioning only logs them
+// today (surfacing them to the creator is a follow-up).
+type SkippedSkill struct {
+	URI    string
+	Reason string
+}
+
+// skillInstallFailedOnBroker is the fixed reason given to the user for an
+// install failure whose error text is not known to be safe to show: local
+// filesystem errors name broker paths. The full error is logged.
+const skillInstallFailedOnBroker = "install failed on the broker"
+
+// skillInstallError is an install failure whose public text is safe to show
+// to the user who created the agent: it names no broker filesystem path and
+// no download URL (a signed URL carries a token). Error returns the full
+// text, for the broker log.
+type skillInstallError struct {
+	public string
+	err    error
+}
+
+func (e *skillInstallError) Error() string { return e.err.Error() }
+func (e *skillInstallError) Unwrap() error { return e.err }
+
+// newSkillInstallError returns err with public as its user-facing text.
+func newSkillInstallError(public string, err error) error {
+	return &skillInstallError{public: public, err: err}
+}
+
+// publicInstallReason returns the user-facing text for an install failure:
+// the public text of a skillInstallError in err's chain, or the fixed
+// skillInstallFailedOnBroker for any other error.
+func publicInstallReason(err error) string {
+	var ie *skillInstallError
+	if errors.As(err, &ie) {
+		return ie.public
+	}
+	return skillInstallFailedOnBroker
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
@@ -361,6 +411,10 @@ type SkillCollisionEntry struct {
 // DestName(), the skill with the higher scope rank wins. On equal scope,
 // the later entry wins (last-writer-wins, consistent with mergeSkillRefs).
 //
+// A required loser makes the winner required (Optional is cleared), so an
+// optional winner that then fails to install fails the install instead of
+// silently dropping the required declaration.
+//
 // Returns the deduplicated list (preserving winner order of first appearance)
 // and a slice of collision entries for diagnostics.
 func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]ResolvedSkill, []SkillCollisionEntry) {
@@ -402,6 +456,11 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 			winner = existing.skill
 			loser = skill
 		}
+
+		// A required loser makes the winner required: otherwise an optional
+		// winner that then fails to install would be skipped, and the
+		// required declaration would be dropped without an error (#5020).
+		winners[dest].skill.Optional = winners[dest].skill.Optional && loser.Optional
 
 		collisions = append(collisions, SkillCollisionEntry{
 			DestName:     dest,
@@ -455,19 +514,27 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 
 // installResolvedSkills downloads, verifies, and installs resolved skills
 // into the agent's skill directory.
+//
+// A skill that fails to install is handled by its Optional flag. An optional
+// skill is skipped: the failure is logged as a warning naming the skill and
+// the reason, the skill is returned in the skipped list, and the remaining
+// skills are still installed. A required skill fails the whole install with a
+// *SkillResolutionError (Code SkillErrCodeInstallFailed) naming the skill.
+// Its Message is user-facing (see publicInstallReason); the full error is
+// logged.
 func installResolvedSkills(
 	ctx context.Context,
 	skills []ResolvedSkill,
 	skillsDest string,
 	agentHome string,
-) (*SkillResolutionRecord, error) {
+) (*SkillResolutionRecord, []SkippedSkill, error) {
 	// S6: Resolve destination-name collisions via scope-based precedence.
 	// Previously this was a hard error; now collisions are resolved by dropping
 	// the lower-scope skill and logging a warning.
 	skills, collisions := deduplicateByDestName(ctx, skills)
 
 	if err := os.MkdirAll(skillsDest, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create skills directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to create skills directory: %w", err)
 	}
 
 	record := &SkillResolutionRecord{
@@ -476,15 +543,22 @@ func installResolvedSkills(
 		Collisions: collisions,
 	}
 
+	var skipped []SkippedSkill
 	for _, skill := range skills {
-		dest, err := skill.DestName()
+		entry, err := installSkillAt(ctx, skill, skillsDest)
 		if err != nil {
-			return nil, fmt.Errorf("skill %q has invalid destination name: %w", skill.URI, err)
-		}
-
-		entry, err := installOneSkill(ctx, skill, dest, skillsDest)
-		if err != nil {
-			return nil, fmt.Errorf("skill %q installation failed: %w", skill.URI, err)
+			reason := publicInstallReason(err)
+			if skill.Optional {
+				slog.WarnContext(ctx, "optional skill could not be installed; skipped",
+					"skill_uri", skill.URI, "skill_name", skill.Name,
+					"reason", reason, "error", err)
+				skipped = append(skipped, SkippedSkill{URI: skill.URI, Reason: reason})
+				continue
+			}
+			slog.WarnContext(ctx, "required skill could not be installed",
+				"skill_uri", skill.URI, "skill_name", skill.Name,
+				"reason", reason, "error", err)
+			return nil, nil, &SkillResolutionError{URI: skill.URI, Code: SkillErrCodeInstallFailed, Message: reason}
 		}
 		record.Skills = append(record.Skills, *entry)
 
@@ -500,31 +574,58 @@ func installResolvedSkills(
 		}
 	}
 
-	return record, nil
+	return record, skipped, nil
+}
+
+// installSkillAt validates skill's destination name and installs it under
+// skillsDest.
+func installSkillAt(ctx context.Context, skill ResolvedSkill, skillsDest string) (*SkillResolutionEntry, error) {
+	dest, err := skill.DestName()
+	if err != nil {
+		// The name comes from the skill, not the broker, so the text is safe.
+		return nil, newSkillInstallError(err.Error(), err)
+	}
+	return installOneSkill(ctx, skill, dest, skillsDest)
 }
 
 func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest string) (*SkillResolutionEntry, error) {
+	// Every source (cache or download) is staged first; finalDest is
+	// touched only by the final rename in commitStagedSkill, so a failed
+	// install leaves neither a half-written skill dir nor a removed
+	// pre-existing one behind (#5020: an optional skill's failure no longer
+	// fails the create, so such leftovers would reach the agent).
+	finalDest := filepath.Join(skillsDest, dest)
+	stagingDir, err := os.MkdirTemp(skillsDest, stagingDirPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create staging directory: %w", err)
+	}
+	defer func() {
+		// Clean up staging dir on any failure
+		_ = os.RemoveAll(stagingDir)
+	}()
+	skillStagingDir := filepath.Join(stagingDir, dest)
+
 	// Check cache before downloading
 	cache := SkillCacheFromContext(ctx)
 	if cache != nil && skill.Hash != "" {
 		if cachedPath, hit := cache.Get(skill.Hash); hit {
-			finalDest := filepath.Join(skillsDest, dest)
-			if _, err := os.Stat(finalDest); err == nil {
-				_ = os.RemoveAll(finalDest)
+			copyErr := cache.CopyToDir(cachedPath, skillStagingDir)
+			if copyErr == nil {
+				copyErr = verifyInstalledSkillHash(skillStagingDir, skill)
 			}
-			if err := cache.CopyToDir(cachedPath, finalDest); err == nil {
-				if err := verifyInstalledSkillHash(finalDest, skill); err != nil {
-					util.Debugf("provision: cached skill failed verification, falling through to download: %v", err)
-					_ = os.RemoveAll(finalDest)
-				} else {
-					util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
-					slog.InfoContext(ctx, "skill_content_cache: cache hit",
-						"skill", skill.Name, "version", skill.Version,
-						"hash", truncHash(skill.Hash), "cache_hit", true)
-					return buildSkillEntry(skill, dest, skillsDest)
+			if copyErr == nil {
+				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
+					return nil, err
 				}
+				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+				slog.InfoContext(ctx, "skill_content_cache: cache hit",
+					"skill", skill.Name, "version", skill.Version,
+					"hash", truncHash(skill.Hash), "cache_hit", true)
+				return buildSkillEntry(skill, dest, skillsDest)
 			}
 			// Cache entry unusable (copy or hash verification failed) — re-downloading.
+			util.Debugf("provision: cached skill unusable, falling through to download: %v", copyErr)
+			_ = os.RemoveAll(skillStagingDir)
 			slog.InfoContext(ctx, "skill_content_cache: cache error, re-downloading",
 				"skill", skill.Name, "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
@@ -535,17 +636,6 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		}
 	}
 
-	// Create staging directory
-	stagingDir, err := os.MkdirTemp(skillsDest, stagingDirPrefix)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create staging directory: %w", err)
-	}
-	defer func() {
-		// Clean up staging dir on any failure
-		_ = os.RemoveAll(stagingDir)
-	}()
-
-	skillStagingDir := filepath.Join(stagingDir, dest)
 	if err := os.MkdirAll(skillStagingDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create skill staging dir: %w", err)
 	}
@@ -561,7 +651,9 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	for _, f := range skill.Files {
 		// S3: Validate path safety
 		if err := validateFilePath(f.Path); err != nil {
-			return nil, fmt.Errorf("unsafe file path in skill %q: %w", skill.URI, err)
+			// The path comes from the skill bundle, so the text is safe.
+			msg := fmt.Sprintf("unsafe file path in skill %q: %v", skill.URI, err)
+			return nil, newSkillInstallError(msg, errors.New(msg))
 		}
 
 		destPath := filepath.Join(skillStagingDir, f.Path)
@@ -584,10 +676,10 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		// downloadSkillFile with the credential chosen above.
 		if f.Content != nil {
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
-				return nil, fmt.Errorf("failed to write %s: %w", f.Path, err)
+				return nil, wrapSkillFileError("failed to write", f.Path, err)
 			}
 		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghToken); err != nil {
-			return nil, fmt.Errorf("failed to download %s: %w", f.Path, err)
+			return nil, wrapSkillFileError("failed to download", f.Path, err)
 		}
 
 		// S2: Verify per-file hash, in whichever format the resolver supplied.
@@ -596,9 +688,9 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			return nil, fmt.Errorf("failed to hash %s: %w", f.Path, err)
 		}
 		if f.Hash != "" && actualHash != f.Hash {
-			return nil, fmt.Errorf(
-				"hash mismatch for file %q in skill %q: expected %s, got %s",
+			msg := fmt.Sprintf("hash mismatch for file %q in skill %q: expected %s, got %s",
 				f.Path, skill.URI, f.Hash, actualHash)
+			return nil, newSkillInstallError(msg, errors.New(msg))
 		}
 
 		fileEntries = append(fileEntries, FileEntry{
@@ -618,21 +710,14 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		}
 		bundleHash := transfer.ComputeContentHash(transferFiles)
 		if bundleHash != skill.Hash {
-			return nil, fmt.Errorf(
-				"bundle hash mismatch for skill %q: expected %s, got %s",
+			msg := fmt.Sprintf("bundle hash mismatch for skill %q: expected %s, got %s",
 				skill.URI, skill.Hash, bundleHash)
+			return nil, newSkillInstallError(msg, errors.New(msg))
 		}
 	}
 
-	// S3: Atomic install — remove existing destination and rename
-	finalDest := filepath.Join(skillsDest, dest)
-	if _, err := os.Stat(finalDest); err == nil {
-		if err := os.RemoveAll(finalDest); err != nil {
-			return nil, fmt.Errorf("failed to remove existing skill dir %s: %w", dest, err)
-		}
-	}
-	if err := os.Rename(skillStagingDir, finalDest); err != nil {
-		return nil, fmt.Errorf("failed to install skill %s: %w", dest, err)
+	if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
+		return nil, err
 	}
 
 	// Populate cache after successful download+verify+install
@@ -641,6 +726,33 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	}
 
 	return buildSkillEntry(skill, dest, skillsDest)
+}
+
+// commitStagedSkill moves the verified skill at staged to finalDest,
+// replacing any existing directory there (S3: atomic install).
+func commitStagedSkill(staged, finalDest, dest string) error {
+	if _, err := os.Stat(finalDest); err == nil {
+		if err := os.RemoveAll(finalDest); err != nil {
+			return fmt.Errorf("failed to remove existing skill dir %s: %w", dest, err)
+		}
+	}
+	if err := os.Rename(staged, finalDest); err != nil {
+		return fmt.Errorf("failed to install skill %s: %w", dest, err)
+	}
+	return nil
+}
+
+// wrapSkillFileError wraps err, a failure to write or download the skill file
+// at path (relative to the skill), as "<action> <path>: ...". It keeps a
+// user-facing text only when err has one; a local filesystem error, which
+// names a broker path, gets none, so the user sees the fixed reason.
+func wrapSkillFileError(action, path string, err error) error {
+	wrapped := fmt.Errorf("%s %s: %w", action, path, err)
+	var ie *skillInstallError
+	if errors.As(err, &ie) {
+		return newSkillInstallError(fmt.Sprintf("%s %s: %s", action, path, ie.public), wrapped)
+	}
+	return wrapped
 }
 
 // buildSkillEntry creates a SkillResolutionEntry for a successfully installed skill.
@@ -812,7 +924,9 @@ func isGitHubHost(host string) bool {
 func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghToken string) error {
 	parsed, err := url.Parse(fileURL)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		// The parse error quotes the URL, which may be signed, so neither
+		// text includes it.
+		return newSkillInstallError("invalid download URL", errors.New("invalid download URL"))
 	}
 
 	// S5: HTTPS only (except localhost)
@@ -821,7 +935,8 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		if parsed.Scheme == "http" && isLocalhost(host) {
 			// Allow HTTP for localhost
 		} else {
-			return fmt.Errorf("HTTPS required for skill downloads (got %s)", parsed.Scheme)
+			msg := fmt.Sprintf("HTTPS required for skill downloads (got %s)", parsed.Scheme)
+			return newSkillInstallError(msg, errors.New(msg))
 		}
 	}
 
@@ -841,7 +956,8 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		// Not err: it can quote the URL.
+		return fmt.Errorf("failed to create request for %s", parsed.Host)
 	}
 	if ghToken != "" && isGitHubHost(parsed.Hostname()) {
 		req.Header.Set("Authorization", "Bearer "+ghToken)
@@ -849,12 +965,22 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		// client.Do returns a *url.Error, whose text quotes the full URL; a
+		// signed URL carries a token in its query. Neither the user text nor
+		// the logged error includes it: only the host and the cause.
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			return newSkillInstallError("download failed", fmt.Errorf("download from %s failed", parsed.Host))
+		}
+		cause := transportFailureCause(ue)
+		public := "download failed: " + cause
+		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", parsed.Host, cause))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d", resp.StatusCode)
+		msg := fmt.Sprintf("download failed with status %d", resp.StatusCode)
+		return newSkillInstallError(msg, errors.New(msg))
 	}
 
 	// S5: Enforce size limit
@@ -873,13 +999,29 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	if n > maxSize {
 		_ = f.Close()
 		_ = os.Remove(destPath)
-		return fmt.Errorf("file exceeds maximum size of %d bytes", maxSize)
+		msg := fmt.Sprintf("file exceeds maximum size of %d bytes", maxSize)
+		return newSkillInstallError(msg, errors.New(msg))
 	}
 
 	// S5: Do not log the URL (may contain signed tokens)
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
 	return nil
+}
+
+// transportFailureCause returns the cause of a client.Do failure as text that
+// names no URL: ue.Err's text (ue itself quotes the URL), with a malformed
+// redirect Location, which net/http quotes and which may be signed too,
+// replaced. A nil ue.Err gives a fixed text rather than a panic.
+func transportFailureCause(ue *url.Error) string {
+	if ue.Err == nil {
+		return "unknown error"
+	}
+	cause := ue.Err.Error()
+	if strings.Contains(cause, "Location header") {
+		cause = "invalid redirect Location"
+	}
+	return cause
 }
 
 // writeSkillFileContent writes pre-fetched content bytes directly to destPath,
@@ -892,7 +1034,8 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 // the check here is a defensive backstop for any future resolver that sets Content.
 func writeSkillFileContent(content []byte, destPath string) error {
 	if int64(len(content)) > defaultMaxFileSize {
-		return fmt.Errorf("pre-fetched content exceeds maximum size of %d bytes", defaultMaxFileSize)
+		msg := fmt.Sprintf("pre-fetched content exceeds maximum size of %d bytes", defaultMaxFileSize)
+		return newSkillInstallError(msg, errors.New(msg))
 	}
 	f, err := os.Create(destPath)
 	if err != nil {

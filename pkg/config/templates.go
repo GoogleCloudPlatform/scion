@@ -163,6 +163,10 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
 	}
 
+	if err := api.ValidateMessageMode(cfg.MessageMode); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 
@@ -908,6 +912,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Model != "" {
 		result.Model = override.Model
 	}
+	if override.MessageMode != "" {
+		result.MessageMode = override.MessageMode
+	}
 	// ThinkingLevel is a *int: nil means "unset", so a nil override never
 	// clobbers a base value. Copy the pointee rather than the pointer — the
 	// merge's shallow copy above already aliases base's fields, and adding a
@@ -1159,6 +1166,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
+			if override.Cloud.TLS.CertFile != "" {
+				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
+			}
+			if override.Cloud.TLS.KeyFile != "" {
+				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
+			}
 		}
 		if override.Cloud.Batch != nil {
 			if result.Cloud.Batch == nil {
@@ -1267,12 +1280,18 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 				result.Filter.Sampling.Default = override.Filter.Sampling.Default
 			}
 			if override.Filter.Sampling.Rates != nil {
-				if result.Filter.Sampling.Rates == nil {
-					result.Filter.Sampling.Rates = make(map[string]float64)
+				// Build a fresh map: result.Filter.Sampling is only a
+				// shallow copy of base, so writing into its Rates would
+				// mutate the base config (for example a shared settings or
+				// hub default object) and leak rates between agents.
+				rates := make(map[string]float64, len(result.Filter.Sampling.Rates)+len(override.Filter.Sampling.Rates))
+				for k, v := range result.Filter.Sampling.Rates {
+					rates[k] = v
 				}
 				for k, v := range override.Filter.Sampling.Rates {
-					result.Filter.Sampling.Rates[k] = v
+					rates[k] = v
 				}
+				result.Filter.Sampling.Rates = rates
 			}
 		}
 	}

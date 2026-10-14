@@ -737,9 +737,13 @@ func TestUserStreamOpenClosed4403(t *testing.T) {
 // Accept fails; no bridge leaks.
 func TestBridgeCancelDuringOpening4499BothLegs(t *testing.T) {
 	pending := make(chan conduit.PendingStream, 1)
+	// The handler ctx is cancelled only after the target stream has left
+	// the opening state, so it orders the late Accept after the close.
+	handlerCtx := make(chan context.Context, 1)
 	targetCancelled := make(chan uint32, 1)
 	cfg := conduit.Config{
-		StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+		StreamHandler: conduit.StreamHandlerFunc(func(ctx context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+			handlerCtx <- ctx
 			pending <- ps
 			return nil // decide later
 		}),
@@ -760,6 +764,7 @@ func TestBridgeCancelDuringOpening4499BothLegs(t *testing.T) {
 		_, err := p.remote().OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
 		errc <- err
 	}()
+	hctx := relaytest.Wait(t, handlerCtx, "target handler ctx")
 	ps := relaytest.Wait(t, pending, "target StreamOpen")
 	cancel()
 	if err := relaytest.Wait(t, errc, "caller OpenStream"); !errors.Is(err, context.Canceled) {
@@ -768,6 +773,9 @@ func TestBridgeCancelDuringOpening4499BothLegs(t *testing.T) {
 	if code := relaytest.Wait(t, targetCancelled, "target StreamClose"); code != conduit.CloseCancelled {
 		t.Fatalf("target leg closed with %d, want 4499", code)
 	}
+	// The Interceptor sees the StreamClose before the session applies it;
+	// wait until the target stream has recorded the cancel.
+	relaytest.WaitClosed(t, hctx.Done(), "target stream cancel")
 	if _, err := ps.Accept(); !errors.Is(err, conduit.ErrStreamCancelled) {
 		t.Fatalf("late Accept = %v, want ErrStreamCancelled", err)
 	}

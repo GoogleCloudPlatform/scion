@@ -529,3 +529,100 @@ describe('rankCandidates: cross-group tie contract and deterministic IDs', () =>
     expect(ranked.highlight).toEqual([]);
   });
 });
+
+describe('multi-word queries: a space matches a word separator', () => {
+  it.each`
+    query            | field                  | expected
+    ${'native chat'} | ${'native-chat'}       | ${0}
+    ${'native chat'} | ${'native_chat'}       | ${0}
+    ${'native chat'} | ${'Native Chat'}       | ${0}
+    ${'native chat'} | ${'native-chat-ui'}    | ${1}
+    ${'tive cha'}    | ${'native-chat'}       | ${2}
+    ${'native chat'} | ${'my-native-chat'}    | ${2}
+    ${'native chat'} | ${'native-agent-chat'} | ${3}
+    ${'chat native'} | ${'native-chat'}       | ${3}
+    ${'native chat'} | ${'native-agent'}      | ${null}
+  `('classifies "$query" against "$field" as tier $expected', ({ query, field, expected }) => {
+    expect(classifyMatch(normalizeQuery(query), field)).toBe(expected);
+  });
+
+  it('does not treat "." or "@" as a word separator for a contiguous match', () => {
+    expect(classifyMatch(normalizeQuery('native chat'), 'native.chat')).toBe(3);
+    expect(classifyMatch(normalizeQuery('jane example'), 'jane@example.com')).toBe(3);
+  });
+
+  it('collapses inner whitespace runs in the query to one space', () => {
+    expect(normalizeQuery('  native \t  chat ')).toBe('native chat');
+    expect(classifyMatch(normalizeQuery('native   chat'), 'native-chat')).toBe(0);
+  });
+
+  it('keeps single-word queries matching literally', () => {
+    expect(classifyMatch(normalizeQuery('native-chat'), 'native-chat')).toBe(0);
+    expect(classifyMatch(normalizeQuery('native-chat'), 'native_chat')).toBeNull();
+    expect(classifyMatch(normalizeQuery('native-chat'), 'native chat')).toBeNull();
+    expect(classifyMatch(normalizeQuery('nativechat'), 'native-chat')).toBe(3);
+    expect(classifyMatch(normalizeQuery('chat'), 'native-chat')).toBe(2);
+  });
+
+  it('matches a hyphen typed inside a multi-word query only against a hyphen', () => {
+    expect(classifyMatch(normalizeQuery('native-chat ui'), 'native-chat-ui')).toBe(0);
+    expect(classifyMatch(normalizeQuery('native-chat ui'), 'native_chat ui')).toBeNull();
+  });
+
+  it('merges the highlights of out-of-order words whose first occurrences overlap', () => {
+    expect(classifyMatch(normalizeQuery('at nat'), 'nat')).toBe(3);
+    expect(highlightRangesFor('at nat', 'nat')).toEqual([{ start: 0, end: 3 }]);
+  });
+
+  it('treats a query with a trailing space as the single word', () => {
+    expect(normalizeQuery('native ')).toBe(normalizeQuery('native'));
+    for (const field of ['native', 'native-chat', 'my-native-chat', 'n-a-t-i-v-e', 'chat']) {
+      expect(classifyMatch(normalizeQuery('native '), field)).toBe(
+        classifyMatch(normalizeQuery('native'), field)
+      );
+      expect(highlightRangesFor('native ', field)).toEqual(highlightRangesFor('native', field));
+    }
+  });
+
+  it('highlights the hyphen a query space matched inside a contiguous match', () => {
+    expect(highlightRangesFor('native chat', 'Native-Chat')).toEqual([{ start: 0, end: 11 }]);
+    expect(highlightRangesFor('tive cha', 'my-native-chat')).toEqual([{ start: 5, end: 13 }]);
+  });
+
+  it('highlights the separator a query space matched in a subsequence match', () => {
+    expect(highlightRangesFor('native chat', 'native-agent-chat')).toEqual([
+      { start: 0, end: 7 },
+      { start: 13, end: 17 },
+    ]);
+  });
+
+  it('highlights each word of an out-of-order match at its first occurrence', () => {
+    expect(highlightRangesFor('chat native', 'native-chat')).toEqual([
+      { start: 0, end: 6 },
+      { start: 7, end: 11 },
+    ]);
+  });
+
+  it('ranks a contiguous separator match ahead of looser multi-word matches, which still appear', () => {
+    const exact = agentCandidate({ id: dmCandidateId('agent', 'a1'), label: 'native-chat' });
+    const apart = agentCandidate({
+      id: dmCandidateId('agent', 'a2'),
+      label: 'native-agent-chat',
+      activityMs: 3000,
+    });
+    const reversed = agentCandidate({
+      id: dmCandidateId('agent', 'a3'),
+      label: 'chat-native',
+      activityMs: 2000,
+    });
+    const unrelated = agentCandidate({ id: dmCandidateId('agent', 'a4'), label: 'native-agent' });
+    const ranked = rankCandidates('native chat', [apart, reversed, unrelated, exact]);
+    expect(ranked.map((r) => r.candidate.label)).toEqual([
+      'native-chat',
+      'native-agent-chat',
+      'chat-native',
+    ]);
+    expect(ranked.map((r) => r.tier)).toEqual([0, 3, 3]);
+    expect(ranked[0].highlight).toEqual([{ start: 0, end: 11 }]);
+  });
+});

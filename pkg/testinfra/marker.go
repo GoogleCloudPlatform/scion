@@ -24,7 +24,17 @@
 //     that no non-test pkg/hub file references Mark or the marker's ent
 //     create builder.
 //   - Read is called only at server startup, by the test admin gate in cmd,
-//     before the hub serves any request.
+//     before the hub serves any request. ReadWebSessionKey is likewise
+//     called only at server startup, in cmd, when test identities are on.
+//   - Unmark, like Mark, is called only by the offline host command
+//     (`scion server test-infra unmark`).
+//
+// The marker row also holds the hub-local test-identity web session key
+// (phase WS1, DEC-8): 64 bytes from crypto/rand that Mark generates. It is
+// never derived from any other input, never logged, and never part of
+// Marker. Unmark deletes it with the row, and a later Mark generates a new
+// one, so every test-identity web session cookie signed with the old key
+// stops validating.
 //
 // The one generic code path that walks the table is the hub-maintenance
 // timestamp normalization (pkg/store/entadapter/timestamp_normalize.go),
@@ -33,7 +43,9 @@
 package testinfra
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +67,71 @@ const MarkMutationType = "test_infra_mark"
 
 // ErrMarkerAbsent is returned by Read when the database has no marker row.
 var ErrMarkerAbsent = errors.New("test infrastructure marker absent")
+
+// UnmarkMutationType is the mutation_audits.mutation_type of the audit row
+// the unmark command writes in the same transaction as the delete.
+const UnmarkMutationType = "test_infra_unmark"
+
+// WebSessionKeyLen is the length in bytes of the test-identity web session
+// key (512 bits; the hub expands it into a 32-byte hash key and a 32-byte
+// block key).
+const WebSessionKeyLen = 64
+
+// Errors of ReadWebSessionKey besides ErrMarkerAbsent. Each one means the
+// hub runs without test-identity web sessions; none of them is fatal.
+var (
+	ErrWebSessionKeyMissing     = errors.New("test infrastructure marker has no web session key; mark the database again")
+	ErrWebSessionKeyInvalid     = errors.New("test infrastructure marker web session key is malformed")
+	ErrWebSessionKeyHubMismatch = errors.New("test infrastructure marker names a different hub id")
+	ErrWebSessionKeyClass       = errors.New(`test infrastructure marker class is not "test"`)
+)
+
+// randRead is the key source. Tests replace it to simulate a failure.
+var randRead = rand.Read
+
+// newWebSessionKey returns WebSessionKeyLen bytes from crypto/rand.
+func newWebSessionKey() ([]byte, error) {
+	key := make([]byte, WebSessionKeyLen)
+	if _, err := randRead(key); err != nil {
+		return nil, fmt.Errorf("generate web session key: %w", err)
+	}
+	if bytes.Equal(key, make([]byte, WebSessionKeyLen)) {
+		return nil, errors.New("generate web session key: random source returned zeros")
+	}
+	return key, nil
+}
+
+// ReadWebSessionKey returns the hub-local test-identity web session key
+// from the marker row. It requires the marker to name hubID and class
+// "test", and the key to be exactly WebSessionKeyLen bytes, not all zero.
+// It returns ErrMarkerAbsent, ErrWebSessionKeyHubMismatch,
+// ErrWebSessionKeyClass, ErrWebSessionKeyMissing, ErrWebSessionKeyInvalid
+// or a wrapped read error otherwise. The caller must never log the key.
+func ReadWebSessionKey(ctx context.Context, client *ent.Client, hubID string) ([]byte, error) {
+	if client == nil {
+		return nil, errors.New("test infrastructure marker: no database client")
+	}
+	row, err := client.TestInfraMarker.Get(ctx, MarkerID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, ErrMarkerAbsent
+		}
+		return nil, fmt.Errorf("read test infrastructure marker: %w", err)
+	}
+	switch {
+	case hubID == "" || row.HubID != hubID:
+		return nil, ErrWebSessionKeyHubMismatch
+	case !config.IsTestHubClass(row.Class):
+		return nil, ErrWebSessionKeyClass
+	case len(row.WebSessionKey) == 0:
+		return nil, ErrWebSessionKeyMissing
+	case len(row.WebSessionKey) != WebSessionKeyLen || bytes.Equal(row.WebSessionKey, make([]byte, WebSessionKeyLen)):
+		return nil, ErrWebSessionKeyInvalid
+	}
+	key := make([]byte, WebSessionKeyLen)
+	copy(key, row.WebSessionKey)
+	return key, nil
+}
 
 // ErrMarkerExists is returned by Mark when the database already has a
 // marker row. Re-designating a database is a deliberate host-side act:
@@ -134,6 +211,11 @@ func Mark(ctx context.Context, client *ent.Client, in MarkInput) (*Marker, error
 	}
 	now = now.UTC()
 
+	webSessionKey, err := newWebSessionKey()
+	if err != nil {
+		return nil, err
+	}
+
 	tx, err := client.Tx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -156,7 +238,8 @@ func Mark(ctx context.Context, client *ent.Client, in MarkInput) (*Marker, error
 		SetHubID(hubID).
 		SetClass(config.HubClassTest).
 		SetCreatedAt(now).
-		SetCreatedByHost(in.Host)
+		SetCreatedByHost(in.Host).
+		SetWebSessionKey(webSessionKey)
 	if len(in.Attested) > 0 {
 		create.SetAttested(in.Attested)
 	}
@@ -184,6 +267,77 @@ func Mark(ctx context.Context, client *ent.Client, in MarkInput) (*Marker, error
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit test infrastructure marker: %w", err)
+	}
+	return &Marker{
+		HubID:         row.HubID,
+		Class:         row.Class,
+		CreatedAt:     row.CreatedAt,
+		CreatedByHost: row.CreatedByHost,
+		Attested:      row.Attested,
+	}, nil
+}
+
+// UnmarkInput is the input of Unmark.
+type UnmarkInput struct {
+	// Operator identifies who ran the command, for the audit row.
+	Operator string
+	// Host is the host name the command ran on.
+	Host string
+	// Now is the unmarking time (wall clock of the host).
+	Now time.Time
+}
+
+// Unmark deletes the marker row, and with it the test-identity web session
+// key, and writes a test_infra_unmark mutation audit row in one
+// transaction. It returns the deleted marker, or ErrMarkerAbsent when there
+// is none.
+func Unmark(ctx context.Context, client *ent.Client, in UnmarkInput) (*Marker, error) {
+	if client == nil {
+		return nil, errors.New("test infrastructure marker: no database client")
+	}
+	operator := strings.TrimSpace(in.Operator)
+	if operator == "" {
+		operator = "unknown"
+	}
+	now := in.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+
+	tx, err := client.Tx(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	rollback := func(cause error) (*Marker, error) {
+		_ = tx.Rollback()
+		return nil, cause
+	}
+	row, err := tx.TestInfraMarker.Get(ctx, MarkerID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return rollback(ErrMarkerAbsent)
+		}
+		return rollback(fmt.Errorf("read test infrastructure marker: %w", err))
+	}
+	if err := tx.TestInfraMarker.DeleteOneID(MarkerID).Exec(ctx); err != nil {
+		return rollback(fmt.Errorf("delete test infrastructure marker: %w", err))
+	}
+	audit := entadapter.NewMutationAuditStore(tx.Client())
+	if err := audit.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+		Timestamp:          now,
+		MutationType:       UnmarkMutationType,
+		ActorPrincipalKind: "operator",
+		ActorPrincipalID:   operator,
+		TargetType:         "test_infra_marker",
+		TargetID:           MarkerID,
+		BeforeSummary: fmt.Sprintf("test infrastructure marker deleted: hub_id=%s class=%s host=%s operator=%s",
+			row.HubID, row.Class, in.Host, operator),
+	}); err != nil {
+		return rollback(fmt.Errorf("write test_infra_unmark audit row: %w", err))
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit test infrastructure marker delete: %w", err)
 	}
 	return &Marker{
 		HubID:         row.HubID,

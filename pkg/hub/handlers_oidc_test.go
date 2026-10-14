@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -43,35 +41,7 @@ import (
 func testOIDCServer(t *testing.T) *Server {
 	t.Helper()
 	srv, _ := testServer(t)
-
-	// Generate a test RSA key pair.
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	kid := computeKeyID(&privKey.PublicKey)
-	signingKey := &OIDCSigningKey{
-		KeyID:      kid,
-		PrivateKey: privKey,
-		PublicKey:  &privKey.PublicKey,
-		Active:     true,
-	}
-
-	// Create the RS256 signer (needed by identity token endpoint).
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
-	)
-	require.NoError(t, err)
-
-	mgr := &OIDCKeyManager{
-		activeKey: signingKey,
-		allKeys:   []*OIDCSigningKey{signingKey},
-		signer:    signer,
-		issuerURL: testOIDCIssuerURL,
-	}
-
-	srv.oidcKeyManager = mgr
-	srv.oidcIssuerURL = testOIDCIssuerURL
+	installTestOIDCKeyManager(t, srv)
 	return srv
 }
 
@@ -172,6 +142,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 				expectedClaims := []string{
 					"iss", "sub", "aud", "iat", "exp", "nbf", "jti",
 					"project_id", "agent_name", "ancestry", "root_user",
+					"email", "email_verified", "name", "scion_token_kind",
 				}
 				assert.Equal(t, expectedClaims, doc.ClaimsSupported)
 			}
@@ -509,6 +480,7 @@ func TestHandleAgentIdentityToken(t *testing.T) {
 				assert.Equal(t, "test-agent", tokenClaims.AgentName, "agent_name should be the agent slug")
 				assert.Equal(t, claims.Ancestry, tokenClaims.Ancestry, "ancestry should match")
 				assert.Equal(t, claims.Ancestry[0], tokenClaims.RootUser, "root_user should be ancestry[0]")
+				assert.Equal(t, "agent", tokenClaims.TokenKind, "scion_token_kind should be agent")
 
 				// Verify exp = now + token_lifetime (within 5 second tolerance)
 				expectedExpiry := time.Now().Add(15 * time.Minute)

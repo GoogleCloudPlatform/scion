@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -41,9 +41,9 @@ func TestCreateAgent_CapturesCreateInputs(t *testing.T) {
 	ctx := context.Background()
 
 	// Configure a hub-level telemetry default so we can prove it lands on
-	// the live InlineConfig but NOT on the CreateInputs snapshot (Amendment
-	// A1 point 2: resolveDerivedConfig writes hub defaults into InlineConfig
-	// in place).
+	// neither the live InlineConfig nor the CreateInputs snapshot: hub
+	// telemetry is resolved per dispatch, never written into the agent
+	// record (ptone/scion#4222).
 	srv.mu.Lock()
 	enabled := true
 	srv.config.TelemetryConfig = &api.TelemetryConfig{Enabled: &enabled}
@@ -91,15 +91,16 @@ func TestCreateAgent_CapturesCreateInputs(t *testing.T) {
 	assert.Equal(t, "explicit-model", ci.InlineConfig.Model)
 	assert.Equal(t, "explicit-value", ci.InlineConfig.Env["EXPLICIT_KEY"])
 
-	// The hub telemetry default must have landed on the live InlineConfig...
+	// The hub telemetry default must not land on the live InlineConfig
+	// (ptone/scion#4222)...
 	require.NotNil(t, persisted.AppliedConfig.InlineConfig)
-	require.NotNil(t, persisted.AppliedConfig.InlineConfig.Telemetry,
-		"hub telemetry default should be stamped onto the live InlineConfig")
+	assert.Nil(t, persisted.AppliedConfig.InlineConfig.Telemetry,
+		"hub telemetry default must not be stamped onto the live InlineConfig")
 
-	// ...but the CreateInputs snapshot, captured before that stamping ran,
-	// must NOT show it: it was never part of the explicit request.
+	// ...nor on the CreateInputs snapshot: it was never part of the
+	// explicit request.
 	assert.Nil(t, ci.InlineConfig.Telemetry,
-		"CreateInputs.InlineConfig must not observe hub defaults stamped onto AppliedConfig.InlineConfig after the snapshot was taken")
+		"CreateInputs.InlineConfig must not carry hub defaults")
 }
 
 // TestCreateAgent_CreateInputsIndependentOfLaterMutation is a narrower,

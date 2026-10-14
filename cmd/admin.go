@@ -137,7 +137,7 @@ func promoteUserToAdmin(ctx context.Context, s store.Store, email string, out io
 	}
 
 	// A hub test identity is never promoted: its role is fixed at issuance.
-	if user.IsTestFixture() || store.IsTestFixtureEmail(user.Email) {
+	if !user.IsHumanKind() || store.IsReservedTestIdentityEmail(user.Email) {
 		return fmt.Errorf("user %q is a hub test identity; test identities cannot be promoted to admin", email)
 	}
 

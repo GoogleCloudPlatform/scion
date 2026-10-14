@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -47,7 +47,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -113,10 +112,12 @@ func forEachHubFile(t *testing.T, fn func(name string, fset *token.FileSet, f *a
 	t.Helper()
 	dir := findHubDir(t)
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards message artifact admission and credential context uses, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards message artifact admission and credential context uses.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected for the call-site pins (identity.go and identity_credential.go call none of the pinned functions); the credential subject key test scans the principal directory through forEachHubAndPrincipalFile.
-	entries, err := os.ReadDir(dir)
+	// scanned through guardScanSubdirs; guards message artifact admission and credential context uses.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards message artifact admission and credential context uses.
+	entries, err := readGuardScanDirs(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +312,14 @@ func TestArtifactRefsAdmittedAfterAuthzInChatV2(t *testing.T) {
 func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 	got := hubCallSites(t, "artifactRefResolver", "contextWithCredentialContext")
 
-	wantResolver := map[stripSiteKey]bool{{"message_artifacts.go", "resolveArtifactRefs"}: true}
+	// artifactRecipientWarning builds it too, for the warning-only
+	// recipient check (ptone/scion#4575), which never resolves anything for
+	// the caller of ctx; it is pinned below and by
+	// TestArtifactRecipientCheckIsWarningOnly.
+	wantResolver := map[stripSiteKey]bool{
+		{"message_artifacts.go", "resolveArtifactRefs"}:      true,
+		{"message_artifacts.go", "artifactRecipientWarning"}: true,
+	}
 	if len(got["artifactRefResolver"]) == 0 {
 		t.Fatal("found no artifactRefResolver call sites: scanner broken")
 	}
@@ -331,38 +339,22 @@ func TestArtifactRefResolverReachableOnlyFromRequestContexts(t *testing.T) {
 		}
 	}
 
-	if calls, ok := funcCalls(t, stripSiteKey{"message_artifacts.go", "resolveArtifactRefs"}, "requestCredentialBindsIdentity"); !ok || !calls {
-		t.Error("resolveArtifactRefs must check that the request credential binds the current identity before resolving")
+	for key := range wantResolver {
+		if calls, ok := funcCalls(t, key, "requestCredentialBindsIdentity"); !ok || !calls {
+			t.Errorf("%s must check that the request credential binds the current identity before building the artifact service", key.function)
+		}
 	}
 }
 
 // forEachHubAndPrincipalFile runs fn over the non-test files directly in
-// pkg/hub (named by base name, as forEachHubFile does) and then over those
-// in pkg/hub/internal/principal, named by their path relative to pkg/hub
-// ("internal/principal/identity.go").
+// pkg/hub (named by base name) and in pkg/hub/internal/principal (named by
+// their path relative to pkg/hub, "internal/principal/identity.go"). It is
+// forEachHubFile, which scans every guardScanSubdirs directory, including
+// internal/principal; the name is kept so the credential subject key test
+// states that it relies on the principal directory being scanned.
 func forEachHubAndPrincipalFile(t *testing.T, fn func(name string, fset *token.FileSet, f *ast.File)) {
 	t.Helper()
 	forEachHubFile(t, fn)
-	const principalDir = "internal/principal"
-	dir := filepath.Join(findHubDir(t), filepath.FromSlash(principalDir))
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scans pkg/hub/internal/principal explicitly, in addition to pkg/hub itself.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
-		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
-		}
-		fn(principalDir+"/"+name, fset, f)
-	}
 }
 
 // TestCredentialSubjectKeyOnlyInIdentityAndAuthFiles widens the setter pin

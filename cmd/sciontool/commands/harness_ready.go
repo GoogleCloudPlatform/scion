@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -42,14 +44,16 @@ var (
 // read the init-run file.
 const readinessFileMode os.FileMode = 0o644
 
-// readinessFileMaxBytes bounds reads of either file; both hold one short line.
+// readinessFileMaxBytes bounds reads of either file; the init-run file holds
+// two short lines and the marker one. It equals the runtime probe's cap.
 const readinessFileMaxBytes = 256
 
 // writeInitRunFile starts a new readiness run: it removes any init-run file
 // and ready marker left by an earlier run, then atomically writes a new
-// init-run file with a fresh nonce and the mode for harness (SCION_HARNESS).
-// It returns the nonce. Removing the stale marker first means a marker from
-// the previous run can never satisfy the runtime's readiness check.
+// init-run file with a fresh nonce and the harness's ready spec (line 1 the
+// mode, line 2 the spec; see state.FormatInitRunSpec). It returns the nonce.
+// Removing the stale marker first means a marker from the previous run can
+// never satisfy the runtime's readiness check.
 //
 // A failure to remove a stale file (other than it not existing) is logged at
 // Warn and is not fatal: a stale marker carries the previous run's nonce, so
@@ -58,7 +62,7 @@ const readinessFileMaxBytes = 256
 // The init-run file is 0644, so the agent user can read the nonce and write
 // its own ready marker. That only affects message delivery timing for that
 // agent's own harness.
-func writeInitRunFile(harness string) (string, error) {
+func writeInitRunFile(spec api.ReadySpec) (string, error) {
 	for _, p := range []string{harnessReadyFilePath, initRunFilePath} {
 		if err := removeNoFollow(p); err != nil {
 			log.Warn("Harness readiness: removing stale %s: %v", p, err)
@@ -69,12 +73,37 @@ func writeInitRunFile(harness string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content := state.FormatInitRun(nonce, hooks.HarnessReadyMode(harness))
+	content := state.FormatInitRunSpec(nonce, spec)
 	if err := writeFileAtomicNoFollow(initRunFilePath, []byte(content), readinessFileMode); err != nil {
 		return "", err
 	}
 	return nonce, nil
 }
+
+// harnessReadyMarkerTime reports whether the ready marker carries nonce and,
+// if so, its mtime. Used by init's readiness watcher; same file checks as the
+// runtime probe (no symlinks, bounded read). The mtime comes from an lstat
+// after the read: the marker is only ever replaced by an atomic rename, so a
+// replacement between the two can only make the time later.
+func harnessReadyMarkerTime(nonce string) (time.Time, bool) {
+	data, err := dirfd.ReadFileNoFollow(harnessReadyFilePath, readinessFileMaxBytes)
+	if err != nil {
+		return time.Time{}, false
+	}
+	got, ok := state.ParseReadyMarker(string(data))
+	if !ok || got != nonce {
+		return time.Time{}, false
+	}
+	fi, err := os.Lstat(harnessReadyFilePath)
+	if err != nil || !fi.Mode().IsRegular() {
+		return time.Time{}, false
+	}
+	return fi.ModTime(), true
+}
+
+// markHarnessReadyFn is markHarnessReady; a variable so tests can observe
+// when the marker is written relative to the local status write.
+var markHarnessReadyFn = markHarnessReady
 
 // markHarnessReady writes the ready marker for the current init run when ev
 // is a qualifying readiness event. It never fails the hook and never waits:
@@ -98,17 +127,17 @@ func markHarnessReady(ev *hooks.Event) {
 		}
 		return
 	}
-	nonce, _, ok := state.ParseInitRun(string(data))
+	run, ok := state.ParseInitRunSpec(string(data))
 	if !ok {
 		log.Debug("harness ready marker: init-run file is not well formed")
 		return
 	}
 	if existing, err := dirfd.ReadFileNoFollow(harnessReadyFilePath, readinessFileMaxBytes); err == nil {
-		if got, ok := state.ParseReadyMarker(string(existing)); ok && got == nonce {
+		if got, ok := state.ParseReadyMarker(string(existing)); ok && got == run.Nonce {
 			return
 		}
 	}
-	if err := writeFileAtomicNoFollow(harnessReadyFilePath, []byte(state.FormatReadyMarker(nonce)), readinessFileMode); err != nil {
+	if err := writeFileAtomicNoFollow(harnessReadyFilePath, []byte(state.FormatReadyMarker(run.Nonce)), readinessFileMode); err != nil {
 		log.Debug("harness ready marker: write: %v", err)
 	}
 }

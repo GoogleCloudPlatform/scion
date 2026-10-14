@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -58,7 +59,7 @@ import (
 // The scan runs only when filter carries scion.project_path, or when filter
 // is empty or only {scion.agent: true} (the current and global projects).
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +137,8 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				agents[i].Activity = ""
 				// Best-effort convergence: only persist if on-disk state
 				// differs from the terminal phase we want to record.
-				if parsedInfo != nil && (parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "") {
+				// An owned manager writes only under a trusted project path.
+				if parsedInfo != nil && (parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "") && m.mayWriteEntryPath(agents[i]) {
 					if err := persistAgentInfoState(agentInfoJSON, terminalPhase, ""); err != nil {
 						slog.Debug("failed to persist terminal agent state", "path", agentInfoJSON, "err", err)
 					}
@@ -210,6 +212,17 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// Already terminal — preserve as-is
 			}
 		}
+		// A runtime that reports "starting" is authoritative: its start
+		// has not been confirmed (for example, one interrupted by a
+		// crash), so agent-info.json's phase — "created" from
+		// provisioning, or a previous run's "stopped", "error" or
+		// "running" — must not replace it. Otherwise list and the
+		// broker heartbeat would report a live start as stopped or as
+		// running (ptone/scion#4756).
+		if runtimePhase == string(state.PhaseStarting) {
+			agents[i].Phase = string(state.PhaseStarting)
+			agents[i].Activity = ""
+		}
 	}
 
 	for _, gp := range projectsToScan {
@@ -281,6 +294,11 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
+					continue
+				}
+				// An owned manager sees only the file-only agents its
+				// instance's durable ownership record claims.
+				if m.owner != nil && !m.ownsFileAgent(projectIDLabel(), e.Name()) {
 					continue
 				}
 
@@ -389,31 +407,34 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 }
 
 func persistAgentInfoState(path, phase, activity string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
+	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
+	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	if info.Phase == phase && info.Activity == activity {
-		return nil
-	}
+		if info.Phase == phase && info.Activity == activity {
+			return nil
+		}
 
-	info.Phase = phase
-	info.Activity = activity
+		info.Phase = phase
+		info.Activity = activity
 
-	updated, err := json.MarshalIndent(info, "", "  ")
-	if err != nil {
-		return err
-	}
+		updated, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
 
-	return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+	})
 }

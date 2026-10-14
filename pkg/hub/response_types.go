@@ -31,6 +31,9 @@ type AgentWithCapabilities struct {
 	CloudLogging        bool                             `json:"cloudLogging,omitempty"`
 	// Editability is set on the single-agent GET only.
 	Editability *AgentEditability `json:"editability,omitempty"`
+	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
+	// set on the single-agent GET only (agentSSHHostKey).
+	SSHHostKey string `json:"sshHostKey,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.Agent.
@@ -44,6 +47,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}{
 		AgentAlias:          AgentAlias(a.Agent),
 		Cap:                 a.Cap,
@@ -52,6 +56,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		HarnessCapabilities: a.HarnessCapabilities,
 		CloudLogging:        a.CloudLogging,
 		Editability:         a.Editability,
+		SSHHostKey:          a.SSHHostKey,
 	})
 }
 
@@ -67,6 +72,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 		CloudLogging        bool                             `json:"cloudLogging,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
+		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 	}
 	var wrapper WrapperFields
 	if err := json.Unmarshal(data, &wrapper); err != nil {
@@ -78,6 +84,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.HarnessCapabilities = wrapper.HarnessCapabilities
 	a.CloudLogging = wrapper.CloudLogging
 	a.Editability = wrapper.Editability
+	a.SSHHostKey = wrapper.SSHHostKey
 	return nil
 }
 

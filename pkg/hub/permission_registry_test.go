@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -399,10 +397,16 @@ func artifactPermissionUses(t *testing.T, constants map[string]string, skipHubFu
 		inArtifacts bool
 	}{{filepath.Join("..", "artifacts"), true}, {".", false}} {
 		// pkgmove:scan-covers pkg/hub/apierr
-		// unaffected: guards artifact permission ID literals, which errors.go and json_response.go do not contain.
+		// scanned through guardScanSubdirs; guards artifact permission ID literals (for "." only; ../artifacts is read alone).
 		// pkgmove:scan-covers pkg/hub/internal/principal
-		// unaffected: guards artifact permission ID literals, which identity.go and identity_credential.go do not contain.
-		entries, err := os.ReadDir(dir.path)
+		// scanned through guardScanSubdirs; guards artifact permission ID literals (for "." only; ../artifacts is read alone).
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// scanned through guardScanSubdirs once it exists; guards artifact permission ID literals (for "." only; ../artifacts is read alone).
+		read := os.ReadDir
+		if dir.path == "." {
+			read = readGuardScanDirs
+		}
+		entries, err := read(dir.path)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir.path, err)
 		}
@@ -546,7 +550,8 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 func TestTokenScopeSurfacesDoNotExposeStaleUATScopes(t *testing.T) {
 	cliHelp := permissions.UATScopeHelp()
 	for _, stale := range []string{"agent:start", "agent:stop", "agent:dispatch"} {
-		if strings.Contains(cliHelp, stale) {
+		// Whole scope names only: agent:stop_all is a valid scope.
+		if regexp.MustCompile(`(^|[^a-z_:])` + regexp.QuoteMeta(stale) + `($|[^a-z_])`).MatchString(cliHelp) {
 			t.Fatalf("generated CLI help still exposes stale UAT scope %q", stale)
 		}
 	}

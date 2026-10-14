@@ -60,7 +60,7 @@ var testStoreSeq atomic.Int64
 // The store is closed in t.Cleanup. A migrated in-memory database holds
 // several MiB of SQLite memory until its last connection closes, so a store
 // a test forgets to close stays resident for the rest of the package run;
-// enough of them tripped the pkg/hub memory guard (mem_guard_helpers_test.go).
+// enough of them tripped the pkg/hub memory guard (internal/hubtestutil/mem_guard.go).
 // Closing twice is harmless, so callers that close the store themselves (for
 // example to reopen a file-backed one) keep working.
 func newTestStore(t testing.TB, url string) (store.Store, error) {
@@ -95,7 +95,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 		return nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
-	if err := migrateTestStore(context.Background(), s); err != nil {
+	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 // cleanup loops, broker-auth nonce cache, OIDC key loops, ...) stop when the
 // test ends instead of keeping the whole
 // server graph reachable for the rest of the package run (ptone/scion#3641;
-// the package-exit leak guard in leak_guard_helpers_test.go enforces it).
+// the package-exit leak guard in internal/hubtestutil/leak_guard.go enforces it).
 // Use it instead of calling New directly in tests.
 //
 // Ordering: t.Cleanup runs last-registered first, so the server shuts down
@@ -176,8 +176,8 @@ type sqliteRestorer interface {
 
 // testStoreTemplate builds the migrate-once template the first time it is
 // called: it runs one full CompositeStore.Migrate (schema, backfills and
-// seeds) on the template database, under testMigrateMu like every other
-// test migration. Later calls return the first call's error.
+// seeds) on the template database. Later calls return the first call's
+// error.
 func testStoreTemplate(ctx context.Context) error {
 	testStoreTemplateOnce.Do(func() {
 		holder, err := (&sqlite.Driver{}).Open(testStoreTemplateURI)
@@ -192,7 +192,7 @@ func testStoreTemplate(ctx context.Context) error {
 			return
 		}
 		s := entadapter.NewCompositeStore(client)
-		err = migrateTestStore(ctx, s)
+		err = s.Migrate(ctx)
 		_ = s.Close()
 		if err != nil {
 			_ = holder.Close()
@@ -209,7 +209,7 @@ func testStoreTemplate(ctx context.Context) error {
 // connection to it open for the life of the test binary: an in-memory
 // database is dropped when its last connection closes. A raw driver
 // connection starts no goroutines, so the package-exit leak guard
-// (leak_guard_helpers_test.go), which counts database/sql connection
+// (internal/hubtestutil/leak_guard.go), which counts database/sql connection
 // openers, does not see it.
 const testStoreTemplateURI = "file:hubtesttemplate?mode=memory&cache=shared"
 

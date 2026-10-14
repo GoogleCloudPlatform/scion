@@ -30,6 +30,22 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
+// testHintEndpoint is the endpoint the hub-check hint describes in cmd
+// tests, so that a hub error's rendering does not depend on the settings or
+// environment of the machine running them. TestHintHubEndpoint_Resolves
+// covers the real resolver.
+const testHintEndpoint = "https://hub.example.com"
+
+// testHubCheckHint is the hub-check hint rendered for testHintEndpoint.
+const testHubCheckHint = "\n\nCheck the hub with 'scion hub status'."
+
+// realHintHubEndpoint is the production resolver, kept for its own test.
+var realHintHubEndpoint = hintHubEndpoint
+
+func init() {
+	hintHubEndpoint = func() string { return testHintEndpoint }
+}
+
 // transportErr builds an error shaped like the one apiclient.Transport
 // returns when the hub cannot be reached at all.
 func transportErr() error {
@@ -51,7 +67,7 @@ func apiErr(status int, code, msg string) error {
 }
 
 func TestWrapHubError_StatusTable(t *testing.T) {
-	const hint = "scion hub disable"
+	const hint = testHubCheckHint
 	tests := []struct {
 		name        string
 		err         error
@@ -114,29 +130,32 @@ func TestWrapHubError_NilAndIdempotent(t *testing.T) {
 	}
 	once := wrapHubError(transportErr())
 	twice := wrapHubError(fmt.Errorf("outer: %w", once))
-	if n := strings.Count(twice.Error(), "scion hub disable"); n != 1 {
+	if n := strings.Count(twice.Error(), "scion hub status"); n != 1 {
 		t.Errorf("expected exactly one hint after double wrap, got %d: %q", n, twice)
 	}
 }
 
-func TestWrapHubError_SuppressesLocalHintForAgents(t *testing.T) {
-	// A connectivity failure is the case where the local-only hint is shown
+func TestWrapHubError_SuppressesHubCheckHintForAgents(t *testing.T) {
+	// A connectivity failure is the case where the hub-check hint is shown
 	// to standalone users, so it is the meaningful case for agent suppression.
 	baseErr := transportErr()
 
-	t.Run("standalone CLI includes local-only hint", func(t *testing.T) {
+	t.Run("standalone CLI includes the hub-check hint", func(t *testing.T) {
 		t.Setenv("SCION_AGENT_ID", "")
 		got := wrapHubError(baseErr)
-		if !strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected local-only mode hint for standalone CLI, got: %s", got)
+		if got.Error() != baseErr.Error()+testHubCheckHint {
+			t.Errorf("expected the hub-check hint for standalone CLI, got: %s", got)
+		}
+		if strings.Contains(got.Error(), "local-only") || strings.Contains(got.Error(), "hub disable") {
+			t.Errorf("hint must not suggest local-only mode, got: %s", got)
 		}
 	})
 
-	t.Run("hub-managed agent omits local-only hint", func(t *testing.T) {
+	t.Run("hub-managed agent omits the hub-check hint", func(t *testing.T) {
 		t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
 		got := wrapHubError(baseErr)
-		if strings.Contains(got.Error(), "local-only mode") {
-			t.Errorf("expected no local-only mode hint for hub-managed agent, got: %s", got)
+		if got.Error() != baseErr.Error() {
+			t.Errorf("expected no hint for hub-managed agent, got: %s", got)
 		}
 		if !errors.Is(got, baseErr) {
 			t.Errorf("expected wrapped error to contain base error")
@@ -181,7 +200,7 @@ func TestShowUsageForError_HubFailuresSuppressUsage(t *testing.T) {
 
 // TestWrapHubError_EmptyResponseFromHubclient drives a real hubclient call
 // against a hub that answers 204 where a body is required, and checks the
-// exact rendered message: the empty-response note and no local-only hint.
+// exact rendered message: the empty-response note and no hub-check hint.
 // A transport failure and an API error from the same client keep their
 // existing rendering.
 func TestWrapHubError_EmptyResponseFromHubclient(t *testing.T) {
@@ -220,10 +239,56 @@ func TestWrapHubError_EmptyResponseFromHubclient(t *testing.T) {
 	server.Close()
 	_, err = client.Env().List(t.Context(), nil)
 	got = wrapHubError(err)
-	if got.Error() != err.Error()+localOnlyHint {
-		t.Errorf("connectivity failure should keep the local-only hint: got %q", got.Error())
+	if got.Error() != err.Error()+testHubCheckHint {
+		t.Errorf("connectivity failure should keep the hub-check hint: got %q", got.Error())
 	}
 	if strings.Contains(got.Error(), emptyResponseNote) {
 		t.Errorf("connectivity failure must not get the empty-response note: %q", got.Error())
+	}
+}
+
+// TestHubCheckHint_LocalAndRemote checks both hint texts and that the hint
+// follows the endpoint of the invocation.
+func TestHubCheckHint_LocalAndRemote(t *testing.T) {
+	for _, name := range []string{"SCION_HUB_TOKEN", "SCION_AUTH_TOKEN", "SCION_AGENT_ID", "SCION_DEV_TOKEN_FILE"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_hinttest")
+
+	const local = "\n\nIs the local server running? Check with 'scion server status'; start it with 'scion server start'."
+	if got := hubCheckHint("http://127.0.0.1:8080"); got != local {
+		t.Errorf("hubCheckHint(local) = %q, want %q", got, local)
+	}
+	if got := hubCheckHint("https://hub.example.com"); got != testHubCheckHint {
+		t.Errorf("hubCheckHint(remote) = %q, want %q", got, testHubCheckHint)
+	}
+
+	prev := hintHubEndpoint
+	t.Cleanup(func() { hintHubEndpoint = prev })
+	hintHubEndpoint = func() string { return "http://127.0.0.1:8080" }
+	if got := wrapHubError(transportErr()).Error(); got != transportErr().Error()+local {
+		t.Errorf("wrapHubError on the local endpoint = %q", got)
+	}
+}
+
+// TestHintHubEndpoint_Resolves checks the production resolver: the --hub
+// flag wins, then the environment.
+func TestHintHubEndpoint_Resolves(t *testing.T) {
+	origHub, origNoHub, origProject := hubEndpoint, noHub, projectPath
+	t.Cleanup(func() { hubEndpoint, noHub, projectPath = origHub, origNoHub, origProject })
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_HUB_URL", "")
+	t.Chdir(t.TempDir())
+	noHub, projectPath = false, ""
+
+	hubEndpoint = "https://flag.example.com"
+	t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.com")
+	if got := realHintHubEndpoint(); got != "https://flag.example.com" {
+		t.Errorf("with --hub: got %q", got)
+	}
+	hubEndpoint = ""
+	if got := realHintHubEndpoint(); got != "https://env.example.com" {
+		t.Errorf("from the environment: got %q", got)
 	}
 }

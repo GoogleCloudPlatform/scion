@@ -563,7 +563,13 @@ type LifecycleResponse struct {
 // body is the agent plus an optional warnings list; a body that cannot be
 // decoded is ignored, since the action itself succeeded.
 func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*LifecycleResponse, error) {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, nil, nil)
+	return s.lifecycleWithBody(ctx, agentID, action, nil)
+}
+
+// lifecycleWithBody is lifecycle with a request body; a nil reqBody posts
+// none.
+func (s *agentService) lifecycleWithBody(ctx context.Context, agentID, action string, reqBody interface{}) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, reqBody, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -584,6 +590,52 @@ func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*
 		}
 	}
 	return out, nil
+}
+
+// LifecycleStartOptions is the optional body of a start or restart.
+type LifecycleStartOptions struct {
+	// AcceptAsyncLaunch opts in to a non-blocking start or restart. A Hub
+	// that has async start enabled may then answer as soon as the broker
+	// accepts the start, with the agent in a pre-running phase and an
+	// active Launch; the client follows the launch with WaitForLaunch. A
+	// Hub that does not support or enable it ignores the field and answers
+	// synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+}
+
+// LifecycleOptionsStarter starts or restarts an agent with options. It is a
+// separate interface so AgentService implementations outside this package
+// are not affected; the client's agent service implements it.
+type LifecycleOptionsStarter interface {
+	// StartWithOptions is Start with a request body. Zero options post no
+	// body, exactly like Start. It never asks for a force-resume.
+	StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+	// RestartWithOptions is Restart with a request body. Zero options post
+	// no body, exactly like Restart.
+	RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error)
+}
+
+var _ LifecycleOptionsStarter = (*agentService)(nil)
+
+// StartWithOptions starts a stopped agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) StartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "start", lifecycleStartBody(opts))
+}
+
+// RestartWithOptions restarts an agent with options; see
+// LifecycleOptionsStarter.
+func (s *agentService) RestartWithOptions(ctx context.Context, agentID string, opts LifecycleStartOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "restart", lifecycleStartBody(opts))
+}
+
+// lifecycleStartBody returns the body for opts: nil (no body) for zero
+// options, so a plain start or restart is unchanged on the wire.
+func lifecycleStartBody(opts LifecycleStartOptions) interface{} {
+	if opts == (LifecycleStartOptions{}) {
+		return nil
+	}
+	return opts
 }
 
 // ResetAuth injects a fresh token into a running agent without restarting.
@@ -935,6 +987,16 @@ type OutboundMessageResult struct {
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.
 	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+	// DefaultAgentResult reports the delivery of a group post to the
+	// conversation's default agent. Set only for a group post that
+	// @mentioned no agent, in a conversation with a default agent.
+	DefaultAgentResult *messages.MentionResult `json:"default_agent_result,omitempty"`
+	// WokenAgents lists the agents a group post reached, through
+	// @mentions or the conversation's default agent.
+	WokenAgents []string `json:"woken_agents,omitempty"`
+	// NoAgentWoken is true when a group post reached no agent. Always
+	// false for other sends, and on hubs that predate this field.
+	NoAgentWoken bool `json:"no_agent_woken,omitempty"`
 	// ArtifactWarning is set when artifact references the message named
 	// were not attached. Empty on hubs that predate this field.
 	ArtifactWarning string `json:"artifact_warning,omitempty"`
@@ -965,6 +1027,9 @@ type BroadcastResponse struct {
 	Targeted         int            `json:"targeted"`
 	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+	// Starting counts targeted agents that are still initializing; the
+	// message is held until their harness is ready. Included in Targeted.
+	Starting int `json:"starting,omitempty"`
 }
 
 // BroadcastMessage broadcasts a structured message to all running agents in the project.

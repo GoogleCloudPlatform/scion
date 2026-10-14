@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -20,10 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
@@ -305,6 +310,9 @@ func TestImageStatusHandler_BareImageCheck(t *testing.T) {
 	if status != store.HarnessConfigImageStatusValid {
 		t.Errorf("expected status %q, got %q", store.HarnessConfigImageStatusValid, status)
 	}
+	if source, _ := resp["source"].(string); source != "local" {
+		t.Errorf("expected source %q, got %q", "local", source)
+	}
 }
 
 func TestImageStatusHandler_MultipleBrokersMixed(t *testing.T) {
@@ -360,5 +368,229 @@ func TestBrokerUnsupportedError(t *testing.T) {
 	err := &BrokerUnsupportedError{StatusCode: 404}
 	if err.Error() != "broker does not support this endpoint (HTTP 404)" {
 		t.Errorf("unexpected error message: %s", err.Error())
+	}
+}
+
+// fakeRegistryClient answers every registry request with statusCode and
+// counts the requests it served.
+type fakeRegistryClient struct {
+	statusCode int
+	calls      atomic.Int32
+}
+
+func (f *fakeRegistryClient) Do(req *http.Request) (*http.Response, error) {
+	f.calls.Add(1)
+	return &http.Response{
+		StatusCode: f.statusCode,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    req,
+	}, nil
+}
+
+// setupCheckImageTest returns a server whose registry checks are answered by
+// a fake registry with registryStatus, and a harness config for image.
+func setupCheckImageTest(t *testing.T, image string, registryStatus int) (*Server, store.Store, *store.HarnessConfig, *fakeRegistryClient) {
+	t.Helper()
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	srv, db := setupImageStatusTest(t)
+	reg := &fakeRegistryClient{statusCode: registryStatus}
+	srv.imageChecker = imagecheck.NewChecker(imagecheck.WithHTTPClient(reg))
+	hc := createTestHarnessConfig(t, db, "hc1", image)
+	return srv, db, hc, reg
+}
+
+// useHTTPBrokerClient points srv's broker client at plain HTTP brokers.
+func useHTTPBrokerClient(srv *Server) {
+	srv.brokerClient = &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: &neverConnectedTunnel{}},
+		httpClient:     newBrokerHTTPTransport(false, nil),
+	}
+}
+
+// doCheckImage runs the check-image handler and returns image_status and source.
+func doCheckImage(t *testing.T, srv *Server, hc *store.HarnessConfig) (status, source string) {
+	t.Helper()
+	req := imageStatusRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/check-image")
+	rr := httptest.NewRecorder()
+	srv.handleHarnessConfigCheckImage(rr, req, hc)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	status, _ = resp["image_status"].(string)
+	source, _ = resp["source"].(string)
+	return status, source
+}
+
+const qualifiedTestImage = "registry.example.com/team/agent:dev"
+
+func TestCheckImage_QualifiedLocalOnBroker_Registry404(t *testing.T) {
+	srv, db, hc, reg := setupCheckImageTest(t, qualifiedTestImage, http.StatusNotFound)
+	// The stored status reflects registry validity only, so a local find
+	// must leave this earlier registry result in place.
+	if err := db.UpdateHarnessConfigImageStatus(context.Background(), hc.ID, store.HarnessConfigImageStatusInvalid, time.Now()); err != nil {
+		t.Fatalf("UpdateHarnessConfigImageStatus: %v", err)
+	}
+	brokerTS := fakeBrokerServer(http.StatusOK, &BrokerImageStatusResponse{
+		LocalLong: &BrokerImageEntityState{Exists: true, Hash: "sha256:built-locally"},
+	})
+	defer brokerTS.Close()
+	createTestBroker(t, db, "broker1", "docker-broker", brokerTS.URL, []store.BrokerProfile{{Type: "docker"}}, nil)
+	useHTTPBrokerClient(srv)
+
+	status, source := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusValid || source != "local" {
+		t.Fatalf("got status %q source %q, want %q from %q", status, source, store.HarnessConfigImageStatusValid, "local")
+	}
+	if n := reg.calls.Load(); n != 0 {
+		t.Errorf("registry probed %d times for an image present locally, want 0", n)
+	}
+	got, err := db.GetHarnessConfig(context.Background(), hc.ID)
+	if err != nil {
+		t.Fatalf("GetHarnessConfig: %v", err)
+	}
+	if got.ImageStatus != store.HarnessConfigImageStatusInvalid {
+		t.Errorf("stored image status %q after a local-only find, want it unchanged at %q", got.ImageStatus, store.HarnessConfigImageStatusInvalid)
+	}
+}
+
+func TestCheckImage_QualifiedAbsentOnBroker_RegistryPresent(t *testing.T) {
+	srv, db, hc, _ := setupCheckImageTest(t, qualifiedTestImage, http.StatusOK)
+	brokerTS := fakeBrokerServer(http.StatusOK, &BrokerImageStatusResponse{
+		LocalLong: &BrokerImageEntityState{Exists: false},
+	})
+	defer brokerTS.Close()
+	createTestBroker(t, db, "broker1", "docker-broker", brokerTS.URL, []store.BrokerProfile{{Type: "docker"}}, nil)
+	useHTTPBrokerClient(srv)
+
+	status, source := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusValid || source != "registry" {
+		t.Fatalf("got status %q source %q, want %q from %q", status, source, store.HarnessConfigImageStatusValid, "registry")
+	}
+}
+
+func TestCheckImage_QualifiedAbsentEverywhere(t *testing.T) {
+	srv, db, hc, _ := setupCheckImageTest(t, qualifiedTestImage, http.StatusNotFound)
+	brokerTS := fakeBrokerServer(http.StatusOK, &BrokerImageStatusResponse{
+		LocalLong: &BrokerImageEntityState{Exists: false},
+	})
+	defer brokerTS.Close()
+	createTestBroker(t, db, "broker1", "docker-broker", brokerTS.URL, []store.BrokerProfile{{Type: "docker"}}, nil)
+	useHTTPBrokerClient(srv)
+
+	status, _ := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusInvalid {
+		t.Fatalf("got status %q, want %q", status, store.HarnessConfigImageStatusInvalid)
+	}
+}
+
+func TestCheckImage_QualifiedLocalOnHubRuntime_Registry404(t *testing.T) {
+	srv, _, hc, reg := setupCheckImageTest(t, qualifiedTestImage, http.StatusNotFound)
+	srv.imageManager = &fakeImageManager{exists: map[string]bool{qualifiedTestImage: true}}
+
+	status, source := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusValid || source != "local" {
+		t.Fatalf("got status %q source %q, want %q from %q", status, source, store.HarnessConfigImageStatusValid, "local")
+	}
+	if n := reg.calls.Load(); n != 0 {
+		t.Errorf("registry probed %d times for an image present locally, want 0", n)
+	}
+}
+
+// With neither a broker nor a hub runtime there is no local store to ask, so
+// the registry result is reported as before.
+func TestCheckImage_QualifiedNoLocalSource(t *testing.T) {
+	tests := []struct {
+		name           string
+		registryStatus int
+		wantStatus     string
+		wantSource     string
+	}{
+		{"registry 404", http.StatusNotFound, store.HarnessConfigImageStatusInvalid, ""},
+		{"registry 200", http.StatusOK, store.HarnessConfigImageStatusValid, "registry"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, hc, reg := setupCheckImageTest(t, qualifiedTestImage, tc.registryStatus)
+			status, source := doCheckImage(t, srv, hc)
+			if status != tc.wantStatus || source != tc.wantSource {
+				t.Fatalf("got status %q source %q, want %q from %q", status, source, tc.wantStatus, tc.wantSource)
+			}
+			if n := reg.calls.Load(); n != 1 {
+				t.Errorf("registry probed %d times, want 1", n)
+			}
+		})
+	}
+}
+
+// An error from one broker must not mask a find on another.
+func TestCheckImage_QualifiedBrokerErrorDoesNotMaskFind(t *testing.T) {
+	srv, db, hc, _ := setupCheckImageTest(t, qualifiedTestImage, http.StatusNotFound)
+	failingTS := fakeBrokerServer(http.StatusInternalServerError, nil)
+	defer failingTS.Close()
+	holdingTS := fakeBrokerServer(http.StatusOK, &BrokerImageStatusResponse{
+		LocalLong: &BrokerImageEntityState{Exists: true},
+	})
+	defer holdingTS.Close()
+	createTestBroker(t, db, "broker1", "failing-broker", failingTS.URL, []store.BrokerProfile{{Type: "docker"}}, nil)
+	createTestBroker(t, db, "broker2", "holding-broker", holdingTS.URL, []store.BrokerProfile{{Type: "podman"}}, nil)
+	useHTTPBrokerClient(srv)
+
+	status, source := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusValid || source != "local" {
+		t.Fatalf("got status %q source %q, want %q from %q", status, source, store.HarnessConfigImageStatusValid, "local")
+	}
+}
+
+// A malformed reference (Docker rejects upper-case repository names, so the
+// broker's ImageExists call fails) is not found locally and ends invalid
+// through the registry check.
+func TestCheckImage_QualifiedMalformedReference(t *testing.T) {
+	srv, db, hc, reg := setupCheckImageTest(t, "registry.example.com/Team/Agent:dev", http.StatusNotFound)
+	brokerTS := fakeBrokerServer(http.StatusInternalServerError, nil)
+	defer brokerTS.Close()
+	createTestBroker(t, db, "broker1", "docker-broker", brokerTS.URL, []store.BrokerProfile{{Type: "docker"}}, nil)
+	useHTTPBrokerClient(srv)
+
+	status, _ := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusInvalid {
+		t.Fatalf("got status %q, want %q", status, store.HarnessConfigImageStatusInvalid)
+	}
+	if n := reg.calls.Load(); n != 1 {
+		t.Errorf("registry probed %d times, want 1", n)
+	}
+}
+
+// An empty image is the only reference the image parser rejects; the handler
+// refuses it before any check runs.
+func TestCheckImage_EmptyImageRejected(t *testing.T) {
+	srv, _, hc, reg := setupCheckImageTest(t, "", http.StatusOK)
+	req := imageStatusRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/check-image")
+	rr := httptest.NewRecorder()
+	srv.handleHarnessConfigCheckImage(rr, req, hc)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "no_image") {
+		t.Errorf("expected error code no_image, got %s", rr.Body.String())
+	}
+	if n := reg.calls.Load(); n != 0 {
+		t.Errorf("registry probed %d times, want 0", n)
+	}
+}
+
+// With no node-bound broker, a bare name is checked against the hub's
+// co-located runtime.
+func TestCheckImage_BareOnHubRuntime(t *testing.T) {
+	srv, _, hc, _ := setupCheckImageTest(t, "my-custom-image", http.StatusNotFound)
+	srv.imageManager = &fakeImageManager{exists: map[string]bool{"my-custom-image": true}}
+
+	status, source := doCheckImage(t, srv, hc)
+	if status != store.HarnessConfigImageStatusValid || source != "local" {
+		t.Fatalf("got status %q source %q, want %q from %q", status, source, store.HarnessConfigImageStatusValid, "local")
 	}
 }

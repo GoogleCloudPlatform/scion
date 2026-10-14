@@ -157,3 +157,38 @@ func TestShowMatchingProjectsPrompt_AutoConfirm(t *testing.T) {
 		t.Errorf("expected selected ID 'id-1', got %q", selectedID)
 	}
 }
+
+// TestShowProjectLinkOrDisablePrompt_TwoChoices checks that the unlinked
+// project prompt offers only link and cancel, and that every input path
+// resolves to one of them.
+func TestShowProjectLinkOrDisablePrompt_TwoChoices(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		input       string
+		tty         bool
+		autoConfirm bool
+		want        LinkOrDisableChoice
+	}{
+		{name: "choice 1 links", input: "1\n", tty: true, want: LinkOrDisableLink},
+		{name: "choice 2 cancels", input: "2\n", tty: true, want: LinkOrDisableCancel},
+		{name: "c cancels", input: "c\n", tty: true, want: LinkOrDisableCancel},
+		{name: "former disable number 3 is invalid, then cancel", input: "3\n2\n", tty: true, want: LinkOrDisableCancel},
+		{name: "auto-confirm links", autoConfirm: true, want: LinkOrDisableLink},
+		{name: "no terminal cancels", tty: false, want: LinkOrDisableCancel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := withPromptIO(t, strings.NewReader(tc.input), tc.tty)
+			got := ShowProjectLinkOrDisablePrompt("widgets", tc.autoConfirm)
+			if got != tc.want {
+				t.Errorf("choice = %v, want %v", got, tc.want)
+			}
+			text := out.String()
+			if !strings.Contains(text, "[1] Link and sync project now") || !strings.Contains(text, "[2] Cancel") {
+				t.Errorf("prompt does not offer link and cancel:\n%s", text)
+			}
+			if strings.Contains(text, "[3]") || strings.Contains(strings.ToLower(text), "disable") {
+				t.Errorf("prompt still offers a third or disable choice:\n%s", text)
+			}
+		})
+	}
+}

@@ -101,8 +101,9 @@ func collectSchemaEnvVars(t *testing.T) []schemaEnvVarEntry {
 // globalConfigReadLayer1Keys lists registry (Layer-1) keys whose live value
 // the hub still takes from GlobalConfig at startup rather than from the
 // opsettings snapshot: server.hub.public_url is Hub.Endpoint, consumed by
-// resolveHubEndpoint in cmd/server_foreground.go; the snapshot's PublicURL
-// only feeds the admin server-config view.
+// resolveHubEndpoint in cmd/server_foreground.go. A value saved in the
+// settings database is read separately at startup (hub.StoredPublicURL),
+// not through the snapshot (ptone/scion#3905).
 var globalConfigReadLayer1Keys = map[string]bool{
 	"server.hub.public_url": true,
 }

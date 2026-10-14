@@ -63,7 +63,8 @@ var conversationCmd = &cobra.Command{
 	Short:   "Manage conversations",
 	Long: `View and manage conversations you participate in.
 
-Conversations require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Conversations go through the hub (start the local one with 'scion server start',
+or set a remote one with 'scion config set hub.endpoint <url>').
 
 Commands:
   scion conversation list                       List your conversations
@@ -72,6 +73,7 @@ Commands:
   scion conversation get-message <ref> <msg-id> Get a message from a conversation
   scion conversation create <name>              Create a new group conversation
   scion conversation set-default <ref> <agent>  Set default agent for a conversation
+  scion conversation group ...                  Manage project thread groups
 
 Conversation references:
   conv:<uuid>     Direct conversation ID
@@ -122,7 +124,12 @@ var conversationCreateCmd = &cobra.Command{
 Examples:
   scion conversation create "Design Discussion"
   scion conversation create "Sprint Planning" --project <project-id>
-  scion conversation create "Debug Thread" --json`,
+  scion conversation create "Debug Thread" --json
+  scion conversation create "release-notes" --group Release
+
+--group files the new conversation into a thread group of the same project
+(a group ID, or a name resolved within the project). It requires the
+hub.chat_thread_groups experiment on the hub.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConversationCreate,
 }
@@ -132,6 +139,13 @@ var conversationGetCmd = &cobra.Command{
 	Use:   "get <conversation-ref>",
 	Short: "Get conversation details",
 	Long: `Get details of a single conversation including participants.
+
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation get conv:a1b2c3d4-...
@@ -176,6 +190,13 @@ var conversationParticipantsCmd = &cobra.Command{
 	Use:   "participants <conversation-ref>",
 	Short: "List participants in a conversation",
 	Long: `List participants in a conversation.
+
+The MSG MODE column shows each agent participant's message mode (see
+scion set-message-mode --help) in the conversation's project; for a
+conversation without a project (a DM or legacy group), in the calling
+agent's project. It shows "-" for users, for any agent outside that
+project, and for every agent when a user reads a conversation without a
+project.
 
 Examples:
   scion conversation participants conv:a1b2c3d4-...
@@ -420,8 +441,23 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 		Kind:        "group",
 	}
 
+	// --group resolves within the same project the conversation is created
+	// in (ptone/scion#4424, design section 4); the hub also requires the
+	// group's project to equal the conversation's.
+	var group *hubclient.ThreadGroup
+	if convCreateGroup != "" {
+		group, err = resolveThreadGroup(ctx, client, convProject, projectResolveErr, convCreateGroup)
+		if err != nil {
+			return err
+		}
+		req.ThreadGroupID = group.ID
+	}
+
 	conv, err := client.Conversations().Create(ctx, req)
 	if err != nil {
+		if req.ThreadGroupID != "" && isThreadGroupsDisabledCreateError(err) {
+			return fmt.Errorf("failed to create conversation: %w", &hubclient.ThreadGroupsNotEnabledError{Err: err})
+		}
 		// If we couldn't resolve a project locally and the server's 400 is
 		// specifically the projectId-required guard, the resolveProjectID
 		// error ("Use --project flag or link this project with 'scion hub
@@ -456,7 +492,20 @@ func runConversationCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Name:    %s\n", conv.DisplayName)
 	fmt.Printf("  Kind:    %s\n", conv.Kind)
 	fmt.Printf("  Surface: %s\n", conv.Surface)
+	if group != nil {
+		fmt.Printf("  Group:   %s\n", group.Name)
+	}
 	return nil
+}
+
+// isThreadGroupsDisabledCreateError reports whether err is the hub's 400 for
+// a threadGroupId sent while the hub.chat_thread_groups experiment is off.
+// --group normally lists the project's groups first, which already reports
+// a disabled hub; this covers a group ID used with no resolved project.
+func isThreadGroupsDisabledCreateError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.IsBadRequest() &&
+		strings.Contains(apiErr.Message, "thread groups are not enabled")
 }
 
 func runConversationGet(cmd *cobra.Command, args []string) error {
@@ -496,17 +545,61 @@ func runConversationGet(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Created:        %s\n", clitime.Format(conv.CreatedAt, clitime.Full))
 	fmt.Printf("Last Activity:  %s\n", clitime.Format(conv.LastActivityAt, clitime.Full))
 
-	if len(conv.Participants) > 0 {
-		fmt.Println("\nParticipants:")
-		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE")
-		for _, p := range conv.Participants {
-			shortID := truncateRunes(p.PrincipalID, 12, false)
-			_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role)
-		}
-		_ = tw.Flush()
-	}
+	writeConversationGetParticipants(os.Stdout, conv.Participants)
 	return nil
+}
+
+// participantModeCell is the MSG MODE cell for a participant: the agent's
+// message mode, or "-" for a user or an agent whose mode the hub did not
+// report (an agent outside the conversation's project, or any agent when a
+// user reads a conversation without a project).
+func participantModeCell(p hubclient.ConversationParticipantDetail) string {
+	if p.MessageMode == "" {
+		return "-"
+	}
+	return p.MessageMode
+}
+
+// conversationModeHint is printed under the conversation get participants
+// table when an agent participant has a restricted message mode.
+const conversationModeHint = "Agent-to-agent delivery requires compatible message modes; see `scion set-message-mode --help`."
+
+// writeConversationGetParticipants writes the participants section of
+// `scion conversation get`, including each agent's message mode
+// (ptone/scion#4411).
+func writeConversationGetParticipants(w io.Writer, participants []hubclient.ConversationParticipantDetail) {
+	if len(participants) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nParticipants:")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "  KIND\tID\tROLE\tMSG MODE")
+	restricted := false
+	for _, p := range participants {
+		shortID := truncateRunes(p.PrincipalID, 12, false)
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", p.PrincipalKind, shortID, p.Role, participantModeCell(p))
+		switch p.MessageMode {
+		case "", "project", "hub":
+		default:
+			restricted = true
+		}
+	}
+	_ = tw.Flush()
+	if restricted {
+		_, _ = fmt.Fprintln(w, "\n"+conversationModeHint)
+	}
+}
+
+// writeConversationParticipantsTable writes the `scion conversation
+// participants` table, including each agent's message mode.
+func writeConversationParticipantsTable(w io.Writer, participants []hubclient.ConversationParticipantDetail) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tMSG MODE\tJOINED")
+	for _, p := range participants {
+		joined := clitime.Ago(p.JoinedAt)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, participantModeCell(p), joined)
+	}
+	return tw.Flush()
 }
 
 // writeMessageBody writes msg.Msg to w with no added bytes — no trailing
@@ -649,13 +742,7 @@ func runConversationParticipants(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "KIND\tID\tROLE\tJOINED")
-	for _, p := range conv.Participants {
-		joined := clitime.Ago(p.JoinedAt)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", p.PrincipalKind, p.PrincipalID, p.Role, joined)
-	}
-	return tw.Flush()
+	return writeConversationParticipantsTable(os.Stdout, conv.Participants)
 }
 
 func runConversationJoin(cmd *cobra.Command, args []string) error {

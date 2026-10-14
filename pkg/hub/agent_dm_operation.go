@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,11 @@ type AgentDMInput struct {
 	// phase here — an agent that merely hasn't finished starting yet is
 	// exactly as unable to see the mention right now as a stopped one.
 	SkipPhaseGate bool
+
+	// RecordLogged reports that the adapter already wrote this message's
+	// record to the message log (handleAgentMessage does so before it
+	// reaches here). When set, the operation does not write another.
+	RecordLogged bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -498,7 +504,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// credential (ptone/scion#3222).
 	var artifactRefs []artifacts.MessageRef
 	var artifactWarning string
-	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directAgentRecipient(input.TargetAgent, input.GroupID))
 	structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Stamp attachment metadata onto the structured message.
@@ -542,6 +549,13 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			"sender_agent_id", input.SenderAgent.ID,
 			"target_agent_id", input.TargetAgent.ID,
 		)
+	}
+
+	// 8c. Message record: one per message, written once the message is
+	// persisted and before the dispatch outcome, unless the adapter already
+	// wrote it (RecordLogged).
+	if !input.RecordLogged {
+		logMessageRecord(s.recordLog(), input.TargetAgent, structuredMsg)
 	}
 
 	// 9. Publish SSE event.
@@ -628,7 +642,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
 		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+		dispatchErr = dispatchWithBrokerRetry(retryCtx, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 		retryCancel()
 	}
 
@@ -726,12 +740,18 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 14. Log delivery.
+	// 14. Log delivery. The message record was written at 8c (or by the
+	// adapter), so this outcome line is a lifecycle entry.
 	dmLogAttrs := []any{
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
+		logging.AttrLogKind, logging.LogKindEvent,
+		logging.AttrSender, structuredMsg.Sender,
+		logging.AttrSenderID, structuredMsg.SenderID,
+		logging.AttrRecipient, structuredMsg.Recipient,
+		logging.AttrRecipientID, structuredMsg.RecipientID,
 	}
 	if input.ConversationID != "" {
 		dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)

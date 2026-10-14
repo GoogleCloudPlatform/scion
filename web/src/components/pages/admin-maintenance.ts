@@ -114,13 +114,61 @@ interface MaintenanceStateResponse {
 }
 
 /**
+ * One failed agent in a reset-auth-all result. For a classified failure
+ * `error` is a plain reason, not the raw error; `code` names the category.
+ */
+interface ResetAuthAllFailure {
+  id: string;
+  name: string;
+  error: string;
+  /** Failure category, e.g. delegation_creator_missing or agent_not_in_standing. */
+  code?: string;
+  /** Deny cause of a structural delegation denial. */
+  cause?: string;
+  /** Creator (depth 1) or ancestor whose delegation is missing. */
+  ancestor_id?: string;
+  ancestor_depth?: number;
+}
+
+/**
  * Result of POST /api/v1/admin/agents/reset-auth-all. The hub sends null
- * for an empty list.
+ * for an empty list. failed_by_code counts the failures per code, with
+ * "unclassified" for failures that carry none.
  */
 interface ResetAuthAllResult {
   succeeded: { id: string; name: string }[] | null;
-  failed: { id: string; name: string; error: string }[] | null;
+  failed: ResetAuthAllFailure[] | null;
   total: number;
+  failed_by_code?: Record<string, number>;
+}
+
+/** Display labels for reset-auth-all failure codes. */
+const RESET_AUTH_CODE_LABELS: Record<string, string> = {
+  delegation_creator_missing: 'Creator delegation missing',
+  delegation_own_missing: 'Own delegation missing',
+  delegation_ceiling: 'Delegation chain invalid',
+  agent_not_in_standing: 'Not in good standing',
+  runtime_unavailable: 'Runtime unavailable',
+  internal_error: 'Internal error',
+  unclassified: 'Other',
+};
+
+function resetAuthCodeLabel(code: string): string {
+  return RESET_AUTH_CODE_LABELS[code] ?? code;
+}
+
+/** The per-category failure counts, sorted by code, on one line. */
+function resetAuthCategorySummary(result: ResetAuthAllResult): string {
+  return Object.entries(result.failed_by_code ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, n]) => `${resetAuthCodeLabel(code)}: ${n}`)
+    .join(' \u00b7 ');
+}
+
+/** One failed agent: its name, the reason and, when coded, the category. */
+function resetAuthFailureLine(f: ResetAuthAllFailure): string {
+  const category = f.code ? ` [${resetAuthCodeLabel(f.code)}]` : '';
+  return `${f.name || f.id}: ${f.error}${category}`;
 }
 
 @customElement('scion-page-admin-maintenance')
@@ -155,6 +203,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Whether a run request is in-flight. */
   @state()
   private runInProgress = false;
+
+  /**
+   * Open state of the completed-migrations group. Kept on the component so it
+   * survives reloads that swap the page content for the loading spinner.
+   */
+  @state()
+  private completedMigrationsOpen = false;
 
   /** Polling timer for running operations/migrations. */
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -333,6 +388,27 @@ export class ScionPageAdminMaintenance extends LitElement {
       display: flex;
       flex-direction: column;
       gap: 1rem;
+    }
+
+    .card-list + .completed-migrations {
+      display: block;
+      margin-top: 1rem;
+    }
+
+    .completed-migrations::part(base) {
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .completed-migrations::part(header) {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      padding: 0.875rem 1rem;
+    }
+
+    .completed-migrations::part(content) {
+      padding: 0 1rem 1rem 1rem;
     }
 
     .card {
@@ -740,13 +816,17 @@ export class ScionPageAdminMaintenance extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newValue }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-    } catch {
-      // Silently ignore — keep current state on failure.
+      const data = (await res.json()) as MaintenanceStateResponse;
+      this.maintenanceEnabled = data.enabled;
+      this.maintenanceBreakGlass = data.break_glass === true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
+      // The toggle renders from maintenanceEnabled, which is set only from a
+      // server response; re-read it so the toggle shows the saved state.
+      await this.fetchMaintenanceState();
     }
   }
 
@@ -961,7 +1041,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start migration:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start migration';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start migration');
     } finally {
       this.runInProgress = false;
     }
@@ -995,7 +1077,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start operation';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start operation');
     } finally {
       this.runInProgress = false;
     }
@@ -1216,12 +1300,17 @@ export class ScionPageAdminMaintenance extends LitElement {
                       ${this.resetAuthAllResult.failed?.length ?? 0}
                     </span>
                   </div>
+                  ${Object.keys(this.resetAuthAllResult.failed_by_code ?? {}).length > 0
+                    ? html`
+                        <div class="card-meta reset-auth-categories">
+                          <span>${resetAuthCategorySummary(this.resetAuthAllResult)}</span>
+                        </div>
+                      `
+                    : nothing}
                   ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
                     ? html`
                         <div class="result-log result-error">
-                          ${this.resetAuthAllResult
-                            .failed!.map((f) => `${f.name || f.id}: ${f.error}`)
-                            .join('\n')}
+                          ${this.resetAuthAllResult.failed!.map(resetAuthFailureLine).join('\n')}
                         </div>
                       `
                     : nothing}
@@ -1390,6 +1479,8 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderMigrations() {
+    const completed = this.migrations.filter((m) => m.status === 'completed');
+    const active = this.migrations.filter((m) => m.status !== 'completed');
     return html`
       <div class="section">
         <h2 class="section-title">Migrations</h2>
@@ -1400,12 +1491,42 @@ export class ScionPageAdminMaintenance extends LitElement {
         ${this.migrations.length === 0
           ? html`<div class="empty-inline">No migrations registered.</div>`
           : html`
-              <div class="card-list">
-                ${this.migrations.map((m) => this.renderMigrationCard(m))}
-              </div>
+              ${active.length > 0
+                ? html`
+                    <div class="card-list">${active.map((m) => this.renderMigrationCard(m))}</div>
+                  `
+                : nothing}
+              ${this.renderCompletedMigrations(completed)}
             `}
       </div>
     `;
+  }
+
+  /**
+   * Completed migrations are grouped in one collapsible element, collapsed by
+   * default. Its open state is tracked in completedMigrationsOpen from
+   * sl-show/sl-hide and bound back, so it is kept across poll refreshes and
+   * across reloads that re-create the element.
+   */
+  private renderCompletedMigrations(completed: MaintenanceOperation[]) {
+    if (completed.length === 0) return nothing;
+    return html`
+      <sl-details
+        class="completed-migrations"
+        summary="Completed migrations (${completed.length})"
+        ?open=${this.completedMigrationsOpen}
+        @sl-show=${(e: Event) => this.onCompletedMigrationsToggle(e, true)}
+        @sl-hide=${(e: Event) => this.onCompletedMigrationsToggle(e, false)}
+      >
+        <div class="card-list">${completed.map((m) => this.renderMigrationCard(m))}</div>
+      </sl-details>
+    `;
+  }
+
+  private onCompletedMigrationsToggle(e: Event, open: boolean): void {
+    // Ignore sl-show/sl-hide bubbling up from elements inside the cards.
+    if (e.target !== e.currentTarget) return;
+    this.completedMigrationsOpen = open;
   }
 
   private renderMigrationCard(m: MaintenanceOperation) {

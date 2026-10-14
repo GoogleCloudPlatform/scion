@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -311,7 +311,7 @@ func TestAutoExposePorts_ClearRevertsToStartupValue(t *testing.T) {
 // The save response lists the changed keys applied to the running hub and
 // the changed keys pending a restart.
 func TestPutServerConfigDB_ReportsAppliedAndPendingRestartKeys(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
+	srv, _, ops := newTestDBServerWithStore(t, &settingsAuditStore{})
 	rr := putHubNameServerConfigDB(t, srv, ops,
 		`{"server":{"hub":{"hub_name":"report-hub","public_url":"https://report.example.com","soft_delete_retention":"2h"}}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())

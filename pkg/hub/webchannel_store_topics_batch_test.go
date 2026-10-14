@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -135,10 +135,10 @@ func assertListTopicsByProjectsParity(t *testing.T, db *sql.DB, dialect string, 
 }
 
 func TestListTopicsByProjects_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
-	assertListTopicsByProjectsParity(t, db, "sqlite3", wcs)
+	assertListTopicsByProjectsParity(t, db, "sqlite", wcs)
 }
 
 func TestListTopicsByProjects_Postgres(t *testing.T) {

@@ -26,10 +26,10 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// GovernanceService — transactional boundary mutation governance (B5)
+// GovernanceService — transactional boundary mutation governance
 // ---------------------------------------------------------------------------
 
-// GovernanceService wraps B3's PreviewService with transactional commit.
+// GovernanceService wraps PreviewService with transactional commit.
 // Every boundary create/update/delete and every adjacent-domain change that
 // could relax a boundary must go through this service to enforce:
 //   - Preview token validation (single-use, actor/draft/state-bound)
@@ -83,7 +83,7 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 
 // commitEventTypes maps operation names to their corresponding event type
 // constants. Used by the commit path instead of string concatenation to
-// ensure we use the canonical constants (R3).
+// ensure we use the canonical constants.
 var commitEventTypes = map[string]string{
 	"create": EventBoundaryCreated,
 	"update": EventBoundaryUpdated,
@@ -110,7 +110,7 @@ type CommitRequest struct {
 	PreviewToken string
 
 	// PreviewID is the semantic preview identifier from the PreviewResult.
-	// Populated from the preview validation step (B3) rather than being
+	// Populated from the preview token validation rather than being
 	// extracted by slicing the opaque token.
 	PreviewID string
 
@@ -165,7 +165,7 @@ func (e *GovernanceError) Error() string {
 //
 // Transaction steps:
 //
-//	a. Validate the preview token (B3's ValidateToken)
+//	a. Validate the preview token (PreviewService.ValidateToken)
 //	b. Re-read the boundary (if update/delete) and verify revision matches
 //	c. Re-read relevant state: role bindings, group memberships, principal
 //	   status, permission registry — scoped to the subject/scope under change
@@ -380,7 +380,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 }
 
 // ---------------------------------------------------------------------------
-// Compensating actions for audit failure (R1)
+// Compensating actions for audit failure
 // ---------------------------------------------------------------------------
 
 // compensateAuditFailure undoes the store mutation when the subsequent audit
@@ -694,7 +694,7 @@ func (gs *GovernanceService) enforceLockout(ctx context.Context, req CommitReque
 }
 
 // ---------------------------------------------------------------------------
-// Adjacent-domain governance gates (B5 §4)
+// Adjacent-domain governance gates
 // ---------------------------------------------------------------------------
 
 // AdjacentDomainCheck is the result of checking whether an adjacent-domain
@@ -772,76 +772,81 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 }
 
 // ---------------------------------------------------------------------------
-// Atomic RoleBinding replacement (B5 §5)
+// RoleBinding replacement in one transaction
 // ---------------------------------------------------------------------------
 
-// ReplaceRoleBinding atomically replaces a role binding so grant downgrades
-// never leave both old and new bindings active simultaneously.
+// ReplaceRoleBinding replaces a role binding in one transaction, so a
+// grant downgrade never leaves both the old and the new binding active.
+// When the old role carries access_constraint.admin, the replacement runs
+// the lockout check (checkRoleBindingRemovalAdminLockout) on the old
+// binding's scope unless the new binding keeps that admin: its role
+// carries access_constraint.admin, it names the same principal at the
+// same scope, and its validity window covers the old one
+// (bindingWindowCovers). The check takes the admin-guard lock, the same
+// lock the user and role-binding removal paths take, so it reads the
+// state the transaction then writes. As with a binding delete, the new
+// binding does not count as a remaining admin: to hand the only admin
+// role at a scope to another principal or scope, add the new binding
+// first, then remove the old one.
 func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingID string, newBinding *store.RoleBinding, previewToken string) (*store.RoleBinding, error) {
-	// Load existing binding.
-	existing, err := gs.store.GetRoleBinding(ctx, oldBindingID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load existing binding: %w", err)
-	}
-
-	// Check if the old binding's role includes access_constraint.admin.
-	oldRD, err := gs.store.GetRoleDefinition(ctx, existing.RoleDefinitionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load old role definition: %w", err)
-	}
-
-	oldHasAdmin := roleHasConstraintAdmin(oldRD)
-
-	// Check if new binding's role includes access_constraint.admin.
-	newRD, err := gs.store.GetRoleDefinition(ctx, newBinding.RoleDefinitionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load new role definition: %w", err)
-	}
-
-	newHasAdmin := roleHasConstraintAdmin(newRD)
-
-	// If downgrading from admin, enforce lockout invariant.
-	if oldHasAdmin && !newHasAdmin {
-		if err := gs.enforceRoleBindingLockout(ctx, existing); err != nil {
-			return nil, err
+	var created *store.RoleBinding
+	err := gs.store.WithTx(ctx, func(tx store.Store) error {
+		existing, err := tx.GetRoleBinding(ctx, oldBindingID)
+		if err != nil {
+			return fmt.Errorf("failed to load existing binding: %w", err)
 		}
-	}
 
-	// Create new binding first, then delete old one.
-	//
-	// Order rationale: create-then-delete means the failure mode is "both
-	// bindings active" (overly permissive but detectable and recoverable)
-	// rather than "zero bindings" (data loss). This is a strictly better
-	// failure mode given that the Store interface lacks transaction support.
-	//
-	// TODO: Migrate to a true atomic swap when Store gains RunInTx support.
-	created, err := gs.store.CreateRoleBinding(ctx, newBinding)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create replacement binding: %w", err)
-	}
-
-	if err := gs.store.DeleteRoleBinding(ctx, oldBindingID); err != nil {
-		// Compensating action: delete the newly created binding to prevent
-		// inconsistent state where both old and new bindings are active.
-		if delErr := gs.store.DeleteRoleBinding(ctx, created.ID); delErr != nil {
-			gs.logger.Error("failed to roll back new binding after old-binding delete failure; both bindings now active",
-				"old_binding_id", oldBindingID, "new_binding_id", created.ID,
-				"delete_error", err, "rollback_error", delErr)
-		} else {
-			gs.logger.Warn("rolled back new binding after old-binding delete failure",
-				"old_binding_id", oldBindingID, "new_binding_id", created.ID, "error", err)
+		oldRD, err := tx.GetRoleDefinition(ctx, existing.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("failed to load old role definition: %w", err)
 		}
-		return nil, fmt.Errorf("failed to delete old binding: %w", err)
-	}
+		newRD, err := tx.GetRoleDefinition(ctx, newBinding.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("failed to load new role definition: %w", err)
+		}
 
+		// Removing or moving an admin binding must leave a constraint
+		// admin at the old binding's scope.
+		keepsAdmin := roleHasConstraintAdmin(newRD) &&
+			newBinding.PrincipalType == existing.PrincipalType &&
+			newBinding.PrincipalID == existing.PrincipalID &&
+			newBinding.ScopeType == existing.ScopeType &&
+			newBinding.ScopeID == existing.ScopeID &&
+			bindingWindowCovers(newBinding, existing)
+		if roleHasConstraintAdmin(oldRD) && !keepsAdmin {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, gs.nowFunc(), existing); err != nil {
+				return err
+			}
+		}
+
+		// The create and the delete commit together or not at all.
+		created, err = tx.CreateRoleBinding(ctx, newBinding)
+		if err != nil {
+			return fmt.Errorf("failed to create replacement binding: %w", err)
+		}
+		if err := tx.DeleteRoleBinding(ctx, oldBindingID); err != nil {
+			return fmt.Errorf("failed to delete old binding: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return created, nil
 }
 
-// enforceRoleBindingLockout checks whether removing an admin role binding
-// would violate the lockout invariant.
-func (gs *GovernanceService) enforceRoleBindingLockout(ctx context.Context, binding *store.RoleBinding) error {
-	return checkConstraintAdminLockout(ctx, gs.store, gs.nowFunc(),
-		binding.ScopeType, binding.ScopeID, adminRemoval{binding: binding})
+// bindingWindowCovers reports whether outer is active (isBindingActive)
+// at every time inner is: outer's NotBefore is unset or no later than
+// inner's, and outer's ExpiresAt is unset or no earlier than inner's,
+// where an inner binding with no expiry needs an outer one with none.
+func bindingWindowCovers(outer, inner *store.RoleBinding) bool {
+	if outer.NotBefore != nil && (inner.NotBefore == nil || outer.NotBefore.After(*inner.NotBefore)) {
+		return false
+	}
+	if outer.ExpiresAt != nil && (inner.ExpiresAt == nil || outer.ExpiresAt.Before(*inner.ExpiresAt)) {
+		return false
+	}
+	return true
 }
 
 // adminRemoval describes the constraint-admin authority a mutation takes
@@ -851,8 +856,9 @@ type adminRemoval struct {
 	userID string
 	// userAction names the user change for the refusal message.
 	userAction userRemovalAction
-	// binding is a role binding being removed or downgraded.
-	binding *store.RoleBinding
+	// bindings are role bindings at one scope, each carrying
+	// access_constraint.admin, being removed or downgraded together.
+	bindings []*store.RoleBinding
 }
 
 // checkConstraintAdminLockout is the single lockout check for the
@@ -861,12 +867,15 @@ type adminRemoval struct {
 // *GovernanceError with ErrCodeConstraintAdminLockout when the change
 // would leave the scope with no active user holding
 // access_constraint.admin, now or once scheduled constraints activate.
-// Only active users count (resolveConstraintAdminUsers).
+// Only active users with a binding active at now count
+// (resolveConstraintAdminUsers). At the activation time of a scheduled
+// constraint, an admin counts only through an admin binding at the scope
+// still valid at that time.
 //
 // st may be a transaction handle so the check reads the same state the
 // caller then writes.
 func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.Time, scopeType, scopeID string, rm adminRemoval) error {
-	adminUsers, err := resolveConstraintAdminUsers(ctx, st, scopeType, scopeID)
+	adminUsers, inactiveOnly, err := resolveConstraintAdmins(ctx, st, now, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeConstraintAdminLockout,
@@ -876,8 +885,10 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 
 	if rm.userID != "" {
 		// A user who is not an active admin here removes no admin
-		// authority from this scope.
-		isAdmin := false
+		// authority from this scope. A user whose admin bindings here
+		// are all outside their activation window (inactiveOnly) still
+		// has the scope judged, over the active admins.
+		isAdmin := inactiveOnly[rm.userID]
 		for _, au := range adminUsers {
 			if au.userID == rm.userID {
 				isAdmin = true
@@ -895,10 +906,21 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 		}
 	}
 
+	// A binding removal is judged against the other bindings at the
+	// binding's own scope. A read failure counts every admin as losing
+	// authority, so the check fails closed.
+	var scopeBindings []*store.RoleBinding
+	scopeReadOK := true
+	if len(rm.bindings) > 0 {
+		if scopeBindings, err = st.ListRoleBindingsForScope(ctx, scopeType, scopeID); err != nil {
+			scopeReadOK = false
+		}
+	}
+
 	// Admins that keep access_constraint.admin after the change.
 	var surviving []adminUserInfo
 	for _, au := range adminUsers {
-		if !adminLosesAuthority(ctx, st, au.userID, rm) {
+		if !adminLosesAuthority(ctx, st, now, au, rm, scopeBindings, scopeReadOK) {
 			surviving = append(surviving, au)
 		}
 	}
@@ -946,21 +968,68 @@ func checkConstraintAdminLockout(ctx context.Context, st store.Store, now time.T
 		restricting = append(restricting, c)
 	}
 
-	if len(restricting) > 0 {
-		scheduledSurviving := 0
+	if len(restricting) == 0 {
+		return nil
+	}
+	scheduledSurviving := 0
+	for _, au := range surviving {
+		if !constraintsBlockUser(restricting, au) {
+			scheduledSurviving++
+		}
+	}
+	if scheduledSurviving == 0 {
+		return &GovernanceError{
+			Code:    ErrCodeConstraintAdminLockout,
+			Message: rm.lockoutMessage(" when scheduled constraints activate"),
+		}
+	}
+
+	// At each later activation time, a remaining admin counts only
+	// through an admin binding at the scope still valid at that time
+	// (isBindingActive at the activation time).
+	var activations []time.Time
+	for _, c := range restricting {
+		if c.NotBefore == nil || !c.NotBefore.After(now) {
+			continue
+		}
+		dup := false
+		for _, at := range activations {
+			dup = dup || at.Equal(*c.NotBefore)
+		}
+		if !dup {
+			activations = append(activations, *c.NotBefore)
+		}
+	}
+	if len(activations) == 0 {
+		return nil
+	}
+	if len(rm.bindings) == 0 {
+		scopeBindings, err = st.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+		scopeReadOK = err == nil
+	}
+	if !scopeReadOK {
+		return &GovernanceError{
+			Code:    ErrCodeConstraintAdminLockout,
+			Message: "failed to load role bindings for scheduled-state lockout check",
+		}
+	}
+	removed := removedBindingIDs(rm)
+	for _, at := range activations {
+		survivesAt := false
 		for _, au := range surviving {
-			if !constraintsBlockUser(restricting, au) {
-				scheduledSurviving++
+			if adminHoldsAt(ctx, st, at, au, removed, scopeBindings) &&
+				!constraintsBlockUser(restricting, au) {
+				survivesAt = true
+				break
 			}
 		}
-		if scheduledSurviving == 0 {
+		if !survivesAt {
 			return &GovernanceError{
 				Code:    ErrCodeConstraintAdminLockout,
 				Message: rm.lockoutMessage(" when scheduled constraints activate"),
 			}
 		}
 	}
-
 	return nil
 }
 
@@ -984,36 +1053,76 @@ func (rm adminRemoval) lockoutMessage(suffix string) string {
 	return action + " would leave zero constraint admins" + suffix
 }
 
-// adminLosesAuthority reports whether the admin userID loses
-// access_constraint.admin through the removal rm. A lookup failure counts
-// as a loss so the check fails closed.
-func adminLosesAuthority(ctx context.Context, st store.Store, userID string, rm adminRemoval) bool {
+// adminLosesAuthority reports whether the admin au loses
+// access_constraint.admin through the removal rm. For a binding removal,
+// au loses it when a removed binding covers au (a user binding for au, or
+// a group binding for one of au's effective groups) and no binding in
+// scopeBindings, the bindings at the removed bindings' scope, that is not
+// itself removed, is active at now (isBindingActive), covers au and
+// carries access_constraint.admin. A binding that is not yet valid or
+// has expired keeps no admin. When scopeReadOK is false the scope
+// bindings could not be read and every covered admin counts as a loss,
+// so the check fails closed.
+func adminLosesAuthority(ctx context.Context, st store.Store, now time.Time, au adminUserInfo, rm adminRemoval, scopeBindings []*store.RoleBinding, scopeReadOK bool) bool {
 	if rm.userID != "" {
-		return userID == rm.userID
+		return au.userID == rm.userID
 	}
-	b := rm.binding
-	if b.PrincipalType != "user" || b.PrincipalID != userID {
+	covered := false
+	for _, b := range rm.bindings {
+		covered = covered || bindingCoversAdmin(b, au)
+	}
+	if !covered {
 		return false
 	}
-	// The bound user keeps admin only through another admin binding.
-	otherBindings, err := st.ListRoleBindingsForPrincipals(ctx,
-		[]store.PrincipalRef{{Type: "user", ID: userID}}, nil, nil)
-	if err != nil {
+	if !scopeReadOK {
 		return true
 	}
-	for _, ob := range otherBindings {
-		if ob.ID == b.ID {
+	return !adminHoldsAt(ctx, st, now, au, removedBindingIDs(rm), scopeBindings)
+}
+
+// removedBindingIDs returns the IDs of the bindings rm removes.
+func removedBindingIDs(rm adminRemoval) map[string]bool {
+	removed := make(map[string]bool, len(rm.bindings))
+	for _, b := range rm.bindings {
+		removed[b.ID] = true
+	}
+	return removed
+}
+
+// adminHoldsAt reports whether a binding in scopeBindings that is not in
+// removed is active at at (isBindingActive), covers au and carries
+// access_constraint.admin. A binding whose role cannot be read keeps no
+// admin, so the check fails closed.
+func adminHoldsAt(ctx context.Context, st store.Store, at time.Time, au adminUserInfo, removed map[string]bool, scopeBindings []*store.RoleBinding) bool {
+	for _, b := range scopeBindings {
+		if removed[b.ID] || !isBindingActive(b, at) || !bindingCoversAdmin(b, au) {
 			continue
 		}
-		rd, err := st.GetRoleDefinition(ctx, ob.RoleDefinitionID)
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
-			continue
+			continue // fail closed: an unreadable role keeps no admin
 		}
 		if roleHasConstraintAdmin(rd) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// bindingCoversAdmin reports whether b grants its role to au, directly or
+// through one of au's effective groups.
+func bindingCoversAdmin(b *store.RoleBinding, au adminUserInfo) bool {
+	switch b.PrincipalType {
+	case "user":
+		return b.PrincipalID == au.userID
+	case "group":
+		for _, gid := range au.groupIDs {
+			if gid == b.PrincipalID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkUserRemovalAdminLockout runs checkConstraintAdminLockout for every
@@ -1042,8 +1151,10 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		return fmt.Errorf("list bindings for constraint-admin lockout check: %w", err)
 	}
 	// Unclamped read: a test identity is never a constraint admin through
-	// a system-scoped grant.
-	bindings, err = clampTestFixtureBindings(ctx, st, principals, bindings)
+	// a system-scoped grant. No authorization service is wired here, so an
+	// admin-kind test identity gets no authority from the clamps either
+	// (it never counts as a constraint admin).
+	bindings, err = clampTestIdentityBindings(ctx, st, nil, principals, bindings)
 	if err != nil {
 		return err
 	}
@@ -1055,10 +1166,16 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		if checked[key] {
 			continue
 		}
+		// A binding whose role definition no longer exists grants
+		// nothing; any other read error refuses the change.
 		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
-		if err != nil || !roleHasConstraintAdmin(rd) {
-			// resolveConstraintAdminUsers skips an unreadable role
-			// definition the same way.
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if !roleHasConstraintAdmin(rd) {
 			continue
 		}
 		checked[key] = true
@@ -1067,6 +1184,35 @@ func checkUserRemovalAdminLockout(ctx context.Context, st store.Store, now time.
 		}
 	}
 	return nil
+}
+
+// checkRoleBindingRemovalAdminLockout runs checkConstraintAdminLockout
+// for role bindings at one scope about to be deleted together. Only the
+// bindings whose role carries access_constraint.admin are counted; with
+// none it is a no-op. Otherwise it first takes the admin-guard lock
+// (lockConstraintAdminGuard) so the check serializes with user suspend
+// and delete; a caller that took it already re-takes it at no cost. The
+// role-binding delete and replace paths call it inside their transaction,
+// before the write; st must be that handle.
+func checkRoleBindingRemovalAdminLockout(ctx context.Context, st store.Store, now time.Time, bs ...*store.RoleBinding) error {
+	var adminBindings []*store.RoleBinding
+	for _, b := range bs {
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return fmt.Errorf("resolve role for constraint-admin lockout check: %w", err)
+		}
+		if roleHasConstraintAdmin(rd) {
+			adminBindings = append(adminBindings, b)
+		}
+	}
+	if len(adminBindings) == 0 {
+		return nil
+	}
+	if err := lockConstraintAdminGuard(ctx, st); err != nil {
+		return err
+	}
+	b := adminBindings[0]
+	return checkConstraintAdminLockout(ctx, st, now, b.ScopeType, b.ScopeID, adminRemoval{bindings: adminBindings})
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,12 +1329,17 @@ func (gs *GovernanceService) isConstraintAdmin(ctx context.Context, userID strin
 	}
 	// Unclamped read: apply the test-identity grant clamp, so a test
 	// identity is never a constraint admin through a system-scoped grant.
-	bindings, err = clampTestFixtureBindings(ctx, gs.store, principals, bindings)
+	bindings, err = clampTestIdentityBindings(ctx, gs.store, gs.authz, principals, bindings)
 	if err != nil {
 		return false, err
 	}
 
+	// Only active bindings count (activation window: isBindingActive).
+	now := time.Now()
 	for _, b := range bindings {
+		if !isBindingActive(b, now) {
+			continue
+		}
 		rd, err := gs.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
 		if err != nil {
 			continue

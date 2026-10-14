@@ -72,6 +72,16 @@ export const PHASE_DISPLAY: Record<AgentPhase, StateDisplay> = {
 // ---------------------------------------------------------------------------
 
 export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
+  // Display only: the activity is still 'initializing' in the API. The
+  // container is up but the harness has not shown it reads input yet;
+  // messages sent now are held until it is ready (ptone/scion#4482).
+  initializing: {
+    emoji: '🚀',
+    icon: 'arrow-repeat',
+    variant: 'warning',
+    pulse: true,
+    label: 'starting',
+  },
   working: { emoji: '🔄', icon: 'circle-fill', variant: 'success', pulse: false },
   thinking: { emoji: '💭', icon: 'lightning-charge', variant: 'primary', pulse: true },
   executing: { emoji: '⚙️', icon: 'gear', variant: 'primary', pulse: true },
@@ -157,6 +167,8 @@ interface AgentStatusBadgeOptions {
   /** Badge label; defaults to stateLabel(status). */
   label?: string;
   size?: 'small' | 'medium' | 'large';
+  /** A data-testid for the badge, for UI automation. */
+  testId?: string;
 }
 
 /**
@@ -165,7 +177,7 @@ interface AgentStatusBadgeOptions {
  */
 export function agentStatusBadge(
   agent: Agent,
-  { status = getAgentDisplayStatus(agent), label, size }: AgentStatusBadgeOptions = {}
+  { status = getAgentDisplayStatus(agent), label, size, testId }: AgentStatusBadgeOptions = {}
 ): TemplateResult {
   const po = isProvisionedOnly(agent);
   const hint = po ? `Not started yet. Use Start, or run: scion start ${agent.name}` : undefined;
@@ -174,5 +186,6 @@ export function agentStatusBadge(
     label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}
     title=${ifDefined(hint)}
     size=${ifDefined(size)}
+    data-testid=${ifDefined(testId)}
   ></scion-status-badge>`;
 }

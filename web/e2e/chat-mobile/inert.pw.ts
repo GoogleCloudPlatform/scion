@@ -63,9 +63,8 @@ test('@static Tab from the rail never focuses into an off-screen panel', async (
   await page.waitForTimeout(400);
   expect(await currentPanel(page)).toBe('left');
 
-  // Start focus inside the visible rail, on a real focusable control. Scoped
-  // to scion-chat-space-rail: chat-members renders an identical "All" filter
-  // button in its own (currently inert) members panel.
+  // Start focus inside the visible rail, on a real focusable control: the
+  // rail's own "All" filter button.
   await page.locator('scion-chat-space-rail .filter-toggle button', { hasText: 'All' }).focus();
 
   for (let i = 0; i < 40; i++) {

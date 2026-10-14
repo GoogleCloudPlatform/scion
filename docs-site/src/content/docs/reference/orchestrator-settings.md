@@ -32,7 +32,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `schema_version` | string | **Required**. Must be `"1"`. |
-| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). |
+| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). On a Runtime Broker co-located with a database-backed Hub, profiles come from the Hub's stored profiles. The default profile is then `active_profile` if it is one of them. Otherwise, if the Hub stores exactly one profile, that profile is used (the broker logs which one and why). With no stored profiles, or several, a dispatch that needs the default profile is refused with an error that names the available profiles. The Hub's own reads of the default profile follow the same rule. The runtime selector (`GET`/`PUT /api/v1/system/runtime`, used during onboarding) does not: it always reads and writes the profile that `active_profile` names. |
 | `default_template` | string | The default template to use when creating agents (e.g., `gemini`, `antigravity`). |
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents (e.g., `api-key`, `vertex-ai`, `none`). |
@@ -65,18 +65,16 @@ Settings for connecting the CLI to a Scion Hub.
 
 ```yaml
 hub:
-  enabled: true
   endpoint: "https://hub.example.com"
   project_id: "uuid-or-slug"
-  local_only: false
 ```
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `enabled` | bool | Whether to enable Hub integration for this project. |
-| `endpoint` | string | The Hub API endpoint URL. Can be overridden per-agent in `scion-agent.yaml`. |
+| `endpoint` | string | The Hub API endpoint URL. A configured endpoint is what makes the CLI use a Hub. Can be overridden per-agent in `scion-agent.yaml`. The value in the global settings is added once to the CLI's hub list as a named hub (`local` for the workstation hub); to add a hub, use `scion hub add <name> <url>`. Inside a project directory, a `hub.endpoint` here (project or global) takes precedence over the hub selected with `scion use --hub`. Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead (see [Server Configuration](/scion/reference/server-config/)). |
 | `project_id` | string | The unique identifier for this project on the Hub. |
-| `local_only` | bool | If `true`, forces local-only operation even if the Hub is configured. |
+| `linked` | bool | Written by the CLI: `true` once the project is linked, `false` after `scion hub unlink` (agent commands then refuse until `scion hub link`). Unset means never linked; the project links on its first command. |
+| `enabled`, `local_only` | bool | **Deprecated and ignored.** Accepted so existing settings files still validate. `scion hub status` notes it when they are set; see the [migration page](/scion/reference/local-mode-removal/). |
 
 :::caution[Moved Fields]
 Legacy fields like `token`, `apiKey`, and broker identity fields (`brokerId`) have been removed. 
@@ -112,11 +110,11 @@ runtimes:
 | `namespace` | string | (Kubernetes) The target namespace. |
 | `sync` | string | File sync strategy (e.g., `tar`). |
 | `gke` | bool | (Kubernetes) Enable GKE-specific features (e.g., Workload Identity, Autopilot scheduling). Default: `false`. |
-| `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. A template/agent `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
+| `priority_class_name` | string | (Kubernetes) Default `priorityClassName` applied to agent pods using this runtime entry. Must name a `PriorityClass` that already exists on the cluster — Scion does not create one. An agent's `kubernetes.priorityClassName` overrides this. Unset means no priority class (pods schedule at priority 0). |
 | `list_all_namespaces` | bool | (Kubernetes) List agents across all namespaces. Default: `false`. |
-| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and a template or agent `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
+| `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and an agent's `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
-| `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and a template or agent `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
+| `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and an agent's `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
 | `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents whose profile uses this runtime. A directory it does not name uses `shared_dir_storage_backend`. A profile's values, single or per directory, win over this. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
 | `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
@@ -163,7 +161,7 @@ harness_configs:
 
 ### Resource Specification (`resources`)
 
-Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `profiles.<name>.harness_overrides.<harness-config>.resources`, and the template or agent `resources` field. Harness configs themselves (`harness_configs.<name>`) have no `resources` field.
+Defines the compute and disk constraints for an agent's container. The same shape is used by `default_resources`, `profiles.<name>.resources`, `profiles.<name>.harness_overrides.<harness-config>.resources`, and the agent `resources` field (a template's `resources` is ignored). Harness configs themselves (`harness_configs.<name>`) have no `resources` field.
 
 ```yaml
 resources:
@@ -240,9 +238,9 @@ profiles:
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `resources` | object | Resource requests and limits for agents created under this profile. See [Resource Specification](#resource-specification-resources). |
-| `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
+| `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; an agent's `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
-| `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
+| `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; an agent's `kubernetes.safeToEvict` wins over this. |
 | `clone_depth` | string or int | Git clone depth for clone-per-agent workspaces of agents under this profile: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent `clone_depth` wins over this. Unset (absent, null or empty) keeps the default shallow (depth 1) clone. Applies only when the workspace is cloned (a new agent, or a recreated workspace). |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 | `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
@@ -251,9 +249,9 @@ profiles:
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |
 | `kubernetes_block_service_account` | string | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_block_service_account`. Read from global settings only. |
 
-**Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
+**Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
-**Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's or template's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
+**Safe-to-evict (Kubernetes).** The first source that sets `safe_to_evict` wins: the agent's `kubernetes.safeToEvict`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile), then that profile's runtime entry. An explicit `true` at a higher level turns the annotation off even when a lower level sets `false`. On GKE Autopilot the annotation makes the pod an extended run time pod, which has its own limits and cost. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
 
 **Clone depth.** The first source that sets `clone_depth` wins: the agent's or template's `clone_depth`, then the agent's profile (`--profile`, or the profile the agent was created with, falling back to the active profile). When neither sets it, a clone-per-agent workspace is a shallow clone of depth 1. `full` clones the whole history, so `git rev-parse --is-shallow-repository` prints `false` and rebase, merge-base, `git log` and blame work without `git fetch --unshallow`. `0`, values above 999999999 and other values are rejected; use `full` for a full clone. The setting applies only when the broker clones the repository per agent (clone-per-agent); on the Kubernetes runtime it reaches both the NFS provisioning init container and the in-container clone. It takes effect only when the workspace is cloned: a new agent, or an agent whose workspace is recreated. Restarting an agent whose workspace is already a shallow clone keeps it shallow; to deepen it in place, run `git fetch --unshallow` in the workspace. For example:
 
@@ -264,7 +262,7 @@ profiles:
     clone_depth: full
 ```
 
-**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order, pins and local mode, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
+**Agent timezone.** Profiles do not set the `TZ` of a Hub-dispatched agent: a `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key). The Hub-level default is `agent_defaults.default_timezone` (in `settings.yaml`, the top-level `default_timezone` key). For the full order and pins, see [Times and Timezones](/scion/reference/times-and-timezones/#agent-tz-hub-dispatched-agents).
 
 #### Removed: profile `timezone`
 
@@ -272,7 +270,7 @@ The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server
 
 ## Telemetry Configuration (`telemetry`)
 
-Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per-template or per-agent in `scion-agent.yaml`.
+Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). They can also be overridden per agent in `scion-agent.yaml` (a template's `telemetry` block is ignored).
 
 See the [Metrics & OpenTelemetry guide](/scion/hosted/single-node/metrics/) for operational details.
 
@@ -374,7 +372,11 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |
 | `telemetry.cloud.endpoint` | `SCION_OTEL_ENDPOINT` |
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
-| `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_INSECURE` |
+| `telemetry.cloud.tls.enabled` (inverted) | `SCION_OTEL_INSECURE` |
+| `telemetry.cloud.tls.insecure_skip_verify` | `SCION_OTEL_SKIP_TLS_VERIFY` |
+| `telemetry.cloud.tls.ca_file` | `SCION_OTEL_CA_FILE` |
+| `telemetry.cloud.tls.cert_file` | `SCION_OTEL_CERT_FILE` |
+| `telemetry.cloud.tls.key_file` | `SCION_OTEL_KEY_FILE` |
 | `telemetry.hub.enabled` | `SCION_TELEMETRY_HUB_ENABLED` |
 
 See [Local Governance](/scion/local/local-governance/) for more on variable substitution.

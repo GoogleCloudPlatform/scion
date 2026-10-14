@@ -132,6 +132,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		LaunchCause:         a.LaunchCause,
 		RunID:               a.RunID,
 		PreviousRunIDs:      append([]string(nil), a.PreviousRunIds...),
 		WorkspacePlacement:  a.WorkspacePlacement,
@@ -146,6 +147,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		t := *a.RunIDUpdatedAt
 		sa.RunIDUpdatedAt = &t
 	}
+	sa.SSHHostKey = a.SSHHostKey
+	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
 	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
 	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
 	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
@@ -410,6 +413,27 @@ func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 		return nil, mapError(err)
 	}
 	return entAgentToStore(a), nil
+}
+
+// GetAgentRunState implements store.AgentStore.GetAgentRunState: one
+// primary-key read of run_id and deleted_at.
+func (s *AgentStore) GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return store.AgentRunState{}, err
+	}
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldDeletedAt).
+		Only(ctx)
+	if err != nil {
+		return store.AgentRunState{}, mapError(err)
+	}
+	rs := store.AgentRunState{RunID: row.RunID}
+	if row.DeletedAt != nil {
+		rs.DeletedAt = *row.DeletedAt
+	}
+	return rs, nil
 }
 
 // GetAgentBySlug retrieves an agent by its slug within a project.
@@ -848,7 +872,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	// launch_* column from the caller's struct; this is the one exception,
 	// and it is unconditional (not gated on the row's launch_state).
 	if a.Phase == "running" {
-		update.SetLaunchError("")
+		update.SetLaunchError("").SetLaunchCause("")
 	}
 
 	return update, nil
@@ -1600,7 +1624,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// method has already locked (not on the caller's struct, which may be
 	// stale). No CASE SQL: both are plain Go conditionals on current.
 	if su.Phase == "running" {
-		upd.SetLaunchError("")
+		upd.SetLaunchError("").SetLaunchCause("")
 		if current.LaunchState == store.LaunchStateActive {
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
@@ -2725,6 +2749,47 @@ func runIDWritable(now time.Time) predicate.Agent {
 			),
 		),
 	)
+}
+
+// SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
+// conditional write, applied only while run_id equals runID, no delete
+// holds the row and no key is recorded for runID yet. When it writes
+// nothing, a read of the row tells the outcomes apart.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (store.SSHHostKeyResult, error) {
+	if runID == "" || publicKey == "" {
+		return store.SSHHostKeyNotCurrentRun, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.SSHHostKeyRunIDIsNil(), agent.SSHHostKeyRunIDNEQ(runID)),
+		).
+		SetSSHHostKey(publicKey).
+		SetSSHHostKeyRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n > 0 {
+		return store.SSHHostKeyWritten, nil
+	}
+	row, err := s.client.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		return store.SSHHostKeyNotCurrentRun, nil
+	case err != nil:
+		return 0, mapError(err)
+	case row.RunID != runID || row.SSHHostKeyRunID != runID:
+		// Another run, or a delete holds the row.
+		return store.SSHHostKeyNotCurrentRun, nil
+	case row.SSHHostKey == publicKey:
+		return store.SSHHostKeyUnchanged, nil
+	}
+	return store.SSHHostKeyAlreadySet, nil
 }
 
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.

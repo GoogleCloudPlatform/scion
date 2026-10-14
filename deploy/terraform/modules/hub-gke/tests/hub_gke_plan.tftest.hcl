@@ -26,6 +26,12 @@ variables {
   sql_connection_name = "tfha-test-project:us-central1:tfha-pg"
   iap_oauth_client_id = "123456789-abc.apps.googleusercontent.com"
   neg_zones           = ["us-central1-a", "us-central1-b", "us-central1-c"]
+
+  nfs = {
+    server  = "192.0.2.10"
+    export  = "/scion/tfha-gke-h3"
+    pv_name = "tfha-gke-h3-nfs"
+  }
 }
 
 run "client_id_set_installs_the_hub" {
@@ -95,6 +101,7 @@ run "client_id_set_installs_the_hub" {
       output.chart_values.secrets.backend == "gcpsm" &&
       output.chart_values.storage.provider == "gcs" &&
       output.chart_values.cloudsql.enabled &&
+      output.chart_values.cloudsql.privateIp == true &&
       output.chart_values.serviceAccount.name == "scion-hub" &&
       output.chart_values.serviceAccount.gcpServiceAccount == "tfha-gke-h3-hub@tfha-test-project.iam.gserviceaccount.com" &&
       output.chart_values.rbac.create &&
@@ -104,8 +111,54 @@ run "client_id_set_installs_the_hub" {
   }
 
   assert {
+    condition = (
+      output.chart_values.workspaceStorage.nfs.enabled == true &&
+      output.chart_values.workspaceStorage.nfs.server == "192.0.2.10" &&
+      output.chart_values.workspaceStorage.nfs.export == "/scion/tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.mountRoot == "/mnt/scion-nfs" &&
+      output.chart_values.workspaceStorage.nfs.shareId == "tfha-gke-h3" &&
+      output.chart_values.workspaceStorage.nfs.pvName == "tfha-gke-h3-nfs" &&
+      output.chart_values.workspaceStorage.nfs.subpathRoot == "projects"
+    )
+    error_message = "workspaceStorage.nfs must be enabled with the hub's server, export, mountRoot, shareId (= hub_name), pvName and subpathRoot."
+  }
+
+  assert {
+    condition = (
+      length(keys(output.chart_values.workspaceStorage.nfs)) == 7 &&
+      jsonencode(keys(output.chart_values.hub.securityContext)) == jsonencode(["runAsGroup", "runAsUser"])
+    )
+    error_message = "workspaceStorage.nfs must carry exactly the seven chart keys, and hub.securityContext only runAsUser and runAsGroup."
+  }
+
+  assert {
+    condition = (
+      output.chart_values.hub.securityContext.runAsUser == 1000 &&
+      output.chart_values.hub.securityContext.runAsGroup == 1000
+    )
+    error_message = "hub.securityContext.runAsUser/runAsGroup must default to 1000."
+  }
+
+  assert {
+    condition     = try(output.chart_values.config.extra.server.workspace_storage, null) == null
+    error_message = "config.extra must not carry server.workspace_storage; the chart refuses it alongside workspaceStorage.nfs."
+  }
+
+  assert {
     condition     = !contains(keys(output.chart_values.hub), "podAnnotations")
     error_message = "no rotation marker means no rotation annotation."
+  }
+
+  # Default: the value is left out, so the chart's own default (false)
+  # applies and existing hubs' values do not change.
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled defaults to false and must leave hub.testIdentities out of the chart values."
+  }
+
+  assert {
+    condition     = output.chart_values.runtime.gke == true
+    error_message = "agent_runtime_gke_mode defaults to true, so chart_values.runtime.gke must be true (the chart's previous hardcoded runtimes.kubernetes.gke)."
   }
 
   assert {
@@ -127,6 +180,23 @@ run "client_id_set_installs_the_hub" {
   assert {
     condition     = google_storage_bucket.artifacts.name == "tfha-test-project-tfha-gke-h3-artifacts" && google_storage_bucket.artifacts.uniform_bucket_level_access
     error_message = "artifacts bucket must be <project>-<hub>-artifacts with UBLA."
+  }
+}
+
+run "hub_run_as_ids_reach_the_security_context" {
+  command = plan
+
+  variables {
+    hub_run_as_uid = 2001
+    hub_run_as_gid = 2002
+  }
+
+  assert {
+    condition = (
+      output.chart_values.hub.securityContext.runAsUser == 2001 &&
+      output.chart_values.hub.securityContext.runAsGroup == 2002
+    )
+    error_message = "hub_run_as_uid/gid must map to hub.securityContext.runAsUser/runAsGroup."
   }
 }
 
@@ -160,11 +230,60 @@ run "rotation_marker_rolls_pods" {
 
   variables {
     db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
   }
 
   assert {
     condition     = output.chart_values.hub.podAnnotations["scion.dev/db-password-rotation"] == "2026-10-06"
     error_message = "a rotation marker must land in a pod annotation so the pods roll with the new password."
+  }
+}
+
+run "agent_runtime_gke_mode_passes_through" {
+  command = plan
+
+  variables {
+    agent_runtime_gke_mode = false
+  }
+
+  assert {
+    condition     = output.chart_values.runtime.gke == false
+    error_message = "agent_runtime_gke_mode = false must reach the chart as runtime.gke = false."
+  }
+}
+
+run "test_identities_enabled_reaches_the_chart" {
+  command = plan
+
+  variables {
+    test_identities_enabled = true
+  }
+
+  assert {
+    condition     = output.chart_values.hub.testIdentities.enabled == true
+    error_message = "test_identities_enabled = true must set the chart's hub.testIdentities.enabled to true."
+  }
+
+  assert {
+    condition     = helm_release.hub[0].values == tolist([yamlencode(output.chart_values)])
+    error_message = "the release's values must still be exactly the chart_values output."
+  }
+}
+
+run "test_identities_explicit_false_adds_nothing" {
+  command = plan
+
+  variables {
+    test_identities_enabled = false
+  }
+
+  assert {
+    condition     = !contains(keys(output.chart_values.hub), "testIdentities")
+    error_message = "test_identities_enabled = false must leave hub.testIdentities out (the chart default is false)."
   }
 }
 
@@ -198,6 +317,110 @@ run "wildcard_neg_zone_rejected" {
   expect_failures = [var.neg_zones]
 }
 
+# The NFS validations mirror the chart's scion-hub.nfsWorkspace guards.
+run "empty_nfs_server_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "  "
+      export  = "/scion/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "relative_nfs_export_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "192.0.2.10"
+      export  = "scion/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "empty_nfs_pv_name_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "192.0.2.10"
+      export  = "/scion/tfha-gke-h3"
+      pv_name = ""
+    }
+  }
+
+  expect_failures = [var.nfs]
+}
+
+run "relative_nfs_mount_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_mount_root = "mnt/scion-nfs"
+  }
+
+  expect_failures = [var.nfs_mount_root]
+}
+
+run "unclean_nfs_mount_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_mount_root = "/mnt/../scion-nfs"
+  }
+
+  expect_failures = [var.nfs_mount_root]
+}
+
+run "absolute_nfs_subpath_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_subpath_root = "/projects"
+  }
+
+  expect_failures = [var.nfs_subpath_root]
+}
+
+run "unclean_nfs_subpath_root_rejected" {
+  command = plan
+
+  variables {
+    nfs_subpath_root = "projects/./x"
+  }
+
+  expect_failures = [var.nfs_subpath_root]
+}
+
+# The chart refuses root for the hub's uid and gid.
+run "root_hub_uid_rejected" {
+  command = plan
+
+  variables {
+    hub_run_as_uid = 0
+  }
+
+  expect_failures = [var.hub_run_as_uid]
+}
+
+run "root_hub_gid_rejected" {
+  command = plan
+
+  variables {
+    hub_run_as_gid = 0
+  }
+
+  expect_failures = [var.hub_run_as_gid]
+}
+
 # The chart's CI renders deploy/helm/scion-hub/ci/values-terraform-hub-gke.yaml
 # as "the values Terraform generates". This run plans with that fixture's
 # placeholder inputs and requires chart_values to equal the fixture exactly
@@ -218,6 +441,11 @@ run "chart_ci_fixture_matches_chart_values" {
     iap_oauth_client_id  = "123456789-placeholder.apps.googleusercontent.com"
     admin_emails         = ["admin@example.com"]
     db_password_rotation = "2026-10-06"
+    nfs = {
+      server  = "nfs.example.com"
+      export  = "/example-export/tfha-gke-h3"
+      pv_name = "tfha-gke-h3-nfs"
+    }
   }
 
   assert {

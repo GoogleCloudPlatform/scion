@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -133,7 +133,8 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     TestListProjectAgentsSorted_Race_MissingRow.
 //   - The Launch* bookkeeping fields (LaunchAsyncOptIn, LaunchID,
 //     LaunchState, LaunchEndReason, LaunchKind, LaunchDeadline,
-//     LaunchLastReportAt, LaunchOwner, LaunchSeq, LaunchStep, LaunchError):
+//     LaunchLastReportAt, LaunchOwner, LaunchSeq, LaunchStep, LaunchError,
+//     LaunchCause):
 //     per agent_store.go's own doc comment, "UpdateAgent never sets any of
 //     these from the caller's struct: they are absent from its Ent builder
 //     chain entirely" -- only BeginLaunch/MarkLaunchAccepted/EndLaunch/
@@ -173,7 +174,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"LaunchAsyncOptIn": true, "LaunchID": true, "LaunchState": true,
 	"LaunchEndReason": true, "LaunchKind": true, "LaunchDeadline": true,
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
-	"LaunchStep": true, "LaunchError": true,
+	"LaunchStep": true, "LaunchError": true, "LaunchCause": true,
 	"Launch": true,
 	// Deletion marker columns are written only through UpdateAgentDeletion
 	// (never by CreateAgent/UpdateAgent), and Deletion is computed.
@@ -193,6 +194,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// run_id_updated_at: written only with run_id by the same writers
 	// (ptone/scion#3661).
 	"RunIDUpdatedAt": true,
+	// ssh_host_key and ssh_host_key_run_id are written only through
+	// SetAgentSSHHostKey; CreateAgent and UpdateAgent never write them.
+	"SSHHostKey":      true,
+	"SSHHostKeyRunID": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

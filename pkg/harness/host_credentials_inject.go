@@ -142,7 +142,11 @@ const maxHostCredentialFileSize = 1 << 20
 // declared path under home and requires that the resolved path is still
 // strictly inside the resolved home and names the very file that was opened
 // (same device and inode), and that it is a regular file no larger than
-// 1 MiB. The content is read from the already-open descriptor.
+// 1 MiB. The content is read from the already-open descriptor. A file whose
+// path can also hold a non-credential file (copilot's config.json, see
+// hostCredentialContentChecks) is rejected when its content holds no
+// sign-in data, so it is not injected and the start treats file-based
+// sign-in as not configured.
 func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte, error) {
 	rel, ok := homeRelativeSuffix(f.TargetSuffix)
 	if !ok {
@@ -189,6 +193,9 @@ func ReadInjectableHostCredentialFile(f HostCredentialFile, home string) ([]byte
 	}
 	if len(data) > maxHostCredentialFileSize {
 		return nil, fmt.Errorf("file larger than %d bytes", maxHostCredentialFileSize)
+	}
+	if !hostCredentialHoldsSignIn(f, data) {
+		return nil, fmt.Errorf("file holds no sign-in data")
 	}
 	return data, nil
 }

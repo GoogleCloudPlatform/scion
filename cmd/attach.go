@@ -56,10 +56,9 @@ Detaching:
   move to Ctrl-\ then Ctrl-^: a lone Ctrl-\ is delayed until the next key,
   and the full sequence ends the attach (the agent keeps running).
 
-Local vs Hub mode:
-  With a local project, scion attach runs the container runtime's exec on this
-  machine. When the project is linked to a Hub, the session goes through the
-  Hub to the runtime broker running the agent, over a WebSocket. Anyone with
+Sessions:
+  The session goes through the Hub to the runtime broker running the agent,
+  over a WebSocket. Anyone with
   attach permission on the agent can attach. Several people can be attached at
   once and see the same session.
 
@@ -94,7 +93,7 @@ Disconnects:
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
@@ -622,20 +621,19 @@ func attachErrorWithUATHint(err error, token string) error {
 }
 
 // resolveAttachTransport resolves transport auth for the attach WebSocket path.
-// It checks env vars first, then settings.yaml. Returns (nil, _, nil) when
+// It checks env vars first, then the hub list entry of the hub in use, then
+// settings.yaml. Returns (nil, _, nil) when
 // transport auth is not configured.
 func resolveAttachTransport() (transportauth.TokenSource, transportauth.HeaderMode, error) {
 	// Load settings for transport config.
 	resolvedPath, _, _ := config.ResolveProjectPath(projectPath)
 	settings, _ := config.LoadSettings(resolvedPath)
 
-	var ts *transportauth.TransportSettings
-	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
-		ts = &transportauth.TransportSettings{
-			Mode:     settings.Hub.Transport.Mode,
-			Audience: settings.Hub.Transport.Audience,
-		}
+	var endpoint string
+	if settings != nil {
+		endpoint = GetHubEndpoint(settings)
+	} else {
+		endpoint = GetHubEndpoint(nil)
 	}
-
-	return transportauth.FromSettings(ts, adcsource.New)
+	return transportauth.FromSettings(hubTransportSettings(settings, endpoint), adcsource.New)
 }

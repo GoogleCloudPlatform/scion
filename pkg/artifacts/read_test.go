@@ -18,7 +18,9 @@ package artifacts
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -293,10 +295,15 @@ func TestGetFilePaths(t *testing.T) {
 			t.Errorf("%s: %d, want 404", p, rec.Code)
 		}
 	}
-	for p, allow := range map[string]string{"": "GET, HEAD, PATCH", "/files/a%20b.txt": "GET, HEAD", "/versions/1/files/a%20b.txt": "GET, HEAD, PUT"} {
-		rec := f.do(&agentA, http.MethodDelete, "/api/v1/artifacts/"+id+p, nil, nil)
-		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != allow {
-			t.Errorf("DELETE %s: %d Allow=%q", p, rec.Code, rec.Header().Get("Allow"))
+	// DELETE is a route of the artifact itself, so PUT probes it.
+	for p, tc := range map[string]struct{ method, allow string }{
+		"":                            {http.MethodPut, "GET, HEAD, PATCH, DELETE"},
+		"/files/a%20b.txt":            {http.MethodDelete, "GET, HEAD"},
+		"/versions/1/files/a%20b.txt": {http.MethodDelete, "GET, HEAD, PUT"},
+	} {
+		rec := f.do(&agentA, tc.method, "/api/v1/artifacts/"+id+p, nil, nil)
+		if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != tc.allow {
+			t.Errorf("%s %s: %d Allow=%q", tc.method, p, rec.Code, rec.Header().Get("Allow"))
 		}
 	}
 }
@@ -371,4 +378,46 @@ func TestGetFileWithoutContentIsNotFound(t *testing.T) {
 	if rec := f.do(&agentA, http.MethodGet, "/api/v1/artifacts/"+pub.Artifact.ID+"/files/_remote/x", nil, nil); rec.Code != http.StatusNotFound {
 		t.Errorf("file without content: %d, want 404", rec.Code)
 	}
+}
+
+// unansweringScopeHost is a fakeHost whose ScopeChecker answers for no
+// project.
+type unansweringScopeHost struct{ *fakeHost }
+
+func (unansweringScopeHost) ScopesExist(context.Context, []string) (map[string]bool, error) {
+	return map[string]bool{}, nil
+}
+
+// TestGetArtifactScopeDeleted: a GET of the artifact or of one of its
+// versions says when its home project was deleted, by the list's rule, and
+// a failed check leaves the field unset rather than failing the GET
+// (ptone/scion#4588).
+func TestGetArtifactScopeDeleted(t *testing.T) {
+	f := newFixture(t, false)
+	id := f.publish(agentA, "doc.md", []byte("# doc"), "").Artifact.ID
+	paths := []string{"/api/v1/artifacts/" + id, "/api/v1/artifacts/" + id + "/versions/1"}
+	check := func(name string, want bool) {
+		t.Helper()
+		for _, p := range paths {
+			rec := f.do(&agentB, http.MethodGet, p, nil, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: GET %s: %d %s", name, p, rec.Code, rec.Body.String())
+			}
+			got := decodeInto[ArtifactResponse](t, rec)
+			if got.ScopeDeleted != want || strings.Contains(rec.Body.String(), `"scopeDeleted"`) != want {
+				t.Errorf("%s: GET %s: scopeDeleted %v, want %v (%s)", name, p, got.ScopeDeleted, want, rec.Body.String())
+			}
+		}
+	}
+	check("no checker", false)
+	h := &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
+	f.svc.host = h
+	check("home deleted", true)
+	h.gone = map[string]bool{"project-2": true}
+	check("another project deleted", false)
+	h.gone = map[string]bool{"project-1": true}
+	h.err = errors.New("lookup failed")
+	check("check failed", false)
+	f.svc.host = unansweringScopeHost{f.host}
+	check("not answered", false)
 }

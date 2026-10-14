@@ -70,6 +70,8 @@ func TestFormatLastActivity(t *testing.T) {
 		{"clock skew: activity minutes ahead", "", now.Add(5 * time.Minute), "just now"},
 		{"activity with zero time", "running", time.Time{}, "running"},
 		{"empty status with zero time", "", time.Time{}, "-"},
+		{"initializing shown as starting", "initializing", now.Add(-30 * time.Second), "starting, just now"},
+		{"initializing with zero time", "initializing", time.Time{}, "starting"},
 	}
 
 	for _, tt := range tests {
@@ -549,6 +551,89 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	}
 }
 
+// TestDisplayAgentsStartingPhase (ptone/scion#4756): an agent whose runtime
+// reports Phase and ContainerStatus "starting" is shown as starting in both
+// the local table and the hub table (via hubAgentToAgentInfo), and --running
+// keeps it.
+func TestDisplayAgentsStartingPhase(t *testing.T) {
+	local := api.AgentInfo{
+		Name:            "starting-local",
+		Template:        "default",
+		Runtime:         "cloudrun-sandbox",
+		Project:         "my-project",
+		Phase:           "starting",
+		ContainerStatus: "starting",
+	}
+	hub := hubAgentToAgentInfo(hubclient.Agent{
+		ID:              "agent-starting-hub",
+		Name:            "starting-hub",
+		Template:        "default",
+		Phase:           "starting",
+		ContainerStatus: "starting",
+	})
+	if hub.Phase != "starting" || hub.Activity != "" {
+		t.Fatalf("hubAgentToAgentInfo phase/activity = %q/%q, want starting/empty", hub.Phase, hub.Activity)
+	}
+	// Fill the columns left of CONTAINER so the row splits into fields
+	// that line up with the header.
+	hub.Runtime = "cloudrun-sandbox"
+	hub.Project = "my-project"
+	hub.RuntimeBrokerName = "broker-1"
+
+	listRunning = true
+	defer func() { listRunning = false }()
+
+	for _, tc := range []struct {
+		name    string
+		agent   api.AgentInfo
+		hubMode bool
+	}{
+		{name: "local", agent: local, hubMode: false},
+		{name: "hub", agent: hub, hubMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			err := displayAgents([]api.AgentInfo{tc.agent}, false, tc.hubMode)
+			_ = w.Close()
+			os.Stdout = old
+			if err != nil {
+				t.Fatalf("displayAgents returned error: %v", err)
+			}
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("expected header + 1 agent row, got %d lines: %s", len(lines), buf.String())
+			}
+			header, row := strings.Fields(lines[0]), strings.Fields(lines[1])
+			// col maps header words to row fields by position: every column
+			// up to CONTAINER is one non-empty word; LAST ACTIVITY is
+			// multi-word and must stay last.
+			col := func(name string) string {
+				for i, h := range header {
+					if h == name && i < len(row) {
+						return row[i]
+					}
+				}
+				return ""
+			}
+			if row[0] != tc.agent.Name {
+				t.Errorf("NAME = %q, want %q: %s", row[0], tc.agent.Name, lines[1])
+			}
+			if got := col("PHASE"); got != "starting" {
+				t.Errorf("PHASE = %q, want starting: %s", got, lines[1])
+			}
+			if got := col("CONTAINER"); got != "starting" {
+				t.Errorf("CONTAINER = %q, want starting: %s", got, lines[1])
+			}
+		})
+	}
+}
+
 func TestHubAgentToAgentInfo_HarnessConfigTopLevelTakesPrecedence(t *testing.T) {
 	// When both are set, top-level harnessConfig takes precedence
 	a := hubclient.Agent{
@@ -925,46 +1010,6 @@ func TestValidateListFlagsNegativeCount(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "non-negative") {
 		t.Errorf("error %q should mention non-negative", err.Error())
-	}
-}
-
-// TestRejectHubOnlyFiltersInLocalMode covers: a Hub-only filter set while
-// listing locally must error rather
-// than silently listing everything (a narrowing filter that narrows nothing
-// makes the output wider than asked for, with no indication anything was
-// ignored).
-func TestRejectHubOnlyFiltersInLocalMode(t *testing.T) {
-	reset := func() {
-		filterOwner, filterBroker, filterHarness = "", "", ""
-		filterDescendants, filterAncestors, filterLineage = "", "", ""
-	}
-	defer reset()
-
-	t.Run("no Hub-only filters set: no error", func(t *testing.T) {
-		reset()
-		assert.NoError(t, rejectHubOnlyFiltersInLocalMode())
-	})
-
-	tests := []struct {
-		flagName string
-		set      func()
-	}{
-		{"owner", func() { filterOwner = "alice" }},
-		{"broker", func() { filterBroker = "my-broker" }},
-		{"harness", func() { filterHarness = "claude" }},
-		{"descendants", func() { filterDescendants = "agent-a" }},
-		{"ancestors", func() { filterAncestors = "agent-a" }},
-		{"lineage", func() { filterLineage = "agent-a" }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.flagName, func(t *testing.T) {
-			reset()
-			tt.set()
-			err := rejectHubOnlyFiltersInLocalMode()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "--"+tt.flagName)
-			assert.Contains(t, err.Error(), "Hub mode")
-		})
 	}
 }
 

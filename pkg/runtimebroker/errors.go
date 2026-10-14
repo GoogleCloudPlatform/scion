@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // APIError represents a standardized error response.
@@ -98,6 +100,11 @@ const (
 	// Either way this constant lets broker-level callers and tests branch on
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
 
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
@@ -292,6 +299,16 @@ func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
+// RetainedFilesRefused writes a 409 Conflict response with the stable
+// api.BrokerErrCodeRetainedFilesRefused code, for a purge of retained files
+// that removed nothing (ptone/scion#4744). reason, which names no host path,
+// is also in the details under api.BrokerErrDetailReason.
+func RetainedFilesRefused(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, api.BrokerErrCodeRetainedFilesRefused,
+		"Retained files not removed: "+reason,
+		map[string]interface{}{api.BrokerErrDetailReason: reason})
+}
+
 // StaleDispatch writes a 409 Conflict response with the stable
 // ErrCodeStaleDispatch code.
 func StaleDispatch(w http.ResponseWriter, message string) {
@@ -433,6 +450,90 @@ func notFoundResourceText(err error, templateSlug string) string {
 // (classifyStartError, run_launch.go) share it, so both report the same
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
+
+// runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
+// code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
+// set the hub relays. The reasons are kept few on purpose
+// (ptone/scion#4555): a NotFound reaching the start error is ambiguous (the
+// pre-create reads treat a missing pod as normal), and a timeout overlaps
+// the launch deadline handling, so neither gets one.
+var runtimeCauseCodes = map[metav1.StatusReason]string{
+	metav1.StatusReasonForbidden:    api.BrokerRuntimeCauseForbidden,
+	metav1.StatusReasonUnauthorized: api.BrokerRuntimeCauseUnauthorized,
+}
+
+// runtimeFailureCause looks through a Manager.Start error for the failure
+// behind it. The create's client body never carries a start error's text
+// (it gets the fixed runtimeOpError text), and the text of a runtime's
+// start error need not name the underlying failure (the Kubernetes
+// runtime's opaque start errors do not), so the cause is reached through
+// errors.As and Unwrap.
+//
+//   - reason is the Kubernetes status reason ("" when there is none).
+//   - code is the fixed, client-safe details.cause code for reason, or ""
+//     when reason has none (runtimeCauseCodes).
+//   - cause is the first Kubernetes API status in err's chain (errors.As
+//     also searches multi-%w errors). Without one, it is the deepest error
+//     reached by single-error errors.Unwrap, which stops at an error that
+//     wraps several (a multi-%w error) and returns that error. Its text can
+//     name a namespace, ServiceAccount or object, so it is for server logs
+//     only.
+func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, cause error) {
+	if err == nil {
+		return "", "", nil
+	}
+	var status k8serrors.APIStatus
+	if errors.As(err, &status) {
+		if e, ok := status.(error); ok {
+			cause = e
+		}
+		reason = status.Status().Reason
+	}
+	if cause == nil {
+		cause = err
+		for {
+			next := errors.Unwrap(cause)
+			if next == nil {
+				break
+			}
+			cause = next
+		}
+	}
+	return reason, runtimeCauseCodes[reason], cause
+}
+
+// runtimeFailureLogAttrs returns the log attributes describing err's cause
+// (runtimeFailureCause) for a terminal create failure's ERROR record:
+// cause (the innermost error text), and k8s_reason and cause_code when
+// set. Server logs only: none of these may reach a client body except the
+// fixed code.
+func runtimeFailureLogAttrs(err error) []any {
+	reason, code, cause := runtimeFailureCause(err)
+	if cause == nil {
+		return nil
+	}
+	attrs := []any{"cause", cause.Error()}
+	if reason != "" {
+		attrs = append(attrs, "k8s_reason", string(reason))
+	}
+	if code != "" {
+		attrs = append(attrs, "cause_code", code)
+	}
+	return attrs
+}
+
+// writeCreateRuntimeError writes the 500 runtime_error for a create's
+// Manager.Start failure: the fixed runtimeOpError text and, when the
+// failure has a cause code (runtimeFailureCause), details.cause with only
+// that code. The API server message, namespace, ServiceAccount and object
+// names never reach the body.
+func writeCreateRuntimeError(w http.ResponseWriter, err error) {
+	var details map[string]interface{}
+	if _, code, _ := runtimeFailureCause(err); code != "" {
+		details = map[string]interface{}{"cause": code}
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError(opCreateAgent, err).Error(), details)
+}
 
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
 // delete, exec, message, logs, list, and the workspace upload/apply
@@ -606,10 +707,13 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior. The one exception is errSavedProfileUnresolved (a saved profile
-// that no longer resolves), which is checked ahead of every other case and
-// written as the retryable 503 from writeSavedProfileUnresolved; its text is
-// client-safe by construction.
+// behavior. The exceptions are errSavedProfileUnresolved (a saved profile
+// that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
+// a default profile the Hub's stored profiles lack) and
+// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// which are checked ahead of every other case and written as the retryable
+// 503 from writeProfileUnresolved; their text is client-safe by
+// construction.
 //
 // Within that Hub branch, a missing local file (OriginalErr matches
 // fs.ErrNotExist) is checked first and written as a 422 template_error by
@@ -637,9 +741,11 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	// errSavedProfileUnresolved's text names only the agent, the profile
-	// and a fixed or ResolveRuntime cause, and is client-safe as is.
-	if errors.Is(err, errSavedProfileUnresolved) {
-		writeSavedProfileUnresolved(w, err)
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
+	// the stored profile names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
 	sce, ok := err.(*startContextError)

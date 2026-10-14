@@ -61,6 +61,47 @@ type fakeHost struct {
 	// reviewers lists "userRef ownerAgentID homeScope" triples for which
 	// MayGrantReview answers yes.
 	reviewers map[string]bool
+	// admins lists "userRef scope" pairs for which AdministersScope
+	// answers yes.
+	admins map[string]bool
+	// subjectErr, when set, makes ReviewSubjectAuthorize fail.
+	subjectErr error
+}
+
+// ReviewSubjectAuthorize answers from the same table as Authorize, for
+// the named user rather than the caller of ctx.
+func (h *fakeHost) ReviewSubjectAuthorize(_ context.Context, kind, ref, scope, perm string) (bool, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "subject "+PrincipalRef(kind, ref)+" "+scope+" "+perm)
+	if h.subjectErr != nil {
+		return false, h.subjectErr
+	}
+	if kind != PrincipalKindUser || scope == "" {
+		return false, nil
+	}
+	return h.perms[PrincipalRef(kind, ref)][scope][perm], nil
+}
+
+// allowAdmin makes AdministersScope answer yes for u in scope.
+func (h *fakeHost) allowAdmin(u principal, scope string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.admins == nil {
+		h.admins = map[string]bool{}
+	}
+	h.admins[PrincipalRef(u.kind, u.ref)+" "+scope] = true
+}
+
+func (h *fakeHost) AdministersScope(ctx context.Context, scope string) bool {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "administers "+scope)
+	return h.admins[PrincipalRef(kind, ref)+" "+scope]
 }
 
 // allowReview makes MayGrantReview answer yes for u on artifacts owned by
@@ -150,6 +191,11 @@ func (h *fakeHost) Authorize(ctx context.Context, scope, perm string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls = append(h.calls, scope+" "+perm)
+	// Like the hub's Authorize, it starts with Permits (the credential),
+	// read from the same table without logging a second call.
+	if scope == "" || h.denied[PrincipalRef(kind, ref)+" "+scope+" "+perm] {
+		return false
+	}
 	return h.perms[PrincipalRef(kind, ref)][scope][perm]
 }
 

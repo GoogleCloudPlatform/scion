@@ -30,7 +30,8 @@ import (
 // For every project p, chatMemberProjectIDs(ctx, u)[p] equals
 // CheckEffectiveMembership(ctx, u, p).IsMember, computed for all projects at
 // once: an active project-scoped role binding held directly, or through an
-// effective group (a group-bound owner role confers nothing). Hub-admin
+// effective group (a group-bound owner role confers nothing, nor does a role
+// that does not confer membership, such as project-visitor). Hub-admin
 // status, public visibility and generic read grants are not membership, so
 // an admin's unread state covers only the projects they belong to, not all
 // the projects they can read.
@@ -47,6 +48,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 	failed := make(map[string]bool)
 	roleNames := make(map[string]string)
 	roleMissing := make(map[string]bool)
+	// noMembership holds the role definitions that do not confer
+	// membership (project-visitor); their bindings are ignored.
+	noMembership := make(map[string]bool)
 	// roleName resolves a role definition's name, reporting whether the
 	// definition exists.
 	roleName := func(id string) (string, bool, error) {
@@ -65,12 +69,17 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 			return "", false, fmt.Errorf("get role definition %s: %w", id, err)
 		}
 		roleNames[id] = rd.Name
+		noMembership[id] = !rd.ConfersProjectMembership()
 		return rd.Name, true, nil
 	}
 
 	direct, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list direct bindings: %w", err)
+	}
+	// Unclamped reads: apply the test identity clamps (fail closed).
+	if direct, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, direct); err != nil {
+		return nil, fmt.Errorf("test identity clamp: %w", err)
 	}
 	for _, rb := range direct {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {
@@ -82,6 +91,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 		}
 		if !ok {
 			failed[rb.ScopeID] = true
+			continue
+		}
+		if noMembership[rb.RoleDefinitionID] {
 			continue
 		}
 		members[rb.ScopeID] = true
@@ -100,6 +112,9 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 		if err != nil {
 			return nil, fmt.Errorf("list group bindings: %w", err)
 		}
+		if bindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, bindings); err != nil {
+			return nil, fmt.Errorf("test identity clamp: %w", err)
+		}
 		for _, rb := range bindings {
 			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID == "" || !isBindingActive(rb, now) {
 				continue
@@ -112,8 +127,12 @@ func (s *Server) chatMemberProjectIDs(ctx context.Context, userID string) (map[s
 				failed[rb.ScopeID] = true
 				continue
 			}
-			// Groups never confer owner; such a binding is ignored.
-			if name == store.ProjectRoleOwner {
+			// Groups never confer owner; such a binding is ignored, as is
+			// one of a role that does not confer membership. That second
+			// check is defensive: the store binds such a role only to a user
+			// principal (CreateVisitorRoleBinding), so no group binding of
+			// one is written today.
+			if name == store.ProjectRoleOwner || noMembership[rb.RoleDefinitionID] {
 				continue
 			}
 			members[rb.ScopeID] = true

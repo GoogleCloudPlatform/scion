@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_4
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,6 +38,7 @@ func TestCredentialKindsAliasCanonicalContract(t *testing.T) {
 		CredentialKindBroker,
 		CredentialKindDev,
 		CredentialKindDelegatedAgent,
+		CredentialKindWorkloadDelegation,
 	}
 	if want := credentialmeta.Kinds(); !reflect.DeepEqual(serverKinds, want) {
 		t.Fatalf("server credential kinds = %v, canonical kinds = %v", serverKinds, want)

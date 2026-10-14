@@ -183,6 +183,19 @@ func parseLabels(raw []string) (map[string]string, error) {
 	return m, nil
 }
 
+// resolveBranch returns the branch for a new agent: the --branch flag if
+// given, else the inline config's branch, else "" (the default). Local and
+// Hub create and start all use it, so they apply the same precedence.
+func resolveBranch(flag string, inlineCfg *api.ScionConfig) string {
+	if flag != "" {
+		return flag
+	}
+	if inlineCfg != nil {
+		return inlineCfg.Branch
+	}
+	return ""
+}
+
 // loadInlineConfig loads a ScionConfig from the --config flag path.
 // If path is "-", reads from stdin. Supports YAML and JSON formats.
 // Returns (nil, nil) if no inline config path is set.
@@ -271,8 +284,12 @@ type HubContext struct {
 	// CredentialKind mirrors hubsync.HubContext.CredentialKind — see its doc
 	// for what it records and why (ptone/scion#2146). Zero value
 	// (hubsync.CredentialKindUnknown) on any HubContext not built via
-	// CheckHubAvailability* (e.g. a test double).
+	// requireHub (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
+	// TargetProfile names the target-hub profile this context was built
+	// from (profileAgentHubContext), or is empty. A profile context has no
+	// local project: commands using it touch no local project state.
+	TargetProfile string
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub over
@@ -327,71 +344,45 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 	return config.LoadSettings(resolvedPath)
 }
 
-// CheckHubAvailability checks if Hub integration is enabled and returns a ready-to-use
-// Hub context if available. Returns nil if Hub should not be used (not enabled or --no-hub flag is set).
+// requireHub returns a ready-to-use Hub context for projectPath. Every
+// agent operation goes through a hub, so it never returns a nil HubContext
+// without an error:
+//   - no hub configured: errHubNotConfigured ("No hub selected. Add one with
+//     'scion hub add <name> <url>' ..."), or the local-only mode migration
+//     text for a project that still has local-mode agents;
+//   - the local workstation endpoint does not answer: "Local scion server
+//     is not running. Start it with 'scion server start'.";
+//   - a remote hub is unreachable: the error with the hub-check hint;
+//   - the project was unlinked (hub.linked=false): hubsync.ErrProjectUnlinked.
 //
-// IMPORTANT: When Hub is enabled, this function will return an error if the Hub is
-// unavailable or misconfigured. There is NO silent fallback to local mode - this is
-// by design to ensure users always know which mode they're operating in.
-//
-// This function now performs full Hub sync checks via hubsync.EnsureHubReady:
-// - Verifies project registration (prompts to register if not)
-// - Compares local and Hub agents (prompts to sync if mismatched)
-func CheckHubAvailability(projectPath string) (*HubContext, error) {
-	return CheckHubAvailabilityWithOptions(projectPath, false)
-}
-
-// CheckHubAvailabilityWithOptions is like CheckHubAvailability but allows skipping sync.
-func CheckHubAvailabilityWithOptions(projectPath string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(projectPath, nil, skipSync)
-}
-
-// CheckHubAvailabilityForAgent checks Hub availability for an operation on a specific agent.
-// The targetAgent parameter specifies the agent being operated on, which will be excluded
-// from sync requirements. This allows operations like delete to proceed without first
-// syncing the target agent (e.g., deleting a local-only agent without registering it).
-func CheckHubAvailabilityForAgent(projectPath, targetAgent string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(projectPath, []string{targetAgent}, skipSync)
-}
-
-// CheckHubAvailabilityForAgents checks Hub availability for operations on one or more agents.
-// All target agents are excluded from sync requirements so batch operations are not blocked
-// by sync drift on the exact agents being modified.
-func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
-	targetAgent := ""
-	if len(excludedAgents) > 0 {
-		targetAgent = excludedAgents[0] // compatibility field for older internals
+// A target-hub profile (--hub-profile) names the hub and, with --project,
+// the project on it: no hub sync and no local project (ptone/scion#4240).
+// On the local workstation hub an unregistered project is linked without a
+// prompt (see hubsync.EnsureHubReady). There is no per-command agent
+// reconcile.
+func requireHub(projectPath string) (*HubContext, error) {
+	if hubProfileSelected() {
+		return profileAgentHubContext()
 	}
-
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
-		NoHub:            noHub,
 		EndpointOverride: hubEndpoint,
-		SkipSync:         skipSync,
-		TargetAgent:      targetAgent,
-		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
-		// On the local workstation hub, link an unregistered project
-		// without prompting; a remote hub keeps the prompt.
-		AutoLinkLocal: true,
-	}
-
-	// A hub project reference needs hub mode: offer to enable it (when
-	// logged in, interactively) or name 'scion hub enable' (#3533).
-	if !noHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
-		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
-			return nil, err
-		}
+		// The hub selected with 'scion use' never links or registers a
+		// project that is already linked to a hub.
+		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
-	}
-
-	if hubCtx == nil {
-		return nil, nil
 	}
 
 	// Convert hubsync.HubContext to cmd.HubContext
@@ -407,24 +398,10 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 	}, nil
 }
 
-// errHubNotConfigured is returned by requireHub when the command needs a hub
-// but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
-
-// requireHub is CheckHubAvailability for commands that only work against a
-// hub. It never returns a nil HubContext without an error: when no hub is in
-// use it returns errHubNotConfigured, so callers can use hubCtx.Client
-// directly.
-func requireHub(projectPath string) (*HubContext, error) {
-	hubCtx, err := CheckHubAvailability(projectPath)
-	if err != nil {
-		return nil, err
-	}
-	if hubCtx == nil {
-		return nil, errHubNotConfigured
-	}
-	return hubCtx, nil
-}
+// errHubNotConfigured is returned by requireHub when no hub endpoint is
+// configured (flag, environment, settings or the hub list). It matches every
+// hubsync.HubNotConfiguredError through errors.Is.
+var errHubNotConfigured = hubsync.ErrHubNotConfigured
 
 // detectCrossProjectTarget reports the target project when the caller is an
 // agent that set --project to a DIFFERENT project than its own. Returns ""
@@ -493,13 +470,33 @@ func PrintUsingHub(endpoint string) {
 	fmt.Fprintf(os.Stderr, "Using hub: %s\n", endpoint)
 }
 
-// localOnlyHint is appended to hub errors where switching to local-only mode
-// is a plausible remedy (the hub is unreachable or failing).
-const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
+// hubCheckHint is appended to hub errors where the hub may be down or
+// failing. For the local workstation endpoint it says how to check and start
+// the local server; for any other endpoint it points at 'scion hub status'.
+// The wording is shared with pkg/hubsync.
+func hubCheckHint(endpoint string) string {
+	return "\n\n" + hubsync.HubCheckHint(endpoint)
+}
 
-// emptyResponseNote replaces localOnlyHint when the hub answered a call that
-// needs a body with an empty response (apiclient.ErrNoContent). The hub was
-// reachable, so suggesting local-only mode would be misleading.
+// hintHubEndpoint returns the hub endpoint hubCheckHint describes: the
+// endpoint of the current invocation (the --hub flag, the active project's
+// settings, or the environment). It is only called on an error path, and
+// returns what it can without failing. Tests replace it.
+var hintHubEndpoint = func() string {
+	resolved, _, err := config.ResolveProjectPath(projectPath)
+	if err != nil {
+		return GetHubEndpoint(nil)
+	}
+	settings, err := config.LoadSettings(resolved)
+	if err != nil {
+		return GetHubEndpoint(nil)
+	}
+	return GetHubEndpoint(settings)
+}
+
+// emptyResponseNote replaces the hub-check hint when the hub answered a call
+// that needs a body with an empty response (apiclient.ErrNoContent). The hub
+// was reachable, so telling the user to check it would be misleading.
 const emptyResponseNote = "\n\nThe hub returned an empty response where a result was expected."
 
 // hubError marks an error that has been through wrapHubError. Error() is the
@@ -543,21 +540,21 @@ func isHubFailure(err error) bool {
 //     hub-managed agent, a credentials-rejected message that keeps the cause).
 //   - Connectivity failures (anything that is not an *apiclient.APIError,
 //     other than the empty-response case below, e.g. a transport error or
-//     timeout) and 5xx responses: the "scion hub disable" local-only hint is
-//     appended, since the hub being down is the case where falling back to
-//     local mode can help.
+//     timeout) and 5xx responses: the hubCheckHint for the current endpoint
+//     is appended (check and start the local server, or 'scion hub status'),
+//     since the hub may be down.
 //   - A runtime broker failure relayed by the Hub ("runtime broker returned
 //     error ..."): rendered as a short failure category with the broker's
-//     code and the request ID, without the local-only hint.
+//     code and the request ID, without the hub-check hint.
 //   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
-//     hub answered and the message is about the request, so suggesting that
-//     the user disable the hub would be misleading noise.
+//     hub answered and the message is about the request, so telling the user
+//     to check the hub would be misleading noise.
 //   - An empty response from a call that needs a body (an error wrapping
 //     apiclient.ErrNoContent): the hub answered, so it gets a note saying so
-//     instead of the local-only hint.
+//     instead of the hub-check hint.
 //
-// Inside a hub-managed agent the local-only hint is never added, because
-// disabling the Hub would break orchestration connectivity.
+// Inside a hub-managed agent the hub-check hint is never added: the agent
+// cannot run those commands.
 func wrapHubError(err error) error {
 	if err == nil {
 		return nil
@@ -581,15 +578,15 @@ func wrapHubError(err error) error {
 		return &hubError{msg: "authentication failed, login to hub with 'scion hub auth login'", err: err}
 	}
 	// A failure the Hub relays from the runtime broker: the Hub is up, so
-	// local-only mode is no remedy; show a short category instead of the
+	// checking it is no remedy; show a short category instead of the
 	// broker's raw response (ptone/scion#3323).
 	if msg, ok := renderBrokerFailure(err); ok {
 		return &hubError{msg: msg, err: err}
 	}
-	if config.IsHubManagedAgent() || !shouldSuggestLocalOnly(err) {
+	if config.IsHubManagedAgent() || !shouldSuggestHubCheck(err) {
 		return &hubError{msg: err.Error(), err: err}
 	}
-	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+	return &hubError{msg: err.Error() + hubCheckHint(hintHubEndpoint()), err: err}
 }
 
 // printDeleteInProgressWarnings writes each string in details.warnings of a
@@ -617,9 +614,9 @@ func printDeleteInProgressWarnings(w io.Writer, err error) {
 	}
 }
 
-// shouldSuggestLocalOnly reports whether the local-only hint is relevant for
+// shouldSuggestHubCheck reports whether the hub-check hint is relevant for
 // err: true for connectivity failures (no structured API response) and 5xx.
-func shouldSuggestLocalOnly(err error) bool {
+func shouldSuggestHubCheck(err error) bool {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) {
 		return true
@@ -660,10 +657,6 @@ func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
 // git remote. Every other branch (context/settings short-circuit, missing
 // remote, zero matches) is identical for both callers.
 func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
-	if hubCtx == nil {
-		return "", errors.New("no hub context available to resolve the project ID")
-	}
-
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
@@ -689,11 +682,7 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 			"Link it with 'scion hub link', or pass --project <slug|id> to target a hub project")
 	}
 	if gitRemote == "" {
-		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"
-		if !config.IsHubManagedAgent() {
-			msg += ", or use --no-hub for local-only mode"
-		}
-		return "", errors.New(msg)
+		return "", errors.New("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -753,6 +742,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
 
+	// A target-hub profile refuses the flags that need local state before
+	// anything else (ptone/scion#4240).
+	if err := checkProfileAgentFlags(cmd); err != nil {
+		return err
+	}
+
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return newUsageError("--format json and --attach are mutually exclusive")
@@ -771,6 +766,9 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	if err := validateLaunchWaitFlags(); err != nil {
+		return asUsageError(err)
+	}
+	if err := validateWaitReadyFlags(); err != nil {
 		return asUsageError(err)
 	}
 
@@ -797,9 +795,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
-	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
-	if err := CheckAgentsGitignore(projectPath); err != nil {
-		return err
+	// Pre-flight: verify .scion/agents/ is gitignored (once, before any
+	// provisioning). A target-hub profile has no local project.
+	if !hubProfileSelected() {
+		if err := CheckAgentsGitignore(projectPath); err != nil {
+			return err
+		}
 	}
 
 	// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -840,7 +841,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// This allows starting/resuming an agent even if it exists on Hub but not locally
 	// (will be created via Hub) or if other agents are out of sync.
-	hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
@@ -879,15 +880,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	// Apply inline config overrides to CLI options
-	effectiveBranch := branch
+	effectiveBranch := resolveBranch(branch, inlineCfg)
 	effectiveTask := strings.TrimSpace(task)
 	effectiveHarnessConfig := harnessConfigFlag
 	effectiveHarnessAuth := harnessAuthFlag
 
 	if inlineCfg != nil {
-		if effectiveBranch == "" && inlineCfg.Branch != "" {
-			effectiveBranch = inlineCfg.Branch
-		}
 		if effectiveTask == "" && inlineCfg.Task != "" {
 			effectiveTask = inlineCfg.Task
 		}
@@ -949,16 +947,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
 	// var are resolved here; the agent's scion-agent.yaml can override
 	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
-	if IsHubEnabled() {
-		if cliSettings, err := config.LoadSettings(projectPath); err == nil {
-			if !cliSettings.IsHubExplicitlyDisabled() {
-				if ep := GetHubEndpoint(cliSettings); ep != "" {
-					if opts.Env == nil {
-						opts.Env = make(map[string]string)
-					}
-					opts.Env["SCION_HUB_ENDPOINT"] = ep
-					opts.Env["SCION_HUB_URL"] = ep
+	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
+		if !cliSettings.IsHubExplicitlyDisabled() {
+			if ep := GetHubEndpoint(cliSettings); ep != "" {
+				if opts.Env == nil {
+					opts.Env = make(map[string]string)
 				}
+				opts.Env["SCION_HUB_ENDPOINT"] = ep
+				opts.Env["SCION_HUB_URL"] = ep
 			}
 		}
 	}
@@ -1015,23 +1011,47 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		displayStatus = "resumed"
 	}
 
+	var readyErr error
+	if startWaitReady {
+		var progress io.Writer
+		if !isJSONOutput() {
+			progress = os.Stderr
+		}
+		_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+			AgentName: agentName,
+			Get:       localReadyProbe(mgr, agentName),
+			Timeout:   remainingWaitReadyTimeout(time.Now()),
+			Progress:  progress,
+		})
+	}
+
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
+		details := map[string]interface{}{
+			"id":       info.ID,
+			"detached": info.Detached,
+		}
+		if startWaitReady {
+			details["ready"] = readyErr == nil
+		}
+		if err := outputJSON(ActionResult{
 			Status:   "success",
 			Command:  cmd.Name(),
 			Agent:    agentName,
 			Message:  fmt.Sprintf("Agent '%s' %s successfully.", agentName, displayStatus),
 			Warnings: info.Warnings,
-			Details: map[string]interface{}{
-				"id":       info.ID,
-				"detached": info.Detached,
-			},
-		})
+			Details:  details,
+		}); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("Agent '%s' %s successfully (ID: %s)\n", agentName, displayStatus, info.ID)
+	if startWaitReady && readyErr == nil {
+		statusf("Agent '%s' is ready.\n", agentName)
+	}
 
-	return nil
+	return readyErr
 }
 
 // waitForTmuxSession polls the container until the tmux session "scion" is
@@ -1137,6 +1157,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
 		return
 	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)\n")
+		return
+	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
@@ -1150,15 +1175,15 @@ func hubCloneTransportNote(cloneURL string) string {
 	lower := strings.ToLower(cloneURL)
 	switch {
 	case strings.HasPrefix(lower, "https://"):
-		return "Hub mode uses HTTPS clone with GITHUB_TOKEN"
+		return "the broker uses HTTPS clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "http://"):
-		return "Hub mode uses plain HTTP clone with GITHUB_TOKEN"
+		return "the broker uses plain HTTP clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "ssh://"), strings.HasPrefix(cloneURL, "git@"):
-		return "Hub mode uses SSH clone; GITHUB_TOKEN is not used"
+		return "the broker uses SSH clone; GITHUB_TOKEN is not used"
 	case strings.HasPrefix(lower, "git://"):
-		return "Hub mode uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
+		return "the broker uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
 	default:
-		return "Hub mode clones this path on the runtime broker"
+		return "the runtime broker clones this path"
 	}
 }
 
@@ -1318,7 +1343,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
 		Workspace:       workspace,
 		Labels:          parsedLabels,
 		Resume:          resume,
@@ -1332,6 +1357,13 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		// Opt in to a non-blocking launch; the CLI waits for it below. A
 		// Hub without async launch ignores this and answers synchronously.
 		AcceptAsyncLaunch: true,
+	}
+
+	// With a target-hub profile, nothing is gathered from the local
+	// environment for another hub: the env-gather flow is off
+	// (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		req.GatherEnv = false
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -1465,6 +1497,15 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		// A create that failed in transport (for example the client
+		// timeout) may still be running on the Hub, which carries on
+		// without the client: say so when the agent now exists
+		// (ptone/scion#4007). Nothing is deleted here.
+		if unknownErr := createOutcomeUnknownError(agentName, err, existingPhase != "", func(ctx context.Context) (*hubclient.Agent, error) {
+			return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+		}); unknownErr != nil {
+			return wrapHubError(unknownErr)
+		}
 		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
@@ -1503,7 +1544,9 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			envGatherAgentID = resp.EnvGather.AgentID
 		}
 
-		// cleanupProvisioningAgent removes a partially-created agent from the Hub.
+		// cleanupProvisioningAgent removes a partially-created agent from the
+		// Hub. It runs only through cleanup, which skips it once the env has
+		// been submitted: the submit is where the Hub launches the agent.
 		cleanupProvisioningAgent := func() {
 			if envGatherAgentID == "" {
 				return
@@ -1520,8 +1563,12 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			}
 		}
 
+		cleanup := newEnvGatherCleanup(cleanupProvisioningAgent)
+
 		// Install a signal handler so Ctrl+C during interactive prompting
-		// still cleans up the provisioning agent instead of leaving it orphaned.
+		// still cleans up the provisioning agent instead of leaving it
+		// orphaned. Once the env has been submitted the agent may be
+		// starting, so it is left alone.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -1530,22 +1577,36 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		go func() {
 			select {
 			case <-sigCh:
-				fmt.Fprintln(os.Stderr, "\nInterrupted. Cleaning up provisioning agent...")
-				cleanupProvisioningAgent()
+				fmt.Fprintln(os.Stderr, "\nInterrupted.")
+				if cleanup.cleanupIfUnsubmitted() {
+					fmt.Fprintln(os.Stderr, "Cleaned up the provisioning agent.")
+				} else {
+					fmt.Fprintf(os.Stderr, "The env was already submitted; agent '%s' may be starting and was not deleted.\n", agentName)
+				}
 				os.Exit(130) // 128 + SIGINT(2)
 			case <-envGatherDone:
 				// Normal completion — goroutine exits.
 			}
 		}()
 
-		submitResp, err := gatherAndSubmitEnv(ctx, hubCtx, projectID, resp)
+		submitResp, err := gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, cleanup)
 
 		// Stop the signal handler and goroutine now that env-gather is done.
 		signal.Stop(sigCh)
 		close(envGatherDone)
 
 		if err != nil {
-			cleanupProvisioningAgent()
+			// Delete only when nothing was submitted or the Hub definitely
+			// refused the submit; otherwise the launch may be running on
+			// the Hub, so report that instead (ptone/scion#4007).
+			if !envGatherCleanupSafe(err) {
+				return wrapHubError(envSubmitOutcomeUnknownError(agentName, err, func(ctx context.Context) (*hubclient.Agent, error) {
+					return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+				}))
+			}
+			// cleanupAfterFailure re-checks envGatherCleanupSafe so the
+			// guard is safe on its own; the check is pure and cheap.
+			cleanup.cleanupAfterFailure(err)
 			return fmt.Errorf("env-gather failed: %w", err)
 		}
 		// Replace response with the finalized one
@@ -1627,6 +1688,11 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	if startNoWait && !attach {
 		needWait = false
 	}
+	// --wait-ready needs the agent running first.
+	if startWaitReady {
+		needWait = true
+	}
+	waitStart := time.Now()
 
 	finalAgent := resp.Agent
 	// notFollowed is set when the Hub accepted the launch but the wait could
@@ -1695,6 +1761,42 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		}
 	}
 
+	// --wait-ready: once running, wait until the harness accepts input. A
+	// launch the wait could not follow to running is not ready either.
+	var readyErr error
+	if startWaitReady {
+		if notFollowed != "" {
+			p := readyProbe{}
+			if finalAgent != nil {
+				p = hubReadyProbe(finalAgent)
+			}
+			readyErr = &waitReadyTimeoutError{Agent: agentName, Timeout: remainingWaitReadyTimeout(waitStart), Phase: p.Phase, Activity: p.Activity}
+		} else {
+			var progress io.Writer
+			if !isJSONOutput() {
+				progress = os.Stderr
+			}
+			var last *hubclient.Agent
+			_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+				AgentName: agentName,
+				Get: func(ctx context.Context) (readyProbe, error) {
+					a, err := hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+					if err != nil || a == nil {
+						return readyProbe{}, fmt.Errorf("fetching agent: %w", err)
+					}
+					last = a
+					return hubReadyProbe(a), nil
+				},
+				Timeout:  remainingWaitReadyTimeout(waitStart),
+				Progress: progress,
+			})
+			if last != nil {
+				finalAgent = last
+				statusRead = true
+			}
+		}
+	}
+
 	// A status that was never read leaves only the create answer, whose
 	// phase predates the launch.
 	phaseKnown := statusRead
@@ -1756,6 +1858,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if notFollowed != "" {
 				result.Details["launchNote"] = notFollowed
 			}
+			if startWaitReady {
+				result.Details["ready"] = readyErr == nil
+			}
 			if launching && launchReportable && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
@@ -1763,7 +1868,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 				}
 			}
 		}
-		return outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			return err
+		}
+		return markWaitReadyReported(readyErr)
 	}
 
 	statusf("%s\n", message)
@@ -1783,6 +1891,12 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
+	if startWaitReady {
+		if readyErr != nil {
+			return readyErr
+		}
+		statusf("Agent '%s' is ready.\n", agentName)
 	}
 
 	if !attach {
@@ -2000,6 +2114,19 @@ const (
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+	return gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, nil)
+}
+
+// gatherAndSubmitEnvGuarded is gatherAndSubmitEnv that marks cleanup
+// submitted just before the env submit is sent. A submit failure is
+// returned as an *envSubmitError.
+func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse, cleanup *envGatherCleanup) (*hubclient.CreateAgentResponse, error) {
+	// With a target-hub profile the request asked for no env-gather; if
+	// the target asks anyway, nothing is gathered from the local
+	// environment.
+	if hubCtx.profileLocalOnly() {
+		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile nothing is gathered from the local environment: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
+	}
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {
@@ -2162,12 +2289,20 @@ func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID strin
 
 	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
 
-	// Submit gathered env to Hub
+	// Submit gathered env to Hub. From here the Hub may launch the agent.
+	// A context that already ended sends nothing: report it as a failure
+	// before the submit, so the agent is cleaned up as before.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("env submit not sent: %w", err)
+	}
+	if !cleanup.markSubmitted() {
+		return nil, errEnvGatherInterrupted
+	}
 	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to submit gathered env: %w", err)
+		return nil, &envSubmitError{err: err}
 	}
 
 	if debugMode {

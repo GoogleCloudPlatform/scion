@@ -86,22 +86,27 @@ func entPrefsToStore(p *entschema.UserPreferences) *store.UserPreferences {
 // entUserToStore converts an Ent User entity to a store.User model.
 func entUserToStore(u *ent.User) *store.User {
 	su := &store.User{
-		ID:                u.ID.String(),
-		Email:             u.Email,
-		DisplayName:       u.DisplayName,
-		AvatarURL:         u.AvatarURL,
-		Role:              string(u.Role),
-		Status:            string(u.Status),
-		InvitedBy:         u.InvitedBy,
-		InviteNote:        u.InviteNote,
-		Preferences:       entPrefsToStore(u.Preferences),
-		SessionGeneration: u.SessionGeneration,
-		Kind:              string(u.Kind),
-		ExpiresAt:         u.ExpiresAt,
-		IssuedBy:          u.IssuedBy,
-		Purpose:           u.Purpose,
-		Created:           u.Created,
+		ID:                 u.ID.String(),
+		Email:              u.Email,
+		DisplayName:        u.DisplayName,
+		AvatarURL:          u.AvatarURL,
+		Role:               string(u.Role),
+		Status:             string(u.Status),
+		InvitedBy:          u.InvitedBy,
+		InviteNote:         u.InviteNote,
+		Preferences:        entPrefsToStore(u.Preferences),
+		SessionGeneration:  u.SessionGeneration,
+		Kind:               string(u.Kind),
+		ExpiresAt:          u.ExpiresAt,
+		IssuedBy:           u.IssuedBy,
+		Purpose:            u.Purpose,
+		IssuanceID:         u.IssuanceID,
+		IssuerCredentialID: u.IssuerCredentialID,
+		FederatedEmail:     u.FederatedEmail,
+		HomeIssuer:         u.HomeIssuer,
+		Created:            u.Created,
 	}
+	su.IssuerDelegationID = u.IssuerDelegationID
 	if u.LastLogin != nil {
 		su.LastLogin = *u.LastLogin
 	}
@@ -111,11 +116,19 @@ func entUserToStore(u *ent.User) *store.User {
 	return su
 }
 
-// CreateUser creates a new user record. It refuses a test-fixture row and
-// any email in the reserved test-fixture domain: only
-// CreateTestFixtureUser writes those.
+// CreateUser creates a new user record. It refuses every test identity
+// kind and any email in a reserved test identity domain: only
+// CreateTestFixtureUser and CreateTestAdminUser write those. It refuses
+// the federated kind, its fields, the pending status and any address of
+// the federated synthetic shape with store.ErrFederatedAccountRefused:
+// only CreateFederatedUser writes those.
 func (s *UserStore) CreateUser(ctx context.Context, u *store.User) error {
-	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil || store.IsTestFixtureEmail(u.Email) {
+	if u.Kind == store.UserKindFederated || u.FederatedEmail != nil || u.HomeIssuer != nil ||
+		u.Status == store.UserStatusPending || store.IsFederatedSyntheticEmail(u.Email) {
+		return store.ErrFederatedAccountRefused
+	}
+	if (u.Kind != "" && u.Kind != store.UserKindHuman) || u.ExpiresAt != nil || u.IssuedBy != nil || u.Purpose != nil ||
+		u.IssuanceID != nil || u.IssuerCredentialID != nil || u.IssuerDelegationID != nil || store.IsReservedTestIdentityEmail(u.Email) {
 		return store.ErrTestFixtureKindRefused
 	}
 	return s.createUser(ctx, u, nil)
@@ -133,11 +146,17 @@ func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) er
 	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
 		return fmt.Errorf("%w: a test fixture user requires an issuer", store.ErrInvalidInput)
 	}
-	if !store.IsTestFixtureEmail(u.Email) {
+	if store.TestIdentityEmailKind(u.Email) != store.UserKindTestFixture {
 		return fmt.Errorf("%w: a test fixture user requires an email in %s", store.ErrInvalidInput, store.TestFixtureEmailDomain)
+	}
+	if u.IssuanceID != nil || u.IssuerCredentialID != nil {
+		return fmt.Errorf("%w: issuance and issuer credential IDs are for admin-kind test identities", store.ErrInvalidInput)
 	}
 	if u.Role != store.UserRoleMember && u.Role != store.UserRoleViewer {
 		return fmt.Errorf("%w: a test fixture user must have the member or viewer role", store.ErrInvalidInput)
+	}
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
 	}
 	return s.createUser(ctx, u, func(create *ent.UserCreate) {
 		create.SetKind(user.KindTestFixture).
@@ -145,6 +164,9 @@ func (s *UserStore) CreateTestFixtureUser(ctx context.Context, u *store.User) er
 			SetIssuedBy(*u.IssuedBy)
 		if u.Purpose != nil {
 			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
 		}
 	})
 }
@@ -161,6 +183,96 @@ func (s *UserStore) CountLiveTestFixtureUsers(ctx context.Context, issuedBy stri
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// validateTestAdminUser checks the fields CreateTestAdminUser requires.
+func validateTestAdminUser(u *store.User) error {
+	if !store.IsTestAdminKind(u.Kind) {
+		return fmt.Errorf("%w: kind must be %s or %s", store.ErrInvalidInput, store.UserKindTestHubAdmin, store.UserKindTestSuperAdmin)
+	}
+	if u.ExpiresAt == nil || u.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: an admin-kind test identity requires an expiry", store.ErrInvalidInput)
+	}
+	if u.IssuedBy == nil || strings.TrimSpace(*u.IssuedBy) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuer", store.ErrInvalidInput)
+	}
+	if u.IssuanceID == nil || strings.TrimSpace(*u.IssuanceID) == "" {
+		return fmt.Errorf("%w: an admin-kind test identity requires an issuance ID", store.ErrInvalidInput)
+	}
+	if u.IssuerCredentialID != nil && strings.TrimSpace(*u.IssuerCredentialID) == "" {
+		return fmt.Errorf("%w: an empty issuer credential ID must be omitted", store.ErrInvalidInput)
+	}
+	if u.IssuerDelegationID != nil {
+		// Workload issuer delegations cover the member tier only (phase X2).
+		return fmt.Errorf("%w: an admin-kind test identity is never issued through a workload delegation", store.ErrInvalidInput)
+	}
+	if store.TestIdentityEmailKind(u.Email) != u.Kind {
+		return fmt.Errorf("%w: a %s user requires an email in %s", store.ErrInvalidInput, u.Kind, store.TestAdminEmailDomain(u.Kind))
+	}
+	if u.Role != store.TestAdminRole(u.Kind) {
+		return fmt.Errorf("%w: a %s user must have the %s role", store.ErrInvalidInput, u.Kind, store.TestAdminRole(u.Kind))
+	}
+	return nil
+}
+
+// createTestAdminRow writes the user row of CreateTestAdminUser. The
+// caller validated u (validateTestAdminUser) and runs it inside the
+// transaction that also creates the identity's binding.
+func (s *UserStore) createTestAdminRow(ctx context.Context, u *store.User) error {
+	return s.createUser(ctx, u, func(create *ent.UserCreate) {
+		create.SetKind(user.Kind(u.Kind)).
+			SetExpiresAt(testAdminExpiry(*u.ExpiresAt)).
+			SetIssuedBy(*u.IssuedBy).
+			SetIssuanceID(*u.IssuanceID)
+		if u.Purpose != nil {
+			create.SetPurpose(*u.Purpose)
+		}
+		if u.IssuerCredentialID != nil {
+			create.SetIssuerCredentialID(*u.IssuerCredentialID)
+		}
+	})
+}
+
+// testAdminKinds are the ent values of the admin test identity kinds.
+var testAdminKinds = []user.Kind{user.KindTestHubAdmin, user.KindTestSuperAdmin}
+
+// CountLiveTestAdminUsers counts admin-kind test identities that expire
+// after now: of one kind when kind is non-empty, of one issuer when
+// issuedBy is non-empty.
+func (s *UserStore) CountLiveTestAdminUsers(ctx context.Context, kind, issuedBy string, now time.Time) (int, error) {
+	q := s.client.User.Query().Where(user.ExpiresAtGT(now))
+	switch {
+	case kind == "":
+		q = q.Where(user.KindIn(testAdminKinds...))
+	case store.IsTestAdminKind(kind):
+		q = q.Where(user.KindEQ(user.Kind(kind)))
+	default:
+		return 0, fmt.Errorf("%w: %q is not an admin test identity kind", store.ErrInvalidInput, kind)
+	}
+	if issuedBy != "" {
+		q = q.Where(user.IssuedByEQ(issuedBy))
+	}
+	n, err := q.Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// ListTestAdminUsers returns every admin-kind test identity, oldest first.
+func (s *UserStore) ListTestAdminUsers(ctx context.Context) ([]store.User, error) {
+	rows, err := s.client.User.Query().
+		Where(user.KindIn(testAdminKinds...)).
+		Order(user.ByCreated(sql.OrderAsc()), user.ByID()).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.User, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entUserToStore(r))
+	}
+	return out, nil
 }
 
 // ListTestFixtureUsers returns test fixture users, newest first: for one
@@ -277,10 +389,11 @@ func (s *UserStore) GetUser(ctx context.Context, id string) (*store.User, error)
 }
 
 // GetUserByEmail retrieves a user by email using a case-insensitive match,
-// preserving the COLLATE NOCASE semantics of the legacy SQLite schema.
+// preserving the COLLATE NOCASE semantics of the legacy SQLite schema. It
+// never returns a federated account, even for its synthetic address.
 func (s *UserStore) GetUserByEmail(ctx context.Context, email string) (*store.User, error) {
 	u, err := s.client.User.Query().
-		Where(user.EmailEqualFold(normalizeEmail(email))).
+		Where(user.EmailEqualFold(normalizeEmail(email)), notFederated()).
 		Only(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -298,14 +411,32 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	u.Email = normalizeEmail(u.Email)
 
 	// kind is Immutable, so no update can change it. The email must also
-	// stay on the right side of the reserved test-fixture domain: a human
-	// row cannot move into it and a test-fixture row cannot leave it.
-	current, err := s.client.User.Query().Where(user.IDEQ(uid)).Select(user.FieldKind).Only(ctx)
+	// stay in the reserved domain of the row's kind: a human row cannot
+	// move into any test identity domain, and a test identity row cannot
+	// leave its own. A federated row keeps its synthetic email and the
+	// viewer role, and is never invited; no other row takes a federated
+	// synthetic address or the pending status.
+	current, err := s.client.User.Query().Where(user.IDEQ(uid)).Select(user.FieldKind, user.FieldEmail).Only(ctx)
 	if err != nil {
 		return mapError(err)
 	}
-	if (current.Kind == user.KindTestFixture) != store.IsTestFixtureEmail(u.Email) {
-		return store.ErrTestFixtureKindRefused
+	if current.Kind == user.KindFederated {
+		if u.Email != current.Email || u.Status == store.UserStatusInvited ||
+			(u.Role != "" && u.Role != store.UserRoleViewer) ||
+			u.InvitedBy != nil || u.InviteNote != nil {
+			return store.ErrFederatedAccountRefused
+		}
+	} else {
+		if store.IsFederatedSyntheticEmail(u.Email) || u.Status == store.UserStatusPending {
+			return store.ErrFederatedAccountRefused
+		}
+		wantKind := string(current.Kind)
+		if current.Kind == user.KindHuman {
+			wantKind = ""
+		}
+		if store.TestIdentityEmailKind(u.Email) != wantKind {
+			return store.ErrTestFixtureKindRefused
+		}
 	}
 
 	update := s.client.User.UpdateOneID(uid).
@@ -426,9 +557,11 @@ func (s *UserStore) DeleteUser(ctx context.Context, id string) error {
 
 // ListUsers returns users matching the filter criteria. Pagination is
 // offset-based to match the legacy SQLite store: the cursor is the integer
-// offset of the next page.
+// offset of the next page. Federated accounts are never listed: they are
+// not hub users, and the startup and reconciliation loops that walk this
+// list (hub role grants, admin reconciliation) must never see them.
 func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts store.ListOptions) (*store.ListResult[store.User], error) {
-	query := s.client.User.Query()
+	query := s.client.User.Query().Where(notFederated())
 
 	if filter.Role != "" {
 		query.Where(user.RoleEQ(user.Role(filter.Role)))
@@ -474,7 +607,11 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 			order = user.ByDisplayName(sql.OrderAsc())
 		}
 	case "lastSeen":
-		order = user.ByLastSeen(sortOpt(opts.SortDir))
+		// Never-seen users (last_seen IS NULL) sort last in both directions.
+		// Postgres would otherwise put NULLs first under DESC (SQLite puts
+		// them last), so "most recently seen first" could list only users
+		// who have never signed in.
+		order = user.ByLastSeen(sortOpt(opts.SortDir), sql.OrderNullsLast())
 	default: // "created" and unspecified
 		order = user.ByCreated(sortOpt(opts.SortDir))
 	}
@@ -506,12 +643,14 @@ func (s *UserStore) ListUsers(ctx context.Context, filter store.UserFilter, opts
 
 // IsUserInvitedOrActive returns true if a User record exists with the given
 // email and status in ("invited", "active"). Used by the invite_only
-// authorization gate as a replacement for IsEmailAllowListed.
+// authorization gate as a replacement for IsEmailAllowListed. A federated
+// account never matches.
 func (s *UserStore) IsUserInvitedOrActive(ctx context.Context, email string) (bool, error) {
 	return s.client.User.Query().
 		Where(
 			user.EmailEqualFold(normalizeEmail(email)),
 			user.StatusIn(user.StatusInvited, user.StatusActive),
+			notFederated(),
 		).
 		Exist(ctx)
 }

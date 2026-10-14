@@ -20,14 +20,16 @@ import (
 )
 
 // secretResolutionError is the error a dispatch returns when the secret
-// backend fails to resolve an agent's secrets (a resolution error, not an
-// absence: an agent with no secrets resolves to an empty list without
-// error). The dispatch stops before anything is sent to the broker and
-// before any token is minted, so the start did not happen.
+// backend fails to resolve an agent's secrets, or when the hub fails to read
+// the agent's stored environment settings (Source says which). It is a read
+// or resolution error, never an absence: an agent with no secrets or no
+// stored settings resolves to an empty set without error. The dispatch
+// stops before anything is sent to the broker and before any token is
+// minted, so the start did not happen.
 //
 // On a cross-node dispatch only a marker travels on the failed row
-// (dispatchFailureEnvelope.SecretResolution); the requesting node rebuilds
-// the error with a nil Err.
+// (dispatchFailureEnvelope.SecretResolution, plus SecretResolutionSource);
+// the requesting node rebuilds the error with a nil Err.
 //
 // Error() is a fixed message that names no secret, value or backend
 // detail: it is what reaches the API caller and the agent's status
@@ -37,10 +39,28 @@ type secretResolutionError struct {
 	// Verb is the action that was not performed: "started", "restarted"
 	// or "created".
 	Verb string
-	Err  error
+	// Source is what could not be read: resolutionSourceSecrets (the zero
+	// value) or resolutionSourceEnvSettings. It picks the fixed message.
+	Source resolutionSource
+	Err    error
 }
 
+// resolutionSource names what a *secretResolutionError failed to read. Its
+// string form travels on a failed cross-node dispatch row.
+type resolutionSource string
+
+const (
+	// resolutionSourceSecrets is the secret backend (the zero value).
+	resolutionSourceSecrets resolutionSource = ""
+	// resolutionSourceEnvSettings is the hub's stored environment settings
+	// (resolveEnvFromStorage: the scope env vars and the progeny list).
+	resolutionSourceEnvSettings resolutionSource = "env_settings"
+)
+
 func (e *secretResolutionError) Error() string {
+	if e.Source == resolutionSourceEnvSettings {
+		return "agent environment settings could not be read; the agent was not " + e.Verb
+	}
 	return "agent secrets could not be resolved; the agent was not " + e.Verb
 }
 
@@ -65,6 +85,16 @@ func secretResolutionVerb(op string) string {
 func isSecretResolutionError(err error) bool {
 	var e *secretResolutionError
 	return errors.As(err, &e)
+}
+
+// secretResolutionSourceOf returns the Source of the *secretResolutionError
+// in err's chain, or resolutionSourceSecrets when there is none.
+func secretResolutionSourceOf(err error) resolutionSource {
+	var e *secretResolutionError
+	if errors.As(err, &e) {
+		return e.Source
+	}
+	return resolutionSourceSecrets
 }
 
 // writeSecretResolutionError writes a 503 unavailable response for a

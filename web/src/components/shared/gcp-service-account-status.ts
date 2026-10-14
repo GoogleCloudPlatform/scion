@@ -222,8 +222,10 @@ export class ScionGCPServiceAccountStatus extends LitElement {
     const variant =
       m.state === 'mapped' ? 'success' : m.state === 'not_mapped' ? 'warning' : 'neutral';
     // An unknown state carries its own reason, which covers an incomplete
-    // report; the separate incomplete note is for the other states.
+    // report; the separate incomplete note is for the other states. An
+    // ambiguous mapping is said once, by the ambiguous note.
     const unknown = m.state === 'unknown';
+    const unknownNote = unknown && !(m.ambiguous && m.unknownReason === 'ambiguous_mapping');
     const reported = ago(m.reportedAt);
     return html`
       <tr data-profile=${m.profile}>
@@ -236,7 +238,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
                 so the broker refuses it.
               </div>`
             : nothing}
-          ${unknown
+          ${unknownNote
             ? html`<div class="note" data-note="unknown">
                 <sl-icon name="exclamation-triangle"></sl-icon>
                 Unknown: ${unknownReasonText(m)}.

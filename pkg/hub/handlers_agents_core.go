@@ -286,9 +286,10 @@ type CreateAgentRequest struct {
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
 	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in.
 	// Persisted as store.Agent.LaunchAsyncOptIn because env finalize and
-	// workspace finalize launch in later requests. It takes effect only when
-	// hub.asyncAgentLaunch is on (see dispatchLaunching). Scheduled creates
-	// set the opt-in server-side rather than from client input.
+	// workspace finalize launch in later requests. It takes effect only while
+	// the hub.async_agent_launch experiment is on (see asyncLaunchEligible),
+	// checked at each send. Scheduled creates set the opt-in server-side
+	// rather than from client input.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
@@ -939,9 +940,16 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 }
 
 // writeQuotaReserveError writes the response for a failed quota reservation
-// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+// of limitName: 409 broker_reservation_scope_conflict when the resource
+// holds an active reservation on another Runtime Broker, 429 at the limit or
+// on lock contention, 500 otherwise.
 func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
+	var conflict *ReservationScopeConflictError
 	switch {
+	case errors.As(err, &conflict):
+		writeError(w, http.StatusConflict, ErrCodeBrokerReservationScopeConflict,
+			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			quotaExceededMessage(limitName), nil)
@@ -2025,21 +2033,27 @@ func (s *Server) createAgentInProject(
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
-	//   2. Template specifies message_mode → use it.
+	//   2. Template specifies message_mode → use it. Read from the
+	//      template's job config (its stripped AgentConfig snapshot,
+	//      ptone/scion#4222), the template's own scion-agent.yaml.
 	//   3. Parent agent exists → inherit parent's message_mode.
 	//   4. Otherwise → default to "project" (handled by Ent schema default).
+	var templateMessageMode string
+	if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil {
+		templateMessageMode = jc.MessageMode
+	}
 	if req.MessageMode != "" {
 		if !store.IsValidMessageMode(req.MessageMode) {
 			ValidationError(w, "invalid message mode: "+req.MessageMode, nil)
 			return
 		}
 		agent.MessageMode = req.MessageMode
-	} else if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(resolvedTemplate.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+resolvedTemplate.Config.MessageMode, nil)
+	} else if templateMessageMode != "" {
+		if !store.IsValidMessageMode(templateMessageMode) {
+			ValidationError(w, "invalid template message mode: "+templateMessageMode, nil)
 			return
 		}
-		agent.MessageMode = resolvedTemplate.Config.MessageMode
+		agent.MessageMode = templateMessageMode
 	} else if parentMessageMode != "" {
 		agent.MessageMode = parentMessageMode
 	} else {
@@ -2105,7 +2119,7 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
-	} else if profileName, profileSAID := s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	} else if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, runtimeBrokerID, project); profileSAID != "" {
 		// No explicit GCP identity, and the project sets a default service
 		// account for the profile this agent runs under. It is more specific
 		// than the project-wide default below and wins over it, including an
@@ -3932,6 +3946,10 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentDelegations(w, r, id)
 	case AgentRouteDelegationExchange:
 		s.handleAgentDelegationExchange(w, r, id, route.Suffix.Param)
+	case AgentRouteDelegationItem:
+		s.handleAgentDelegationItem(w, r, id, route.Suffix.Param)
+	case AgentRouteDelegationCredential:
+		s.handleAgentDelegationCredential(w, r, id, route.Suffix.Param, route.Suffix.SecondParam)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)
@@ -4014,8 +4032,9 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// denied reading any *other* agent here, except an agent it directly
-	// launched in its project (authz_launcher_read.go). An agent reading its
+	// denied reading any *other* agent here, except an agent it launched,
+	// directly or through its descendants, in its project
+	// (authz_launcher_read.go). An agent reading its
 	// own record is exempt, matching getProjectAgent's self-read contract (see
 	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
 	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
@@ -4089,6 +4108,7 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
 		CloudLogging:        s.logQueryService != nil,
+		SSHHostKey:          s.agentSSHHostKey(agent),
 	}
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, agentResource(agent))
@@ -4396,13 +4416,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				warnings = append(warnings, configEnvTZIgnoredWarning)
 			}
 		}
+		// canViewAgentEnv is the same attach-equivalent-access gate the GET
+		// response's Env redaction uses (ResponseView). A caller who fails
+		// it never saw the live Env to begin with, so their request's env
+		// map cannot be trusted to list every key that still exists live --
+		// see recordExplicitEdits' env-removal gate. It also gates the env
+		// removals below (removedConfigEntries, nextClearedFields).
+		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
-			// canViewAgentEnv is the same attach-equivalent-access gate the
-			// GET response's Env redaction uses (ResponseView). A caller who
-			// fails it never saw the live Env to begin with, so their
-			// request's env map cannot be trusted to list every key that
-			// still exists live -- see recordExplicitEdits' env-removal gate.
-			canAttachEnv := canViewAgentEnv(ctx, s, agent)
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
 				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
 		}
@@ -4453,7 +4474,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// as taking effect at the next reincarnation is the key reported
 		// held for it.
 		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
-		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canAttachEnv)
+		// The broker's start-time merge keeps a previous value the inline
+		// config leaves empty; the cleared paths it sends with each start
+		// let the broker remove them (ptone/scion#3906).
+		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
@@ -4666,7 +4691,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged),
+		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil),
 	})
 }
 
@@ -4827,15 +4852,20 @@ func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
 
 // agentUpdateDisposition builds the PATCH response's disposition: the wire
 // keys whose value the request changed, listed by when the edit takes
-// effect. A key sent with its current value is in no list. Metadata, the
+// effect. A key sent with its current value is in no list, except
+// gcp_identity when the PATCH records a service-account assignment for it
+// (see saAssignmentRecorded below). Metadata, the
 // GCP identity (writable only before the first start) and the timezone
 // pin are applied; the config keys are split by configEditDisposition.
 // held is reserved for config edits held while a container is live and is
 // always empty, because such edits are refused; a timezone pin edited on a
 // live agent is applied, with a warning only when the zone its next start
 // gets changes. before is the agent as it stood before the writes, after
-// the agent as written.
-func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged bool) AgentUpdateDisposition {
+// the agent as written. saAssignmentRecorded reports that the PATCH wrote
+// a service-account assignment row; gcp_identity is then listed under
+// applied even when the request names the current account, because the
+// row records this caller as its source.
+func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, configApplied, configHeldForReincarnate []string, timezoneChanged, saAssignmentRecorded bool) AgentUpdateDisposition {
 	applied := append([]string{}, configApplied...)
 	if after.Name != before.name {
 		applied = append(applied, "name")
@@ -4853,7 +4883,7 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	if after.AppliedConfig != nil {
 		gcpAfter = after.AppliedConfig.GCPIdentity
 	}
-	if !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
+	if saAssignmentRecorded || !reflect.DeepEqual(gcpAfter, before.gcpIdentity) {
 		applied = append(applied, "gcp_identity")
 	}
 	if timezoneChanged {
@@ -5374,6 +5404,11 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if isBrokerAgentNotFound(err) {
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
@@ -5461,8 +5496,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 				"unable to verify credential status", nil)
 			return
 		case credErr == nil && cred.RevokedAt != nil:
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",
@@ -5477,8 +5511,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		cred, legacy, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
 		switch {
 		case errors.Is(credErr, errAgentCredentialRevoked):
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",
@@ -5537,8 +5570,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, agentTokenRecordFailedMessage, nil)
 		return
 	}
 
@@ -5659,6 +5691,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}
@@ -5677,15 +5714,6 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Auth reset dispatched successfully",
 	})
-}
-
-func isContainerNameConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return (strings.Contains(msg, "container name") && strings.Contains(msg, "already in use")) ||
-		strings.Contains(msg, "is already in use by container")
 }
 
 // skillResolutionErrorCode is the broker's code for a required-skill
@@ -5714,6 +5742,13 @@ const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 //
+// A broker 409 conflict, such as an agent name still held by a stopped
+// container, is relayed as a 409 by relayBrokerRefusal (ptone/scion#3501).
+//
+// Any other failure gets the generic 502. When the broker answered
+// runtime_error with a well-formed details.cause code, details.cause
+// carries that code and nothing else (brokerRuntimeCauseDetails).
+//
 // A delete that claimed agentID while the create was in flight refuses the
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
@@ -5733,8 +5768,6 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	}
 
 	switch {
-	case isContainerNameConflict(err):
-		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 	case relayDispatchRefusal(w, err):
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
@@ -5751,7 +5784,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		}
 		writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to dispatch to runtime broker: "+message, nil)
 	default:
-		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
+		// A broker runtime_error may carry a fixed details.cause code (for
+		// example runtime_forbidden, ptone/scion#4555); relay only that.
+		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Failed to dispatch to runtime broker: "+err.Error(), brokerRuntimeCauseDetails(err))
 	}
 }
 
@@ -5811,9 +5846,10 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 }
 
 // relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
-// harness_config_unusable, 403 forbidden or 400 validation_error -- with the
-// broker's status, code and message instead of the generic 502, and reports
-// whether it did. For any other error it writes nothing and returns false.
+// harness_config_unusable, 403 forbidden, 400 validation_error or 409
+// conflict -- with the broker's status, code and message instead of the
+// generic 502, and reports whether it did. For any other error it writes
+// nothing and returns false.
 //
 // The 422 harness_config_unusable and 403 forbidden answers are the broker's
 // refusal of the harness-config a dispatch would run: its provisioner cannot
@@ -5825,6 +5861,14 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // answers it for a request it refuses as invalid (its ValidationError
 // helper and the start-context checks), usually a request the caller must
 // fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
+//
+// The 409 conflict is the broker's answer when the agent name is still held
+// by a stopped container: the broker maps every runtime's name-in-use error
+// to agent.ErrContainerNameInUse and answers 409 conflict with that fixed
+// text. Its other 409 conflicts (a run holding the name, a create already in
+// progress, a refused re-provision) are conflicts for the caller to resolve
+// as well, so the status and code are keyed on, never the message text
+// (ptone/scion#3501).
 func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -5834,6 +5878,7 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
+	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
 		// 403 "forbidden". If the broker ever sends 403 forbidden with a

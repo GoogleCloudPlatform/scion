@@ -25,6 +25,7 @@ import (
 	gcemetadata "cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 const redactedEnvValue = "<redacted>"
@@ -238,13 +239,17 @@ func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {
 	return ""
 }
 
+// hubEndpointFromProjectSettings returns the hub endpoint from the project's
+// settings file. It does not look at hub.enabled: the broker is
+// authoritative about hub connectivity, so a project that set
+// hub.enabled=false on this host still gets its endpoint.
 func hubEndpointFromProjectSettings(projectPath string) string {
 	if projectPath == "" {
 		return ""
 	}
 	settingsDir := resolveProjectSettingsDir(projectPath)
 	projectSettings, err := config.LoadSettingsFromDir(settingsDir)
-	if err != nil || projectSettings.IsHubExplicitlyDisabled() {
+	if err != nil {
 		return ""
 	}
 	return projectSettings.GetHubEndpoint()
@@ -431,7 +436,7 @@ func cloudrunSandboxHubEndpoint(hubListenPort int) (string, error) {
 // from a standalone CRI instance.
 func cloudrunInstancesHubEndpoint(ctx context.Context) (string, error) {
 	return resolveCloudRunServiceURL(
-		os.Getenv("K_SERVICE"),
+		cloudrunenv.ServiceName(),
 		func() (string, error) { return gcemetadata.NumericProjectIDWithContext(ctx) },
 		func() (string, error) { return gcemetadata.ZoneWithContext(ctx) },
 	)

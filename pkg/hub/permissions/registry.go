@@ -61,6 +61,10 @@ const (
 	// target that a role binding could authorize. See TargetClassKindSelf.
 	ResourceInbox              = "inbox"
 	ResourceUserSkillInjection = "user_skill_injection"
+	// ResourceFederationToken is the self-scoped resource of a user access
+	// credential for a peer hub that the holder obtains for themselves
+	// (POST /api/v1/auth/federation-token).
+	ResourceFederationToken = "federation_token"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -99,11 +103,22 @@ const (
 	ActionWrite = "write"
 	// ActionIssue covers issuing hub test identities.
 	ActionIssue = "issue"
+	// ActionIssueAdmin and ActionIssueSuperAdmin cover issuing the admin
+	// test identity kinds (test_hub_admin, test_super_admin).
+	ActionIssueAdmin      = "issue_admin"
+	ActionIssueSuperAdmin = "issue_super_admin"
 	// ActionDelegationCreate and ActionDelegationExchange are the agent
 	// delegation grant issuance and credential exchange actions
 	// (.design/agent-delegation.md §18.5).
 	ActionDelegationCreate   = "delegation_create"
 	ActionDelegationExchange = "delegation_exchange"
+	// ActionDelegationRevoke, ActionDelegationCredentialRevoke,
+	// ActionDelegationList and ActionDelegationRead are the agent delegation
+	// grant management actions (.design/agent-delegation.md §7, §18.5).
+	ActionDelegationRevoke           = "delegation_revoke"
+	ActionDelegationCredentialRevoke = "delegation_credential_revoke"
+	ActionDelegationList             = "delegation_list"
+	ActionDelegationRead             = "delegation_read"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -177,6 +192,8 @@ type Permission struct {
 	// do not hold (owners/admins lack attach; members lack
 	// port_access), so that holders of those roles can still mint
 	// agent:manage tokens. The scope remains available for explicit selection.
+	// agent.update, agent.stop_all and agent.set_message_mode are left out
+	// too: some project roles that can mint agent:manage do not hold them.
 	ExcludeFromManageAlias bool
 }
 
@@ -190,17 +207,21 @@ var Registry = []Permission{
 	{ID: "agent.create", Resource: ResourceAgent, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "agent:create", AgentScopes: []string{"project:agent:create"}, Description: "Create agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentCreate", "pkg/hub/handlers_agents_core.go"}},
 	{ID: "agent.read", Resource: ResourceAgent, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "agent:read", Description: "Read agent status and metadata", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
 	{ID: "agent.list", Resource: ResourceAgent, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "agent:list", Description: "List agents in the project", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/authz.go"}},
-	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, Description: "Update agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
+	{ID: "agent.update", Resource: ResourceAgent, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "agent:update", Description: "Update agents (metadata, configuration, status, workspace sync)", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_lifecycle.go:updateAgentStatus", "pkg/hub/workspace_handlers.go"}, ExcludeFromManageAlias: true},
 	{ID: "agent.delete", Resource: ResourceAgent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "agent:delete", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Delete agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go", "pkg/hub/handlers_agent_delete_authz_test.go"}},
 	{ID: "agent.attach", Resource: ResourceAgent, Action: ActionAttach, CapabilityKind: CapabilityResource, UATScope: "agent:attach", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Attach to agent sessions (terminal, exec, env, reset-auth)", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/pty_handlers.go", "pkg/hub/authorize_agentkeys.go:authorizeAgentKeys"}, ExcludeFromManageAlias: true},
 	{ID: "agent.lifecycle", Resource: ResourceAgent, Action: ActionLifecycle, CapabilityKind: CapabilityResource, UATScope: "agent:lifecycle", AgentScopes: []string{"project:agent:lifecycle"}, Description: "Start, stop, suspend, restart, restore, and reincarnate agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeAgentLifecycle", "pkg/hub/handlers_agents_core.go:handleAgentAction", "pkg/hub/handlers_agent_reincarnate.go:authorizeAgentReincarnate"}},
 	{ID: "agent.port_access", Resource: ResourceAgent, Action: ActionPortAccess, CapabilityKind: CapabilityResource, UATScope: "agent:port_access", Description: "Access agent forwarded ports", Enforcement: []string{"pkg/hub/port_forward_handlers.go"}, ExcludeFromManageAlias: true},
-	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
+	{ID: "agent.stop_all", Resource: ResourceAgent, Action: ActionStopAll, CapabilityKind: CapabilityScope, UATScope: "agent:stop_all", Description: "Stop all agents", Enforcement: []string{"pkg/hub/handlers_agent_lifecycle.go:handleStopAllAgents"}, ExcludeFromManageAlias: true},
 	{ID: "agent.message", Resource: ResourceAgent, Action: ActionMessage, CapabilityKind: CapabilityScope, UATScope: "agent:message", Description: "Send messages to agents", NonRouteUse: []string{"Phase 2: pkg/hub/authorize.go:authorizeAgentMessage"}},
-	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agents_core.go"}},
+	{ID: "agent.set_message_mode", Resource: ResourceAgent, Action: ActionSetMessageMode, CapabilityKind: CapabilityResource, UATScope: "agent:set_message_mode", AgentScopes: []string{"project:agent:set_message_mode"}, Description: "Change agent message mode", Enforcement: []string{"pkg/hub/handlers_agent_message_mode.go:handleSetMessageMode"}, ExcludeFromManageAlias: true},
 	{ID: "agent.grant_hub_mode", Resource: ResourceAgent, Action: "grant_hub_mode", CapabilityKind: CapabilityResource, Description: "Grant hub message mode (requires full role + hub mode for agent callers)", Enforcement: []string{"pkg/hub/authorize_message_mode_grant.go"}},
 	{ID: "agent.delegation.create", Resource: ResourceAgent, Action: ActionDelegationCreate, Description: "Issue an agent delegation grant to an agent the issuer controls", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleCreateAgentDelegation"}},
 	{ID: "agent.delegation.exchange", Resource: ResourceAgent, Action: ActionDelegationExchange, Description: "Exchange an agent delegation grant for a delegated credential (the bound agent, with its own agent token; no role binding is consulted)", Enforcement: []string{"pkg/hub/handlers_agent_delegation.go:handleExchangeAgentDelegation"}},
+	{ID: "agent.delegation.revoke", Resource: ResourceAgent, Action: ActionDelegationRevoke, Description: "Revoke an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.credential.revoke", Resource: ResourceAgent, Action: ActionDelegationCredentialRevoke, Description: "Revoke one delegated credential of an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.list", Resource: ResourceAgent, Action: ActionDelegationList, Description: "List agent delegation grants: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.read", Resource: ResourceAgent, Action: ActionDelegationRead, Description: "Read an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
@@ -209,12 +230,13 @@ var Registry = []Permission{
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/artifacts_host.go:func (h *artifactHost) MayGrantReview"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
+	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (owner/admin)", NonRouteUse: []string{"visitor grant routes (ptone/scion#4603)"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
 	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
-	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; the service has no artifact delete route"},
-	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject"}},
+	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; DELETE on an artifact is gated by artifact.manage (ptone/scion#4529)"},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
@@ -319,13 +341,15 @@ var Registry = []Permission{
 	{ID: "hub.metrics.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "hub_metrics:read", Description: "Read metrics dashboard", Enforcement: []string{"pkg/hub/route_metadata.go:admin.metricsDashboard", "pkg/hub/route_metadata.go:admin.metricsDashboard.legacy"}},
 	{ID: "hub.env_vars.read", Resource: ResourceHub, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "List hub-level environment variables (read only; excludes secrets)", Enforcement: []string{"pkg/hub/handlers_env_secrets.go:listEnvVars"}},
 	{ID: "hub.audit.read", Resource: ResourceHub, Action: ActionManage, CapabilityKind: CapabilityNone, Description: "Explain authorization decisions for other principals (super-admin only)", NonRouteUse: []string{"audit_authz.go explain-for-other-principal gate"}},
-	{ID: "test_identity.issue", Resource: ResourceTestIdentity, Action: ActionIssue, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue", Description: "Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.create", "pkg/hub/route_metadata.go:testIdentities.list", "pkg/hub/route_metadata.go:testIdentities.token", "pkg/hub/route_metadata.go:testIdentities.delete", "pkg/hub/handlers_test_identities.go:testIdentityCaller"}},
+	{ID: "test_identity.issue", Resource: ResourceTestIdentity, Action: ActionIssue, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue", Description: "Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.create", "pkg/hub/route_metadata.go:testIdentities.list", "pkg/hub/route_metadata.go:testIdentities.token", "pkg/hub/route_metadata.go:testIdentities.webLoginCode", "pkg/hub/route_metadata.go:testIdentities.delete", "pkg/hub/route_metadata.go:testIdentityDelegations.create", "pkg/hub/route_metadata.go:testIdentityDelegations.list", "pkg/hub/route_metadata.go:testIdentityDelegations.revoke", "pkg/hub/handlers_test_identities.go:testIdentityCaller", "pkg/hub/handlers_test_identity_delegations.go:testIdentityDelegationCaller"}},
+	{ID: "test_identity.issue_admin", Resource: ResourceTestIdentity, Action: ActionIssueAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_admin", Description: "Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin); held only by super-admin", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.admin.create", "pkg/hub/route_metadata.go:testIdentities.admin.revokeAll", "pkg/hub/handlers_test_admin_identities.go:testAdminIssuer"}},
+	{ID: "test_identity.issue_super_admin", Resource: ResourceTestIdentity, Action: ActionIssueSuperAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_super_admin", Description: "Issue short-lived test identities holding an expiring super-admin role (refused until the admin tier's policy phase)", Reserved: "no role holds it until admin tier phase A2: test super-admin issuance answers 404 while its gate is refused, and testAdminIssuer's capability check therefore never admits a caller"},
 
 	// Quota management (Phase 2B — Limits/Quotas)
-	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
-	{ID: "quota.create", Resource: ResourceQuota, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
-	{ID: "quota.update", Resource: ResourceQuota, Action: ActionUpdate, CapabilityKind: CapabilityScope, Description: "Update limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
-	{ID: "quota.delete", Resource: ResourceQuota, Action: ActionDelete, CapabilityKind: CapabilityScope, Description: "Delete limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go"}},
+	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "quota:read", Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go", "pkg/hub/route_metadata.go:admin.limits", "pkg/hub/route_metadata.go:admin.limits.byId", "pkg/hub/route_metadata.go:admin.entitlements.byId", "pkg/hub/route_metadata.go:admin.usage", "pkg/hub/route_metadata.go:admin.usage.byLimit"}},
+	{ID: "quota.create", Resource: ResourceQuota, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "quota:create", Description: "Create limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go:requireWritePermissionForQuota"}},
+	{ID: "quota.update", Resource: ResourceQuota, Action: ActionUpdate, CapabilityKind: CapabilityScope, UATScope: "quota:update", Description: "Update limit definitions, entitlement bindings and broker settings", Enforcement: []string{"pkg/hub/handlers_quota.go:requireWritePermissionForQuota", "pkg/hub/broker_settings_handlers.go:authorizeBrokerSettingsWrite"}},
+	{ID: "quota.delete", Resource: ResourceQuota, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "quota:delete", Description: "Delete limit definitions and entitlement bindings", Enforcement: []string{"pkg/hub/handlers_quota.go:requireWritePermissionForQuota"}},
 
 	// Role management (Phase 2 PR-C1)
 	{ID: "role.read", Resource: ResourceRole, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "Read role definitions", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
@@ -392,6 +416,7 @@ var Registry = []Permission{
 	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_conversation_resolve.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_skills_injection.go"}},
+	{ID: "federation_token.mint", Resource: ResourceFederationToken, Action: ActionMint, UATScope: "federation_token:mint", Description: "Obtain a short-lived user access credential for yourself to present to a peer hub", Enforcement: []string{"pkg/hub/authorize.go:selfScopedDecision", "pkg/hub/handlers_federation_token.go:handleFederationToken"}},
 }
 
 // IsReserved reports whether p is a reserved row (see Permission.Reserved).

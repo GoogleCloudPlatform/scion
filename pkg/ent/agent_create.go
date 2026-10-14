@@ -722,6 +722,34 @@ func (_c *AgentCreate) SetNillableRunIDUpdatedAt(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (_c *AgentCreate) SetSSHHostKey(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKey(v)
+	return _c
+}
+
+// SetNillableSSHHostKey sets the "ssh_host_key" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKey(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKey(*v)
+	}
+	return _c
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (_c *AgentCreate) SetSSHHostKeyRunID(v string) *AgentCreate {
+	_c.mutation.SetSSHHostKeyRunID(v)
+	return _c
+}
+
+// SetNillableSSHHostKeyRunID sets the "ssh_host_key_run_id" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSSHHostKeyRunID(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSSHHostKeyRunID(*v)
+	}
+	return _c
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (_c *AgentCreate) SetLaunchState(v string) *AgentCreate {
 	_c.mutation.SetLaunchState(v)
@@ -844,6 +872,20 @@ func (_c *AgentCreate) SetLaunchError(v string) *AgentCreate {
 func (_c *AgentCreate) SetNillableLaunchError(v *string) *AgentCreate {
 	if v != nil {
 		_c.SetLaunchError(*v)
+	}
+	return _c
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (_c *AgentCreate) SetLaunchCause(v string) *AgentCreate {
+	_c.mutation.SetLaunchCause(v)
+	return _c
+}
+
+// SetNillableLaunchCause sets the "launch_cause" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLaunchCause(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetLaunchCause(*v)
 	}
 	return _c
 }
@@ -1380,6 +1422,10 @@ func (_c *AgentCreate) defaults() {
 		v := agent.DefaultLaunchError
 		_c.mutation.SetLaunchError(v)
 	}
+	if _, ok := _c.mutation.LaunchCause(); !ok {
+		v := agent.DefaultLaunchCause
+		_c.mutation.SetLaunchCause(v)
+	}
 	if _, ok := _c.mutation.DeletionState(); !ok {
 		v := agent.DefaultDeletionState
 		_c.mutation.SetDeletionState(v)
@@ -1754,6 +1800,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldRunIDUpdatedAt, field.TypeTime, value)
 		_node.RunIDUpdatedAt = &value
 	}
+	if value, ok := _c.mutation.SSHHostKey(); ok {
+		_spec.SetField(agent.FieldSSHHostKey, field.TypeString, value)
+		_node.SSHHostKey = value
+	}
+	if value, ok := _c.mutation.SSHHostKeyRunID(); ok {
+		_spec.SetField(agent.FieldSSHHostKeyRunID, field.TypeString, value)
+		_node.SSHHostKeyRunID = value
+	}
 	if value, ok := _c.mutation.LaunchState(); ok {
 		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
 		_node.LaunchState = value
@@ -1789,6 +1843,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LaunchError(); ok {
 		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
 		_node.LaunchError = value
+	}
+	if value, ok := _c.mutation.LaunchCause(); ok {
+		_spec.SetField(agent.FieldLaunchCause, field.TypeString, value)
+		_node.LaunchCause = value
 	}
 	if value, ok := _c.mutation.DeletionState(); ok {
 		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
@@ -2843,6 +2901,42 @@ func (u *AgentUpsert) ClearRunIDUpdatedAt() *AgentUpsert {
 	return u
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsert) SetSSHHostKey(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKey, v)
+	return u
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKey() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKey)
+	return u
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsert) ClearSSHHostKey() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKey)
+	return u
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) SetSSHHostKeyRunID(v string) *AgentUpsert {
+	u.Set(agent.FieldSSHHostKeyRunID, v)
+	return u
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSSHHostKeyRunID() *AgentUpsert {
+	u.SetExcluded(agent.FieldSSHHostKeyRunID)
+	return u
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsert) ClearSSHHostKeyRunID() *AgentUpsert {
+	u.SetNull(agent.FieldSSHHostKeyRunID)
+	return u
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsert) SetLaunchState(v string) *AgentUpsert {
 	u.Set(agent.FieldLaunchState, v)
@@ -3002,6 +3096,24 @@ func (u *AgentUpsert) UpdateLaunchError() *AgentUpsert {
 // ClearLaunchError clears the value of the "launch_error" field.
 func (u *AgentUpsert) ClearLaunchError() *AgentUpsert {
 	u.SetNull(agent.FieldLaunchError)
+	return u
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsert) SetLaunchCause(v string) *AgentUpsert {
+	u.Set(agent.FieldLaunchCause, v)
+	return u
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLaunchCause() *AgentUpsert {
+	u.SetExcluded(agent.FieldLaunchCause)
+	return u
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsert) ClearLaunchCause() *AgentUpsert {
+	u.SetNull(agent.FieldLaunchCause)
 	return u
 }
 
@@ -4448,6 +4560,48 @@ func (u *AgentUpsertOne) ClearRunIDUpdatedAt() *AgentUpsertOne {
 	})
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertOne) SetSSHHostKey(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertOne) ClearSSHHostKey() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) SetSSHHostKeyRunID(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertOne) ClearSSHHostKeyRunID() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertOne) SetLaunchState(v string) *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
@@ -4634,6 +4788,27 @@ func (u *AgentUpsertOne) UpdateLaunchError() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLaunchError() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertOne) SetLaunchCause(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertOne) ClearLaunchCause() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
 	})
 }
 
@@ -6316,6 +6491,48 @@ func (u *AgentUpsertBulk) ClearRunIDUpdatedAt() *AgentUpsertBulk {
 	})
 }
 
+// SetSSHHostKey sets the "ssh_host_key" field.
+func (u *AgentUpsertBulk) SetSSHHostKey(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKey(v)
+	})
+}
+
+// UpdateSSHHostKey sets the "ssh_host_key" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKey()
+	})
+}
+
+// ClearSSHHostKey clears the value of the "ssh_host_key" field.
+func (u *AgentUpsertBulk) ClearSSHHostKey() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKey()
+	})
+}
+
+// SetSSHHostKeyRunID sets the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) SetSSHHostKeyRunID(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSSHHostKeyRunID(v)
+	})
+}
+
+// UpdateSSHHostKeyRunID sets the "ssh_host_key_run_id" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSSHHostKeyRunID()
+	})
+}
+
+// ClearSSHHostKeyRunID clears the value of the "ssh_host_key_run_id" field.
+func (u *AgentUpsertBulk) ClearSSHHostKeyRunID() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSSHHostKeyRunID()
+	})
+}
+
 // SetLaunchState sets the "launch_state" field.
 func (u *AgentUpsertBulk) SetLaunchState(v string) *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
@@ -6502,6 +6719,27 @@ func (u *AgentUpsertBulk) UpdateLaunchError() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLaunchError() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLaunchError()
+	})
+}
+
+// SetLaunchCause sets the "launch_cause" field.
+func (u *AgentUpsertBulk) SetLaunchCause(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLaunchCause(v)
+	})
+}
+
+// UpdateLaunchCause sets the "launch_cause" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLaunchCause()
+	})
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (u *AgentUpsertBulk) ClearLaunchCause() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLaunchCause()
 	})
 }
 

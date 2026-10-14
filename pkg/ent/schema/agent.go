@@ -19,6 +19,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
@@ -264,9 +265,9 @@ func (Agent) Fields() []ent.Field {
 
 		// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
 		// launch_async_opt_in records whether the client that created (or is
-		// finalizing) this agent opted into non-blocking launch. The Hub flag
-		// hub.asyncAgentLaunch is the kill switch; this is the per-request
-		// half of the gate.
+		// finalizing) this agent opted into non-blocking launch. The Hub
+		// experiment hub.async_agent_launch is the switch; this is the
+		// per-request half of the gate.
 		field.Bool("launch_async_opt_in").
 			Default(false),
 		// launch_id is the current or most recent launch's identity. It is
@@ -303,6 +304,16 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_id_updated_at").
 			Optional().
 			Nillable(),
+		// ssh_host_key is the authorized_keys line of the agent's SSH host
+		// key for the run in ssh_host_key_run_id, reported by sciontool
+		// with the conduit experiment on. The reported host key is bound to
+		// the reporting agent's current run: it is written only for the
+		// current run_id (SetAgentSSHHostKey) and served only while
+		// ssh_host_key_run_id equals run_id.
+		field.Text("ssh_host_key").
+			Optional(),
+		field.String("ssh_host_key_run_id").
+			Optional(),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns
@@ -358,6 +369,14 @@ func (Agent) Fields() []ent.Field {
 		// agent that has ever run is never treated as an incomplete create
 		// again, whatever happens to it later.
 		field.String("launch_error").
+			Optional().
+			Default(""),
+		// launch_cause is the fixed runtime cause code
+		// (api.BrokerRuntimeCause*, e.g. runtime_forbidden) a broker's
+		// failed launch report gave for the runtime_error in launch_error
+		// (ptone/scion#4666), or "". It is written with launch_error by a
+		// failed report and cleared wherever launch_error is cleared.
+		field.String("launch_cause").
 			Optional().
 			Default(""),
 
@@ -507,6 +526,13 @@ func (Agent) Edges() []ent.Edge {
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("reported_runs", BrokerReportedRun.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+	}
+}
+
+// Annotations of the Agent: the fixture stamp CHECK (fixtureStampCheck).
+func (Agent) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Checks: fixtureStampCheck("agents")},
 	}
 }
 
