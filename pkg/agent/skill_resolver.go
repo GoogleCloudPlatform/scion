@@ -972,12 +972,7 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		if !errors.As(err, &ue) {
 			return newSkillInstallError("download failed", fmt.Errorf("download from %s failed", parsed.Host))
 		}
-		cause := ue.Err.Error()
-		if strings.Contains(cause, "Location header") {
-			// net/http quotes a malformed redirect Location, which may be
-			// signed too.
-			cause = "invalid redirect Location"
-		}
+		cause := transportFailureCause(ue)
 		public := "download failed: " + cause
 		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", parsed.Host, cause))
 	}
@@ -1012,6 +1007,21 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	util.Debugf("provision: downloaded skill file %s (%d bytes)", filepath.Base(destPath), n)
 
 	return nil
+}
+
+// transportFailureCause returns the cause of a client.Do failure as text that
+// names no URL: ue.Err's text (ue itself quotes the URL), with a malformed
+// redirect Location, which net/http quotes and which may be signed too,
+// replaced. A nil ue.Err gives a fixed text rather than a panic.
+func transportFailureCause(ue *url.Error) string {
+	if ue.Err == nil {
+		return "unknown error"
+	}
+	cause := ue.Err.Error()
+	if strings.Contains(cause, "Location header") {
+		cause = "invalid redirect Location"
+	}
+	return cause
 }
 
 // writeSkillFileContent writes pre-fetched content bytes directly to destPath,

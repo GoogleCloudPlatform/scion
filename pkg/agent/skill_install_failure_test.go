@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -541,5 +542,27 @@ func TestInstallResolvedSkills_MalformedRedirectScrubsLocation(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// TestTransportFailureCause_NilErr checks that a *url.Error with a nil Err
+// gives a fixed cause, naming no URL, rather than panicking.
+func TestTransportFailureCause_NilErr(t *testing.T) {
+	ue := &url.Error{Op: "Get", URL: "https://example.com/private/SKILL.md?sig=SECRETNIL"}
+	var got string
+	panicked := func() (p bool) {
+		defer func() {
+			if recover() != nil {
+				p = true
+			}
+		}()
+		got = transportFailureCause(ue)
+		return false
+	}()
+	if panicked {
+		t.Fatalf("nil Err: transportFailureCause panicked on a *url.Error with a nil Err")
+	}
+	if got != "unknown error" {
+		t.Errorf("nil Err: cause = %q, want %q", got, "unknown error")
 	}
 }
