@@ -675,7 +675,15 @@ type AgentStore interface {
 	// (nil, nil), so a concurrent start,
 	// restart, stop or heartbeat always wins. On success it returns the
 	// updated record for event publishing.
-	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
+	//
+	// haltRuntime is the runtime of the complete inventory target that no
+	// longer lists the container. When it is one RuntimeHaltEligible trusts,
+	// and the agent's run intent is running with no start claim held, the
+	// agent is moved to phase halted instead of error (same exit reason and
+	// message rules): the platform ended a run that should still be running
+	// (ptone/scion#4853). A returned record in phase halted means this call
+	// halted it, and it is the only caller that sees that.
+	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string) (*Agent, error)
 
 	// MarkAgentContainerMissingIfUnchanged is MarkAgentContainerMissing for a
 	// caller that read the agent before a broker call and learned from that
@@ -684,7 +692,8 @@ type AgentStore interface {
 	// phase running (not stopping), that the row's state_version and run_id
 	// still equal pre's (so a start, restart or other versioned write since
 	// the read wins) and that no start claim of any kind (start, restart,
-	// stop) is held. Returns (nil, nil) when any check fails.
+	// stop) is held. Returns (nil, nil) when any check fails. It never
+	// halts: the phase written is always error.
 	MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre ContainerMissingPrecondition, message string) (*Agent, error)
 
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
@@ -1173,8 +1182,8 @@ type AgentHealthAggregate struct {
 	Total   int            // Total number of non-deleted agents
 	ByPhase map[string]int // Count per lifecycle phase
 
-	// Errored is the number of agents in phase error or with activity
-	// crashed, each agent counted once. Stopped agents are excluded (a
+	// Errored is the number of agents in phase error or halted, or with
+	// activity crashed, each agent counted once. Stopped agents are excluded (a
 	// crash survives the move to stopped), so Errored never exceeds
 	// Considered.
 	Errored int
@@ -1184,7 +1193,7 @@ type AgentHealthAggregate struct {
 	// Problem groups. Each has a true count and at most AgentHealthRefCap
 	// references, most recently updated first. Groups may overlap: an agent
 	// in phase error with activity offline is in both ErrorPhase and Offline.
-	ErrorPhase AgentProblemGroup // phase error
+	ErrorPhase AgentProblemGroup // phase error or halted
 	Crashed    AgentProblemGroup // activity crashed, phase not stopped
 	Offline    AgentProblemGroup // activity offline (heartbeat timed out), phase not stopped
 
@@ -1211,8 +1220,9 @@ type AgentHealthRef struct {
 type AgentBrokerCounts struct {
 	// Running is the number of agents in phase running.
 	Running int
-	// Attention is the number of agents needing attention: phase error, or
-	// activity crashed or offline outside phase stopped. Each agent once.
+	// Attention is the number of agents needing attention: phase error or
+	// halted, or activity crashed or offline outside phase stopped. Each
+	// agent once.
 	Attention int
 }
 
@@ -1321,6 +1331,30 @@ type AgentStatusUpdate struct {
 	// because hub-internal writers, including the reincarnation worker,
 	// must keep writing the phase. Internal to the hub — json:"-".
 	GuardReincarnation bool `json:"-"`
+	// ReportSource says which hub handler built this update from a report
+	// about the agent's run: the broker heartbeat handler (runtime) or the
+	// agent's own status endpoint (agent). Hub-internal writes leave it
+	// empty. Only the handlers set it, never a request body (json:"-"):
+	// the run check, halted's stickiness and the halt rule read it, and
+	// only a runtime report can halt an agent.
+	ReportSource StatusReportSource `json:"-"`
+	// ReportRunID is the run a status report came from: the run of the
+	// broker heartbeat's agent entry, or the run of the agent token that
+	// sent a self-report. When it is non-empty and differs from the stored
+	// run_id, the report describes an older (or unknown) run, and only the
+	// last-seen and updated timestamps are written. Internal to the hub —
+	// json:"-".
+	ReportRunID string `json:"-"`
+	// Restore marks a hub write that puts back a phase saved before a
+	// failed start (the start dispatch's rollback). It is the only write
+	// that may store phase halted directly; any other update carrying
+	// Phase "halted" has its phase dropped, and the halt rule does not
+	// apply to it. Internal to the hub — json:"-".
+	Restore bool `json:"-"`
+	// Result, when non-nil, is filled by a successful UpdateAgentStatus
+	// with what the write did (see AgentStatusResult). The caller owns it;
+	// it is left as it was on error. Internal to the hub — json:"-".
+	Result *AgentStatusResult `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -2979,7 +3013,7 @@ type LifecycleHookStore interface {
 type LifecycleHookFilter struct {
 	ScopeType string // Filter by scope type (hub, project)
 	ScopeID   string // Filter by scope ID
-	Trigger   string // Filter by trigger (running, suspended, stopped, error)
+	Trigger   string // Filter by trigger (running, suspended, stopped, error, halted)
 	Enabled   *bool  // Filter by enabled status (nil = no filter)
 }
 

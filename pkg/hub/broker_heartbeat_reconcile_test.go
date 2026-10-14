@@ -569,9 +569,9 @@ func (s *markCountingStore) SetAgentRuntimeTarget(ctx context.Context, id string
 	return s.Store.SetAgentRuntimeTarget(ctx, id, expectedVersion, target, candidate)
 }
 
-func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
+func (s *markCountingStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string) (*store.Agent, error) {
 	s.marks.Add(1)
-	return s.Store.MarkAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+	return s.Store.MarkAgentContainerMissing(ctx, id, brokerID, cutoff, haltRuntime, message)
 }
 
 // TestReconcileMissing_HubGuardsSkipStoreWrite pins the hub-side last_seen
