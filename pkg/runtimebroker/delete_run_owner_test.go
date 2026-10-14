@@ -216,7 +216,7 @@ func TestDeleteAgent_LegacyAgentInfoRunID(t *testing.T) {
 			srv, home := newCleanupTestServer(t, mgr)
 			scionB, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 			recordRun(t, scionB, "dev", tc.hostRun)
-			infoB := writeAgentInfo(t, scionB, "dev", tc.legacyRun)
+			infoB := writeLegacyAgentInfo(t, scionB, "dev", tc.legacyRun)
 
 			rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&runId=run-old"+allDeleteParams)
 			if tc.wantKept {

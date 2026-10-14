@@ -45,7 +45,7 @@ import (
 // none: a legacy agent). It returns the agent-info.json path.
 func recordRun(t *testing.T, scionDir, name, runID string) string {
 	t.Helper()
-	info := writeAgentInfo(t, scionDir, name, "")
+	info := writeLegacyAgentInfo(t, scionDir, name, "")
 	if runID != "" {
 		if err := os.MkdirAll(filepath.Join(scionDir, "agents", name), 0o755); err != nil {
 			t.Fatal(err)
@@ -61,10 +61,10 @@ func recordRun(t *testing.T, scionDir, name, runID string) string {
 	return info
 }
 
-// writeAgentInfo rewrites the agent's agent-info.json, with legacyRunID as
+// writeLegacyAgentInfo rewrites the agent's agent-info.json, with legacyRunID as
 // its runId when not empty (as an older broker recorded it), and returns
 // its path.
-func writeAgentInfo(t *testing.T, scionDir, name, legacyRunID string) string {
+func writeLegacyAgentInfo(t *testing.T, scionDir, name, legacyRunID string) string {
 	t.Helper()
 	home := config.GetAgentHomePath(scionDir, name)
 	if err := os.MkdirAll(home, 0o755); err != nil {
