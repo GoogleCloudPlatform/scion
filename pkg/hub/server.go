@@ -6299,8 +6299,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		schedOpts = append(schedOpts, WithMaxConcurrency(*s.config.SchedulerMaxConcurrency))
 	}
 	// Written under s.mu: a shutdown that begins during startup reads
-	// s.scheduler under s.mu.RLock (BeginShutdown, CleanupResources). The reads in registerSchedulerHandlers below run on
-	// this goroutine, after this write, so they need no lock.
+	// s.scheduler under s.mu.RLock (BeginShutdown, CleanupResources).
+	// The reads in registerSchedulerHandlers below run on this
+	// goroutine, after this write, so they need no lock.
 	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.mu.Lock()
 	s.scheduler = sched

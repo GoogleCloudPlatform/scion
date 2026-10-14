@@ -208,15 +208,19 @@ var (
 )
 
 // conduitDrainStepFallback bounds the pre-cancel conduit drain step when
-// shutdown_grace is unset: the relay's own bound on its draining writes
-// (10s) before it sends the GoAways.
-const conduitDrainStepFallback = 10 * time.Second
+// shutdown_grace is unset: the relay's own bound on its draining registry
+// writes (10s) before it sends the GoAways, plus 2s to send them.
+const conduitDrainStepFallback = 12 * time.Second
 
 // conduitDrainStepBound is how long the pre-cancel conduit drain step may
 // hold the shutdown before cancel: with the budget set, min(grace, S/4),
 // so a stalled GoAway send cannot eat the later phases; unset,
 // conduitDrainStepFallback. The drain itself goes on in the background
-// and the teardown's relay shutdown waits for it.
+// and the teardown's relay shutdown waits for it. Trade-off: with the
+// budget set, a registry slower than the bound (the relay waits up to
+// min(10s, grace-2.5s) for its draining writes before sending GoAway) lets
+// cancel run before the GoAways go out; they still go out from the
+// background drain.
 func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
 	if !b.set {
 		return conduitDrainStepFallback

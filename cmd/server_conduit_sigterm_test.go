@@ -100,9 +100,10 @@ func TestRegisterConduitShutdownDrain_BoundedWait(t *testing.T) {
 }
 
 // TestConduitDrainStepBound: min(grace, S/4) with shutdown_grace set (S =
-// max(G-2s, G/2)); 10s unset.
+// max(G-2s, G/2)); 12s unset (the relay's 10s write bound plus a send
+// margin).
 func TestConduitDrainStepBound(t *testing.T) {
-	assert.Equal(t, conduitDrainStepFallback, conduitDrainStepBound(serverShutdownBudget{}))
+	assert.Equal(t, 12*time.Second, conduitDrainStepBound(serverShutdownBudget{}))
 	assert.Equal(t, 2*time.Second, conduitDrainStepBound(serverShutdownBudget{grace: 10 * time.Second, set: true}))
 	assert.Equal(t, 4500*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: 20 * time.Second, set: true}))
 	assert.Equal(t, 125*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: time.Second, set: true}))
