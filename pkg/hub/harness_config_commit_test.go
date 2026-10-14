@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"maps"
 	"net/http"
@@ -851,4 +852,37 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, exists, "a lost repair commit must not reconcile storage")
 	})
+}
+
+// existsErrorStorage fails every Exists call while failing is set, like a
+// transient storage or permission error.
+type existsErrorStorage struct {
+	*mockStorage
+	failing bool
+}
+
+func (m *existsErrorStorage) Exists(ctx context.Context, objectPath string) (bool, error) {
+	if m.failing {
+		return false, errors.New("injected storage error")
+	}
+	return m.mockStorage.Exists(ctx, objectPath)
+}
+
+// A storage error while the commit verifies the manifest objects is a 500,
+// not the 400 "file not found" (GCP#3669 review, finding 1), and the row is
+// left unchanged.
+func TestHarnessConfigCommit_StorageErrorIsNotFileNotFound(t *testing.T) {
+	srv, s := testServer(t)
+	stor := &existsErrorStorage{mockStorage: newMockStorage("test-bucket")}
+	srv.SetStorage(stor)
+	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
+
+	stor.failing = true
+	rec := finalizeHCManifest(t, srv, hc, map[string]string{"config.yaml": deriveFullYAML})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "file not found")
+
+	after := globalHC(t, s, deriveHCName)
+	assert.Equal(t, hc.ContentHash, after.ContentHash, "a failed commit leaves the row unchanged")
+	assertDerivedFrom(t, after, deriveBareYAML)
 }

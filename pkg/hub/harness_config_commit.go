@@ -252,7 +252,13 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 			}
 		}
 		exists, err := stor.Exists(ctx, hc.StoragePath+"/"+f.Path)
-		if err != nil || !exists {
+		if err != nil {
+			// A storage failure is not a missing file: it must not become
+			// the 400 "file not found" an older CLI answers with a full
+			// re-upload, but a 500.
+			return fmt.Errorf("harness-config commit: check %s in storage: %w", f.Path, err)
+		}
+		if !exists {
 			return &fileNotFoundError{path: f.Path}
 		}
 	}
