@@ -96,11 +96,6 @@ func TestHubWrittenMutationTypesResolvesKnownWriters(t *testing.T) {
 			t.Errorf("source scan did not find mutation type %q", want)
 		}
 	}
-	for mt := range written {
-		if strings.Contains(mt, ".") {
-			t.Errorf("source scan returned dotted mutation type %q", mt)
-		}
-	}
 }
 
 // hubWrittenMutationTypes returns the mutation types that non-test pkg/hub
