@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -403,4 +404,159 @@ func TestConduitRenewStream_TunnelTCPNeedsActionTunnel(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden, "via=tunnel without ActionTunnel")
 	_, err = f.srv.renewConduitStreamWith(ctx, req(proxyTok, proxyOpen), noTunnel)
 	assert.NoError(t, err, "via=proxy needs only ActionPortAccess")
+}
+
+// TestConduitScopeFor: the scope claim of an identity is nil unless it is a
+// scoped user token; for one it holds the token's scopes, boundary and
+// ceiling as stored, a hub boundary staying hub.
+func TestConduitScopeFor(t *testing.T) {
+	f := newRenewalFixture(t)
+	sc, err := conduitScopeFor(f.user)
+	require.NoError(t, err)
+	assert.Nil(t, sc, "a plain user identity has no scope")
+
+	project := mustScope(t, NewScopedUserIdentity(f.user, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess, store.UATScopeAgentPortAccess}))
+	require.NotNil(t, project)
+	assert.Equal(t, []string{store.UATScopeAgentPortAccess}, project.Scopes)
+	assert.Equal(t, grant.ScopeBoundary{Kind: grant.ScopeBoundaryProject, ProjectID: f.agent.ProjectID}, project.Boundary)
+	assert.Equal(t, int(permissions.CeilingVersionUnspecified), project.Ceiling.Version)
+
+	ceiling := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.port_access", "agent.attach"}}
+	hub := mustScope(t, NewScopedUserIdentityWithBoundary(f.user, TokenBoundary{Kind: BoundaryKindHub}, []string{store.UATScopeAgentPortAccess}, "tok-1", ceiling))
+	require.NotNil(t, hub)
+	assert.Equal(t, grant.ScopeBoundary{Kind: grant.ScopeBoundaryHub}, hub.Boundary)
+	assert.Equal(t, grant.ScopeCeiling{Version: int(permissions.CeilingVersionV1), PermissionIDs: []string{"agent.attach", "agent.port_access"}}, hub.Ceiling)
+
+	rebuilt, ok := conduitScopedIdentity(f.user, hub).(*ScopedUserIdentity)
+	require.True(t, ok)
+	assert.Equal(t, BoundaryKindHub, rebuilt.Boundary().Kind, "a hub boundary is rebuilt as hub")
+	assert.Equal(t, permissions.CeilingVersionV1, rebuilt.Ceiling().Version)
+}
+
+// TestConduitRenewStream_Scope: a stream opened with a scoped token renews
+// only for what the token's scope permits, against the user's current
+// permissions; each renewal copies the scope.
+func TestConduitRenewStream_Scope(t *testing.T) {
+	f := newRenewalFixture(t)
+	portOnly := mustScope(t, NewScopedUserIdentity(f.user, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess}))
+	withScope := func(sc *grant.Scope, jti string) func(*grant.Claims) {
+		return func(c *grant.Claims) { c.Scope, c.JTI = sc, jti }
+	}
+
+	tcpTok, tcpOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), withScope(portOnly, "open-scoped-tcp"))
+	r, err := f.renew(tcpTok, tcpOpen, 1)
+	require.NoError(t, err, "a port-scoped proxy TCP stream renews")
+	assert.True(t, grant.ScopeEqual(portOnly, r.Claims.Scope), "the renewal copies the scope")
+	f.targetAcceptsScoped(t, r, tcpOpen, 1)
+	_, err = f.renew(r.Token, tcpOpen, 1)
+	require.NoError(t, err, "the renewal renews in turn")
+
+	ptyTok, ptyOpen := f.openGrant(t, grant.ViaPTY, ptyHeader(), withScope(portOnly, "open-scoped-pty"))
+	_, err = f.renew(ptyTok, ptyOpen, 1)
+	assert.ErrorIs(t, err, errConduitForbidden, "the user holds attach, the token's scope does not")
+	plainTok, plainOpen := f.openGrant(t, grant.ViaPTY, ptyHeader(), nil)
+	_, err = f.renew(plainTok, plainOpen, 1)
+	assert.NoError(t, err, "the same user's unscoped PTY stream renews")
+	assert.Nil(t, plainOpen.Scope)
+
+	otherProject := mustScope(t, NewScopedUserIdentity(f.user, tid("another-project"), []string{store.UATScopeAgentPortAccess}))
+	otherTok, otherOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), withScope(otherProject, "open-other-project"))
+	_, err = f.renew(otherTok, otherOpen, 1)
+	assert.ErrorIs(t, err, errConduitForbidden, "a project-boundary scope for another project")
+
+	hubScope := mustScope(t, NewScopedUserIdentityWithBoundary(f.user, TokenBoundary{Kind: BoundaryKindHub}, []string{store.UATScopeAgentPortAccess}, "",
+		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.port_access"}}))
+	hubTok, hubOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), withScope(hubScope, "open-hub-scope"))
+	_, err = f.renew(hubTok, hubOpen, 1)
+	assert.NoError(t, err, "a hub-boundary scope renews while the user has the project access")
+
+	f.deleteBinding(t, f.portBind)
+	_, err = f.renew(tcpTok, tcpOpen, 1)
+	assert.ErrorIs(t, err, errConduitForbidden, "the port-scoped stream stops renewing once the user loses port access")
+}
+
+// mustScope is conduitScopeFor for an identity that must have a scope.
+func mustScope(t *testing.T, ident Identity) *grant.Scope {
+	t.Helper()
+	sc, err := conduitScopeFor(ident)
+	require.NoError(t, err)
+	require.NotNil(t, sc)
+	return sc
+}
+
+// wrappedScoped embeds a scoped identity, so its accessors are promoted.
+type wrappedScoped struct{ *ScopedUserIdentity }
+
+// opaqueIdentity wraps an identity behind the Identity interface alone.
+type opaqueIdentity struct{ Identity }
+
+// TestConduitScopeForFailsClosed: an identity is unscoped only when it is a
+// plain user identity. A wrapper exposing the scoped accessors is scoped
+// exactly like the identity it wraps; a wrapper hiding them, a non-user
+// identity, a scoped context that is not a user, and a scoped context that
+// is not a valid scope are refused, never treated as unscoped.
+func TestConduitScopeForFailsClosed(t *testing.T) {
+	f := newRenewalFixture(t)
+	scoped := NewScopedUserIdentity(f.user, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess})
+
+	got, err := conduitScopeFor(wrappedScoped{scoped})
+	require.NoError(t, err)
+	assert.True(t, grant.ScopeEqual(mustScope(t, scoped), got), "a wrapper exposing the accessors is scoped like the wrapped identity")
+
+	for name, ident := range map[string]Identity{
+		"wrapper hiding a scoped identity": opaqueIdentity{scoped},
+		"wrapper hiding a plain user":      opaqueIdentity{f.user},
+		"agent identity":                   newAgentIdentityFromStore(f.agent),
+		"delegated agent identity (boundary and ceiling, no scopes)": newDelegatedAgentIdentity(
+			&store.AgentDelegatedCredential{ID: "cred-1", AgentID: f.agent.ID},
+			&store.AgentDelegationGrant{ID: "grant-1", AgentID: f.agent.ID, AgentProjectID: f.agent.ProjectID}),
+		"scoped user with no scopes": NewScopedUserIdentity(f.user, f.agent.ProjectID, nil),
+		"scoped user with an invalid boundary": NewScopedUserIdentityWithBoundary(f.user, TokenBoundary{Kind: BoundaryKindProject}, []string{store.UATScopeAgentPortAccess}, "",
+			permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.port_access"}}),
+		"no identity": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sc, err := conduitScopeFor(ident)
+			assert.ErrorIs(t, err, errConduitScope)
+			assert.Nil(t, sc)
+		})
+	}
+}
+
+// targetAcceptsScoped is targetAccepts for a stream whose open grant carries
+// a scope.
+func (f *renewalFixture) targetAcceptsScoped(t *testing.T, r *conduitRenewal, open grant.Claims, streamID uint32) {
+	t.Helper()
+	pubs, err := f.srv.ConduitGrantPublicKeys(context.Background())
+	require.NoError(t, err)
+	keys, err := grant.NewKeySet(pubs...)
+	require.NoError(t, err)
+	_, err = grant.VerifyRenewal(context.Background(), r.Token, keys, grant.RenewalExpectation{
+		Target: open.Target, ProjectID: open.ProjectID, Subject: open.Subject, Stream: open.Stream, Via: open.Via, Scope: open.Scope,
+		StreamID: streamID, OpenJTI: open.JTI, Issuer: conduitGrantIssuer,
+		After: open.AuthzUntil.Add(-time.Second), NotAfter: f.clock.Now().Add(open.AuthzInterval + 30*time.Second),
+	}, grant.NewMemoryReplayCache(f.clock.Now, 0), f.clock.Now())
+	require.NoError(t, err)
+}
+
+// TestConduitGrantLargestScopeFits: a grant and its renewal for a token
+// holding every scope a new token may hold (permissions.UATValidScopes),
+// with the ceiling those scopes resolve to at mint
+// (permissions.BuildCeilingFromSelectors), fit the grant size limit.
+func TestConduitGrantLargestScopeFits(t *testing.T) {
+	f := newRenewalFixture(t)
+	var scopes []string
+	for s := range permissions.UATValidScopes() {
+		scopes = append(scopes, s)
+	}
+	ceiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok)
+	largest := mustScope(t, NewScopedUserIdentityWithBoundary(f.user,
+		TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.agent.ProjectID}, scopes, "", ceiling))
+	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) { c.Scope, c.JTI = largest, "open-largest" })
+	t.Logf("open grant with %d scopes and %d permission ids: %d bytes", len(largest.Scopes), len(largest.Ceiling.PermissionIDs), len(tok))
+	assert.Less(t, len(tok), 16<<10)
+	r, err := f.renew(tok, open, 1)
+	require.NoError(t, err)
+	assert.Less(t, len(r.Token), 16<<10)
 }

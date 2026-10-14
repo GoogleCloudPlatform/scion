@@ -481,3 +481,36 @@ func TestDeadlinesRenewalOutsideViaTableRefused(t *testing.T) {
 		t.Fatal("a renewal outside the via table changed something")
 	}
 }
+
+// TestDeadlinesRenewalScopeMustMatch: for a stream whose open grant carries
+// a scope, a renewal without it or with another scope is refused and changes
+// nothing, and its jti stays usable; one copying the scope is accepted
+// (design v2.21.31 §3.5).
+func TestDeadlinesRenewalScopeMustMatch(t *testing.T) {
+	df := newDeadlineFixture(t)
+	ctx := context.Background()
+	scope := grant.NewScope([]string{"agent:port:access"}, grant.ScopeBoundary{Kind: grant.ScopeBoundaryProject, ProjectID: df.open.ProjectID}, 1, []string{"agent.port_access"})
+	df.stop()
+	df.open.Scope = scope
+	df.stop = df.d.Track(testBinding, 3, &df.open, df.rec.close)
+	t.Cleanup(df.stop)
+	before := df.deadline(t)
+	until := df.clk.Now().Add(testInterval + 10*time.Second)
+	const jti = "renewal-scope"
+	other := grant.NewScope([]string{"agent:port:access"}, grant.ScopeBoundary{Kind: grant.ScopeBoundaryHub}, 1, []string{"agent.port_access"})
+	for name, s := range map[string]*grant.Scope{"no scope": nil, "another scope": other} {
+		t.Run(name, func(t *testing.T) {
+			jtis := df.cache.Len()
+			if _, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Scope = jti, s })); !errors.Is(err, grant.ErrScope) {
+				t.Fatalf("err = %v, want ErrScope", err)
+			}
+			if got := df.deadline(t); !got.Equal(before) || df.rec.count() != 0 || df.cache.Len() != jtis {
+				t.Fatal("a renewal with a different scope changed something")
+			}
+		})
+	}
+	got, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Scope = jti, scope }))
+	if err != nil || !got.Equal(until) {
+		t.Fatalf("renewal copying the scope with the same jti: %v, %v", got, err)
+	}
+}

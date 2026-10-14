@@ -47,7 +47,10 @@ type RenewalClaims struct {
 	// renewal for the same OpenJTI).
 	Stream StreamHeader
 	// Via is the stream's origin, copied unchanged like Stream.
-	Via      string
+	Via string
+	// Scope is the stream's scoped-token credential context, copied
+	// unchanged like Stream; nil when the open grant has none.
+	Scope    *Scope
 	StreamID uint32
 	OpenJTI  string
 	// AuthzUntil is the stream's new authorization deadline.
@@ -67,6 +70,7 @@ type wireRenewal struct {
 	Target     Target       `json:"target"`
 	Stream     StreamHeader `json:"stream"`
 	Via        string       `json:"via"`
+	Scope      *Scope       `json:"scope,omitempty"`
 	StreamID   uint32       `json:"stream_id"`
 	OpenJTI    string       `json:"open_jti"`
 	AuthzUntil int64        `json:"authz_until"`
@@ -92,6 +96,8 @@ func (c *RenewalClaims) validate() error {
 		return fmt.Errorf("%w: missing or unknown via %q", ErrInvalidClaims, c.Via)
 	case !ViaAllows(c.Via, c.Stream.Kind):
 		return fmt.Errorf("%w: via %q does not carry stream kind %q", ErrVia, c.Via, c.Stream.Kind)
+	case c.Scope != nil && c.Scope.validate() != nil:
+		return c.Scope.validate()
 	case c.StreamID == 0:
 		return fmt.Errorf("%w: missing stream_id", ErrInvalidClaims)
 	case c.OpenJTI == "":
@@ -141,7 +147,7 @@ func MintRenewal(signer *Signer, c RenewalClaims) ([]byte, error) {
 	}
 	return sign(signer, RenewalTokenType, wireRenewal{
 		Issuer: c.Issuer, Audience: c.Audience, KeyID: c.KeyID, JTI: c.JTI,
-		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream, Via: c.Via,
+		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream, Via: c.Via, Scope: c.Scope,
 		StreamID: c.StreamID, OpenJTI: c.OpenJTI, AuthzUntil: c.AuthzUntil.Unix(),
 		NotBefore: c.NotBefore.Unix(), Expiry: c.Expiry.Unix(),
 	})
@@ -163,6 +169,9 @@ type RenewalExpectation struct {
 	// Via is the admitted open grant's via; the renewal's must equal it.
 	// Required.
 	Via string
+	// Scope is the admitted open grant's scope; the renewal's must equal
+	// it as a whole, including presence (both nil, or both equal).
+	Scope *Scope
 	// StreamID and OpenJTI name the stream: the id the renewal arrived
 	// for and the jti of its open grant. Required.
 	StreamID uint32
@@ -207,7 +216,7 @@ func VerifyRenewal(ctx context.Context, token []byte, keys KeySet, expect Renewa
 	}
 	c := &RenewalClaims{
 		Issuer: w.Issuer, Audience: w.Audience, KeyID: w.KeyID, JTI: w.JTI,
-		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream, Via: w.Via,
+		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream, Via: w.Via, Scope: w.Scope,
 		StreamID: w.StreamID, OpenJTI: w.OpenJTI, AuthzUntil: timeOrZero(w.AuthzUntil),
 		NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 	}
@@ -246,6 +255,9 @@ func VerifyRenewal(ctx context.Context, token []byte, keys KeySet, expect Renewa
 	}
 	if c.Via != expect.Via {
 		return nil, ErrVia
+	}
+	if !ScopeEqual(c.Scope, expect.Scope) {
+		return nil, ErrScope
 	}
 	if !c.AuthzUntil.After(expect.After) || c.AuthzUntil.After(expect.NotAfter) {
 		return nil, ErrAuthzUntil

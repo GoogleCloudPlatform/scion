@@ -198,6 +198,7 @@ func (d *Deadlines) Renew(ctx context.Context, b Binding, streamID uint32, token
 		Subject:   e.open.Subject,
 		Stream:    e.open.Stream,
 		Via:       e.open.Via,
+		Scope:     e.open.Scope,
 		StreamID:  streamID,
 		OpenJTI:   e.open.JTI,
 		Issuer:    issuer,

@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -517,6 +518,7 @@ func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalR
 		Target:     target,
 		Stream:     c.Stream,
 		Via:        c.Via,
+		Scope:      c.Scope,
 		StreamID:   req.TargetStreamID,
 		OpenJTI:    req.OpenJTI,
 		AuthzUntil: mintAt.Add(s.conduitUserStreamAuthzInterval()),
@@ -537,12 +539,13 @@ func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalR
 }
 
 // conduitRenewalIdentity returns the identity a renewal re-check evaluates
-// for the user named by a verified grant: the user's own current
-// permissions, read from the store. It is the single place that decides
-// which permissions a renewal evaluates. A user row that is gone wraps
-// errConduitPrincipalInactive; a failed lookup wraps
+// for the user named by a verified grant (design v2.21.31 §3.5, Scope claim
+// scope): the user, read from the store, and for a grant with a scope the
+// scoped identity rebuilt from it (conduitScopedIdentity), so the re-check
+// runs the same scoped-token check as a request with that token. A user
+// row that is gone wraps errConduitPrincipalInactive; a failed lookup wraps
 // errConduitAuthzUnavailable.
-func (s *Server) conduitRenewalIdentity(ctx context.Context, _ *grant.RecheckClaims, userID string) (Identity, error) {
+func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckClaims, userID string) (Identity, error) {
 	user, err := s.store.GetUser(ctx, userID)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -550,7 +553,79 @@ func (s *Server) conduitRenewalIdentity(ctx context.Context, _ *grant.RecheckCla
 	case err != nil:
 		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
 	}
-	return NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""), nil
+	ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
+	if c.Scope == nil {
+		return ident, nil
+	}
+	return conduitScopedIdentity(ident, c.Scope), nil
+}
+
+// errConduitScope marks an identity whose scope claim cannot be decided:
+// one carrying part of a scoped token's credential context, or whose
+// context does not form a valid scope, or an identity kind with no scope
+// rule. The open mint refuses it rather than minting a grant without scope.
+var errConduitScope = errors.New("conduit: stream scope cannot be determined")
+
+// conduitScopedCredential is the credential context of a scoped token as
+// the scoped-token check consumes it: ScopedUserIdentity's Boundary,
+// Ceiling and ScopedScopes. An identity exposing any of them is treated as
+// scoped.
+type conduitScopedCredential interface {
+	Boundary() TokenBoundary
+	Ceiling() permissions.FrozenPermissionCeiling
+	ScopedScopes() []string
+}
+
+// conduitScopeFor returns the scope claim of identity (design v2.21.31
+// §3.5). An identity with a scoped token's credential context gets the
+// token's scopes, boundary and ceiling, both lists sorted and deduplicated
+// and the ceiling copied as stored. Only a plain user identity
+// (AuthenticatedUser, DevUser) gets nil, meaning no scope. Anything else,
+// including an identity exposing only part of the context, a scoped
+// identity that is not a user, or a context that is not a valid scope,
+// fails with errConduitScope.
+func conduitScopeFor(identity Identity) (*grant.Scope, error) {
+	if isNilIdentity(identity) {
+		return nil, fmt.Errorf("%w: no identity", errConduitScope)
+	}
+	_, hasBoundary := identity.(interface{ Boundary() TokenBoundary })
+	_, hasCeiling := identity.(interface {
+		Ceiling() permissions.FrozenPermissionCeiling
+	})
+	_, hasScopes := identity.(interface{ ScopedScopes() []string })
+	if hasBoundary || hasCeiling || hasScopes {
+		cred, complete := identity.(conduitScopedCredential)
+		if !complete {
+			return nil, fmt.Errorf("%w: incomplete scoped credential context", errConduitScope)
+		}
+		if _, user := identity.(UserIdentity); !user {
+			return nil, fmt.Errorf("%w: scoped identity is not a user", errConduitScope)
+		}
+		b, c := cred.Boundary(), cred.Ceiling()
+		sc := grant.NewScope(cred.ScopedScopes(), grant.ScopeBoundary{Kind: string(b.Kind), ProjectID: b.ProjectID}, int(c.Version), c.PermissionIDs)
+		if err := sc.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: %v", errConduitScope, err)
+		}
+		return sc, nil
+	}
+	switch identity.(type) {
+	// New plain-user identity types must be added here deliberately; any
+	// type not listed fails closed.
+	case *AuthenticatedUser, *DevUser:
+		return nil, nil
+	}
+	return nil, fmt.Errorf("%w: no scope rule for %T", errConduitScope, identity)
+}
+
+// conduitScopedIdentity rebuilds the scoped identity of user from a
+// verified scope claim, with the constructor for scoped identities outside
+// a request: the boundary kind and project, the scopes and the ceiling are
+// taken as they are, so a hub boundary stays a hub boundary.
+func conduitScopedIdentity(user UserIdentity, sc *grant.Scope) Identity {
+	return NewScopedUserIdentityWithBoundary(user,
+		TokenBoundary{Kind: BoundaryKind(sc.Boundary.Kind), ProjectID: sc.Boundary.ProjectID},
+		slices.Clone(sc.Scopes), "",
+		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersion(sc.Ceiling.Version), PermissionIDs: slices.Clone(sc.Ceiling.PermissionIDs)})
 }
 
 // conduitUserStreamAuthzInterval is the user stream authorization interval,

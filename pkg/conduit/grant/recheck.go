@@ -46,6 +46,10 @@ type RecheckClaims struct {
 	// Via is the stream's origin. A re-check derives its action set from
 	// Via and Stream.Kind.
 	Via string
+	// Scope is the stream's scoped-token credential context, nil for a
+	// stream opened without a scoped token. A re-check evaluates the action
+	// set under it.
+	Scope *Scope
 	// OpenJTI is the jti of the stream's open grant: the presented grant's
 	// own jti for an open grant, its open_jti claim for a renewal.
 	OpenJTI string
@@ -103,7 +107,7 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 			Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream,
 			NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 			AuthzUntil: timeOrZero(w.AuthzUntil), AuthzInterval: time.Duration(w.AuthzInterval) * time.Second,
-			Via: w.Via,
+			Via: w.Via, Scope: w.Scope,
 		}
 		if oc.Audience != Audience {
 			return nil, ErrAudience
@@ -119,7 +123,7 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 		}
 		c = &RecheckClaims{
 			KeyID: w.KeyID, Issuer: oc.Issuer, Subject: oc.Subject, ProjectID: oc.ProjectID,
-			Target: oc.Target, Stream: oc.Stream, Via: oc.Via, OpenJTI: oc.JTI,
+			Target: oc.Target, Stream: oc.Stream, Via: oc.Via, Scope: oc.Scope, OpenJTI: oc.JTI,
 			AuthzUntil: oc.AuthzUntil, NotBefore: oc.NotBefore, Expiry: oc.Expiry,
 		}
 	case RenewalTokenType:
@@ -129,7 +133,7 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 		}
 		rc := RenewalClaims{
 			Issuer: w.Issuer, Audience: w.Audience, KeyID: w.KeyID, JTI: w.JTI,
-			Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream, Via: w.Via,
+			Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream, Via: w.Via, Scope: w.Scope,
 			StreamID: w.StreamID, OpenJTI: w.OpenJTI, AuthzUntil: timeOrZero(w.AuthzUntil),
 			NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 		}
@@ -144,7 +148,7 @@ func VerifyRecheck(token []byte, keys KeySet, expect RecheckExpectation, now tim
 		}
 		c = &RecheckClaims{
 			Renewal: true, KeyID: w.KeyID, Issuer: rc.Issuer, Subject: rc.Subject, ProjectID: rc.ProjectID,
-			Target: rc.Target, Stream: rc.Stream, Via: rc.Via, OpenJTI: rc.OpenJTI, StreamID: rc.StreamID,
+			Target: rc.Target, Stream: rc.Stream, Via: rc.Via, Scope: rc.Scope, OpenJTI: rc.OpenJTI, StreamID: rc.StreamID,
 			AuthzUntil: rc.AuthzUntil, NotBefore: rc.NotBefore, Expiry: rc.Expiry,
 		}
 	default:
