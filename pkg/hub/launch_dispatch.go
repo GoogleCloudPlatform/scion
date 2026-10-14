@@ -21,6 +21,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -75,7 +76,8 @@ func envReqsResult(envReqs *RemoteEnvRequirementsResponse) *CreateDispatchResult
 // AsyncLaunchSettings are the Hub settings that govern asynchronous agent
 // launch.
 type AsyncLaunchSettings struct {
-	// Enabled is the hub.asyncAgentLaunch flag.
+	// Enabled is the hub.async_agent_launch experiment, resolved when the
+	// settings are read.
 	Enabled bool
 	// Timeout is the whole-launch budget (hub.launchTimeout).
 	Timeout time.Duration
@@ -83,13 +85,17 @@ type AsyncLaunchSettings struct {
 	KeepaliveSeconds int
 }
 
-// asyncLaunchSettings returns the server's async launch settings. They are
-// fixed at startup; read under s.mu like the other config fields.
+// asyncLaunchSettings returns the server's async launch settings. The
+// dispatcher calls it at every create send, so Enabled follows the
+// hub.async_agent_launch experiment without a restart. Timeout and
+// KeepaliveSeconds are fixed at startup; read under s.mu like the other
+// config fields.
 func (s *Server) asyncLaunchSettings() AsyncLaunchSettings {
+	enabled := s.experimentEnabled(experiments.AsyncAgentLaunch)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return AsyncLaunchSettings{
-		Enabled:          s.config.AsyncAgentLaunch,
+		Enabled:          enabled,
 		Timeout:          s.config.LaunchTimeout,
 		KeepaliveSeconds: s.config.LaunchKeepaliveSeconds,
 	}
@@ -138,7 +144,8 @@ func (c *HybridBrokerClient) createWithGatherWouldDefer(ctx context.Context, bro
 type createSendFunc func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 
 // asyncLaunchEligible reports whether a create send for agent may request an
-// asynchronous launch: the flag is on, the agent opted in, the
+// asynchronous launch: the hub.async_agent_launch experiment is on, the
+// agent opted in, the
 // request launches (not provision-only or reprovision), and the broker is not
 // known to lack support. A broker with no recorded capabilities, or one that
 // cannot be read, is tried: its echo is authoritative.

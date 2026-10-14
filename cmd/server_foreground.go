@@ -158,12 +158,20 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Server secrets are now in memory; remove them from the process env
+	// before anything below can start a child process. Two earlier
+	// spawns remain: on macOS the container runtime probe during logging
+	// setup, and the legacy settings migration's git ls-files during
+	// config load (pkg/config gitTracked), which runs with these names
+	// filtered out of its env.
+	scrubServerSecretEnv()
 	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
 	// precedence. The level filter and the cloud, request and message
 	// handlers built by initServerLogging follow the shared level state, so
 	// this takes effect for every later record.
 	applyServerLogLevelSetting(cfg.LogLevel)
 	if enableHub {
+		warnRetiredServerSettings(slog.Default(), serverConfigPath)
 		if err := validateHubWorkspaceStorage(cfg); err != nil {
 			return err
 		}
@@ -1202,6 +1210,16 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	return nil
 }
 
+// warnRetiredServerSettings logs one warning for each retired server setting
+// still set in the server config or environment. The loader ignores them, so
+// without this a hub would silently change behaviour after an upgrade
+// (ptone/scion#4991).
+func warnRetiredServerSettings(logger *slog.Logger, configPath string) {
+	for _, w := range config.RetiredServerSettingWarnings(configPath) {
+		logger.Warn(w)
+	}
+}
+
 // loadAndReconcileConfig loads the server configuration file and reconciles
 // it with command-line flags and workstation defaults.
 func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
@@ -1815,7 +1833,7 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	devAuthCfg := apiclient.DevAuthConfig{
 		Enabled:   cfg.Auth.Enabled,
 		Token:     cfg.Auth.Token,
-		TokenFile: cfg.Auth.TokenFile,
+		TokenFile: devTokenFilePath(cfg.Auth.TokenFile, globalDir),
 	}
 
 	devAuthToken, err := apiclient.InitDevAuth(devAuthCfg, globalDir)
@@ -1868,12 +1886,18 @@ func devTokenStartupHint(cfg *config.GlobalConfig, globalDir string) string {
 }
 
 // devTokenFilePath returns the file the server keeps its dev token in: the
-// configured token file, or <globalDir>/dev-token by default.
+// configured token file, or <globalDir>/dev-token by default. A relative
+// configured path is resolved against globalDir, so it names the same file
+// however the server was started (foreground, background or --global) and
+// whatever the working directory is.
 func devTokenFilePath(configured, globalDir string) string {
-	if configured != "" {
-		return configured
+	if configured == "" {
+		return filepath.Join(globalDir, "dev-token")
 	}
-	return filepath.Join(globalDir, "dev-token")
+	if !filepath.IsAbs(configured) {
+		return filepath.Join(globalDir, configured)
+	}
+	return configured
 }
 
 // devTokenExportHint returns the shell command that exports the dev token
@@ -2215,17 +2239,18 @@ func resolveHubNameFromEnv() string {
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
-// --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
-// var (then SESSION_SECRET for compatibility). The same value backs both the
-// web session cookie store and the hub JWT signing keys so that all replicas
-// behind the load balancer agree.
+// --session-secret flag, falling back to the value scrubServerSecretEnv read
+// at startup, then to the SCION_SERVER_SESSION_SECRET env var (then the
+// deprecated SESSION_SECRET). The same value backs both the web session cookie
+// store and the hub JWT signing keys so that all replicas behind the load
+// balancer agree.
 func resolveSessionSecret() string {
 	secret := webSessionSecret
 	if secret == "" {
-		secret = os.Getenv("SCION_SERVER_SESSION_SECRET")
+		secret = capturedSessionSecret
 	}
 	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET")
+		secret = sessionSecretFromEnv()
 	}
 	if secret == "" && hostedMode {
 		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
@@ -2407,7 +2432,6 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
-		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
@@ -3078,7 +3102,9 @@ func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub 
 // syncHubSettings performs every-boot re-sync of hub_settings from bootstrap
 // material. For each registered section:
 //   - If the row is absent or origin=="seeded": write the bootstrap doc
-//     (skip-write-on-equality to avoid revision bumps and event churn).
+//     (skip-write-on-equality to avoid revision bumps and event churn),
+//     except that an absent catalog section (runtimes, profiles,
+//     harness_configs) with an empty bootstrap doc stays absent.
 //   - If origin=="managed": skip — admin owns this section.
 //
 // Also runs BackfillOrigin for pre-origin rows and writes the _meta sentinel.
@@ -3107,6 +3133,14 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 		}
 
 		if existing == nil {
+			// An empty catalog section is left absent: an empty stored
+			// runtimes, profiles or harness_configs map means "not managed
+			// in the hub", and absent says so without a row
+			// (ptone/scion#5007).
+			if isEmptyCatalogSeed(sec.Name, bootstrapDoc) {
+				slog.Debug("Empty catalog section not seeded", "section", sec.Name)
+				continue
+			}
 			// No row — create with bootstrap material.
 			if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
 				return fmt.Errorf("seeding section %q: %w", sec.Name, err)
@@ -3145,6 +3179,22 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
+}
+
+// isEmptyCatalogSeed reports whether doc is an empty bootstrap document for
+// one of the map-of-objects catalog sections (runtimes, profiles,
+// harness_configs), which syncHubSettings does not create a row for.
+func isEmptyCatalogSeed(section string, doc json.RawMessage) bool {
+	switch section {
+	case "runtimes", "profiles", "harness_configs":
+	default:
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return false
+	}
+	return len(m) == 0
 }
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
