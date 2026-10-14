@@ -361,9 +361,17 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		if hc == nil {
 			return nil
 		}
+		// The storage path is content state (ptone/scion#4219): it is
+		// written through the compare-and-swap with the row as read, so a
+		// concurrent commit is not reverted. A lost race leaves the row as
+		// the commit wrote it.
 		hc.StoragePath = newPath
 		hc.StorageURI = newURI
-		return s.store.UpdateHarnessConfig(ctx, hc)
+		err = s.store.UpdateHarnessConfigContent(ctx, hc, store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash})
+		if errors.Is(err, store.ErrHarnessConfigConflict) {
+			return errStorageMigrationConflict
+		}
+		return err
 
 	case storage.ResourceKindSkill:
 		sk, err := s.store.GetSkill(ctx, res.id)

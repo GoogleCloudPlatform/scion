@@ -169,7 +169,7 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 // isHubDispatchInvocation reports whether agent work for this invocation is
 // sent to a hub instead of run locally. It matches how hub dispatch is
 // decided (hubsync.EnsureHubReady) and how the endpoint is resolved
-// (GetHubEndpoint: --hub, then settings, then environment):
+// (invocationHub: --hub, the environment, a link entry or the current hub):
 //
 //   - inside a hub-connected container (config.IsHubContext);
 //   - a hub project reference (slug, name or git URL) for --project, which
@@ -183,9 +183,5 @@ func isHubDispatchInvocation(projectPath string) bool {
 	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		return true
 	}
-	settings, err := config.LoadSettings(projectPath)
-	if err != nil || settings == nil {
-		return false
-	}
-	return hubConfigured(settings)
+	return hubConfigured()
 }

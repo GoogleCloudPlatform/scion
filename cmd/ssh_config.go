@@ -100,7 +100,7 @@ var sshExit = os.Exit
 type sshCommandEnv struct {
 	home     string
 	exe      string         // absolute scion path written into ProxyCommand
-	endpoint string         // hub endpoint from GetHubEndpoint
+	endpoint string         // hub endpoint from invocationHubEndpoint
 	token    string         // user token from getHubAccessToken
 	project  hubOnlyProject // project for a bare agent reference
 	stdin    io.Reader
@@ -121,10 +121,9 @@ func defaultSSHCommandEnv() (*sshCommandEnv, error) {
 	if err != nil {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path: %v", err)
 	}
-	// As for scion tunnel: --project names a hub project, and the settings
-	// come from the current directory's project or the global layer.
-	settings := tunnelSettings()
-	endpoint := tunnelEndpoint(settings)
+	// As for scion tunnel: --project names a hub project, and the hub is
+	// the one selected for this invocation.
+	endpoint := invocationHubEndpoint()
 	env := &sshCommandEnv{
 		home:     home,
 		exe:      exe,

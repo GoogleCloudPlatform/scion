@@ -6479,3 +6479,13 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 }
 
 const provisionPath = "/api/v1/users"
+
+// createProjectOwnerRoleBinding creates a project-owner role binding for the
+// user on the project, with its audit record, in one transaction. Only
+// tests use it; the create, register and clone handlers write the binding
+// inside the project create transaction (createProjectWithOwner).
+func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
+	})
+}

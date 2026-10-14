@@ -201,7 +201,7 @@ func TestHubUnlink_ListRefusesUntilRelinked(t *testing.T) {
 	clearHubEnvForUnlinkTest(t)
 	globalDir := setupNoEndpointLink(t)
 	server, requests := roundTripHub(t)
-	require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+	hubEndpoint = server.URL
 	require.NoError(t, config.UpdateSetting(globalDir, "hub.enabled", "true", true))
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	origFormat := outputFormat
@@ -273,7 +273,7 @@ func TestHubUnlink_AfterRegistrationPaths(t *testing.T) {
 			clearHubEnvForUnlinkTest(t)
 			globalDir := setupNoEndpointLink(t)
 			server, requests := roundTripHub(t)
-			require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+			hubEndpoint = server.URL
 			require.NoError(t, config.UpdateSetting(globalDir, "hub.enabled", "true", true))
 			t.Setenv("SCION_DEV_TOKEN", tc.devToken)
 			origFormat := outputFormat
@@ -339,7 +339,9 @@ func TestHubUnlink_SplitStorageGitProject(t *testing.T) {
 	t.Chdir(repo)
 
 	server, requests := roundTripHub(t)
-	require.NoError(t, config.UpdateSetting(scionDir, "hub.endpoint", server.URL, false))
+	origEP := hubEndpoint
+	t.Cleanup(func() { hubEndpoint = origEP })
+	hubEndpoint = server.URL
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	projectPath, globalMode, outputFormat = "", false, "json"
 
