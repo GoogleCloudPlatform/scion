@@ -529,9 +529,12 @@ func PruneWorktreesIn(repoRoot string) error {
 // worktrees.
 //
 // It only acts once the worktree directory is gone: when path still exists
-// it does nothing. Without --force, git also refuses to delete a checkout
-// that has modified or untracked files, so a worktree's files are never
-// removed by this call. It does nothing when git has no entry for path
+// it does nothing. Without --force, git refuses to delete a checkout that
+// has modified or untracked files. A clean directory that reappears at path
+// between the existence check and the git call (for example a concurrent
+// re-create at the same path) is still deleted by git, so callers rely on
+// their own ordering: call this only after the worktree at path has been
+// removed. It does nothing when git has no entry for path
 // (already removed or never registered), and inside agent containers (see
 // PruneWorktrees). path must be absolute, so the existence check and git see
 // the same location. Any other failure (for example a locked entry) is
