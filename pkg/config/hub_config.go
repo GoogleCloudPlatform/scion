@@ -37,6 +37,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubServerConfig holds configuration for the Hub API server.
@@ -168,12 +170,6 @@ type HubServerConfig struct {
 	DisableLegacyStorageFallback bool `json:"disableLegacyStorageFallback" yaml:"disableLegacyStorageFallback" koanf:"disableLegacyStorageFallback"`
 
 	// --- Async agent create (design §3.7) ---
-
-	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
-	// by default; even when on, a launch is only non-blocking for a request
-	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
-	// stay synchronous permanently, regardless of this flag.
-	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
 
 	// PerfTrace turns on per-request performance tracing (phase timings,
 	// authorization store-call and decision-audit counts, DB pool waits).
@@ -578,6 +574,20 @@ type RuntimeBrokerInstanceConfig struct {
 	Key           string               `json:"key" yaml:"key" koanf:"key"`
 	Name          string               `json:"name" yaml:"name" koanf:"name"`
 	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+	// AgentDefaults mirrors V1RuntimeBrokerInstanceConfig.AgentDefaults.
+	AgentDefaults *InstanceAgentDefaultsConfig `json:"agentDefaults,omitempty" yaml:"agentDefaults,omitempty" koanf:"agentDefaults"`
+}
+
+// InstanceAgentDefaultsConfig is the server-config form of
+// V1InstanceAgentDefaults.
+type InstanceAgentDefaultsConfig struct {
+	DefaultHarnessConfig string                       `json:"defaultHarnessConfig,omitempty" yaml:"defaultHarnessConfig,omitempty" koanf:"defaultHarnessConfig"`
+	ImageRegistry        string                       `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" koanf:"imageRegistry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harnessOverrides,omitempty" yaml:"harnessOverrides,omitempty" koanf:"harnessOverrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"cloneDepth,omitempty" yaml:"cloneDepth,omitempty" koanf:"cloneDepth"`
 }
 
 // RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
@@ -592,6 +602,13 @@ type RuntimeTargetConfig struct {
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
 	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
 	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1738,7 +1755,6 @@ var camelCaseFields = map[string]string{
 	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
-	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
 	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",

@@ -84,10 +84,11 @@ A database-backed save (`PUT /api/v1/admin/server-config`) returns a `reload` ob
 | `applied` | Database sections written, plus, on a workstation Hub, the `settings.yaml` changes applied live. |
 | `applied_keys` | Changed Layer-1 keys (koanf paths, for example `server.hub.soft_delete_retention`) that the running Hub now uses. |
 | `pending_restart` | Changed Layer-1 keys flagged `restart_required`: saved, but used only after a restart. |
+| `skipped` | Changed Layer-1 keys that were saved but are not in use, as a list of `{"key", "reason"}` objects. They are not in `applied_keys`. |
 | `file_applied` | Workstation Hubs: the `settings.yaml` changes applied live (also listed in `applied`). |
 | `requires_restart` | Workstation Hubs: the `settings.yaml` changes that need a restart. |
 
-A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. `applied_keys` lists keys whose saved document changed. A notification channel that fails validation, or a federation issuer that cannot be built, is still listed there even though it is skipped when applied (ptone/scion#4466).
+A key is listed in `applied_keys` or `pending_restart` only when its value changed. GitHub App fields other than `app_id` are listed under neither heading while the saved `github_app` section has no `app_id`, because they are not used then; a change to `app_id` itself is listed in `pending_restart`. When the running Hub cannot use a saved change, the key is listed in `skipped` instead of `applied_keys`: `server.notification_channels` when a notification channel fails validation (the reason gives the channel's position; the channels that pass validation are in use), and the changed `server.federation.*` keys when the federation configuration is not installed: it fails validation, its authenticator cannot be built, or the test admin tier is on. A reason never repeats a configured value. The Server Config page lists these keys under **Saved but not applied**.
 
 A `409 revision_conflict` response covers the sections written before the conflict:
 
@@ -96,7 +97,7 @@ A `409 revision_conflict` response covers the sections written before the confli
 | `applied` | Revisions of the sections this request wrote. |
 | `unchanged_revisions` | Current revisions of sections the request sent unchanged; they were not written. |
 | `conflicted` | The section that conflicted, with its expected and current revision. |
-| `applied_keys`, `pending_restart` | As in `reload`, for the sections written before the conflict. |
+| `applied_keys`, `pending_restart`, `skipped` | As in `reload`, for the sections written before the conflict. |
 
 ### Layer-0 edits by deployment mode
 
@@ -330,5 +331,6 @@ The admin UI provides structured feedback on save:
 | **400** `validation_failed` | Inline per-section validation errors |
 | **409** `revision_conflict` | "Settings changed since you loaded this page" banner with Reload button |
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
+| **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

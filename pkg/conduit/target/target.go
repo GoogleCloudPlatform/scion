@@ -17,8 +17,13 @@
 // every StreamOpen against what it knows independently, namely its own
 // identity and incarnation, the session id and epoch from its current
 // Welcome, its project, and the StreamOpen kind and params, and only then
-// performs the side effect. Keys come from Welcome.grant_keys and the
-// token-refresh response.
+// performs the side effect. Verification keys come only from the target's
+// own authenticated requests to the hub (KeyHolder; design v2.21.17 §3.5
+// "Target-side deadlines"); keys listed in a Welcome are never used to
+// verify anything.
+//
+// It also enforces each stream's authorization deadline and verifies the
+// hub's renewal grants for it (Deadlines).
 package target
 
 import (
@@ -37,21 +42,8 @@ import (
 // absent or differs from the agent the broker is actually acting on.
 var ErrAgentMismatch = errors.New("conduit target: grant agent_id does not match the agent acted on")
 
-// ErrNoKeys means no Welcome has delivered grant keys yet.
+// ErrNoKeys means the target has no grant keys from the hub yet.
 var ErrNoKeys = errors.New("conduit target: no grant keys")
-
-// KeysFromProto converts Welcome.grant_keys to grant public keys.
-func KeysFromProto(keys []*conduitv1.GrantKey) []grant.PublicKey {
-	out := make([]grant.PublicKey, 0, len(keys))
-	for _, k := range keys {
-		pk := grant.PublicKey{KeyID: k.GetKid(), Key: append([]byte(nil), k.GetPublicKey()...)}
-		if n := k.GetNotAfterUnix(); n != 0 {
-			pk.NotAfter = time.Unix(n, 0)
-		}
-		out = append(out, pk)
-	}
-	return out
-}
 
 // KeysToProto converts grant public keys to Welcome.grant_keys.
 func KeysToProto(keys []grant.PublicKey) []*conduitv1.GrantKey {
@@ -66,9 +58,12 @@ func KeysToProto(keys []grant.PublicKey) []*conduitv1.GrantKey {
 	return out
 }
 
-// KeyHolder is the target's current KeySet, replaced atomically on every
-// Welcome and token refresh (never merged: a key the hub stopped
-// publishing is no longer trusted).
+// KeyHolder is the target's current KeySet. Only keys the target fetched
+// from the hub itself over its authenticated hub API belong in it; keys
+// that arrive in a Welcome are not set here. Each Set replaces the whole
+// set (never merged: a key the hub stopped publishing is no longer
+// trusted). Until the first Set every kid is unknown, so verification
+// fails closed.
 type KeyHolder struct{ p atomic.Pointer[grant.KeySet] }
 
 // Set replaces the key set. An invalid set is refused and the previous one
@@ -80,11 +75,6 @@ func (h *KeyHolder) Set(keys []grant.PublicKey) error {
 	}
 	h.p.Store(&ks)
 	return nil
-}
-
-// SetFromWelcome replaces the key set from a Welcome.
-func (h *KeyHolder) SetFromWelcome(w *conduitv1.Welcome) error {
-	return h.Set(KeysFromProto(w.GetGrantKeys()))
 }
 
 // Lookup implements grant.KeySet. Without keys every kid is unknown, so
@@ -144,6 +134,9 @@ type Verifier struct {
 	Issuer    string        // optional: required iss
 	ClockSkew time.Duration // capped by grant.MaxClockSkew
 	Now       func() time.Time
+	// RequireDeadlineFor, when non-empty, is a subject prefix whose grants
+	// must carry authz_until (grant.Expectation.RequireDeadlineFor).
+	RequireDeadlineFor string
 }
 
 // VerifyStreamOpen verifies open.grant for a stream about to be accepted on
@@ -200,6 +193,8 @@ func (v *Verifier) VerifyStreamOpen(ctx context.Context, b Binding, open *condui
 		ProjectID: projectID,
 		Issuer:    v.Issuer,
 		ClockSkew: v.ClockSkew,
+
+		RequireDeadlineFor: v.RequireDeadlineFor,
 	}
 	return grant.Verify(ctx, open.GetGrant(), v.Keys, expect, v.Replay, now())
 }

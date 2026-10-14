@@ -32,6 +32,10 @@ const (
 	FieldDispatched = "dispatched"
 	// FieldAcknowledged holds the string denoting the acknowledged field in the database.
 	FieldAcknowledged = "acknowledged"
+	// FieldDispatchAttempts holds the string denoting the dispatch_attempts field in the database.
+	FieldDispatchAttempts = "dispatch_attempts"
+	// FieldDispatchOutcome holds the string denoting the dispatch_outcome field in the database.
+	FieldDispatchOutcome = "dispatch_outcome"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the notification in the database.
@@ -50,6 +54,8 @@ var Columns = []string{
 	FieldMessage,
 	FieldDispatched,
 	FieldAcknowledged,
+	FieldDispatchAttempts,
+	FieldDispatchOutcome,
 	FieldCreated,
 }
 
@@ -76,6 +82,12 @@ var (
 	DefaultDispatched bool
 	// DefaultAcknowledged holds the default value on creation for the "acknowledged" field.
 	DefaultAcknowledged bool
+	// DefaultDispatchAttempts holds the default value on creation for the "dispatch_attempts" field.
+	DefaultDispatchAttempts int
+	// DispatchAttemptsValidator is a validator for the "dispatch_attempts" field. It is called by the builders before save.
+	DispatchAttemptsValidator func(int) error
+	// DefaultDispatchOutcome holds the default value on creation for the "dispatch_outcome" field.
+	DefaultDispatchOutcome string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -133,6 +145,16 @@ func ByDispatched(opts ...sql.OrderTermOption) OrderOption {
 // ByAcknowledged orders the results by the acknowledged field.
 func ByAcknowledged(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAcknowledged, opts...).ToFunc()
+}
+
+// ByDispatchAttempts orders the results by the dispatch_attempts field.
+func ByDispatchAttempts(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchAttempts, opts...).ToFunc()
+}
+
+// ByDispatchOutcome orders the results by the dispatch_outcome field.
+func ByDispatchOutcome(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchOutcome, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

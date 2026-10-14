@@ -15,7 +15,7 @@ retry: a client that still sends `raw` is refused, and nothing is delivered.
 
 | Caller | Before | Now |
 | --- | --- | --- |
-| `scion message --raw <agent> <keys>` | Sent keystrokes | Fails in argument validation, before any request is sent, with guidance naming `scion keys`. This applies to any value of the flag, any target form and both local and Hub mode. |
+| `scion message --raw <agent> <keys>` | Sent keystrokes | Fails in argument validation, before any request is sent, with guidance naming `scion keys`. This applies to any value of the flag and any target form. |
 | Hub `POST /api/v1/agents/:id/message` or `POST /api/v1/projects/:projectId/agents/:agentIdOrSlug/message` with `raw` or `structured_message.raw` | Sent keystrokes | `422 raw_input_removed` |
 | Hub `POST /api/v1/projects/:projectId/broadcast` with `raw` or `structured_message.raw` | Rejected with an older code | `422 raw_input_removed` |
 | Message Broker plugins: `POST /api/v1/broker/inbound` or `/inbound/routed` with `raw` or `message.raw` | Rejected with an older code | `422 raw_input_removed`, checked before topic validation and sender resolution |

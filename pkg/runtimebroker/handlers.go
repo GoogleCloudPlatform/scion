@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -1280,6 +1281,25 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// skill resolution) and failing minutes later. A synchronous start takes
 	// the name's launch marker further down (takeName); an async create
 	// hands the registration over to its launch (beginAsyncLaunch).
+	// A create, ProvisionOnly included, is refused while a purge of the
+	// agent's retained files runs here (ptone/scion#4744), and registered
+	// against one until this handler returns; work handed over to an async
+	// launch stays visible to a purge through the launch registry.
+	purgeKeySlug := req.Slug
+	if purgeKeySlug == "" {
+		purgeKeySlug = req.Name
+	}
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: req.ProjectID, Slug: purgeKeySlug})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent create refused: a removal of the agent's retained files is in progress",
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", req.RunID, "slug", purgeKeySlug)
+		markAttemptFailed(http.StatusConflict, api.BrokerErrCodeRetainedPurgeInProgress)
+		span.SetStatus(codes.Error, "retained purge in progress")
+		RetainedPurgeInProgress(w, "create")
+		return
+	}
+	defer releaseProvision()
+
 	var ss *syncStart
 	var unbindStart, finishTracked func()
 	if !req.ProvisionOnly {
@@ -1502,15 +1522,29 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 			return
 		}
+		// Last check before the start: from bind on, the request ending no
+		// longer ends the create, so a create whose caller has already
+		// gone (or that a stop, delete or newer start reached) since the
+		// check after buildStartContext must not start now. finish removes
+		// the marker takeName wrote.
+		if testHookSyncCreateBeforeBind != nil {
+			testHookSyncCreateBeforeBind(req)
+		}
+		if ss.cancelled() {
+			s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+			return
+		}
 		// Tracked as a start in flight until Manager.Start, Run's deferred
 		// cleanup and ss.finish have all returned (the deferred release
 		// above runs finishTracked last).
-		// The start runs under ctx as built up to here (policy hook, skill
-		// resolver, hub agent defaults, worktree signal), cancelled also
-		// when the registration is (bind), never under the registration's
-		// own context, which predates those values.
+		// The start runs with ctx's values as built up to here (policy
+		// hook, skill resolver, hub agent defaults, worktree signal), never
+		// under the registration's own context, which predates those
+		// values. It is cancelled only when the registration is (a stop,
+		// delete or newer start), by broker shutdown, or at the broker's
+		// own bound, not when the request ends (bind, ptone/scion#4817).
 		var startCtx, trackCtx context.Context
-		startCtx, unbindStart = ss.bind(ctx)
+		startCtx, unbindStart = ss.bind(ctx, s.syncStartMaxDuration)
 		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
 		ctx = trackCtx
@@ -2403,6 +2437,31 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	if localOnly {
 		removeBranch = false
 	}
+	// purgeRetained removes the retained files of a soft-deleted agent once
+	// the soft-delete retention window has passed (ptone/scion#4744). It is
+	// a files delete, never a soft one, and it removes nothing unless the
+	// files are still those of a soft-deleted agent (see
+	// retainedPurgeRefusal below).
+	purgeRetained := query.Get(api.PurgeRetainedQueryParam) == "true"
+	if purgeRetained {
+		if localOnly {
+			span.SetStatus(codes.Error, "purgeRetained with localOnly")
+			ValidationError(w, "purgeRetained cannot be combined with localOnly", nil)
+			return
+		}
+		// The purge registers against starts under the agent's project
+		// key (retainedPurges, the start tracker and the launch registry
+		// are all keyed by project ID and slug), so a purge with no
+		// project scope could miss a start of the same agent scoped to
+		// its project.
+		if projectID == "" {
+			span.SetStatus(codes.Error, "purgeRetained without projectId")
+			ValidationError(w, "purgeRetained requires projectId", nil)
+			return
+		}
+		deleteFiles = true
+		softDelete = false
+	}
 
 	// Resolve the exact entry to delete, scoped to the requested project,
 	// across the default and every auxiliary runtime (ptone/scion#1819).
@@ -2446,8 +2505,12 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// below, leaving the start to run on and fail long after the agent is
 	// gone. A key that matches no in-flight start is a harmless no-op. A
 	// delete naming a run leaves a start of a different run alone
-	// (ptone/scion#2550).
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+	// (ptone/scion#2550). A purge of retained files cancels nothing: it
+	// refuses while any start of the agent is in flight (see
+	// retainedPurgeRefusal), since that start may be of a restored agent.
+	if !purgeRetained {
+		s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+	}
 
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
@@ -2575,7 +2638,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// launch is a harmless no-op. Not redundant with the early cancel: this
 	// key carries the resolved entry's project, which the early one lacks
 	// when the delete names no projectId. Run-aware for the same reason.
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, hubAgentID, runID)
+	// Never for a purge of retained files (see the early cancel above).
+	if !purgeRetained {
+		s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, hubAgentID, runID)
+	}
 
 	filesToDelete := deleteFiles
 	if deleteFiles && projectPath == "" && projectID != "" {
@@ -2673,6 +2739,39 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		}
 	}
 
+	// A purge of retained files removes them only while they are still the
+	// retained files of a soft-deleted agent: no runtime entry holds the
+	// agent, no start, restart or create of it is in flight here (of any
+	// run or agent ID: a start still provisioning has no runtime entry yet
+	// and has not rewritten agent-info.json), its agent-info.json carries
+	// the soft-delete mark and none of its directories is a symlink.
+	//
+	// No start path takes the agent-files lock held here, so the purge
+	// registers with retainedPurges first, under both keys, until it
+	// returns: a start, restart or create of the agent entered after that
+	// is refused with a retryable 409 (retained_purge_in_progress). One
+	// entered before it is seen here: beginPurge fails while such a
+	// handler runs, and the start tracker and launch registry, which hold
+	// those starts and any async launch a create handed over, are checked
+	// after it.
+	if purgeRetained {
+		purgeKeys := []launchKey{{ProjectID: projectID, Slug: id}, {ProjectID: agentProjectID, Slug: target.name}}
+		releasePurge, registered := s.retainedPurges.beginPurge(purgeKeys...)
+		defer releasePurge()
+		inFlight := !registered
+		for _, k := range purgeKeys {
+			inFlight = inFlight || s.launchRegistry.anyInFlight(k) || s.startsInFlight.anyFor(k)
+		}
+		if reason := retainedPurgeRefusal(target, projectPath, inFlight); reason != "" {
+			span.SetStatus(codes.Error, "retained files refused")
+			s.agentLifecycleLog.Info("Agent retained files purge refused; nothing removed",
+				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+				"container_id", target.containerID, "reason", reason)
+			RetainedFilesRefused(w, reason)
+			return
+		}
+	}
+
 	// Move what this delete acts on to deleting before anything is removed:
 	// a delete fenced to a run never transitions the record, another run,
 	// or the slug while another run is live, nor when the files are another
@@ -2697,10 +2796,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// (agent.ErrAgentFilesDelete, returned only after a successful runtime
 	// delete). Any other error (the runtime delete failed, found another
 	// run, or anything else) writes no mark, and neither do files that are
-	// another run's. The agent-files lock
-	// taken above (lockAgentFiles, also taken by start) is held from before
-	// DeleteTarget through this write, so no start of the agent can come in
-	// between and have its files marked.
+	// another run's. The agent-files lock taken above (lockAgentFiles) is
+	// held from before DeleteTarget through this write, so another delete,
+	// or a start's failure cleanup (which takes the same lock), cannot come
+	// in between. A start itself does not take that lock.
 	runtimeDeleted := err == nil || errors.Is(err, agent.ErrAgentFilesDelete)
 	if runtimeDeleted && softDelete && projectPath != "" && !filesOfOtherRun {
 		// Phase and deletedAt are written in one locked update (#4681).
@@ -2802,11 +2901,16 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	}
 	s.finishOwnedDelete(ctx, target.mgr, ownedDel)
 
-	if softDelete {
+	switch {
+	case purgeRetained:
+		s.agentLifecycleLog.Info("Agent retained files removed after the soft-delete retention window",
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+			"remove_branch", removeBranch)
+	case softDelete:
 		s.agentLifecycleLog.Info("Agent soft-deleted",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
-	} else {
+	default:
 		s.agentLifecycleLog.Info("Agent deleted",
 			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
@@ -2860,6 +2964,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	queryRunID := r.URL.Query().Get("runId")
 	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
+	// Refused while a purge of the agent's retained files runs here
+	// (ptone/scion#4744); registered until this handler returns.
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: projectID, Slug: id})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent start refused: a removal of the agent's retained files is in progress",
+			"agent_id", id, "project_id", projectID, "run_id", queryRunID)
+		RetainedPurgeInProgress(w, "start")
+		return
+	}
+	defer releaseProvision()
 
 	// ProjectID reaches filesystem paths further on (the project-marker
 	// block in buildStartContext, and worktree provisioning); an empty
@@ -3972,6 +4086,16 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	queryRunID := r.URL.Query().Get("runId")
 	ctx, finishTracked := s.startsInFlight.beginRun(r.Context(), launchKey{ProjectID: projectID, Slug: id}, queryRunID)
 	defer finishTracked()
+	// Refused while a purge of the agent's retained files runs here
+	// (ptone/scion#4744); registered until this handler returns.
+	releaseProvision, provisionOK := s.retainedPurges.beginProvision(launchKey{ProjectID: projectID, Slug: id})
+	if !provisionOK {
+		s.agentLifecycleLog.Info("Agent restart refused: a removal of the agent's retained files is in progress",
+			"agent_id", id, "project_id", projectID, "run_id", queryRunID)
+		RetainedPurgeInProgress(w, "restart")
+		return
+	}
+	defer releaseProvision()
 
 	// Read optional resolvedEnv from request body (hub sends fresh auth token)
 	var restartReq struct {
@@ -5441,15 +5565,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 
 		_ = harnessType // used only for cascade resolution; final value intentionally unused
 
-		// Profile harness_overrides can override auth type
-		if profileName != "" && settings != nil {
-			if profile, ok := settings.Profiles[profileName]; ok {
-				if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
-					if override.AuthSelectedType != "" {
-						authType = override.AuthSelectedType
-					}
-				}
-			}
+		// Profile harness_overrides can override auth type (on a flat
+		// instance, its agent_defaults.harness_overrides; the accessor
+		// holds the profile-name guard)
+		if override, ok, _ := settings.TierHarnessOverride(profileName, harnessConfigName); ok && override.AuthSelectedType != "" {
+			authType = override.AuthSelectedType
 		}
 
 		// Template-level auth_selectedType takes high precedence. Read from
@@ -5661,18 +5781,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 					// via resolved env, inline config env, or process env (the
 					// latter covers workstation mode where PR #719 sets
 					// GOOGLE_APPLICATION_CREDENTIALS at startup).
-					altSatisfied := false
-					for _, altKey := range as.AlternativeEnvKeys {
-						if v, ok := req.ResolvedEnv[altKey]; ok && v != "" {
-							altSatisfied = true
-							break
-						}
-						if v := os.Getenv(altKey); v != "" {
-							altSatisfied = true
-							break
-						}
-					}
-					if !altSatisfied {
+					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys) {
 						required[as.Key] = struct{}{}
 						secretInfo[as.Key] = api.SecretKeyInfo{
 							Description: as.Description,
@@ -5687,17 +5796,11 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 
 	// Phase 2: Settings-based empty-value env key extraction
 	if settings != nil {
-		// Get profile harness override env keys
-		if profileName != "" && settings.Profiles != nil {
-			if profile, ok := settings.Profiles[profileName]; ok {
-				for _, override := range profile.HarnessOverrides {
-					for k, v := range override.Env {
-						if v == "" {
-							required[k] = struct{}{}
-						}
-					}
-				}
-			}
+		// Get profile harness override env keys, from all of its
+		// overrides (on a flat instance, its agent_defaults)
+		overrideEnvKeys, _ := settings.TierAllHarnessOverrideEnvKeys(profileName)
+		for k := range overrideEnvKeys {
+			required[k] = struct{}{}
 		}
 
 		// Get harness config env keys
@@ -5732,17 +5835,14 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			}
 		}
 
-		// 3c: Profile secrets
-		if profileName != "" && settings.Profiles != nil {
-			if profile, ok := settings.Profiles[profileName]; ok {
-				for _, sec := range profile.Secrets {
-					required[sec.Key] = struct{}{}
-					secretInfo[sec.Key] = api.SecretKeyInfo{
-						Description: sec.Description,
-						Source:      "settings",
-						Type:        sec.Type,
-					}
-				}
+		// 3c: Profile secrets (on a flat instance, its agent_defaults)
+		tierSecrets, _ := settings.TierSecrets(profileName)
+		for _, sec := range tierSecrets {
+			required[sec.Key] = struct{}{}
+			secretInfo[sec.Key] = api.SecretKeyInfo{
+				Description: sec.Description,
+				Source:      "settings",
+				Type:        sec.Type,
 			}
 		}
 	}
@@ -5892,21 +5992,43 @@ func expandDirEnv(dirEnv map[string]string) map[string]string {
 	return expanded
 }
 
+// altEnvKeySatisfied reports whether any of altKeys has a non-empty value in
+// resolvedEnv or, for names not refused for agents
+// (util.IsAgentRefusedHostEnvName), in this process's env.
+func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string) bool {
+	for _, altKey := range altKeys {
+		if v, ok := resolvedEnv[altKey]; ok && v != "" {
+			return true
+		}
+		if util.IsAgentRefusedHostEnvName(altKey) {
+			continue
+		}
+		if v := os.Getenv(altKey); v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // expandDirEnvEntry mirrors buildAgentEnv's treatment of a single
 // harness-config-directory env entry (pkg/agent/run.go): the key and value
 // may reference ${VAR}; a value left empty after expansion is an implicit
 // host-env passthrough. ok is false when the entry should be dropped
 // entirely — an empty expanded key, or an unresolved variable reference that
 // buildAgentEnv would also warn about and skip.
+//
+// Names refused for agents (util.IsAgentRefusedHostEnvName) expand
+// to empty and are never passed through, as in buildAgentEnv; an entry left
+// empty only because of them is dropped.
 func expandDirEnvEntry(key, value string) (expandedKey, expandedValue string, ok bool) {
-	expandedKey, _ = quietExpandEnv(key)
+	expandedKey, _, _ = quietExpandEnv(key)
 	if expandedKey == "" {
 		return "", "", false
 	}
-	var warned bool
-	expandedValue, warned = quietExpandEnv(value)
+	var warned, refused bool
+	expandedValue, warned, refused = quietExpandEnv(value)
 	if expandedValue == "" {
-		if warned {
+		if warned || refused || util.IsAgentRefusedHostEnvName(expandedKey) {
 			return "", "", false
 		}
 		if hostVal, hasHost := os.LookupEnv(expandedKey); hasHost && hostVal != "" {
@@ -5922,9 +6044,14 @@ func expandDirEnvEntry(key, value string) (expandedKey, expandedValue string, ok
 // gather-env request, including ones that end in 202 and are retried, and
 // launch prints the same warning again when it expands the value for real —
 // so the preflight's own copy would be pure duplicate noise on the broker's
-// stderr, not new information.
-func quietExpandEnv(s string) (expanded string, warned bool) {
+// stderr, not new information. Names refused for agents
+// (util.IsAgentRefusedHostEnvName) expand to empty and set refused.
+func quietExpandEnv(s string) (expanded string, warned, refused bool) {
 	expanded = os.Expand(s, func(key string) string {
+		if util.IsAgentRefusedHostEnvName(key) {
+			refused = true
+			return ""
+		}
 		val, ok := os.LookupEnv(key)
 		if !ok {
 			warned = true
@@ -5932,7 +6059,7 @@ func quietExpandEnv(s string) (expanded string, warned bool) {
 		}
 		return val
 	})
-	return expanded, warned
+	return expanded, warned, refused
 }
 
 // authCandidateKeyValue returns the value key — a GCP-shared name or one of
@@ -7322,6 +7449,41 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 // variable so tests can observe the write. Tests that
 // replace it must not call t.Parallel, since every Server shares it.
 var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
+
+// checkRetainedAgentFiles checks that an agent's files are still the
+// retained files of a soft-deleted agent; a variable so tests can replace
+// its answer. Tests that replace it must not call t.Parallel, since every
+// Server shares it.
+var checkRetainedAgentFiles = agent.CheckRetainedAgentFiles
+
+// retainedPurgeRefusal returns why a purge of retained files must remove
+// nothing for target (ptone/scion#4744), or "" when the files may be
+// removed: a runtime entry still holds the agent (a live agent, or one this
+// broker cannot tell is gone), a start of the agent is in flight
+// (launchInFlight), the agent's project directory is unknown, or
+// checkRetainedAgentFiles refuses the files (no soft-delete mark, or a
+// symlinked agent directory). The reasons name no host path.
+func retainedPurgeRefusal(target *deleteTarget, projectPath string, launchInFlight bool) string {
+	switch {
+	case target.containerID != "":
+		return "a runtime entry still holds the agent"
+	case launchInFlight:
+		return "a start of the agent is in flight"
+	case projectPath == "":
+		return "the agent's project directory could not be resolved"
+	}
+	err := checkRetainedAgentFiles(target.name, projectPath)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, agent.ErrRetainedFilesSymlink):
+		return "an agent directory is a symlink"
+	case errors.Is(err, agent.ErrRetainedFilesNotMarked):
+		return "the agent's files carry no soft-delete mark"
+	default:
+		return "the agent's files could not be checked"
+	}
+}
 
 // deleteRunRef is the RunRef a resolved delete passes to the runtime: the
 // entry's own run label, or, for a legacy entry with no run label, the run

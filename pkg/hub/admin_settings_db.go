@@ -440,7 +440,10 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 // unseeded bootstrap is set (SetUnseededBootstrap, as startup does), the
 // endpoints public_url is compared with its value from that merge instead,
 // since startup never applies a seed value for the hub endpoint
-// (ptone/scion#4865).
+// (ptone/scion#4865), and a key is attributed to the seed layer only when
+// that layer gave it its value: a key the unseeded merge gives the same
+// value comes from a layer above the seed, which wins over it
+// (ptone/scion#4904).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
@@ -448,6 +451,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		cacheSnap[name] = ss
 	}
 	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
+	unseededK := ops.unseededKoanf
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
@@ -479,6 +483,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		if err := json.Unmarshal(bootstrapDoc, &bootstrapMap); err != nil {
 			continue
 		}
+		unseededMap := unseededSectionMap(unseededK, sec.Name)
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
@@ -488,17 +493,22 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				// pinned badge says so (ptone/scion#3905).
 				continue
 			}
-			keySeedEnvK := seedEnvK
 			if sec.Name == "endpoints" && key == "public_url" && hasUnseededPublicURL {
 				// Startup's endpoint resolution ignores a seed value, so
-				// compare with the value from the layers it reads, and do
-				// not attribute the key to the seed layer
+				// compare with the value from the layers it reads
 				// (ptone/scion#4826, ptone/scion#4865). Without such a
 				// value, the saved one supersedes nothing.
 				if unseededPublicURL == "" {
 					continue
 				}
 				bootstrapVal = unseededPublicURL
+			}
+			keySeedEnvK := seedEnvK
+			if unseededVal, ok := unseededMap[key]; ok && reflect.DeepEqual(unseededVal, bootstrapVal) {
+				// A layer above the seed (settings.yaml, the --config
+				// location or SCION_SERVER_*) gives the key this value
+				// and wins over a seed value, so the key is not
+				// attributed to the seed layer (ptone/scion#4904).
 				keySeedEnvK = nil
 			}
 			dbVal, exists := dbMap[key]
@@ -528,6 +538,24 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		return nil
 	}
 	return result
+}
+
+// unseededSectionMap returns a section's keys from the bootstrap merge
+// without the SCION_SEED_* layer, or nil when that merge is not set or does
+// not have the section.
+func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]interface{} {
+	if unseededK == nil {
+		return nil
+	}
+	doc, err := opsettings.ExtractSectionFromKoanf(unseededK, sectionName)
+	if err != nil || doc == nil {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
@@ -779,8 +807,10 @@ func bodyMergeOptions(section string) sectionMergeOptions {
 }
 
 // detectKeySource determines which bootstrap layer provides a given section key.
-// It checks the individual layers in reverse precedence order (server_env first,
-// then seed_env, then yaml) and returns the first match.
+// It checks server_env first, then seed_env, then falls back to yaml.
+// settings.yaml wins over the seed layer, so a caller that can tell a layer
+// above the seed gives the key its value passes a nil seedEnvK
+// (computeSupersededKeys, ptone/scion#4904).
 func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string) string {
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
@@ -865,6 +895,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// The typed decode above silently drops a removed profiles.<name>.timezone
 	// key, so check the raw body before anything is written.
 	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
+	// Likewise the retired server.hub.async_agent_launch (ptone/scion#4991).
+	if rejectRetiredAsyncAgentLaunch(w, rawBody) {
 		return
 	}
 	// A user access token writes configuration keys only.
@@ -1564,7 +1598,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
 		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
 	}
-	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
+	// The keys the write's self-apply skipped are reported as skipped, not
+	// applied (ptone/scion#4466).
+	keyReport := reportSavedKeys(beforeDocs, writtenDocs).withSkipped(s.layer1ApplySkips())
 
 	if len(conflicted) > 0 {
 		fileTxn.abort()
@@ -1583,6 +1619,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"conflicted":          conflicted,
 			"applied_keys":        keyReport.Applied,
 			"pending_restart":     keyReport.PendingRestart,
+			"skipped":             keyReport.Skipped,
 		})
 		return
 	}
@@ -1626,9 +1663,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// applied_keys and pending_restart list the changed Layer-1
 			// keys (koanf paths) by whether they took effect on save.
 			// file_applied lists the settings.yaml changes applied live
-			// on a workstation hub (also included in applied).
+			// on a workstation hub (also included in applied). skipped
+			// lists the changed keys saved but not in use, each with a
+			// reason (ptone/scion#4466).
 			"applied_keys":    keyReport.Applied,
 			"pending_restart": keyReport.PendingRestart,
+			"skipped":         keyReport.Skipped,
 			"file_applied":    fileApplied,
 		},
 	}
@@ -1932,9 +1972,6 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
-			}
-			if hub.AsyncAgentLaunch != nil {
-				keys = append(keys, "server.hub.async_agent_launch")
 			}
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
