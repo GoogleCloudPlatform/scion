@@ -135,6 +135,12 @@ type Layer1Snapshot struct {
 	// Quotas
 	EnforceBrokerQuotas *bool
 
+	// Hub observability export switches (hub_observability section); nil
+	// when unset. Read once at startup: the exporters are created then,
+	// so ApplySnapshot does not apply them (restart_required).
+	HubMetricsEnabled *bool
+	HubTracingEnabled *bool
+
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
@@ -244,6 +250,17 @@ type OperationalSettings struct {
 	// (SetUnseededBootstrap). Guarded by mu.
 	unseededPublicURL    string
 	hasUnseededPublicURL bool
+	// unseededKoanf is the bootstrap merge without the SCION_SEED_* layer
+	// (SetUnseededBootstrap), nil when unset. computeSupersededKeys uses it
+	// to tell whether the seed layer gave a key its bootstrap value.
+	// Guarded by mu.
+	unseededKoanf *koanf.Koanf
+	// aboveSeedKoanf is the bootstrap merge with only the layers above
+	// SCION_SEED_* (settings files and SCION_SERVER_*), without the coded
+	// defaults (SetAboveSeedBootstrap), nil when unset. computeSupersededKeys
+	// uses it to tell a coded default from a value set in those layers.
+	// Guarded by mu.
+	aboveSeedKoanf *koanf.Koanf
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -295,6 +312,8 @@ func NewOperationalSettings(
 // endpoint resolution at startup ignores seed values, so with no saved
 // public URL, Snapshot takes the public URL the admin view shows from this
 // merge rather than from the full bootstrap merge (ptone/scion#4826).
+// The admin view also uses it to attribute a superseded key to the seed
+// layer only when that layer gave the key its value (ptone/scion#4904).
 // Without it (tests, embedded servers) the full bootstrap merge is used.
 func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	if k == nil {
@@ -302,8 +321,25 @@ func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.unseededKoanf = k
 	o.unseededPublicURL = k.String(config.PublicURLKey)
 	o.hasUnseededPublicURL = true
+}
+
+// SetAboveSeedBootstrap records the bootstrap merge with only the layers
+// above SCION_SEED_*, without the coded defaults
+// (config.LoadAboveSeedBootstrapKoanfWithConfigPath). With it and the
+// unseeded bootstrap set, the admin view attributes a superseded key that
+// none of those layers sets to the seed layer when a seed value exists,
+// else to the coded defaults (ptone/scion#4983). Without it (tests,
+// embedded servers) such a key is attributed to settings.yaml.
+func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.aboveSeedKoanf = k
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
@@ -962,6 +998,16 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.EnforceBrokerQuotas = &v
 	}
 
+	// Hub observability export switches
+	if k.Exists(config.HubMetricsEnabledKey) {
+		v := k.Bool(config.HubMetricsEnabledKey)
+		snap.HubMetricsEnabled = &v
+	}
+	if k.Exists(config.HubTracingEnabledKey) {
+		v := k.Bool(config.HubTracingEnabledKey)
+		snap.HubTracingEnabled = &v
+	}
+
 	// Agent secrets
 	if k.Exists("agent_secrets.user_scope_only") {
 		v := k.Bool("agent_secrets.user_scope_only")
@@ -1155,6 +1201,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Agent secrets — read from settings.yaml top-level agent_secrets
 	// section, so a file-mode admin save takes effect without a restart.
 	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
+	// Hub observability export switches — read at startup only.
+	snap.HubMetricsEnabled = gc.Hub.Observability.MetricsEnabled
+	snap.HubTracingEnabled = gc.Hub.Observability.TracingEnabled
 
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
@@ -1522,10 +1572,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
-	// correct label value. Log handlers have a similar limitation (§7.4).
+	// correct label value.
 	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
 		gcpBackend.SetHubName(hubName)
 	}
+	// Log handlers are built before the stored settings load; label their
+	// records with the applied name, at startup and on every later rename,
+	// so the hub's own log queries (which filter on this name) match them
+	// (ptone/scion#4903). The value is process-wide: tests that apply a
+	// snapshot set it too. Metrics resource attributes cannot follow a
+	// rename; see newHubTelemetryIdentity in cmd.
+	logging.SetHubName(hubName)
 
 	// Runtimes, profiles, and harness configs: update the global settings
 	// overlay so that the co-located broker (which reads via
@@ -1570,9 +1627,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		// installed, whatever the stored settings say. Startup refuses such
 		// a snapshot (cmd); this keeps a later reload from installing one.
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason(federationSkipTestAdminTier)
 		logTestAdminFederationSkipped()
 	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason("")
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
 		}
@@ -1581,6 +1640,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
 			slog.Error("Federation config validation failed during apply, keeping old config",
 				"errors", fmt.Sprintf("%v", errs))
+			s.setFederationSkipReason(federationSkipInvalid)
 		} else {
 			// Derive federation mode using the same pattern as New().
 			federationMode := s.config.Mode
@@ -1606,8 +1666,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			if err != nil {
 				slog.Error("Federation authenticator rebuild failed, keeping old config",
 					"error", err)
+				s.setFederationSkipReason(federationSkipBuildFailed)
 			} else {
 				s.federationAuth.Store(newAuth)
+				s.setFederationSkipReason("")
 				slog.Info("Federation authenticator hot-reloaded",
 					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
 					"enabled", snap.FederationConfig.Enabled)

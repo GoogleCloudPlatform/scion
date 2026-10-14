@@ -27,6 +27,7 @@ import (
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeInstancesClient and friends are a purpose-built double for
@@ -64,6 +65,12 @@ func (it *fakeInstanceIterator) Next() (*runpb.Instance, error) {
 	return inst, nil
 }
 
+// fakeGetResult is one canned GetInstance result.
+type fakeGetResult struct {
+	inst *runpb.Instance
+	err  error
+}
+
 type fakeInstancesClient struct {
 	// Canned responses.
 	getInstance *runpb.Instance
@@ -75,6 +82,26 @@ type fakeInstancesClient struct {
 	waitErr     error // applied to whichever operation is returned
 	listResult  []*runpb.Instance
 	listErr     error
+
+	// Launch cleanup extensions (ptone/scion#4761).
+	// getSeq and deleteErrSeq are per-call results, consumed in order;
+	// once exhausted, getInstance/getErr and deleteErr apply.
+	getSeq       []fakeGetResult
+	deleteErrSeq []error
+	// createBlocks and deleteBlocks make the call block until its ctx
+	// ends and return the ctx's error.
+	createBlocks bool
+	deleteBlocks bool
+	// createWaitErr and deleteWaitErr, when set, replace waitErr for the
+	// create and the delete operation.
+	createWaitErr error
+	deleteWaitErr error
+	// onCreate, when set, runs at the start of CreateInstance.
+	onCreate func()
+	// reconcilingReads is the number of further GetInstance calls that
+	// report the instance Reconciling; while it is above 0 DeleteInstance
+	// is refused with FailedPrecondition.
+	reconcilingReads int
 
 	// Recorded requests.
 	getReqs    []*runpb.GetInstanceRequest
@@ -88,16 +115,37 @@ type fakeInstancesClient struct {
 
 func (c *fakeInstancesClient) GetInstance(ctx context.Context, req *runpb.GetInstanceRequest, opts ...gax.CallOption) (*runpb.Instance, error) {
 	c.getReqs = append(c.getReqs, req)
-	if c.getErr != nil {
-		return nil, c.getErr
+	inst, err := c.getInstance, c.getErr
+	if len(c.getSeq) > 0 {
+		inst, err = c.getSeq[0].inst, c.getSeq[0].err
+		c.getSeq = c.getSeq[1:]
 	}
-	return c.getInstance, nil
+	if err != nil {
+		return nil, err
+	}
+	if inst != nil && c.reconcilingReads > 0 {
+		c.reconcilingReads--
+		cp := proto.Clone(inst).(*runpb.Instance)
+		cp.Reconciling = true
+		return cp, nil
+	}
+	return inst, nil
 }
 
 func (c *fakeInstancesClient) CreateInstance(ctx context.Context, req *runpb.CreateInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.createReqs = append(c.createReqs, req)
+	if c.onCreate != nil {
+		c.onCreate()
+	}
+	if c.createBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if c.createErr != nil {
 		return nil, c.createErr
+	}
+	if c.createWaitErr != nil {
+		return &fakeInstanceOperation{waitErr: c.createWaitErr}, nil
 	}
 	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
 }
@@ -120,8 +168,23 @@ func (c *fakeInstancesClient) StopInstance(ctx context.Context, req *runpb.StopI
 
 func (c *fakeInstancesClient) DeleteInstance(ctx context.Context, req *runpb.DeleteInstanceRequest, opts ...gax.CallOption) (cloudrun.InstanceOperation, error) {
 	c.deleteReqs = append(c.deleteReqs, req)
-	if c.deleteErr != nil {
-		return nil, c.deleteErr
+	if c.deleteBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if c.reconcilingReads > 0 {
+		return nil, status.Error(codes.FailedPrecondition, "instance is reconciling")
+	}
+	err := c.deleteErr
+	if len(c.deleteErrSeq) > 0 {
+		err = c.deleteErrSeq[0]
+		c.deleteErrSeq = c.deleteErrSeq[1:]
+	}
+	if err != nil {
+		return nil, err
+	}
+	if c.deleteWaitErr != nil {
+		return &fakeInstanceOperation{waitErr: c.deleteWaitErr}, nil
 	}
 	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
 }

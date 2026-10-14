@@ -2325,8 +2325,9 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			// TODO(ptone/scion#1934): scope notification.created per-user
 			// and drop this pass-through.
 		case "system":
-			// Only a concrete image-build job ID is allowed; no wildcards
-			// and no trailing tokens past the job ID.
+			// Only a concrete image-pull job ID is allowed; no wildcards
+			// and no trailing tokens past the job ID. Image-build output
+			// is published on user.<requesterId>.images.<jobId> instead.
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}

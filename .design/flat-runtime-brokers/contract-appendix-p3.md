@@ -22,7 +22,7 @@ The P4 work depends on eight points. Each is frozen here or deliberately deferre
 | Per-profile default GCP service account | FC10 (node-local; Hub default per instance deferred) |
 | Capacity surfaces | FC11 |
 
-**Delivery of the schema is phased.** FC1 freezes every field now. P3.1-a wires `runtime_target.shared_dir_storage_class` and `runtime_target.shared_dir_size`. The other FC1 fields are **reserved**: the strict instance loader refuses each of them with an explicit error naming its path ("reserved … not supported in this release"), never by silently dropping it. P3.1-b wires the remaining `runtime_target` fields and P3.1-c wires `agent_defaults`; each removes its keys from the reserved list in the same change that wires them. A reserved key never has a partial effect.
+**Delivery of the schema is phased.** FC1 freezes every field now. P3.1-a wires `runtime_target.shared_dir_storage_class` and `runtime_target.shared_dir_size`. The other FC1 fields were **reserved** until they were wired: the strict instance loader refused each of them with an explicit error naming its path ("reserved … not supported in this release"), never by silently dropping it. P3.1-b wires the remaining `runtime_target` fields and P3.1-c wires `agent_defaults`; each removes its keys from the reserved list in the same change that wires them. A reserved key never has a partial effect. Errata (P3.1-d): with P3.1-b and P3.1-c, every FC1 field is wired and both reserved lists are empty; the loader keeps the reserved-key check for a field a later change freezes before it wires it.
 
 | Field group | Wired in |
 |---|---|
@@ -115,7 +115,7 @@ Every tag is `json`, `yaml` and `koanf` with the same snake_case name. Each Go f
 
 - `pkg/config/hub_config.go` `RuntimeTargetConfig` / `RuntimeBrokerInstanceConfig` mirror every FC1 field with camelCase `json`/`yaml`/`koanf` tags: `gke`, `priorityClassName`, `sharedDirStorageClass`, `sharedDirSize`, `safeToEvict`, `sharedDirStorageBackend`, `sharedDirStorageBackends`, `homeStorageBackend`, `homeStorageLeaf`, and `agentDefaults{defaultHarnessConfig, imageRegistry, volumes, resources, harnessOverrides, secrets, cloneDepth}`.
 - `ConvertV1ServerToGlobalConfig` / `ConvertGlobalToV1ServerConfig` (through `v1InstancesToGlobal` / `globalInstancesToV1`) deep-copy each field: maps, slices and pointers are never shared between the two forms.
-- The strict loader `LoadRuntimeBrokerInstances` is the only reader of instance policy. It refuses, each with an error naming the settings path: an unknown key on an instance entry or under `runtime_target` (and, once wired, under `agent_defaults`); a reserved key (section 0); a non-string scalar where a string is required; any per-type validity error. The startup deep-equal check between the strict result and the lenient server config (`loadServerRuntimeBrokerInstances`) covers the new fields automatically.
+- The strict loader `LoadRuntimeBrokerInstances` is the only reader of instance policy. It refuses, each with an error naming the settings path: an unknown key on an instance entry, under `runtime_target` or under `agent_defaults`; a reserved key (section 0); a non-string scalar where a string is required; any per-type validity error. The startup deep-equal check between the strict result and the lenient server config (`loadServerRuntimeBrokerInstances`) covers the new fields automatically.
 
 ## FC3. Write paths and the file-only ownership boundary
 
@@ -156,9 +156,9 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 
 | Field | Rung of the instance value (chain otherwise unchanged) |
 |---|---|
-| `shared_dir_storage_class`, `shared_dir_size` | below the template/agent `kubernetes.shared_dir_*` (settings fill only empty values, `ApplySharedDirDefaults`); unset → the runtime default (10Gi) |
-| `safe_to_evict` | below the template `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy |
-| `priority_class_name` | below the template/agent `kubernetes.priorityClassName` |
+| `shared_dir_storage_class`, `shared_dir_size` | below the agent's own (inline or persisted) `kubernetes.shared_dir_*` (settings fill only empty values, `ApplySharedDirDefaults`); unset → the runtime default (10Gi). Errata (P3.1-b): an earlier text said a template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524) |
+| `safe_to_evict` | below the agent's own (inline or persisted) `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy. Errata (P3.1-b): an earlier text said the template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524), so the agent's own config is the outranking tier |
+| `priority_class_name` | below the agent's own (inline or persisted) `kubernetes.priorityClassName`. Errata (P3.1-b): an earlier text said a template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524) |
 | `gke` | consumed when the instance runtime is built |
 | `shared_dir_storage_backend(s)` | between the agent's recorded backend (always kept) and `server.shared_dir_storage.backend`; flat order is instance per-dir, instance single, global |
 | `home_storage_backend`, `home_storage_leaf` | above `server.home_storage`; first start only, the recorded decision is kept afterwards |
@@ -175,7 +175,7 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 
 **Shadowing fold for the backend pair.** Today's order is profile per-dir, profile single, runtime per-dir, runtime single. A profile's single value therefore shadows the runtime entry's per-dir map. Conversion reproduces that (FC6 rule 2a); an independent per-key merge is wrong.
 
-**Mechanism.** Frozen: the exported API named here (`FlatInstancePolicy`, `WithFlatInstancePolicy`, `FlatInstancePolicyFrom`, `ForFlatInstance`, the derived `ProfileResolutionFrom`, `ForProfileResolution` for the Hub) and the guard-test rule. Not frozen: unexported internals such as the view's policy field and the per-resolver branch layout, which a later refactor may change without amending this appendix as long as the frozen API and rules hold. A request served by a flat instance carries a `config.FlatInstancePolicy` on its context (`config.WithFlatInstancePolicy`, read by `config.FlatInstancePolicyFrom`; nil means legacy). The policy is an immutable deep copy built once per instance server from its strictly loaded entry. `ProfileResolutionFrom(ctx)` returns `ProfileResolutionFlatInstance` exactly when a policy is present. `LoadEffectiveSettingsFor`, `LoadGlobalSettingsWithOverlayFor` and the Runtime Broker's `settingsView` return `vs.ForFlatInstance(policy)`: a view with no profiles and no active profile that carries the policy in an unexported field. Each resolver has a flat branch that reads only the typed policy field and never calls `ResolveProfileValue` or reads `Profiles` / `Runtimes`; a source-scan guard test in `pkg/config` enforces this. Source labels name the instance path, for example `server.broker.instances[k8s-nfs-1].runtime_target.shared_dir_size`. `ForProfileResolution(ProfileResolutionFlatInstance)` remains the policy-less view for the Hub's reincarnation planning, which never sees node-local policy.
+**Mechanism.** Frozen: the exported API named here (`FlatInstancePolicy`, `WithFlatInstancePolicy`, `FlatInstancePolicyFrom`, `ForFlatInstance`, the derived `ProfileResolutionFrom`, `ForProfileResolution` for the Hub) and the guard-test rule. Not frozen: unexported internals such as the view's policy field and the per-resolver branch layout, which a later refactor may change without amending this appendix as long as the frozen API and rules hold. The exported constructor `NewFlatInstancePolicy` also stays outside this freeze: the appendix freezes a minimum API, and the constructor may change as long as the policy it builds keeps the rules above. A request served by a flat instance carries a `config.FlatInstancePolicy` on its context (`config.WithFlatInstancePolicy`, read by `config.FlatInstancePolicyFrom`; nil means legacy). The policy is an immutable deep copy built once per instance server from its strictly loaded entry. `ProfileResolutionFrom(ctx)` returns `ProfileResolutionFlatInstance` exactly when a policy is present. `LoadEffectiveSettingsFor`, `LoadGlobalSettingsWithOverlayFor` and the Runtime Broker's `settingsView` return `vs.ForFlatInstance(policy)`: a view with no profiles and no active profile that carries the policy in an unexported field. Each resolver has a flat branch that reads only the typed policy field and never calls `ResolveProfileValue` or reads `Profiles` / `Runtimes`; a source-scan guard test in `pkg/config` enforces this. Source labels name the instance path, for example `server.broker.instances[k8s-nfs-1].runtime_target.shared_dir_size`. `ForProfileResolution(ProfileResolutionFlatInstance)` remains the policy-less view for the Hub's reincarnation planning, which never sees node-local policy.
 
 ## FC6. Conversion API and finding codes
 
@@ -226,6 +226,13 @@ Rules:
 
 `ProfileMap` is the explicit, unambiguous migration mapping that P4.1 uses to translate an old `profile` request field or `defaultProfile` preference. A profile with a blocking finding, or with no `ProfileMap` entry, has no translation; P4.1 returns its actionable error.
 
+**Errata (P3.1-d).** These name what the text above left open; none changes a frozen name, type or code.
+- **Conflict path.** A conflict between the profiles of one group (`profile_conflict`, `profile_conflict_resolved`) has `Path` `profiles.*.<field>`, where `*` stands for the profiles listed in `Profiles` and `<field>` is the settings path under a profile (for example `profiles.*.shared_dir_size` or `profiles.*.harness_overrides.claude.image`). The message gives each profile's value and the legacy path it comes from. `ConversionChoice.Field` names the same field, with or without the `profiles.*.` prefix.
+- **Invalid choices.** An operator choice that cannot be applied is a blocking `unknown_settings_key` at `Path` `choices[i]`, where `i` is its index in `Choices`, naming the profiles of the group it names (none when the group does not exist). That covers an unknown target group, a profile not in the group, a field with no conflict, a second choice for one field, a Split choice that also sets `Field` or `ChosenProfile`, an empty template name, and a `template:<name>` choice for a field that is not an `agent_defaults` value: only a workload default has a template setting that outranks the instance value (a template's `kubernetes` block is not applied to an agent, see the FC5 errata), so an infrastructure conflict is resolved only by a profile's value or a Split. A profile in `Profiles` that the settings do not define is a blocking `unknown_settings_key` at `profiles.<p>`.
+- **Instance keys.** `TargetGroup` keys are derived from the scope only: `docker`, `k8s` plus the context and namespace that are set, and for a Split group the group's key plus its profiles, each part made key-safe. An 8-hex sha256 suffix of the scope (and Split members) is appended when a part is not key-safe, when the key would be too long, or when two groups of one conversion would share a key, so every group has its own key and the same input always gives the same keys.
+- **Harness override presence.** A harness override that only some profiles of a group set is reported for its presence only when none of its sub-fields conflicts; a sub-field conflict already names the override.
+- **Docker targets.** A Kubernetes-only key on a profile or runtime entry whose target is docker is not copied (a docker runtime ignores it) and is reported as the notice `field_not_valid_for_target_type`.
+
 ## FC7. Zero, false and unknown-key rules
 
 | Field | Unset | Explicit values |
@@ -263,6 +270,17 @@ The API stays as it is, plus one new error code:
 - Reservations on a confirmed-deleted Runtime Broker scope are released with an audit event, so usage shows no rows on deleted Runtime Brokers (P3.3).
 - **New:** a typed 409 with code `broker_reservation_scope_conflict` when an agent that already holds capacity on one Runtime Broker is admitted on another ("agent <id> already holds capacity on Runtime Broker <A>; it cannot be admitted on <B>"). The existing reservation is kept and no new one is made. Store failures stay 500 (P3.3).
 - There are no profile rows and no host-wide or profile capacity scopes.
+
+### Erratum E-FC11-1 (accepted 2026-10-13)
+
+In FC11, a pinned agent's active reservation whose scope differs from its Runtime Broker is "never moved or backfilled, and not released while the agent holds capacity (counted phase or stop_queued); once it holds none, the normal release rule applies". This replaces "never moved, released or backfilled".
+
+Binding points for the release:
+
+1. A stale sweep observation must not release capacity that a concurrent start just re-reserved: the release is store-conditional on the reservation row the sweep read.
+2. A release never touches the saved pin and never authorizes a move.
+3. The next start still passes the pinned-placement check and reserves on the valid instance; an inconsistent pin is still refused.
+4. No automatic transfer or backfill.
 
 ## Not frozen
 

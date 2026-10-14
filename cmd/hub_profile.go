@@ -158,7 +158,8 @@ func hubProfileSelected() bool { return hubProfileName() != "" }
 
 // checkHubProfileGate runs from root's PersistentPreRunE. With a profile
 // selected it refuses every command outside hubProfileAllowed, and
-// --hub-profile together with --hub or --no-hub. Without one it refuses
+// --hub-profile together with --hub (root rejects the removed --no-hub
+// before this gate runs). Without one it refuses
 // --as and --run. In agent mode it applies the target-profile rule to the
 // commands in hubProfileAgentRuntime.
 func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
@@ -182,8 +183,8 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 	if !hubProfileAllowed[path] {
 		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
-	if hubEndpoint != "" || noHub {
-		return errors.New("--hub and --no-hub cannot be used with a hub profile: the profile names the hub")
+	if hubEndpoint != "" {
+		return errors.New("--hub cannot be used with a hub profile: the profile names the hub")
 	}
 	if mode == ModeAgent && !hubProfileNoSession[path] {
 		// The session itself refuses the agent's own hub (hubprofile.Open);

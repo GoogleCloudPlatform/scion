@@ -39,6 +39,10 @@ var directServerEnvNames = map[string]bool{
 	"SCION_SERVER_HUB_HUBNAME":         true, // cmd/server_foreground.go, also a settings key
 	"SCION_SERVER_HUB_HUBID":           true, // pkg/config/hub_config.go, also a settings key
 	"SCION_SERVER_REQUEST_LOG_PATH":    true, // pkg/util/logging/request_log.go
+
+	// Retired; read only so the hub can warn that it is ignored
+	// (pkg/config/retired_settings.go, ptone/scion#4991).
+	"SCION_SERVER_HUB_ASYNCAGENTLAUNCH": true,
 }
 
 // DirectServerEnvNameList returns the directly-read SCION_SERVER_* names,

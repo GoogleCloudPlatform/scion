@@ -114,6 +114,18 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// userTemplate and userTemplateDel are user-scope templates of the
+	// caller, reached through /api/v1/users/me/templates: the dev user's
+	// here, the matrix super-admin's in the bearer disposition matrix
+	// (seedUserTemplates). userTemplateDel is the delete entry's target.
+	userTemplate    string
+	userTemplateDel string
+	// userScopeTemplateDel, userHarnessConfig and userHarnessConfigDel are
+	// the dev user's user-scope records for the user-scope branches of the
+	// /api/v1/templates and /api/v1/harness-configs routes.
+	userScopeTemplateDel string
+	userHarnessConfig    string
+	userHarnessConfigDel string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -130,6 +142,66 @@ type idFixtures struct {
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
 	inbox inboxRecords
+	// chat holds the caller's own native chat records (seedChatRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	chat chatRecords
+	// agentDelProject is a disposable agent for the project-form DELETE,
+	// so the by-ID DELETE keeps agentDel.
+	agentDelProject string
+	// agentPorts is the target of the port registration entries, with one
+	// exposed port (agentPortsPort), so clearing its ports leaves agent's
+	// port for the proxy entries.
+	agentPorts     string
+	agentPortsPort string
+}
+
+// chatRecords are native chat records of one user: a second thread of the
+// fixture project (for the delete entry), a DM with an agent of that
+// project and a DM with another user, messages the user wrote in the
+// fixture thread (one for edit, one for delete, one more), and a message
+// in the agent DM.
+type chatRecords struct {
+	topicDel           string
+	dmAgent            string
+	dmUser             string
+	topicMessage       string
+	topicMessageEdit   string
+	topicMessageDelete string
+	dmMessage          string
+}
+
+// seedChatRecords creates chatRecords for userID: topicID is the fixture
+// thread of projectID, agentID an agent of projectID, peerUserID another
+// active user.
+func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebChatStore, userID, projectID, topicID, agentID, peerUserID string) chatRecords {
+	t.Helper()
+	at := time.Now().UTC().Add(-time.Minute)
+	r := chatRecords{topicDel: uuid.NewString()}
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: r.topicDel, ProjectID: projectID, Name: "chat-del-" + r.topicDel[:8],
+		CreatedBy: userID, CreatedAt: at, LastActivityAt: at,
+	}))
+	var err error
+	r.dmAgent, err = messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.dmUser, err = messages.DMConversationKey("user", userID, "user", peerUserID)
+	require.NoError(t, err)
+
+	message := func(threadID, projectOfRow string, offset time.Duration) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectOfRow, Sender: "user:" + userID, SenderID: userID,
+			Recipient: "chat", Msg: "chat record " + id[:8], Type: "chat",
+			Channel: "web", ThreadID: threadID, CreatedAt: at.Add(offset),
+		}))
+		return id
+	}
+	r.topicMessageEdit = message(topicID, projectID, time.Second)
+	r.topicMessageDelete = message(topicID, projectID, 2*time.Second)
+	r.topicMessage = message(topicID, projectID, 3*time.Second)
+	r.dmMessage = message(r.dmAgent, projectID, 4*time.Second)
+	return r
 }
 
 // seedInboxRecords creates inboxRecords for userID in projectID; agentID
@@ -211,6 +283,10 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	return r
 }
 
+// liveInventoryFederationAudience is the peer hub audience the live
+// inventory server allows for POST /api/v1/auth/federation-token.
+const liveInventoryFederationAudience = "https://peer-hub.example.com"
+
 // seedLiveInventoryFixtures creates one real store row per resource family
 // (plus a second, disposable instance for families with a destructive
 // catalog operation, so a DELETE entry tested earlier in catalog
@@ -267,6 +343,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		agentRestore:         tid("li-agent-restore"),
 		agentRestoreProject:  tid("li-agent-restore-project"),
 		agentProvisioning:    tid("li-agent-provisioning"),
+		agentDelProject:      tid("li-agent-del-project"),
+		agentPorts:           tid("li-agent-ports"),
+		agentPortsPort:       "18081",
 	}
 
 	f.projectSharedDir = "li-shared"
@@ -310,6 +389,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// "no runtime broker available" before persisting anything, for either
 	// form, leaving this fixture's phase untouched.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentProvisioning, Slug: "li-agent-provisioning", Name: "LI Agent Provisioning", ProjectID: f.project, Phase: string(state.PhaseProvisioning)}))
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDelProject, Slug: "li-agent-del-project", Name: "LI Agent Del Project", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentPorts, Slug: "li-agent-ports", Name: "LI Agent Ports", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agentPorts, []store.ExposedPort{{Port: 18081, Host: "127.0.0.1", Label: "li-ports", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
 
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.group, Slug: "li-group", Name: "LI Group"}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.groupDel, Slug: "li-group-del", Name: "LI Group Del"}))
@@ -512,13 +595,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
-	// too, so their experiment-gated routes are live: the registry above
-	// with all three also defaulting on (no operational settings, which
-	// the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
+	// federation.project_visitors on too, so their experiment-gated routes
+	// are live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -530,10 +613,27 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
+	// provider is off: install a test key manager and allow the audience
+	// that bodyOverrides sends, so the route reaches its caller checks.
+	installTestOIDCKeyManager(t, srv)
+	srv.config.OIDCConfig.UserTokenAudiences = []string{liveInventoryFederationAudience}
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.userTemplate, f.userTemplateDel = seedUserTemplates(t, ctx, s, DevUserID)
+	f.userScopeTemplateDel = tid("li-user-scope-template-del")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.userScopeTemplateDel, Name: "li-user-scope-template-del", Slug: "li-user-scope-template-del", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	f.userHarnessConfig = tid("li-user-hc")
+	f.userHarnessConfigDel = tid("li-user-hc-del")
+	for _, id := range []string{f.userHarnessConfig, f.userHarnessConfigDel} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: id, Name: "li-user-hc-" + id[len(id)-6:], Slug: "li-user-hc-" + id[len(id)-6:], Harness: "claude",
+			Scope: store.HarnessConfigScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
 	// Hub test identities: turn the feature on (--test-mode=member)
@@ -566,6 +666,20 @@ func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, us
 	return si.ID
 }
 
+// seedUserTemplates adds two active user-scope templates owned by userID
+// and returns their IDs: one the read and update entries address, and one
+// the delete entry removes.
+func seedUserTemplates(t *testing.T, ctx context.Context, s store.Store, userID string) (keep, del string) {
+	t.Helper()
+	now := time.Now()
+	ids := []string{tid("li-user-template-" + userID), tid("li-user-template-del-" + userID)}
+	for i, name := range []string{"li-user-template", "li-user-template-del"} {
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: ids[i], Name: name, Slug: name, Harness: "claude",
+			Scope: store.TemplateScopeUser, ScopeID: userID, OwnerID: userID, CreatedBy: userID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	}
+	return ids[0], ids[1]
+}
+
 // overrideKey identifies one (operation, pattern) pair for parameter
 // override lookup. Some patterns are declared by more than one operation
 // (e.g. GET, PATCH and DELETE all address "/api/v1/agents/{id}"); an entry
@@ -586,14 +700,39 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
-		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
+		// Chat: the DM variants address the caller's DMs; topic delete
+		// takes the disposable second thread; message delete its own
+		// message.
+		{"chat.topic.delete", "/api/v1/chat/topics/{id}"}:                               {"id": f.chat.topicDel},
+		{"chat.conversation.history.dm", "/api/v1/chat/conversations/{id}/messages"}:    {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}:  {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:   {"id": f.chat.dmUser},
+		{"chat.conversation.readstate.dm", "/api/v1/chat/conversations/{id}/read"}:      {"id": f.chat.dmAgent},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:       {"id": f.chat.dmAgent},
+		{"chat.conversation.markunread.dm", "/api/v1/chat/conversations/{id}/unread"}:   {"id": f.chat.dmAgent},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:           {"id": f.chat.dmAgent},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:             {"id": f.chat.dmAgent},
+		{"chat.conversation.typing.dm", "/api/v1/chat/conversations/{id}/typing"}:       {"id": f.chat.dmAgent},
+		{"chat.message.delete", "/api/v1/chat/conversations/{id}/messages/{messageId}"}: {"id": f.chatTopic, "messageId": f.chat.topicMessageDelete},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                               {"id": f.agentDel},
+		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
+		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
+		// User-scope branches address the caller's user-scope records; a
+		// clone copies the global fixture into the caller's user scope.
+		{"template.user.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
+		{"template.user.delete", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"template.user.reimport", "/api/v1/templates/{id}/reimport"}:             {"id": f.userTemplate},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
+		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
+		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
@@ -658,6 +797,28 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
 		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}":                                     {"id": f.agentPorts, "port": f.agentPortsPort},
+		"/api/v1/projects/{projectId}/agents":                                  {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/stop-all":                         {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/{id}":                             {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},
+		"/api/v1/agents/{id}/logs":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/logs":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/cloud-logs":                                       {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs":                  {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages":                                         {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs":                                     {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs":                {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/metrics/summary":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/keys":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/keys":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/message":                                          {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -706,6 +867,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
 		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
 		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
+		"/api/v1/users/me/templates/{id}":                         {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/upload":                  {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/finalize":                {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/download":                {"id": f.userTemplate},
 		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
 		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
 		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
@@ -824,9 +989,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":         {"id": f.project},
-		"/api/v1/chat/topics/{id}":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
+		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
+		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
@@ -890,6 +1066,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
+		// User access credential for a peer hub: an allowed audience, so
+		// an admitted caller gets 200 instead of a body 400
+		// (seedLiveInventoryFixtures allows it).
+		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -926,6 +1106,30 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// User-scope writes: valid bodies, so the probes reach the
+		// user-scope branch past body validation.
+		{"template.user.create", "/api/v1/users/me/templates"}:             {"name": "li-user-template-created"},
+		{"template.user.update", "/api/v1/users/me/templates/{id}"}:        {"name": "li-user-template-renamed"},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:            {"name": "li-user-template-clone", "scope": "user"},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}: {"name": "li-user-hc-clone", "scope": "user"},
+		{"skill.user.create", "/api/v1/skills"}:                            {"name": "li-user-skill", "scope": "user"},
+		{"template.user.import", "/api/v1/resources/import"}:               {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"template.user.import", "/api/v1/resources/discover"}:             {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/import"}:          {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/discover"}:        {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		// handleWorkspaceSyncTo and handleWorkspaceSyncToFinalize validate
+		// the file list and the manifest before they look up the agent or
+		// check authorization.
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to"}: {
+			"files": []interface{}{map[string]interface{}{"path": "li.txt", "size": 3, "hash": "li-hash"}},
+		},
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+			"manifest": map[string]interface{}{"version": "1", "files": []interface{}{}},
+		},
+		// beginAgentKeysRequest validates the body before the agent lookup
+		// and the authorization check.
+		{"agent.lifecycle.keys", "/api/v1/agents/{id}/keys"}:                      {"keys": "li"},
+		{"agent.lifecycle.keys", "/api/v1/projects/{projectId}/agents/{id}/keys"}: {"keys": "li"},
 	}
 }
 

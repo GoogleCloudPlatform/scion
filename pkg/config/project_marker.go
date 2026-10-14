@@ -92,6 +92,22 @@ func (m ProjectMarker) DirName() string {
 	return fmt.Sprintf("%s__%s", slug, m.ShortUUID())
 }
 
+// projectDirSlugPattern is the grammar api.Slugify produces: lowercase
+// letters, digits and inner dashes, at most api.MaxSlugLength characters.
+var projectDirSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// projectShortIDPattern is the grammar of ShortUUID for a valid project ID:
+// up to eight letters or digits.
+var projectShortIDPattern = regexp.MustCompile(`^[A-Za-z0-9]{1,8}$`)
+
+// HasCanonicalDirName reports whether DirName is built from a slug in the
+// api.Slugify grammar and the short form of a valid project ID. Callers
+// that derive a project's external config dir from trusted inputs use
+// only such a name as a path component.
+func (m ProjectMarker) HasCanonicalDirName() bool {
+	return projectDirSlugPattern.MatchString(m.ProjectSlug) && projectShortIDPattern.MatchString(m.ShortUUID())
+}
+
 // ExternalProjectPath returns the absolute path to the external project config
 // directory: ~/.scion/project-configs/<project-slug>__<short-uuid>/.scion/
 // It returns an error if the project ID does not match the project ID format.
@@ -142,8 +158,18 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	return &marker, nil
 }
 
+// ErrEmptyProjectSlug is returned by WriteProjectMarker for a marker without
+// a project slug. ReadProjectMarker rejects such a marker, and its external
+// project path would be named only by the project ID.
+var ErrEmptyProjectSlug = errors.New("project marker requires a non-empty project-slug")
+
 // WriteProjectMarker writes a ProjectMarker to the given path as a YAML file.
+// A marker with an empty ProjectSlug is refused with ErrEmptyProjectSlug and
+// nothing is written.
 func WriteProjectMarker(path string, marker *ProjectMarker) error {
+	if marker == nil || marker.ProjectSlug == "" {
+		return fmt.Errorf("refusing to write project marker at %s: %w", path, ErrEmptyProjectSlug)
+	}
 	data, err := yaml.Marshal(marker)
 	if err != nil {
 		return fmt.Errorf("failed to marshal project marker: %w", err)

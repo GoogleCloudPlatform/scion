@@ -78,7 +78,7 @@ The agent is provisioned but not started, even when a task is given. Run
 		// Check if Hub should be used, excluding the target agent from sync requirements.
 		// This allows creating an agent even if it already exists on Hub (recreate scenario)
 		// or if other agents are out of sync.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
@@ -99,15 +99,12 @@ The agent is provisioned but not started, even when a task is given. Run
 		mgr := agent.NewManager(rt)
 
 		// Apply inline config overrides to CLI options
-		effectiveBranch := branch
+		effectiveBranch := resolveBranch(branch, inlineCfg)
 		effectiveTask := task
 		effectiveHarnessConfig := harnessConfigFlag
 		effectiveImage := agentImage
 
 		if inlineCfg != nil {
-			if effectiveBranch == "" && inlineCfg.Branch != "" {
-				effectiveBranch = inlineCfg.Branch
-			}
 			if effectiveTask == "" && inlineCfg.Task != "" {
 				effectiveTask = inlineCfg.Task
 			}
@@ -415,7 +412,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inline
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
+		Workspace:       workspace,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
@@ -489,7 +487,7 @@ func init() {
 
 	createCmd.Flags().StringVar(&harnessAuthFlag, "harness-auth", "", "Override auth method for the harness (api-key, oauth-token, auth-file, vertex-ai)")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	createCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	createCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	createCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -511,7 +509,7 @@ func init() {
 			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
@@ -519,10 +517,8 @@ func init() {
 // flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
 func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
-		NoHub:           noHub,
 		AutoConfirm:     true,
 		NonInteractive:  nonInteractive,
-		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}
 }

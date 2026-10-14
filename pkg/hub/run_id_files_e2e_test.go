@@ -104,9 +104,11 @@ func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 			}
 			agentDir := filepath.Join(scionDir, "agents", name)
 			workFile := filepath.Join(agentDir, "workspace", "work.txt")
+			ownerTarget := agent.RunOwnerTarget{ProjectPath: scionDir, AgentName: name, HubProjectID: projectID}
 
 			// provision stands in for pkg/agent provisioning: the agent's
-			// files, with the run recorded as their owner.
+			// files, with the run recorded as their owner in the host
+			// state file.
 			provision := func(runID, work string) {
 				t.Helper()
 				agentHome := config.GetAgentHomePath(scionDir, name)
@@ -119,7 +121,10 @@ func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 					t.Fatal(err)
 				}
 				if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
-					[]byte(`{"name":"dev","phase":"provisioning","runId":"`+runID+`"}`), 0o644); err != nil {
+					[]byte(`{"name":"dev","phase":"provisioning"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := agent.RecordRunOwner(ownerTarget, runID); err != nil {
 					t.Fatal(err)
 				}
 				if err := os.WriteFile(workFile, []byte(work), 0o644); err != nil {
@@ -214,8 +219,8 @@ func TestRunID_E2E_LateGhostDeleteSparesRecreatedAgentFiles(t *testing.T) {
 			if data, err := os.ReadFile(workFile); err != nil || string(data) != "B's work" {
 				t.Fatalf("B's workspace did not survive the late delete of A: %q, %v", data, err)
 			}
-			if got := agent.GetSavedRunID(name, scionDir); got != runB {
-				t.Fatalf("B's agent-info.json run = %q, want %q", got, runB)
+			if got, err := agent.RecordedRunOwner(ownerTarget); err != nil || got != runB {
+				t.Fatalf("B's recorded run = %q, %v; want %q", got, err, runB)
 			}
 			entries, deletes := mgr.snapshot()
 			if len(deletes) != 0 {

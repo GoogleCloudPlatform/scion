@@ -20,10 +20,10 @@ import (
 )
 
 // TestAgentInfoHostAndContainerWritersLoseNoField runs the host writer
-// (updateSavedAgentInfo via SetSavedRunID, as the broker does after
+// (updateSavedAgentInfo via UpdateAgentConfig, as the broker does around
 // Runtime.Run) against the container writer (sciontool's StatusHandler) on
 // one bind-mounted agent-info.json (ptone/scion#4681). The host only sets
-// runId and the container only sets detail.message, each to an increasing
+// profile and the container only sets detail.message, each to an increasing
 // counter. Neither may ever go back below what its writer has finished:
 // that would be the other side writing back a stale read.
 func TestAgentInfoHostAndContainerWritersLoseNoField(t *testing.T) {
@@ -78,10 +78,10 @@ func TestAgentInfoHostAndContainerWritersLoseNoField(t *testing.T) {
 			return
 		}
 		detail, _ := info["detail"].(map[string]any)
-		gotHost := counter(info["runId"], "run")
+		gotHost := counter(info["profile"], "run")
 		gotCtr := counter(detail["message"], "ctr")
 		if (gotHost < wantHost || gotCtr < wantCtr || info["template"] != "tpl") && lost.CompareAndSwap(false, true) {
-			t.Errorf("%s saw a lost update: runId run-%d (finished run-%d), message ctr-%d (finished ctr-%d), template %v",
+			t.Errorf("%s saw a lost update: profile run-%d (finished run-%d), message ctr-%d (finished ctr-%d), template %v",
 				who, gotHost, wantHost, gotCtr, wantCtr, info["template"])
 		}
 	}
@@ -91,7 +91,7 @@ func TestAgentInfoHostAndContainerWritersLoseNoField(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := int64(0); i < n && !lost.Load(); i++ {
-			if err := SetSavedRunID(agentName, projectDir, fmt.Sprintf("run-%d", i)); err != nil {
+			if err := UpdateAgentConfig(agentName, projectDir, "running", "docker", fmt.Sprintf("run-%d", i)); err != nil {
 				t.Errorf("host: %v", err)
 				return
 			}

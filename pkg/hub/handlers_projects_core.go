@@ -1468,7 +1468,9 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 		StoragePath: storagePath,
 	}
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	// A placement refusal only skips the sync-back (logged below): the stop
+	// itself is guarded by its own pre-check and the dispatcher backstop.
+	if err := tunnelAgentWorkspaceRequest(ctx, s.store, cc, agent, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
 		s.agentLifecycleLog.Warn("syncWorkspaceOnStop: failed to upload workspace from broker",
 			"agent_id", agent.ID,
 			"agent", agent.Name, "project_id", project.ID, "error", err,
@@ -3387,9 +3389,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
 		return
 	}
+	// force=true deletes the project even while agents remain whose
+	// runtime deletion is not confirmed (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,
+		Force:     r.URL.Query().Get("force") == "true",
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
@@ -3671,8 +3676,18 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 					"agent_id", agent.ID, "error", err)
 			}
 			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
-				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
-					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				if refusal, refused := placementRefusalOf(err); refused {
+					// Nothing was sent: the agent's saved placement is
+					// inconsistent. Its workload stays running on the
+					// Runtime Broker with no agent record left.
+					s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
+						"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", refusal.Code,
+						"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
+						"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
+				} else {
+					s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
+						"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				}
 			}
 		}
 		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)

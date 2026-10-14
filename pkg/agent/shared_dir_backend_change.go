@@ -497,13 +497,15 @@ type pendingSharedDirBackendChange struct {
 
 // prepareSharedDirBackendChange loads what an explicit backend change needs
 // and validates it. A request that cannot be honoured is refused with
-// ErrReprovisionRefused, before anything is provisioned.
-func prepareSharedDirBackendChange(projectDir, agentDir string, opts api.StartOptions) (*pendingSharedDirBackendChange, error) {
-	settings, _, err := config.LoadEffectiveSettings(projectDir)
+// ErrReprovisionRefused, before anything is provisioned. Settings are read
+// as the view of the request ctx, so a flat Runtime Broker instance's
+// policy takes the profile tier's place.
+func prepareSharedDirBackendChange(ctx context.Context, projectDir, agentDir string, opts api.StartOptions) (*pendingSharedDirBackendChange, error) {
+	settings, _, err := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	if err != nil {
 		return nil, fmt.Errorf("reprovision: load effective settings for the shared dir backend change: %w", err)
 	}
-	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reprovision: load global settings for the shared dir backend change: %w", err)
 	}

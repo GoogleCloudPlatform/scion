@@ -83,7 +83,7 @@ func NewGovernanceService(s store.Store, preview *PreviewService, authz *AuthzSe
 
 // commitEventTypes maps operation names to their corresponding event type
 // constants. Used by the commit path instead of string concatenation to
-// ensure we use the canonical constants (R3).
+// ensure we use the canonical constants.
 var commitEventTypes = map[string]string{
 	"create": EventBoundaryCreated,
 	"update": EventBoundaryUpdated,
@@ -110,7 +110,7 @@ type CommitRequest struct {
 	PreviewToken string
 
 	// PreviewID is the semantic preview identifier from the PreviewResult.
-	// Populated from the preview validation step (B3) rather than being
+	// Populated from the preview token validation rather than being
 	// extracted by slicing the opaque token.
 	PreviewID string
 
@@ -165,7 +165,7 @@ func (e *GovernanceError) Error() string {
 //
 // Transaction steps:
 //
-//	a. Validate the preview token (B3's ValidateToken)
+//	a. Validate the preview token (PreviewService.ValidateToken)
 //	b. Re-read the boundary (if update/delete) and verify revision matches
 //	c. Re-read relevant state: role bindings, group memberships, principal
 //	   status, permission registry — scoped to the subject/scope under change
@@ -380,7 +380,7 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 }
 
 // ---------------------------------------------------------------------------
-// Compensating actions for audit failure (R1)
+// Compensating actions for audit failure
 // ---------------------------------------------------------------------------
 
 // compensateAuditFailure undoes the store mutation when the subsequent audit
@@ -777,11 +777,17 @@ func (gs *GovernanceService) CheckRoleBindingChange(ctx context.Context, binding
 
 // ReplaceRoleBinding replaces a role binding in one transaction, so a
 // grant downgrade never leaves both the old and the new binding active.
-// When the old role carries access_constraint.admin and the new one does
-// not, the replacement takes the admin-guard lock before the lockout
-// check (checkRoleBindingRemovalAdminLockout), the same lock the user
-// and role-binding removal paths take, so the check reads the state the
-// transaction then writes.
+// When the old role carries access_constraint.admin, the replacement runs
+// the lockout check (checkRoleBindingRemovalAdminLockout) on the old
+// binding's scope unless the new binding keeps that admin: its role
+// carries access_constraint.admin, it names the same principal at the
+// same scope, and its validity window covers the old one
+// (bindingWindowCovers). The check takes the admin-guard lock, the same
+// lock the user and role-binding removal paths take, so it reads the
+// state the transaction then writes. As with a binding delete, the new
+// binding does not count as a remaining admin: to hand the only admin
+// role at a scope to another principal or scope, add the new binding
+// first, then remove the old one.
 func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingID string, newBinding *store.RoleBinding, previewToken string) (*store.RoleBinding, error) {
 	var created *store.RoleBinding
 	err := gs.store.WithTx(ctx, func(tx store.Store) error {
@@ -799,8 +805,15 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 			return fmt.Errorf("failed to load new role definition: %w", err)
 		}
 
-		// A downgrade from admin must leave a constraint admin.
-		if roleHasConstraintAdmin(oldRD) && !roleHasConstraintAdmin(newRD) {
+		// Removing or moving an admin binding must leave a constraint
+		// admin at the old binding's scope.
+		keepsAdmin := roleHasConstraintAdmin(newRD) &&
+			newBinding.PrincipalType == existing.PrincipalType &&
+			newBinding.PrincipalID == existing.PrincipalID &&
+			newBinding.ScopeType == existing.ScopeType &&
+			newBinding.ScopeID == existing.ScopeID &&
+			bindingWindowCovers(newBinding, existing)
+		if roleHasConstraintAdmin(oldRD) && !keepsAdmin {
 			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, gs.nowFunc(), existing); err != nil {
 				return err
 			}
@@ -820,6 +833,20 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 		return nil, err
 	}
 	return created, nil
+}
+
+// bindingWindowCovers reports whether outer is active (isBindingActive)
+// at every time inner is: outer's NotBefore is unset or no later than
+// inner's, and outer's ExpiresAt is unset or no earlier than inner's,
+// where an inner binding with no expiry needs an outer one with none.
+func bindingWindowCovers(outer, inner *store.RoleBinding) bool {
+	if outer.NotBefore != nil && (inner.NotBefore == nil || outer.NotBefore.After(*inner.NotBefore)) {
+		return false
+	}
+	if outer.ExpiresAt != nil && (inner.ExpiresAt == nil || outer.ExpiresAt.Before(*inner.ExpiresAt)) {
+		return false
+	}
+	return true
 }
 
 // adminRemoval describes the constraint-admin authority a mutation takes
