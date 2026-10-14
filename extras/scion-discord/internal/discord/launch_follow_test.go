@@ -17,9 +17,12 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -215,8 +219,10 @@ func TestHandleThread_AsyncCreate_WaitErrorNoKickoff(t *testing.T) {
 	runThreadCommand(e)
 
 	all := e.discord.allBodies()
-	assert.Contains(t, all, "⚠️ Stopped waiting for agent `"+asyncAgentSlug+"` to start")
+	assert.Contains(t, all, "⚠️ Stopped waiting for agent `"+asyncAgentSlug+"` to start: the hub refused the status request.")
 	assert.Contains(t, all, "/scion status")
+	assert.NotContains(t, all, asyncAgentID, "the agent ID stays in the log")
+	assert.NotContains(t, all, "400", "the raw hub error stays in the log")
 	assert.NotContains(t, all, "✅ Ready")
 	assert.Empty(t, k.sends(), "no kickoff when the launch outcome is unknown")
 	assert.Empty(t, threadBinding(t, e))
@@ -289,4 +295,74 @@ func TestLaunchFailureText(t *testing.T) {
 
 	noCode := hubclient.LaunchOutcome{Phase: "stopped"}
 	assert.Equal(t, " (`phase: stopped`)", launchFailureText(noCode))
+}
+
+// snowflakeAt returns a Discord snowflake ID created at t.
+func snowflakeAt(t time.Time) string {
+	return strconv.FormatInt((t.UnixMilli()-1420070400000)<<22, 10)
+}
+
+func TestHandleThread_AsyncCreate_StopsAtInteractionDeadline(t *testing.T) {
+	e, k := newAsyncThreadEnv(t)
+	start := activeCreateLaunch("pod_create")
+	zero := 0
+	start.Launch.RemainingSeconds = &zero
+	e.hub.createAgent = start
+	e.hub.agentReads = []hubclient.Agent{*activeCreateLaunch("image_pull")}
+
+	// The interaction arrived 13 min 10 s ago: the follow's deadline
+	// (receipt plus the cap) has already passed.
+	i := luCommand("thread", luStringOpt("title", "Fix the build"))
+	i.ID = snowflakeAt(time.Now().Add(-(createLaunchWaitCap + 10*time.Second)))
+
+	began := time.Now()
+	e.commands.HandleThread(e.session, i)
+
+	assert.Less(t, time.Since(began), 10*time.Second, "the follow must end at the interaction's deadline, not a cap from the follow start")
+	all := e.discord.allBodies()
+	assert.Contains(t, all, "⚠️ Stopped waiting for agent `"+asyncAgentSlug+"` to start: I stopped waiting after 13 min.")
+	assert.Empty(t, k.sends())
+	assert.Empty(t, threadBinding(t, e))
+}
+
+func TestInteractionReceivedAt(t *testing.T) {
+	at := time.Now().Add(-5 * time.Minute).Truncate(time.Millisecond)
+	i := luCommand("thread")
+	i.ID = snowflakeAt(at)
+	assert.True(t, interactionReceivedAt(i).Equal(at), "got %v, want %v", interactionReceivedAt(i), at)
+
+	i.ID = "not-a-snowflake"
+	assert.WithinDuration(t, time.Now(), interactionReceivedAt(i), 5*time.Second)
+}
+
+func TestHandleThread_ThreadFailed_AsyncCreateSaysStarting(t *testing.T) {
+	e, k := newAsyncThreadEnv(t)
+	e.hub.createAgent = activeCreateLaunch("pod_create")
+	e.discord.failPath = "/api/v" + discordgo.APIVersion + "/channels/" + luChannel + "/threads"
+
+	runThreadCommand(e)
+
+	all := e.discord.allBodies()
+	assert.Contains(t, all, "Agent **"+asyncAgentSlug+"** was created but the Discord thread could not be created.")
+	assert.Contains(t, all, "The agent is starting.")
+	assert.Empty(t, e.hub.agentReadCalls(), "without a thread the launch is not followed")
+	assert.Empty(t, k.sends())
+}
+
+func TestLaunchWaitErrorText(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"budget":   {fmt.Errorf("agent %q: %w", asyncAgentID, hubclient.ErrLaunchWaitTimeout), "its launch is still running on the hub"},
+		"deleted":  {fmt.Errorf("agent %q: %w", asyncAgentID, hubclient.ErrAgentDeletedDuringLaunch), "the agent was deleted while it was starting"},
+		"deadline": {fmt.Errorf("stopped waiting: %w", context.DeadlineExceeded), "I stopped waiting after 13 min"},
+		"rejected": {&hubclient.LaunchStatusRejectedError{AgentID: asyncAgentID, Err: errors.New("status 400")}, "the hub refused the status request"},
+		"other":    {errors.New("boom"), "its status could not be read"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, launchWaitErrorText(tc.err, 13*time.Minute+10*time.Second))
+		})
+	}
 }

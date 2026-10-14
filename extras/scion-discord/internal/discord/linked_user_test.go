@@ -174,6 +174,8 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type discordStub struct {
 	mu     sync.Mutex
 	bodies []string
+	// failPath, when set, makes requests to that URL path answer 403.
+	failPath string
 }
 
 func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -183,7 +185,16 @@ func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	d.mu.Lock()
 	d.bodies = append(d.bodies, string(body))
+	failing := d.failPath != "" && req.URL.Path == d.failPath
 	d.mu.Unlock()
+	if failing {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Missing Access","code":50001}`)),
+			Request:    req,
+		}, nil
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},

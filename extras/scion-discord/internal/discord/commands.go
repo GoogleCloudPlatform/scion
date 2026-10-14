@@ -1475,6 +1475,10 @@ func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.Inter
 // (Phase 1/6), binding + kickoff (Phase 2–3/7), and hub capability probe
 // (Phase 8). See arch-scion-thread-cmd.md for the complete design.
 func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	// receivedAt bounds the launch follow, so the interaction token can
+	// still send the follow-up (see createLaunchWaitCap).
+	receivedAt := interactionReceivedAt(i)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -1731,7 +1735,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// follow the launch, and bind and send the kickoff only once the agent
 	// is running.
 	if hubclient.LaunchActive(agentResp.Agent) {
-		if !h.followCreateLaunch(s, i, thread.ID, statusMsgID, link.ProjectID, onBehalfOf, agentResp) {
+		if !h.followCreateLaunch(s, i, receivedAt, thread.ID, statusMsgID, link.ProjectID, onBehalfOf, agentResp) {
 			return
 		}
 	}

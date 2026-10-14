@@ -25,9 +25,22 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-// createLaunchWaitCap bounds the wait for an asynchronous create, so the
-// interaction token (valid for 15 minutes) can still send the follow-up.
-const createLaunchWaitCap = 14 * time.Minute
+// createLaunchWaitCap bounds the wait for an asynchronous create, measured
+// from when Discord sent the interaction. The interaction token is valid
+// for 15 minutes from then; the remaining 2 minutes leave room for the
+// bind, the kickoff and the follow-up that the token sends.
+const createLaunchWaitCap = 13 * time.Minute
+
+// interactionReceivedAt returns when Discord created the interaction, from
+// its snowflake ID, or now when the ID is not a snowflake.
+func interactionReceivedAt(i *discordgo.InteractionCreate) time.Time {
+	if i != nil && i.Interaction != nil {
+		if t, err := discordgo.SnowflakeTimestamp(i.ID); err == nil && t.Unix() > 0 {
+			return t
+		}
+	}
+	return time.Now()
+}
 
 // SetAsyncCreate sets whether /scion thread opts in to an asynchronous
 // create (config async_create). The default is true.
@@ -59,10 +72,11 @@ func (r launchAgentReader) Get(ctx context.Context, agentID string) (*hubclient.
 
 // followCreateLaunch follows an accepted asynchronous create until the
 // agent is running, editing the thread's status message on each launch
-// step. It returns true when the agent is running. Otherwise it has edited
-// the status message and sent the follow-up, and the caller stops: the
-// thread is not bound and no kickoff is sent.
-func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.InteractionCreate, threadID, statusMsgID, projectID, onBehalfOf string, resp *CreateAgentResponse) bool {
+// step. The wait ends at the latest at receivedAt plus
+// createLaunchWaitCap. It returns true when the agent is running.
+// Otherwise it has edited the status message and sent the follow-up, and
+// the caller stops: the thread is not bound and no kickoff is sent.
+func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.InteractionCreate, receivedAt time.Time, threadID, statusMsgID, projectID, onBehalfOf string, resp *CreateAgentResponse) bool {
 	slug := resp.Slug
 	editStatus := func(content string) {
 		if statusMsgID == "" {
@@ -82,7 +96,7 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 	if id == "" {
 		id = slug
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), createLaunchWaitCap)
+	ctx, cancel := context.WithDeadline(context.Background(), receivedAt.Add(createLaunchWaitCap))
 	defer cancel()
 	reader := launchAgentReader{hub: h.hubClient, projectID: projectID, onBehalfOf: onBehalfOf}
 	out, err := hubclient.WaitForLaunch(ctx, reader, id, resp.Agent, hubclient.LaunchWaitOptions{
@@ -94,12 +108,13 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 
 	switch {
 	case err != nil:
-		h.log.Warn("Stopped following agent launch", "error", err, "slug", slug)
-		editStatus(fmt.Sprintf("⚠️ Stopped waiting for agent `%s` to start: %s", slug, err.Error()))
+		reason := launchWaitErrorText(err, time.Since(receivedAt))
+		h.log.Warn("Stopped following agent launch", "error", err, "agent_id", id, "slug", slug)
+		editStatus(fmt.Sprintf("⚠️ Stopped waiting for agent `%s` to start: %s.", slug, reason))
 		h.followup(s, i, fmt.Sprintf(
-			"Agent **%s** was accepted, but I stopped waiting for it to start: %s\n"+
+			"Agent **%s** was accepted, but I stopped waiting for it to start: %s.\n"+
 				"Check it with `/scion status`. Once it is running, run `/scion default %s` in the thread to bind it.",
-			slug, err.Error(), slug))
+			slug, reason, slug))
 		return false
 	case !out.Running:
 		failure := launchFailureText(out)
@@ -109,6 +124,26 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 		return false
 	}
 	return true
+}
+
+// launchWaitErrorText describes, for Discord, why a launch wait ended
+// without an outcome. The raw error (with the agent ID) goes to the log
+// only. waited is the time since the interaction was received.
+func launchWaitErrorText(err error, waited time.Duration) string {
+	var rejected *hubclient.LaunchStatusRejectedError
+	var unreadable *hubclient.LaunchStatusUnreadableError
+	switch {
+	case errors.Is(err, hubclient.ErrLaunchWaitTimeout):
+		return "its launch is still running on the hub"
+	case errors.Is(err, hubclient.ErrAgentDeletedDuringLaunch):
+		return "the agent was deleted while it was starting"
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("I stopped waiting after %d min", int(waited.Round(time.Minute)/time.Minute))
+	case errors.As(err, &rejected), errors.As(err, &unreadable):
+		return "the hub refused the status request"
+	default:
+		return "its status could not be read"
+	}
 }
 
 // launchFailureText describes a failed launch outcome as a suffix:
