@@ -63,6 +63,7 @@ func clearEnvWithPrefixForTest(t *testing.T, prefix string) {
 func TestRunServerStart_HubInitFailureReturnsAndRunsDeferredCleanups(t *testing.T) {
 	clearEnvWithPrefixForTest(t, "SCION_")
 	clearEnvWithPrefixForTest(t, "K_SERVICE")
+	isolateServerSecretEnv(t) // runServerStart scrubs these names
 	home, _ := brokerTestHome(t)
 	t.Chdir(home) // no project .scion above the working directory
 
