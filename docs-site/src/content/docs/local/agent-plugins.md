@@ -235,7 +235,7 @@ Scion's own checks run when it provisions or starts the agent. Their messages st
 | `plugin "<n>": skills ignored: <reason>` | `skills/` is not a usable directory. |
 | `plugin "<n>": from template <t2> replaces the one from <t1>` | Two templates provide the same plugin name; the later one wins. |
 | `harness "<h>" does not support Agent Plugins; plugins staged but not installed (<reason>)` | The harness has no plugin support (see the [matrix](#harness-support)). |
-| `harness-config "<h>" predates Agent Plugins support; plugins staged but not installed (…)` | The installed harness-config is older than plugin support. See [Old harness-configs](#old-harness-configs). |
+| `harness-config "<h>" predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset <h> for the bundled defaults, or scion harness-config upgrade <h> to keep local edits)` | The installed harness-config is older than plugin support. See [Old harness-configs](#old-harness-configs). |
 
 The messages in the first column are shown without their `agent_plugins:` prefix. The path, manifest, version and size errors **fail provisioning** for a plugin that is not `optional` (the error starts with `agent plugins:`). For an `optional` plugin they are warnings that end in `(optional plugin skipped)`.
 
@@ -261,7 +261,13 @@ These lines are logged at INFO level, so `SCION_LOG_LEVEL=warn` hides them; see 
 
 ### Old harness-configs
 
-Harness-configs installed before plugin support have no plugin code in their provisioner and no `agent_plugins` capability, so Scion stages the bundles but warns that the harness-config predates Agent Plugins support. To fix this:
+Harness-configs installed before plugin support have no plugin code in their provisioner and no `agent_plugins` capability. Scion stages the bundles but does not install them, and the start prints:
+
+```text
+agent_plugins: harness-config "codex" predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset codex for the bundled defaults, or scion harness-config upgrade codex to keep local edits)
+```
+
+To fix this:
 
 - For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts (with a backup) and adds the capability, but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
 - For a harness-config you installed from a source, reinstall it from an updated source with `scion harness-config install --force <source>`.
@@ -270,7 +276,7 @@ Harness-configs installed before plugin support have no plugin code in their pro
 ### Claude recovery
 
 - **Lost Scion state.** If `~/.scion/agent-plugins/state-claude.json` is missing or corrupt, Scion no longer knows which `~/.claude/skills/` directories it installed. It treats them as user content and does not replace or remove them, so the plugin is not updated (`… exists and was not installed by Scion`). To recover, delete `~/.claude/skills/<name>/` in the agent; the next start installs the plugin again.
-- **Changing `skills_dir`.** If you change the claude harness-config's `skills_dir`, the plugin is installed in the new directory, and the copy in the old directory stays behind. Delete it by hand.
+- **Changing `skills_dir`.** If you change the claude harness-config's `skills_dir`, the plugin is installed in the new directory, and the copy in the old directory stays behind. Delete `<old skills_dir>/<plugin name>/` by hand.
 
 ## Security notes
 
