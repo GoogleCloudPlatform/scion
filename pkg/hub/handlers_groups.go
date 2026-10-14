@@ -606,7 +606,15 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 
-	if err := s.store.DeleteGroup(ctx, group.ID); err != nil {
+	// The group row, its memberships and child edges, the role bindings
+	// bound to it, and its audit record commit or roll back together. The
+	// loss enqueue and notification below run only after the commit.
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteGroup(ctx, group.ID); err != nil {
+			return err
+		}
+		return s.auditGroupDeleteTx(ctx, tx, group)
+	}); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -618,6 +626,25 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 		"slug", group.Slug)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// auditGroupDeleteTx writes the group_delete mutation audit record for group
+// on tx, attributed to the request actor, so it commits or rolls back with
+// the delete.
+func (s *Server) auditGroupDeleteTx(ctx context.Context, tx store.Store, group *store.Group) error {
+	record := &store.MutationAuditRecord{
+		MutationType:  "group_delete",
+		TargetType:    "group",
+		TargetID:      group.ID,
+		BeforeSummary: marshalDeletionAuditJSON(map[string]string{"group_id": group.ID, "group_name": group.Name, "slug": group.Slug, "project_id": group.ProjectID}),
+	}
+	// The store stamps the record's time.
+	s.buildAuditActorFromContext(ctx).ApplyActor(record)
+	applyHubActorFallback(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit group delete: %w", err)
+	}
+	return nil
 }
 
 // handleGroupMembers handles GET and POST on /api/v1/groups/{groupId}/members
