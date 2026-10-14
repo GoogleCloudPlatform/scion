@@ -44,8 +44,11 @@ permissions). Available scopes:
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
-| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
-| `agent:manage` | All agent scopes except `agent:attach` and `agent:port_access` (convenience alias) |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins). Registering, deleting or clearing an agent's exposed ports also needs `agent.port_access` at hub level for the token's holder |
+| `agent:update` | Update an agent's metadata and configuration, report its status, and sync its workspace |
+| `agent:stop_all` | Stop all agents of a project (any boundary that contains it), or of the whole hub (hub-bound tokens only) |
+| `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session. Granting `hub` mode (by setting it, by a cascade, or when creating an agent) needs a hub-bound token |
+| `agent:manage` | All agent scopes except `agent:attach`, `agent:port_access`, `agent:update`, `agent:stop_all` and `agent:set_message_mode` (convenience alias) |
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
 
@@ -288,9 +291,9 @@ as a likely missing `project:read` scope and stops. A user access token cannot r
 project, so the CLI does not try to link or register the project under one. Link the project
 once with an interactive login (`scion hub link`), then use the token.
 
-Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and any
-command run with `--no-hub` (for example `scion delete --no-hub`), act on the local machine with
-the user's file permissions, and token scopes don't limit them.
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and
+`scion delete --cleanup-only --force`, act on the local machine with the user's file permissions,
+and token scopes don't limit them.
 
 To use the CLI from a coding agent running on your machine, see
 [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).

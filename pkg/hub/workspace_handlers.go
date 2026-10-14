@@ -268,7 +268,10 @@ func (s *Server) handleWorkspaceSyncFrom(w http.ResponseWriter, r *http.Request,
 
 	// Send tunneled request to Runtime Broker
 	var uploadResp RuntimeBrokerWorkspaceUploadResponse
-	if err := tunnelWorkspaceRequest(workCtx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+	if err := tunnelAgentWorkspaceRequest(workCtx, s.store, cc, agent, "POST", "/api/v1/workspace/upload", uploadReq, &uploadResp); err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// Check if it's a timeout or connection issue
 		if errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
@@ -638,7 +641,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 	// deadline to cover it (ptone/scion#4178).
 	extendWriteDeadlineForSyncDispatch(ctx, w, s.config.WriteTimeout)
 	var applyResp RuntimeBrokerWorkspaceApplyResponse
-	if err := tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
+	if err := tunnelAgentWorkspaceRequest(ctx, s.store, cc, agent, "POST", "/api/v1/workspace/apply", applyReq, &applyResp); err != nil {
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if strings.Contains(err.Error(), "timeout") {
 			GatewayTimeout(w, "Runtime Broker unreachable")
 			return
@@ -725,6 +731,19 @@ type RuntimeBrokerWorkspaceApplyResponse struct {
 	Applied      bool  `json:"applied"`
 	FilesApplied int   `json:"filesApplied"`
 	BytesApplied int64 `json:"bytesApplied"`
+}
+
+// tunnelAgentWorkspaceRequest is tunnelWorkspaceRequest for a request
+// about agent, sent to the agent's own Runtime Broker. The saved-placement
+// check (requirePinnedPlacement) runs first: a pinned agent whose placement
+// is inconsistent gets a *PlacementConflictError and nothing is sent. An
+// unpinned agent with no Runtime Broker keeps tunnelWorkspaceRequest's own
+// answer.
+func tunnelAgentWorkspaceRequest(ctx context.Context, st store.Store, cc *ControlChannelManager, agent *store.Agent, method, path string, reqBody interface{}, respBody interface{}) error {
+	if _, err := checkAgentPinnedPlacement(ctx, st, agent); err != nil {
+		return err
+	}
+	return tunnelWorkspaceRequest(ctx, cc, agent.RuntimeBrokerID, method, path, reqBody, respBody)
 }
 
 // tunnelWorkspaceRequest tunnels a workspace request to a Runtime Broker via the control channel.

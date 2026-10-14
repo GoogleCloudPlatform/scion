@@ -1637,6 +1637,14 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		// Flat placement pre-check on the agent being replaced, before its
+		// stop intent: the recreate deletes it on its Runtime Broker.
+		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored
+		}
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
@@ -1644,6 +1652,18 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The agent's saved placement is inconsistent, and the
+				// dispatcher's placement backstop sent nothing
+				// (requirePinnedPlacement): as for a run mismatch,
+				// removing the row could leave a running workload with no
+				// row, so the recreate is refused with the placement 409,
+				// and cleanupMode=force does not override it.
+				if refusal, ok := placementRefusalOf(err); ok {
+					s.agentLifecycleLog.Warn("Env-gather recreate: agent placement is inconsistent; not removing the agent",
+						"agent_id", existingAgent.ID, "code", refusal.Code, "cleanup_mode", cleanupMode)
+					writeError(w, refusal.Status, refusal.Code, refusal.Message, refusal.Details)
+					return existingAgentErrored
+				}
 				// The broker holds a different run of the agent than the
 				// row records and deleted nothing (ptone/scion#3080):
 				// removing the row would leave that run with no row.
