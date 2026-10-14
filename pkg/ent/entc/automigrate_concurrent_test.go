@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
@@ -32,7 +33,9 @@ import (
 )
 
 // lockProbeDriver wraps a dialect.Driver and, on every Exec and Query issued
-// outside a transaction, records whether autoMigrateMu was held at that moment.
+// directly on it, records whether autoMigrateSem was held at that moment.
+// Statements run inside a transaction go through the unwrapped dialect.Tx that
+// the embedded driver's Tx returns, so they are not probed.
 type lockProbeDriver struct {
 	dialect.Driver
 	calls    atomic.Int64
@@ -41,9 +44,11 @@ type lockProbeDriver struct {
 
 func (d *lockProbeDriver) probe() {
 	d.calls.Add(1)
-	if autoMigrateMu.TryLock() {
-		autoMigrateMu.Unlock()
+	select {
+	case autoMigrateSem <- struct{}{}:
+		<-autoMigrateSem
 		d.unlocked.Add(1)
+	default:
 	}
 }
 
@@ -57,9 +62,12 @@ func (d *lockProbeDriver) Query(ctx context.Context, query string, args, v any) 
 	return d.Driver.Query(ctx, query, args, v)
 }
 
-// TestAutoMigrate_HoldsProcessLock checks that AutoMigrate holds autoMigrateMu
-// while it talks to the database: every statement ent's migration issues
-// through the client driver must see the lock taken.
+// TestAutoMigrate_HoldsProcessLock checks that AutoMigrate holds autoMigrateSem
+// while it talks to the database: every statement issued directly on the
+// client driver (outside a transaction) must see the lock taken. These include
+// ent's dialect checks at the start of the migration, so the lock is held from
+// entry; statements inside Atlas's DDL transaction and the decision_audits drop
+// transaction are not probed.
 func TestAutoMigrate_HoldsProcessLock(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared&_pragma=foreign_keys(1)")
 	require.NoError(t, err)
@@ -71,7 +79,7 @@ func TestAutoMigrate_HoldsProcessLock(t *testing.T) {
 	require.NoError(t, AutoMigrate(context.Background(), client))
 	require.Positive(t, probe.calls.Load(), "AutoMigrate issued no statements through the client driver")
 	require.Zero(t, probe.unlocked.Load(),
-		"%d of %d AutoMigrate statements ran without autoMigrateMu held", probe.unlocked.Load(), probe.calls.Load())
+		"%d of %d AutoMigrate statements ran without autoMigrateSem held", probe.unlocked.Load(), probe.calls.Load())
 }
 
 // TestAutoMigrate_ConcurrentCallers runs AutoMigrate from several goroutines at
@@ -117,4 +125,40 @@ func TestAutoMigrate_ConcurrentCallers(t *testing.T) {
 			require.Zero(t, n)
 		}
 	}
+}
+
+// TestAutoMigrate_CancelledWhileWaiting checks that a caller whose context ends
+// while another migration holds the lock returns ctx.Err() promptly and does
+// not migrate. The lock is full for the whole call, so whether cancel lands
+// before or during the wait, the only ready case is ctx.Done().
+func TestAutoMigrate_CancelledWhileWaiting(t *testing.T) {
+	client, err := OpenSQLite("file:"+t.Name()+"?mode=memory&cache=shared", PoolConfig{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	autoMigrateSem <- struct{}{} // stand in for a migration that is running
+	held := true
+	release := func() {
+		if held {
+			held = false
+			<-autoMigrateSem
+		}
+	}
+	t.Cleanup(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- AutoMigrate(ctx, client) }()
+	cancel()
+
+	select {
+	case err := <-errc:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(30 * time.Second):
+		t.Fatal("AutoMigrate did not return within 30s after its context was cancelled while waiting for the lock")
+	}
+	release()
+
+	_, err = client.User.Query().Count(context.Background())
+	require.Error(t, err, "users table exists: the cancelled caller migrated")
 }
