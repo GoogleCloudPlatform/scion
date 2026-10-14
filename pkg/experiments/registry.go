@@ -161,7 +161,9 @@ const AgentDelegation = "hub.agent_delegation"
 // external issuers (ptone/scion#4603). While it is off, a verified
 // federated user token always yields the same federated user identity as
 // before; while it is on, a token whose (issuer, subject) is linked to an
-// active federated account yields that account's visitor identity.
+// active federated account yields that account's visitor identity. It also
+// gates POST /api/v1/auth/federation-token (404 while off), where this
+// hub's own users obtain user access credentials for peer hubs.
 const FederationProjectVisitors = "federation.project_visitors"
 
 // ChatThreadGroups gates project-scoped chat thread groups
@@ -185,7 +187,7 @@ var compiled = []Experiment{
 	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor). While off, federated user tokens behave exactly as before; stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences. While off, federated user tokens behave exactly as before, no user access credentials are issued, and stored accounts are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

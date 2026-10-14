@@ -168,6 +168,9 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart

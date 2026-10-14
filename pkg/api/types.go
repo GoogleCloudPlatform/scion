@@ -1481,9 +1481,11 @@ type KubernetesBlockIdentity struct {
 // ResourceHandle identifies one runtime resource created during a launch
 // (design t1-async-create-v11.md §3.8.4), reported by the runtime via
 // StartOptions.OnResourceCreated after each true create. UID is the
-// identity a cleanup deletes by: the Kubernetes object UID, or the
-// container ID for container runtimes. Namespace is empty for runtimes
-// that have no namespaces.
+// identity a cleanup deletes by: the Kubernetes object UID, the
+// container ID for container runtimes, or, for sandboxes, the launch's run
+// ID (scion.run_id), checked against the run label of the sandbox's state
+// entry before deleting. Namespace is empty for runtimes that have no
+// namespaces.
 type ResourceHandle struct {
 	Kind      string // one of the ResourceKind* constants
 	Namespace string
@@ -1549,6 +1551,9 @@ const (
 	ResourceKindSecretProviderClass = "secretproviderclass"
 	ResourceKindPod                 = "pod"
 	ResourceKindContainer           = "container"
+	// ResourceKindSandbox is a cloudrun-sandbox sandbox; its handle's UID
+	// is the launch's run ID, not a container ID.
+	ResourceKindSandbox = "sandbox"
 )
 
 type StatusEvent struct {

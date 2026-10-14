@@ -75,6 +75,10 @@ type LaunchReport struct {
 	Step       string
 	Message    string
 	ErrorCode  string // set when State == failed
+	// Cause is the fixed runtime cause code (api.BrokerRuntimeCause*) of a
+	// failed report's runtime_error, or "" (ptone/scion#4666). The hub
+	// filters it before it gets here; it is stored with ErrorCode.
+	Cause string
 
 	// AgentConfig is applied on a succeeded terminal with
 	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses
