@@ -385,8 +385,8 @@ func requireHub(projectPath string) (*HubContext, error) {
 	}, nil
 }
 
-// errHubNotConfigured is returned by requireHub when no hub endpoint is
-// configured (flag, environment, settings or the hub list). It matches every
+// errHubNotConfigured is returned by requireHub when no hub is selected
+// (flag, environment or the hub list). It matches every
 // hubsync.HubNotConfiguredError through errors.Is.
 var errHubNotConfigured = hubsync.ErrHubNotConfigured
 

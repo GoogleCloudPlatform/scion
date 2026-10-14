@@ -355,7 +355,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 		row := hubListJSON{
 			Current:  name == c.CurrentHub,
 			Name:     name,
-			Endpoint: h.Endpoint,
+			Endpoint: config.RedactURL(h.Endpoint),
 			Auth:     useAuthJSON{Method: info.MethodType, User: useAuthUser(info)},
 		}
 		if check {

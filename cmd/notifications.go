@@ -57,7 +57,8 @@ var notificationsCmd = &cobra.Command{
 	Long: `Manage notifications and notification subscriptions.
 
 Notifications go through the hub (start the local one with 'scion server start',
-or set a remote one with 'scion config set hub.endpoint <url>').
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion notifications                         List your notifications
@@ -180,10 +181,10 @@ func init() {
 }
 
 // requireHubClient resolves settings and returns a hub client, or
-// errHubNotConfigured when no hub endpoint is configured. The endpoint comes
-// from GetHubEndpoint (--hub, settings, then SCION_HUB_ENDPOINT/SCION_HUB_URL),
-// so inside a hub-connected agent container, where settings carry no hub
-// section, the container's hub env vars are enough. This does not widen
+// errHubNotConfigured when no hub is selected. The endpoint comes from
+// invocationHub (--hub, SCION_HUB_ENDPOINT/SCION_HUB_URL, a link entry or the
+// current hub), so inside a hub-connected agent container the container's
+// hub env vars are enough. This does not widen
 // access: callers still need valid credentials for getHubClient to
 // authenticate.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {

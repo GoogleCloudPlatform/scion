@@ -33,11 +33,10 @@ import (
 // to it: its own OAuth login, or dev auth on a local workstation hub.
 // Credentials that are not tied to one hub (SCION_HUB_TOKEN,
 // SCION_AUTH_TOKEN, the agent token file, the dev token for a remote hub,
-// transport auth from the environment or from hub.transport in settings)
-// are never sent to it; only the transport of its own hub list entry
+// transport auth from the environment) are never sent to it; only the transport of its own hub list entry
 // applies. A hub without a bound credential counts as not logged in and is
 // not contacted. Only the hub the user chose (--hub, SCION_HUB_ENDPOINT or
-// SCION_HUB_URL) or the effective hub (see GetHubEndpoint) keeps the full
+// SCION_HUB_URL) or the effective hub (see invocationHub) keeps the full
 // credential chain of getHubClient: see hubGetsFullChain.
 
 // fanOutLocalHub reports whether endpoint is a local workstation hub, where
@@ -88,8 +87,8 @@ var fanOutADCSource = adcsource.New
 
 // fanOutTransport returns the transport auth for the hub at endpoint in a
 // fan-out: only that hub's own hub list entry (its audience and mode),
-// never the environment's transport token or the settings' hub.transport,
-// which belong to the effective hub. It returns a nil source when the
+// never the environment's transport token, which belongs to the effective
+// hub. It returns a nil source when the
 // entry sets no audience.
 func fanOutTransport(endpoint string) (transportauth.TokenSource, transportauth.HeaderMode, error) {
 	t := hubEntryTransport(endpoint)

@@ -58,10 +58,13 @@ var hubCmd = &cobra.Command{
 The Hub provides centralized coordination for projects, agents, and templates
 across multiple runtime brokers.
 
-Configure the Hub endpoint via:
-  - SCION_HUB_ENDPOINT environment variable
-  - hub.endpoint in settings.yaml
-  - --hub flag on any command`,
+The Hub is taken from, in order:
+  - the --hub flag on any command (a hub nickname or URL)
+  - the SCION_HUB_ENDPOINT environment variable
+  - the hub a linked project directory was linked to ('scion hub link')
+  - the current hub ('scion use --hub <name>')
+Add a hub with 'scion hub add <name> <url>', or start a local one with
+'scion server start'.`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names: an unrecognized subcommand (e.g. a removed alias) returns an
 	// "unknown command" error instead of silently falling through to this
@@ -236,7 +239,7 @@ Examples:
 // error.
 var hubEnableCmd = &cobra.Command{
 	Use:    "enable",
-	Short:  "Removed: a configured hub endpoint is used automatically",
+	Short:  "Removed: the selected hub is used automatically",
 	Hidden: true,
 	RunE:   runHubEnable,
 }
@@ -265,10 +268,10 @@ This command associates your local project with the Hub, enabling:
 The project will be created on the Hub if it doesn't exist, or linked
 to an existing project with a matching name or git remote.
 
-With no Hub endpoint configured, start the local hub first with
-'scion server start', or set a remote one with
-'scion config set hub.endpoint <url>'. On the local hub the project is
-linked without a confirmation prompt.
+With no hub selected, start the local hub first with 'scion server start',
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>'. On the local hub the project is linked without a
+confirmation prompt.
 
 Examples:
   # Link the current project
@@ -704,6 +707,31 @@ func endpointSourceNote(s hubEndpointScope) string {
 	return fmt.Sprintf("            (%s)", s.Label)
 }
 
+// redactEndpointIn returns text (an error message that may quote the hub
+// URL, or a URL built from it) with the user info of endpoint redacted as
+// config.RedactURL does. net/http already masks a password in its errors,
+// but not a user name given without a password, which may be a token.
+func redactEndpointIn(text, endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.User == nil {
+		return text
+	}
+	r, err := url.Parse(config.RedactURL(endpoint))
+	if err != nil || r.User == nil {
+		return text
+	}
+	masked := "//" + r.User.String() + "@"
+	// The user info as url.URL writes it, and as written in endpoint.
+	text = strings.ReplaceAll(text, "//"+u.User.String()+"@", masked)
+	if _, rest, ok := strings.Cut(endpoint, "//"); ok {
+		authority, _, _ := strings.Cut(rest, "/")
+		if at := strings.LastIndex(authority, "@"); at > 0 {
+			text = strings.ReplaceAll(text, "//"+authority[:at]+"@", masked)
+		}
+	}
+	return text
+}
+
 // hubStatusName returns the nickname of the hub at endpoint for hub
 // status, or "-" when the endpoint has no entry in the hub list.
 func hubStatusName(c *config.CLIContext, endpoint string) string {
@@ -763,7 +791,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	if isJSONOutput() {
 		status := map[string]interface{}{
 			"hub":               hubName,
-			"endpoint":          endpoint,
+			"endpoint":          config.RedactURL(endpoint),
 			"endpointSource":    endpointScope.Source,
 			"endpointInherited": endpointScope.Inherited,
 			"configured":        hubConfigured(),
@@ -829,7 +857,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 					}
 				} else {
 					status["connected"] = false
-					status["error"] = err.Error()
+					status["error"] = redactEndpointIn(err.Error(), endpoint)
 				}
 			}
 		}
@@ -848,7 +876,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println("==========")
 	fmt.Printf("Scope:      %s\n", scopeLabel)
 	fmt.Printf("Hub:        %s\n", hubName)
-	fmt.Printf("Endpoint:   %s\n", valueOrNone(endpoint))
+	fmt.Printf("Endpoint:   %s\n", valueOrNone(config.RedactURL(endpoint)))
 	if note := endpointSourceNote(endpointScope); note != "" {
 		fmt.Println(note)
 	}
@@ -941,7 +969,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	// Hub Server section
 	if endpoint != "" {
 		if clientErr != nil {
-			fmt.Printf("\nConnection: failed (%s)\n", clientErr)
+			fmt.Printf("\nConnection: failed (%s)\n", redactEndpointIn(clientErr.Error(), endpoint))
 			return nil
 		}
 
@@ -953,7 +981,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 				// Split multi-line errors (e.g. hint appended by HintProxyError)
 				// so that only the primary error appears on the "Connection: failed"
 				// line and the hint is printed separately beneath it.
-				errStr := healthErr.Error()
+				errStr := redactEndpointIn(healthErr.Error(), endpoint)
 				if nl := strings.IndexByte(errStr, '\n'); nl >= 0 {
 					fmt.Printf("Connection: failed (%s)\n", errStr[:nl])
 					fmt.Println(errStr[nl+1:])
@@ -1165,7 +1193,7 @@ func printProjectBrokers(ctx context.Context, client hubclient.Client, projectID
 		ProjectID: projectID,
 	})
 	if err != nil {
-		fmt.Printf("Brokers:    (error fetching: %s)\n", err)
+		fmt.Printf("Brokers:    (error fetching: %s)\n", redactEndpointIn(err.Error(), invocationHubEndpoint()))
 		return
 	}
 
@@ -1300,7 +1328,7 @@ func addProjectBrokersJSON(ctx context.Context, client hubclient.Client, project
 		ProjectID: projectID,
 	})
 	if err != nil {
-		result["brokersError"] = err.Error()
+		result["brokersError"] = redactEndpointIn(err.Error(), invocationHubEndpoint())
 		return
 	}
 
@@ -2317,7 +2345,7 @@ func truncate(s string, maxLen int) string {
 }
 
 // errHubEnableRemoved is returned by the removed 'scion hub enable'.
-var errHubEnableRemoved = errors.New("'scion hub enable' is no longer needed: a configured endpoint is used automatically; set one with 'scion config set hub.endpoint <url>'")
+var errHubEnableRemoved = errors.New("'scion hub enable' is no longer needed: the selected hub is used automatically; add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'")
 
 // errHubDisableRemoved is returned by the removed 'scion hub disable'.
 var errHubDisableRemoved = errors.New("'scion hub disable' was removed: local-only mode no longer exists; stop the local server with 'scion server stop'")
@@ -2595,7 +2623,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	hubsync.ClearStaleModeSettings(os.Stderr, resolvedPath, isGlobal)
 
 	// Record the link in the hub list: the project resolves to this hub
-	// from now on, whatever hub is current. No hub.endpoint is written to
+	// from now on, whatever hub is current. No hub endpoint is written to
 	// the project's settings.
 	linkOut := cmd.OutOrStdout()
 	if isJSONOutput() {

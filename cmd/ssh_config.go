@@ -100,7 +100,7 @@ var sshExit = os.Exit
 type sshCommandEnv struct {
 	home     string
 	exe      string         // absolute scion path written into ProxyCommand
-	endpoint string         // hub endpoint from GetHubEndpoint
+	endpoint string         // hub endpoint from invocationHubEndpoint
 	token    string         // user token from getHubAccessToken
 	project  hubOnlyProject // project for a bare agent reference
 	stdin    io.Reader
