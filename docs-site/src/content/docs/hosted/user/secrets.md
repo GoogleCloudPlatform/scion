@@ -133,8 +133,10 @@ scion secret set ANTHROPIC_API_KEY sk-ant-api01-...
 scion secret list
 
 # Get metadata for a specific project secret
-scion secret get ANTHROPIC_API_KEY
+scion secret get ANTHROPIC_API_KEY --metadata
 ```
+
+Plain `scion secret get KEY` prints the secret's value, which only works inside an agent container (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval) below). On the host, use `--metadata`.
 
 :::tip[Graceful Raw vs. Base64 Fallback]
 To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
@@ -205,31 +207,29 @@ Once set, every agent that starts will have the credential file mounted at `~/.s
 
 While environment and file-based injection deliver secrets at agent startup, Scion also supports **dynamic runtime secret retrieval** from inside the agent container. This enables harnesses or scripts to request project-scoped secrets programmatically as-needed, reducing initial environment exposure.
 
-This runtime retrieval is accessible either via the `sciontool` helper utility or directly through the Hub API.
+This runtime retrieval is accessible either via the `scion` CLI or directly through the Hub API.
 
-#### Using `sciontool`
-From inside an agent container, use the `sciontool secret` command suite:
+#### Using the `scion` CLI inside an agent
+From inside an agent container, read secrets with `scion secret`. The calls are made as the agent, with its own hub identity:
 
-*   **List Available Secrets**: Lists metadata (keys, types, and injection targets) for all secrets in the agent's project. Sensitive values are omitted.
+*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for all secrets in the agent's project. Values are omitted.
     ```bash
-    sciontool secret list
-    ```
-    *Output:*
-    ```text
-    KEY              TYPE         TARGET
-    ---              ----         ------
-    MY_API_KEY       environment  MY_API_KEY
-    CLAUDE_AUTH      file         ~/.claude/.credentials.json
+    scion secret list
     ```
 
-*   **Retrieve a Secret Value**: Decodes and outputs the raw bytes of a specific secret to stdout (ideal for piping or scripting).
+*   **Retrieve a Secret Value**: Decodes and writes the raw bytes of a specific secret to stdout, with no added newline (ideal for piping or scripting).
     ```bash
-    sciontool secret get MY_API_KEY
+    scion secret get MY_API_KEY
     ```
     *Example script usage:*
     ```bash
-    export API_KEY=$(sciontool secret get MY_API_KEY)
+    export API_KEY=$(scion secret get MY_API_KEY)
     ```
+    Use `scion secret get MY_API_KEY --metadata` to see the secret's metadata instead.
+
+`sciontool secret get` and `sciontool secret list` have moved to these `scion` commands; they now print a message naming the `scion` command and exit `1`.
+
+#### Writing secrets with `sciontool`
 
 *   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
     ```bash

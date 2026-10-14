@@ -931,7 +931,7 @@ Manages per-user Hub settings.
 
 ### `scion secret`
 
-Manages project-scoped secrets from the host or within an agent container. This command mirrors the `sciontool secret` commands used in agent containers, using the `hubclient` Secrets service to operate on the active project.
+Manages project-scoped secrets from the host or within an agent container. Inside an agent container, `scion secret get` and `scion secret list` are available in agent mode; `scion secret set` is not, and agents store secrets with `sciontool secret set`.
 
 Unlike `scion hub secret` (which supports managing secrets at any scope: user, hub, project, or broker), `scion secret` is streamlined for project-level secrets within your current project context.
 
@@ -941,7 +941,11 @@ Unlike `scion hub secret` (which supports managing secrets at any scope: user, h
         - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
         - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
         - `--allow-progeny`: Allow child agents (progeny) to inherit this secret.
-- `scion secret get KEY`: Retrieve the metadata of a project-scoped secret. Secret values are never returned to protect security.
+- `scion secret get KEY`: Print the value of a project-scoped secret. The decoded value is written to stdout as-is, with no added newline or labels, so `export API_KEY=$(scion secret get API_KEY)` works. Reading a value requires an agent's hub identity, so it works only inside an agent container; elsewhere the command fails and names `--metadata`.
+    - Flags:
+        - `--metadata`: Print the secret's metadata (key, scope, type, target, version, timestamps) instead of its value. This was the default output before the value became the default.
+        - `--value`: Print the value (the default). Cannot be combined with `--metadata` or `--json`.
+    - With `--json` or `--format json`, prints the metadata object. The value is never included in JSON output.
 - `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--json` or `--format json`, prints the same list shape as `scion hub secret list`.
 
 ### `scion clean`
