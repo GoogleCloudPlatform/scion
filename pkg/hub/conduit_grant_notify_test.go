@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,4 +225,72 @@ func TestConduitGrantRecheckKeysFreshWithinSeconds(t *testing.T) {
 	assert.True(t, recheckHas(t, n.b, kid), "within conduitGrantKeyRecheckFresh the cached ring is used")
 	n.clock.Advance(conduitGrantKeyRecheckFresh)
 	assert.False(t, recheckHas(t, n.b, kid), "b's re-check set still accepts the revoked kid")
+}
+
+// listenBus is an in-process event bus with a LISTEN (re)connect hook, as
+// PostgresEventPublisher has.
+type listenBus struct {
+	*ChannelEventPublisher
+	mu  sync.Mutex
+	fns map[int]func()
+	seq int
+}
+
+func (b *listenBus) AddOnListen(fn func()) (remove func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.fns == nil {
+		b.fns = map[int]func(){}
+	}
+	b.seq++
+	id := b.seq
+	b.fns[id] = fn
+	return func() {
+		b.mu.Lock()
+		delete(b.fns, id)
+		b.mu.Unlock()
+	}
+}
+
+// reconnect runs every registered hook, as a LISTEN reconnect does.
+func (b *listenBus) reconnect() {
+	b.mu.Lock()
+	fns := make([]func(), 0, len(b.fns))
+	for _, fn := range b.fns {
+		fns = append(fns, fn)
+	}
+	b.mu.Unlock()
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+// TestConduitGrantKeyCacheDroppedOnListenReconnect: a node whose LISTEN
+// connection (re)connects drops its cached ring, so a change published while
+// it was not listening applies at once; the clock does not move.
+func TestConduitGrantKeyCacheDroppedOnListenReconnect(t *testing.T) {
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	a, _ := testServer(t)
+	b, _ := testServer(t)
+	busB := &listenBus{ChannelEventPublisher: NewChannelEventPublisher()}
+	for srv, bus := range map[*Server]EventPublisher{a: NewChannelEventPublisher(), b: busB} {
+		srv.conduitGrants = newConduitGrantKeys(mem, clk.Now)
+		setConduitExperiment(t, srv, true)
+		srv.SetEventPublisher(bus)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_, stop, err := b.startConduitStreamAuthz(ctx, clock.NewFake(time.Now()), -1)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	_, err = a.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	before := publishedKIDs(t, b)
+	rot, err := a.RotateConduitGrantKey(ctx) // published on a's bus only
+	require.NoError(t, err)
+	require.Equal(t, before, publishedKIDs(t, b), "b, missing the event, serves its cached ring")
+	busB.reconnect()
+	assert.True(t, publishedKIDs(t, b)[rot.KeyID], "b did not drop its cached ring on LISTEN reconnect")
 }
