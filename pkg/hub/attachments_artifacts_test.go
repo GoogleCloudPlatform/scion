@@ -544,8 +544,10 @@ func TestAttachmentArtifacts_SettingsSectionDisabled(t *testing.T) {
 	refused := f.unknownAttachmentAnswer(t, f.ua, dm)
 	requireSameAnswer(t, refused, f.attachmentRefusal(t, f.ua, dm, unsent))
 
-	_, err := ops.Update(context.Background(), "artifacts", []byte(`{"enabled":true}`), "test", 0, "managed")
-	require.NoError(t, err)
+	// Enabled again (a fresh settings source with the section at its
+	// default, enabled), the stored attachment reads as before.
+	f.srv.SetOperationalSettings(artifactsOps(t, ""))
+	require.True(t, f.srv.attachmentArtifactsReady())
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, sent).status)
 }
 
