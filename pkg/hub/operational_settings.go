@@ -250,6 +250,11 @@ type OperationalSettings struct {
 	// (SetUnseededBootstrap). Guarded by mu.
 	unseededPublicURL    string
 	hasUnseededPublicURL bool
+	// unseededKoanf is the bootstrap merge without the SCION_SEED_* layer
+	// (SetUnseededBootstrap), nil when unset. computeSupersededKeys uses it
+	// to tell whether the seed layer gave a key its bootstrap value.
+	// Guarded by mu.
+	unseededKoanf *koanf.Koanf
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -301,6 +306,8 @@ func NewOperationalSettings(
 // endpoint resolution at startup ignores seed values, so with no saved
 // public URL, Snapshot takes the public URL the admin view shows from this
 // merge rather than from the full bootstrap merge (ptone/scion#4826).
+// The admin view also uses it to attribute a superseded key to the seed
+// layer only when that layer gave the key its value (ptone/scion#4904).
 // Without it (tests, embedded servers) the full bootstrap merge is used.
 func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	if k == nil {
@@ -308,6 +315,7 @@ func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.unseededKoanf = k
 	o.unseededPublicURL = k.String(config.PublicURLKey)
 	o.hasUnseededPublicURL = true
 }
@@ -1597,9 +1605,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		// installed, whatever the stored settings say. Startup refuses such
 		// a snapshot (cmd); this keeps a later reload from installing one.
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason(federationSkipTestAdminTier)
 		logTestAdminFederationSkipped()
 	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason("")
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
 		}
@@ -1608,6 +1618,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
 			slog.Error("Federation config validation failed during apply, keeping old config",
 				"errors", fmt.Sprintf("%v", errs))
+			s.setFederationSkipReason(federationSkipInvalid)
 		} else {
 			// Derive federation mode using the same pattern as New().
 			federationMode := s.config.Mode
@@ -1633,8 +1644,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			if err != nil {
 				slog.Error("Federation authenticator rebuild failed, keeping old config",
 					"error", err)
+				s.setFederationSkipReason(federationSkipBuildFailed)
 			} else {
 				s.federationAuth.Store(newAuth)
+				s.setFederationSkipReason("")
 				slog.Info("Federation authenticator hot-reloaded",
 					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
 					"enabled", snap.FederationConfig.Enabled)
