@@ -28,8 +28,10 @@ import (
 
 // Some runtimes do not let the host write files in the container, so a
 // failed start is recorded in the host-owned host state file and List shows
-// it (ptone/scion#4815). These tests read the file as raw JSON so that they
-// fail on an assertion, not a build error, without the change.
+// it (ptone/scion#4815). These tests read the file as raw JSON, so they
+// build without the change. Tests and table rows that reproduce the bug
+// fail on an assertion without the change; the ones marked "Guard" pass
+// without it and pin behaviour the change must keep.
 
 var errLaunchFailed = errors.New("launch failed")
 
@@ -170,9 +172,10 @@ func TestStart_FailedLaunch_HomeNotWritable_RecordsError(t *testing.T) {
 	}
 }
 
-// Where the host can write the home (the docker-style path), the
-// agent-info.json error write still lands, and the host state record
-// agrees.
+// Where the host can write the agent home, the agent-info.json error
+// write still lands, and the host state record agrees. Only the
+// startFailedRunId assertion fails without the change; the agent-info.json
+// and List assertions are guards.
 func TestStart_FailedLaunch_HomeWritable_RecordsError(t *testing.T) {
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
@@ -205,7 +208,9 @@ func TestStart_ClearsFailedStartRecordBeforeLaunch(t *testing.T) {
 			return nil, nil
 		}
 		return []api.AgentInfo{{
-			Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "stopped", ProjectPath: projectScionDir,
+			// Running, so Start's post-launch check accepts the container
+			// (a stopped one would be "exited immediately").
+			Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "running", ContainerStatus: "Up", ProjectPath: projectScionDir,
 			Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
 		}}, nil
 	}
@@ -235,6 +240,7 @@ func TestList_FailedStartRecord_ContainerRunMatch(t *testing.T) {
 		name, recorded, containerPhase, want string
 	}{
 		{"same run", "run-2", "stopped", "error"},
+		// Guard rows: no overlay.
 		{"other run", "run-1", "stopped", "stopped"},
 		{"running", "run-2", "running", "running"},
 		{"invalid value", "../run-2", "stopped", "stopped"},
@@ -257,7 +263,7 @@ func TestList_FailedStartRecord_ContainerRunMatch(t *testing.T) {
 	}
 }
 
-// A host state file from before the record existed changes nothing.
+// Guard: a host state file from before the record existed changes nothing.
 func TestList_HostStateWithoutFailedStartRecord_Unchanged(t *testing.T) {
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
@@ -267,8 +273,9 @@ func TestList_HostStateWithoutFailedStartRecord_Unchanged(t *testing.T) {
 	}
 }
 
-// File-only path where the host state contract gives no trusted root (a
-// symlinked .scion): the record is not read and the phase is unchanged.
+// Guard: on the file-only path where the host state contract gives no
+// trusted root (a symlinked .scion), the record is not read and the phase
+// is unchanged. Only the sanity step fails without the change.
 func TestList_FailedStartRecord_RefusedRoot_NoOverlay(t *testing.T) {
 	projectScionDir, agentDir := startTZFixture(t, "", `""`)
 	writeRun1AgentInfo(t, projectScionDir, agentDir)
@@ -288,5 +295,42 @@ func TestList_FailedStartRecord_RefusedRoot_NoOverlay(t *testing.T) {
 	}
 	if got := listedPhase(t, noContainers(), linkedScion, "tz-agent"); got != "stopped" {
 		t.Errorf("List phase = %q through a symlinked .scion, want stopped (no overlay)", got)
+	}
+}
+
+// Guard: on the file-only path, a host state file that cannot be read as a
+// record (corrupt JSON, or a directory at its path) gives no overlay and no
+// error from List.
+func TestList_FailedStartRecord_UnreadableFile_NoOverlay(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		place func(t *testing.T, path string)
+	}{
+		{"corrupt", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte(`{"startFailedRunId":"run-1"`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"directory", func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir, agentDir := startTZFixture(t, "", `""`)
+			writeRun1AgentInfo(t, projectScionDir, agentDir)
+			path, err := HostStatePath(filepath.Dir(projectScionDir), "tz-agent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			tc.place(t, path)
+			if got := listedPhase(t, noContainers(), projectScionDir, "tz-agent"); got != "stopped" {
+				t.Errorf("List phase = %q, want stopped (no overlay)", got)
+			}
+		})
 	}
 }

@@ -26,7 +26,9 @@ import (
 // host-owned HostStateFile (ptone/scion#4815). Some runtimes do not let
 // the host write files in the container, so the "error" phase written to
 // agent-info.json after a failed Runtime.Run may never land; the host
-// state file is always writable by the host.
+// state file does not depend on the agent home being writable. Writing it
+// can still fail (a refused root, or a corrupt or symlinked file); the
+// caller logs that and the start carries on.
 //
 // Start clears the record before Runtime.Run and sets it to the run ID
 // when Run fails. List reads it only to decide the phase it displays (see
@@ -79,14 +81,15 @@ func setStartFailedRunID(t RunOwnerTarget, runID string) error {
 // applies only when HostStateRootFor places HostStateFile in that same
 // dir: with no hub project ID the resolver cannot tell a shared-workspace
 // agent (whose state lives in an external dir) from a worktree agent, and
-// would address the in-project dir instead.
+// would address the in-project dir instead. "Same dir" is sameDir, the
+// check the host state writers use (agentDirRunOwnerRoot).
 func startFailedForDisplay(t RunOwnerTarget, listedAgentDir string) string {
 	root, err := HostStateRootFor(t)
 	if err != nil {
 		return ""
 	}
 	path, err := HostStatePath(root, t.AgentName)
-	if err != nil || !sameDirPath(filepath.Dir(path), listedAgentDir) {
+	if err != nil || !sameDir(filepath.Dir(path), listedAgentDir) {
 		return ""
 	}
 	hs, err := ReadHostState(root, t.AgentName)
@@ -94,21 +97,4 @@ func startFailedForDisplay(t RunOwnerTarget, listedAgentDir string) string {
 		return ""
 	}
 	return hs.StartFailedRunID
-}
-
-// sameDirPath reports whether a and b name the same directory after
-// resolving symlinks. Any resolution error reports false.
-func sameDirPath(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	ra, err := filepath.EvalSymlinks(a)
-	if err != nil {
-		return false
-	}
-	rb, err := filepath.EvalSymlinks(b)
-	if err != nil {
-		return false
-	}
-	return ra == rb
 }
