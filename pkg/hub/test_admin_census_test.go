@@ -257,6 +257,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
 	"project_membership_set.go:loadProjectPrincipalBindings:ListRoleBindingsForPrincipal":            "mutation: the target's existing bindings to plan against",
 	"handlers_project_visitors.go:projectVisitorBinding:ListVisitorRoleBindings":                     "mutation: the visitor grant being changed or revoked; federated accounts only",
+	"federation_visitor.go:missingVisitorRules:ListRoleBindingsForPrincipals":                        "mutation: the linked federated account's own project bindings, to skip a rule's project where it already has a visitor binding or to find the inactive visitor grant by email the rule binding replaces; federated accounts only",
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
