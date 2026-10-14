@@ -59,6 +59,7 @@ import {
   type Frame,
   type Page,
   type Request,
+  type Response,
 } from '@playwright/test';
 
 import {
@@ -316,6 +317,12 @@ const r2 = {
   extraArtifactIds: [] as string[],
   /** v3 exists: its versions POST answered 201 and the page showed v3 (current). */
   v3Published: false,
+  /**
+   * Diagnostics: the latest app-page and view-entry document response
+   * headers per identity, for the listed keys only (values with view
+   * capabilities redacted).
+   */
+  documentHeaders: {} as Record<string, Record<string, Record<string, string>>>,
   /** Saved download files (in memory), checked absent after delete and in the cleanup. */
   downloads: [] as Array<{ who: Key; file: string }>,
   /** A view URL minted for the owner (in memory only), for R2-17a and R2-18. */
@@ -473,6 +480,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     readCookieHeader(req, rec);
   });
   context.on('response', (res) => {
+    if (DIAG_LEGS_ON && who !== 'anonymous') recordDocumentHeaders(who, res);
     const rec = records.get(res.request());
     if (/^https?:/.test(res.url()) && new URL(res.url()).hostname === REMOTE_IMAGE_HOST) {
       r2.remoteHost.responses++;
@@ -825,6 +833,15 @@ async function clickInFrameLink(
     viewFrames: beforeFrames,
     targetRequests: bundleRequestsFor(target),
   };
+  if (DIAG_LEGS_ON) {
+    const centre = linkBox
+      ? { x: linkBox.x + linkBox.width / 2, y: linkBox.y + linkBox.height / 2 }
+      : null;
+    (rec.before as Record<string, unknown>).banner = await bannerState(page, centre);
+    (rec.before as Record<string, unknown>).documentHeaders = JSON.parse(
+      JSON.stringify(r2.documentHeaders)
+    ) as unknown;
+  }
   const alreadyThere = beforeFrames.some((f) => f.entry === targetEntry && f.urlSeq === seq);
   rec.firstClick = await htmlFrame(page)
     .locator(link)
@@ -1000,6 +1017,65 @@ async function runDiagnosticLegs(): Promise<void> {
     },
     { pre: preV3 }
   );
+}
+
+/** Response headers recorded for diagnostics (names and values only). */
+const DIAG_HEADER_KEYS = [
+  'content-security-policy',
+  'cross-origin-opener-policy',
+  'cross-origin-embedder-policy',
+  'cross-origin-resource-policy',
+  'permissions-policy',
+  'x-frame-options',
+];
+
+/**
+ * Records the listed headers of an app-page document (the top-level page)
+ * or a view entry document (index.html under a view), latest per identity.
+ * Values pass through the view redactor; nothing else is kept.
+ */
+function recordDocumentHeaders(who: Key, res: Response): void {
+  const req = res.request();
+  if (req.resourceType() !== 'document') return;
+  const pathname = new URL(res.url()).pathname;
+  let kind: string | null = null;
+  if (pathname.startsWith(VIEW_PREFIX) && pathname.endsWith('/index.html')) kind = 'viewEntry';
+  else if (pathname.startsWith('/projects/')) kind = 'appPage';
+  if (!kind) return;
+  const h = res.headers();
+  const kept: Record<string, string> = {};
+  for (const k of DIAG_HEADER_KEYS) if (h[k] !== undefined) kept[k] = redactViews(h[k]);
+  (r2.documentHeaders[who] ??= {})[kind] = kept;
+}
+
+/**
+ * The test-hub banner (shared/test-hub-banner.ts, data-testid
+ * test-hub-banner) at click time: present, visible, its box, and whether
+ * it covers the point (read-only).
+ */
+async function bannerState(page: Page, point: { x: number; y: number } | null): Promise<unknown> {
+  const banner = page.locator('[data-testid="test-hub-banner"]');
+  const count = await banner.count().catch(() => -1);
+  if (count <= 0) return { count };
+  const box = await banner
+    .first()
+    .boundingBox({ timeout: 2_000 })
+    .catch(() => null);
+  return {
+    count,
+    visible: await banner
+      .first()
+      .isVisible()
+      .catch(() => null),
+    box,
+    coversLinkCentre:
+      !!box &&
+      !!point &&
+      point.x >= box.x &&
+      point.x <= box.x + box.width &&
+      point.y >= box.y &&
+      point.y <= box.y + box.height,
+  };
 }
 
 /** The current heading of the bundle frame. */
@@ -3112,6 +3188,7 @@ async function runCleanup(testInfo: {
   ev.chat = r2.chat;
   ev.frameSessionAlert = r2.frameSessionAlert;
   ev.frameSessionAll = r2.frameSessionAll;
+  ev.documentHeaders = r2.documentHeaders;
   ev.rows = j.state.rows;
   ev.findings = j.state.findings;
   ev.hardFailures = j.state.hardFailures;
