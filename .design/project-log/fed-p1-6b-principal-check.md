@@ -31,3 +31,7 @@
 - The census also finds `googleTrust` (auth_external_bearer.go), which reads the federation
   authenticator only to look up the Google issuer configuration for the external bearer path and
   verifies no credential; it is classified no-credential.
+- After the upstream merge, a linked active federated account resolves to its visitor identity
+  only when its issuer has allow_visitor_grants. The peer user access credential test that links
+  an account now sets allow_visitor_grants on the peer issuer, and a companion test pins the 403
+  for a linked account when the flag is off.

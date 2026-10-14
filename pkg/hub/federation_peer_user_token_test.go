@@ -213,14 +213,10 @@ func assertPeerTokAgent(t *testing.T, f *peerTokFixture, token string) *Federate
 	return fa
 }
 
-// A user access credential minted by the peer is accepted from an issuer
-// with accept_user_tokens, and becomes the visitor identity once the
-// (issuer, subject) pair is linked to an active federated account.
-func TestFederationPeerUserToken_MintedTokenAccepted(t *testing.T) {
-	f := newPeerTokFixture(t, nil)
-	token, u := f.mintUserToken(t)
-	assertPeerTokUser(t, f, token, u.ID, u.Email)
-
+// linkPeerVisitor creates an active federated account and links the peer
+// issuer's (issuer, subject) pair of u to it.
+func (f *peerTokFixture) linkPeerVisitor(t *testing.T, u *store.User) *store.User {
+	t.Helper()
 	issuer := testOIDCIssuerURL
 	email := u.Email
 	acct := &store.User{
@@ -231,6 +227,19 @@ func TestFederationPeerUserToken_MintedTokenAccepted(t *testing.T) {
 	require.NoError(t, f.st.CreateFederatedUser(ctx, acct))
 	_, err := f.st.LinkFederatedIdentity(ctx, acct.ID, testOIDCIssuerURL, u.ID, u.Email)
 	require.NoError(t, err)
+	return acct
+}
+
+// A user access credential minted by the peer is accepted from an issuer
+// with accept_user_tokens, and becomes the visitor identity once the
+// (issuer, subject) pair is linked to an active federated account and the
+// issuer has allow_visitor_grants.
+func TestFederationPeerUserToken_MintedTokenAccepted(t *testing.T) {
+	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) { c.AllowVisitorGrants = true })
+	token, u := f.mintUserToken(t)
+	assertPeerTokUser(t, f, token, u.ID, u.Email)
+
+	acct := f.linkPeerVisitor(t, u)
 
 	identity, credential, rec := f.through(t, token)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -240,6 +249,23 @@ func TestFederationPeerUserToken_MintedTokenAccepted(t *testing.T) {
 	assert.Equal(t, testOIDCIssuerURL, v.IssuerURL())
 	assert.Equal(t, u.ID, v.Subject())
 	assert.Equal(t, CredentialKindFederation, credential.Kind)
+}
+
+// accept_user_tokens alone does not admit a linked visitor: with
+// allow_visitor_grants off on the peer issuer, the credential is accepted
+// while unlinked, and refused with 403 once the pair is linked to an active
+// federated account.
+func TestFederationPeerUserToken_LinkedVisitorRefusedWithoutAllowVisitorGrants(t *testing.T) {
+	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) { c.AllowVisitorGrants = false })
+	token, u := f.mintUserToken(t)
+	assertPeerTokUser(t, f, token, u.ID, u.Email)
+
+	f.linkPeerVisitor(t, u)
+
+	identity, _, rec := f.through(t, token)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, visitorRouteRefusalMessage, federationTokenErrorMessage(t, rec))
+	assert.Nil(t, identity, "the handler never runs")
 }
 
 // A user access credential from an issuer without accept_user_tokens is
