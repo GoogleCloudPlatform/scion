@@ -47,6 +47,8 @@ const (
 	FieldImageStatus = "image_status"
 	// FieldImageStatusCheckedAt holds the string denoting the image_status_checked_at field in the database.
 	FieldImageStatusCheckedAt = "image_status_checked_at"
+	// FieldBuiltImage holds the string denoting the built_image field in the database.
+	FieldBuiltImage = "built_image"
 	// FieldOwnerID holds the string denoting the owner_id field in the database.
 	FieldOwnerID = "owner_id"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
@@ -82,6 +84,7 @@ var Columns = []string{
 	FieldStatus,
 	FieldImageStatus,
 	FieldImageStatusCheckedAt,
+	FieldBuiltImage,
 	FieldOwnerID,
 	FieldCreatedBy,
 	FieldUpdatedBy,
@@ -109,6 +112,8 @@ var (
 	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
+	// DefaultBuiltImage holds the default value on creation for the "built_image" field.
+	DefaultBuiltImage string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -260,6 +265,11 @@ func ByImageStatus(opts ...sql.OrderTermOption) OrderOption {
 // ByImageStatusCheckedAt orders the results by the image_status_checked_at field.
 func ByImageStatusCheckedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldImageStatusCheckedAt, opts...).ToFunc()
+}
+
+// ByBuiltImage orders the results by the built_image field.
+func ByBuiltImage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldBuiltImage, opts...).ToFunc()
 }
 
 // ByOwnerID orders the results by the owner_id field.

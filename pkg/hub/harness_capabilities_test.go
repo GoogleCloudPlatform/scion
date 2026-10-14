@@ -263,7 +263,7 @@ func TestResolveModelAliasForAgent_BackfillsFromStorageWhenRecordPredatesSync(t 
 	// Simulate a record that predates this fix: config.yaml is still in
 	// storage (untouched), but the DB record's Config carries no aliases.
 	hc.Config = &store.HarnessConfigData{Harness: "codex"}
-	require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
+	require.NoError(t, setHarnessConfigContentForTest(ctx, s, hc))
 
 	agent := seedCreatedAgentForHarnessTest(t, s, "backfill-aliases", "codex-legacy")
 	agent.AppliedConfig.HarnessConfigID = hc.ID

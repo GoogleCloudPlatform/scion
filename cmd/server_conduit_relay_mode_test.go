@@ -1,0 +1,258 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const (
+	relayModeTestPeerSecret    = "peer-secret-for-startup-tests-0123456789"
+	relayModeTestSessionSecret = "session-secret-for-startup-tests-01234"
+)
+
+// TestValidateConduitPeerSecret (design §3.9, criterion 30): peer_secret
+// is required in external relay mode and on --role relay, and a hub refuses
+// one equal to its session secret. Errors name the setting, never a value.
+func TestValidateConduitPeerSecret(t *testing.T) {
+	external := config.HubConduitConfig{RelayMode: config.ConduitRelayModeExternal}
+	withSecret := func(c config.HubConduitConfig, s string) config.HubConduitConfig { c.PeerSecret = s; return c }
+	for _, tc := range []struct {
+		name      string
+		conduit   config.HubConduitConfig
+		relayRole bool
+		session   string
+		wantErr   string
+	}{
+		{name: "in-process without peer secret", conduit: config.HubConduitConfig{}},
+		{name: "external without peer secret", conduit: external, wantErr: "server.hub.conduit.peer_secret is required"},
+		{name: "relay role without peer secret", relayRole: true, wantErr: "server.hub.conduit.peer_secret is required on --role relay"},
+		{name: "external with peer secret", conduit: withSecret(external, relayModeTestPeerSecret), session: relayModeTestSessionSecret},
+		{name: "relay role with peer secret", conduit: withSecret(config.HubConduitConfig{}, relayModeTestPeerSecret), relayRole: true},
+		{name: "equal to the session secret", conduit: withSecret(external, relayModeTestSessionSecret), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
+		{name: "equal to the session secret, in-process", conduit: withSecret(config.HubConduitConfig{}, relayModeTestSessionSecret), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
+		{name: "equal to the session secret after the trailing newline is trimmed", conduit: withSecret(external, relayModeTestSessionSecret+"\n"), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
+		{name: "a second trailing newline is part of the secret", conduit: withSecret(external, relayModeTestSessionSecret+"\n\n"), session: relayModeTestSessionSecret},
+		{name: "only a newline is unset (external)", conduit: withSecret(external, "\n"), wantErr: "server.hub.conduit.peer_secret is required"},
+		{name: "only a newline is unset (relay role)", conduit: withSecret(config.HubConduitConfig{}, "\n"), relayRole: true, wantErr: "server.hub.conduit.peer_secret is required on --role relay"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateConduitPeerSecret(tc.conduit, tc.relayRole, tc.session)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.NotContains(t, err.Error(), relayModeTestPeerSecret)
+			assert.NotContains(t, err.Error(), relayModeTestSessionSecret)
+		})
+	}
+}
+
+// TestValidateServerPreflight_RelayMode: the hub's startup preflight
+// applies the relay-mode rules with the configured session secret, and
+// rejects a weak peer secret.
+func TestValidateServerPreflight_RelayMode(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	for _, tc := range []struct {
+		name    string
+		conduit config.HubConduitConfig
+		wantErr string
+	}{
+		{name: "external without peer secret", conduit: config.HubConduitConfig{RelayMode: "external"}, wantErr: "server.hub.conduit.peer_secret is required"},
+		{name: "peer secret equal to the session secret", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestSessionSecret}, wantErr: "must differ from the session secret"},
+		{name: "peer secret too short", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: "short"}, wantErr: "server.hub.conduit.peer_secret"},
+		{name: "peer secret only a newline", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: "\n"}, wantErr: "server.hub.conduit.peer_secret is required"},
+		{name: "unknown relay mode", conduit: config.HubConduitConfig{RelayMode: "sidecar"}, wantErr: "server.hub.conduit.relay_mode"},
+		{name: "external with a peer secret", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetServerFlags()
+			enableHub = true
+			t.Setenv("SCION_SERVER_SESSION_SECRET", relayModeTestSessionSecret)
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.Conduit = tc.conduit
+			err := validateServerPreflight(cfg)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.NotContains(t, err.Error(), relayModeTestSessionSecret)
+		})
+	}
+}
+
+// TestValidateServerPreflight_SessionSecretOnlyInTheEnv: with the session
+// secret given only in the env, the preflight still refuses an equal
+// peer_secret in external relay mode after scrubServerSecretEnv has removed
+// it from the env.
+func TestValidateServerPreflight_SessionSecretOnlyInTheEnv(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	enableHub = true
+	t.Setenv(sessionSecretEnv, relayModeTestSessionSecret)
+	scrubServerSecretEnv()
+	_, inEnv := os.LookupEnv(sessionSecretEnv)
+	require.False(t, inEnv, "the scrub left the session secret in the env")
+
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestSessionSecret}
+	err := validateServerPreflight(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must differ from the session secret")
+	assert.NotContains(t, err.Error(), relayModeTestSessionSecret)
+}
+
+// TestExternalPeerAuthOptions_SessionSecretOnlyInTheEnv: in the same case
+// the external relay mode peer auth options carry the session secret as
+// the shared signing secret, so peer auth can refuse an equal peer secret.
+func TestExternalPeerAuthOptions_SessionSecretOnlyInTheEnv(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	t.Setenv(sessionSecretEnv, relayModeTestSessionSecret)
+	scrubServerSecretEnv()
+
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+	opts := externalPeerAuthOptions(context.Background(), cfg, "hub-0", false)
+	assert.NotEmpty(t, opts.SharedSecret, "no shared signing secret after the scrub")
+	assert.True(t, opts.SharedSecret == relayModeTestSessionSecret, "the shared signing secret is not the session secret")
+	assert.Equal(t, relayModeTestPeerSecret, opts.PeerSecret)
+}
+
+// TestSessionSecretValue_AfterTheScrub: sessionSecretValue returns the flag,
+// else the value scrubServerSecretEnv captured, else the env, without a
+// deprecation warning. An env-only reader fails the captured case, whose
+// env is empty after the scrub.
+func TestSessionSecretValue_AfterTheScrub(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	t.Setenv(sessionSecretEnv, "captured-value")
+	scrubServerSecretEnv()
+	assert.True(t, sessionSecretValue() == "captured-value", "the captured value is not used after the scrub")
+
+	webSessionSecret = "flag-value"
+	assert.True(t, sessionSecretValue() == "flag-value", "the flag does not win")
+	webSessionSecret = ""
+
+	t.Setenv(sessionSecretEnv, "later-env-value")
+	assert.True(t, sessionSecretValue() == "captured-value", "the env wins over the captured value")
+
+	capturedSessionSecret = ""
+	require.NoError(t, os.Unsetenv(sessionSecretEnv))
+	logs := captureSecretEnvSlog(t)
+	t.Setenv(legacySessionSecretEnv, "legacy-value")
+	assert.True(t, sessionSecretValue() == "legacy-value", "the legacy env name is not read")
+	assert.NotContains(t, logs.String(), "deprecated", "sessionSecretValue logged a warning")
+}
+
+// TestStartConduit_ExternalRelayNeedsExperiment: external relay mode with
+// hub.conduit off is a startup error.
+func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	srv := conduitHubServer(t, false)
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	q := newTestShutdown(cancel)
+	err := startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+	require.ErrorIs(t, err, errConduitExternalNeedsExperiment)
+
+	// In-process mode with the experiment off still starts nothing.
+	cfg.Hub.Conduit = config.HubConduitConfig{}
+	assert.NoError(t, startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	assert.Empty(t, q.steps, "no shutdown step without a relay")
+}
+
+// TestStartConduit_ExternalRelayMode: with hub.conduit on, external relay
+// mode starts the external runtime instead of a relay, registers no
+// shutdown step and records no shutdown grace (there is nothing to drain;
+// ptone/scion#5054), and any failure is fatal, outside hosted HA too.
+func TestStartConduit_ExternalRelayMode(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	srv := conduitHubServer(t, true)
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+
+	prevExt, prevRelay, prevSetGrace := startConduitExternalFn, startConduitRelayFn, conduitSetShutdownGrace
+	t.Cleanup(func() {
+		startConduitExternalFn, startConduitRelayFn, conduitSetShutdownGrace = prevExt, prevRelay, prevSetGrace
+	})
+	relayStarted, graceRecorded := false, false
+	startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
+		relayStarted = true
+		return nil
+	}
+	conduitSetShutdownGrace = func(*hub.Server, time.Duration) { graceRecorded = true }
+	cfg.Hub.Conduit.ShutdownGrace = "10s"
+
+	var extErr error
+	externalCalls := 0
+	startConduitExternalFn = func(context.Context, *config.GlobalConfig, *hub.Server, *sync.WaitGroup, chan<- error) error {
+		externalCalls++
+		return extErr
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+	q := newTestShutdown(cancel)
+
+	require.NoError(t, startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+	assert.Equal(t, 1, externalCalls)
+	assert.False(t, relayStarted, "no in-process relay in external mode")
+	q.mu.Lock()
+	steps := len(q.steps)
+	q.mu.Unlock()
+	assert.Zero(t, steps, "no shutdown step without a relay")
+	assert.False(t, graceRecorded, "no shutdown grace recorded without a relay")
+
+	extErr = errors.New("boom")
+	err := startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+	require.Error(t, err, "a failure is fatal outside hosted HA too")
+	assert.Contains(t, err.Error(), "conduit external relay mode")
+}
+
+// TestStartConduitExternal_RequiresInternalListen: relays call the hub
+// internal API on the internal listener, so external relay mode refuses to
+// start without one.
+func TestStartConduitExternal_RequiresInternalListen(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+	var wg sync.WaitGroup
+	err := startConduitExternal(context.Background(), cfg, nil, &wg, make(chan error, 1))
+	require.ErrorIs(t, err, errConduitExternalNoInternalListen)
+}

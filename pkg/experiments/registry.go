@@ -414,6 +414,25 @@ func (r *Registry) Lookup(name string) (Experiment, bool) {
 // IsRetired reports whether name was retired and must never resolve again.
 func (r *Registry) IsRetired(name string) bool { return r.retired[name] }
 
+// Resolve returns the effective value of the named experiment given the
+// admin overrides and whether the overrides document is malformed: an
+// unknown or retired name is off; a malformed document turns off every
+// experiment with a server layer (fail closed); an override wins over the
+// registry default. The hub and a separate relay both resolve through it.
+func (r *Registry) Resolve(name string, overrides map[string]bool, malformed bool) bool {
+	exp, ok := r.Lookup(name)
+	if !ok {
+		return false
+	}
+	if malformed && exp.HasLayer(LayerServer) {
+		return false
+	}
+	if v, set := overrides[name]; set {
+		return v
+	}
+	return exp.Default
+}
+
 // Retired returns every retired name in sorted order. The returned slice is
 // a copy. Tests use it to check that a stored override for any retired name
 // is ignored and pruned, without naming each retired experiment.

@@ -60,6 +60,7 @@ func registerConduitServerFlags(f *pflag.FlagSet) {
 	f.StringVar(&conduitAuthzRecheck, "conduit-authz-recheck-interval", "", "Period of the authorization re-check sweep of open conduit user streams (default 60s, 1s-10m)")
 	f.StringVar(&conduitLifetimeCap, "conduit-lifetime-cap", "", "Platform lifetime cap of a conduit session; the relay sends GoAway 60s before it (default 3500s, 90s-24h)")
 	f.StringVar(&conduitUserStreamAuthzMax, "conduit-stream-authz-max-user", "", "Authorization interval of user-originated conduit streams: at its end the hub re-checks the user and renews or closes the stream (default 8h, 1m-168h)")
+	f.StringVar(&serverRole, "role", serverRoleHub, "Server role: hub (default) or relay, a separate conduit relay process (requires the hub.conduit experiment, server.hub.conduit.peer_secret, server.relay.hub_internal_url, server.relay.public_url and server.hub.conduit.internal_listen)")
 	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Additional agent-local ports a conduit TCP stream may target besides the agent's exposed ports (comma-separated; reserved ports are always refused; default: exposed ports only)")
 }
 
@@ -97,7 +98,7 @@ func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
 // --foreground daemon child.
 func appendConduitDaemonArgs(cmd *cobra.Command, args []string) []string {
 	f := cmd.Flags()
-	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-lifetime-cap", "conduit-stream-authz-max-user"} {
+	for _, name := range []string{"role", "internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window", "conduit-authz-recheck-interval", "conduit-lifetime-cap", "conduit-stream-authz-max-user"} {
 		if f.Changed(name) {
 			args = append(args, fmt.Sprintf("--%s=%s", name, f.Lookup(name).Value.String()))
 		}
@@ -196,6 +197,9 @@ func conduitShutdownDrainSetting(cfg *config.GlobalConfig) (time.Duration, bool)
 var (
 	// startConduitRelayFn starts the relay (startConduitRelay).
 	startConduitRelayFn = startConduitRelay
+	// startConduitExternalFn starts external relay mode
+	// (startConduitExternal).
+	startConduitExternalFn = startConduitExternal
 	// conduitShutdownDrain is the shutdown step's drain: the hub's
 	// SIGTERM drain with the configured grace.
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
@@ -316,6 +320,29 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 	return o
 }
 
+// validateConduitPeerSecret applies the startup rules of the relay-peer
+// secret (design §3.9): it is required in external relay mode and, with
+// relayRole, on --role relay; when set, a hub refuses one equal to its
+// session secret (a relay never resolves the session secret and passes
+// ""). Strength is checked by HubConduitConfig.Validate. Errors name the
+// setting, never the value.
+func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+	secret := c.PeerSecretValue() // a value that is only a newline is unset
+	switch {
+	case secret == "" && relayRole:
+		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
+	case secret == "" && c.ExternalRelay():
+		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+	case secret != "" && sessionSecret != "" && secret == sessionSecret:
+		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
+	}
+	return nil
+}
+
+// errConduitExternalNeedsExperiment refuses external relay mode on a hub
+// where hub.conduit is off (design §3.9 startup check).
+var errConduitExternalNeedsExperiment = errors.New("server.hub.conduit.relay_mode is external, which requires the hub.conduit experiment; turn it on or remove relay_mode")
+
 // startConduit opens the internal listener (if configured) and starts the
 // hub's conduit relay when hub.conduit is on; once the relay runs, the
 // graceful shutdown q drains it before the server context is cancelled
@@ -326,7 +353,23 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
 func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
-	if hubSrv == nil || !hubSrv.ConduitEnabled() {
+	if hubSrv == nil {
+		return nil
+	}
+	if cfg.Hub.Conduit.ExternalRelay() && !hubSrv.ConduitEnabled() {
+		return errConduitExternalNeedsExperiment
+	}
+	if !hubSrv.ConduitEnabled() {
+		return nil
+	}
+	if cfg.Hub.Conduit.ExternalRelay() {
+		// External relay mode: no relay here, so nothing to drain on
+		// shutdown (no step on q, no grace recorded). Its configuration
+		// was chosen explicitly, so every failure is fatal, in and
+		// outside hosted HA.
+		if err := startConduitExternalFn(ctx, cfg, hubSrv, wg, errCh); err != nil {
+			return fmt.Errorf("conduit external relay mode: %w", err)
+		}
 		return nil
 	}
 	requireHA := hostedHAGuardsRequired(cfg)
@@ -372,34 +415,18 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 
 	var endpoint string
 	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
-		ln, lerr := net.Listen("tcp", listen)
+		addr, closeListener, lerr := serveConduitInternalListener(ctx, listen, hubSrv.ConduitInternalHandler(), wg, errCh)
 		if lerr != nil {
-			return fmt.Errorf("conduit internal listener %s: %w", listen, lerr)
+			return lerr
 		}
-		srv := &http.Server{Handler: hubSrv.ConduitInternalHandler(), ReadHeaderTimeout: 10 * time.Second}
 		// A relay that does not start must not keep the port.
 		defer func() {
 			if err != nil {
-				_ = srv.Close()
-				_ = ln.Close() // Serve may not have taken it over yet
+				closeListener()
 			}
 		}()
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				sendConduitErr(errCh, fmt.Errorf("conduit internal listener: %w", err))
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = srv.Shutdown(shutdownCtx)
-		}()
-		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, ln.Addr(), os.Getenv("POD_IP"))
-		slog.Info("Conduit internal listener started", "addr", ln.Addr().String(), "advertise", endpoint)
+		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, addr, os.Getenv("POD_IP"))
+		slog.Info("Conduit internal listener started", "addr", addr.String(), "advertise", endpoint)
 	} else if cfg.Hub.Conduit.InternalAdvertise != "" {
 		return errors.New("server.hub.conduit.internal_advertise is set but internal_listen is not")
 	}
@@ -431,6 +458,80 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		}()
 	}
 	return nil
+}
+
+// errConduitExternalNoInternalListen refuses external relay mode without
+// the internal listener the relays call the hub internal API on.
+var errConduitExternalNoInternalListen = errors.New("server.hub.conduit.internal_listen is required when server.hub.conduit.relay_mode is external: relays call the hub internal API on it")
+
+// startConduitExternal starts the hub's side of external relay mode
+// (design §3.9): relay-peer auth keyed from the dedicated peer secret, the
+// routing runtime over the shared registry, and the internal listener
+// serving the hub internal API. validateServerPreflight has already
+// checked peer_secret; the hub's session secret is passed only so peer
+// auth refuses an equal peer secret again.
+func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, wg *sync.WaitGroup, errCh chan<- error) (err error) {
+	if cfg.Hub.Conduit.InternalListen == "" {
+		return errConduitExternalNoInternalListen
+	}
+	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
+	opts := externalPeerAuthOptions(ctx, cfg, id, metadata.OnGCE())
+	if opts.PeerSecret == "" {
+		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+	}
+	auth, mode, err := hub.NewConduitPeerAuth(opts)
+	if err != nil {
+		return err
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+		return err
+	}
+	addr, _, err := serveConduitInternalListener(ctx, cfg.Hub.Conduit.InternalListen, hubSrv.ConduitInternalHandler(), wg, errCh)
+	if err != nil {
+		return err
+	}
+	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
+	return nil
+}
+
+// externalPeerAuthOptions is the hub's relay-peer auth configuration in
+// external relay mode: keyed from the dedicated peer secret, with the hub's
+// shared signing secret passed so peer auth refuses an equal peer secret.
+func externalPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, id string, onGCP bool) hub.ConduitPeerAuthOptions {
+	opts := conduitPeerAuthOptions(ctx, cfg, id, onGCP)
+	opts.PeerSecret = cfg.Hub.Conduit.PeerSecretValue()
+	opts.SharedSecret = sessionSecretValue()
+	return opts
+}
+
+// serveConduitInternalListener opens the internal listener on listen and
+// serves h on it until ctx ends (graceful shutdown, 10s). A serve error
+// after startup is reported on errCh. closeListener releases the port at
+// once, for a startup that fails after the listener opened.
+func serveConduitInternalListener(ctx context.Context, listen string, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (addr net.Addr, closeListener func(), err error) {
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("conduit internal listener %s: %w", listen, err)
+	}
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			sendConduitErr(errCh, fmt.Errorf("conduit internal listener: %w", err))
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	return ln.Addr(), func() {
+		_ = srv.Close()
+		_ = ln.Close() // Serve may not have taken it over yet
+	}, nil
 }
 
 // errConduitRelayOnCloudRun refuses the in-process relay on Cloud Run in

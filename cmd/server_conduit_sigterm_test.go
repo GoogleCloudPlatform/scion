@@ -129,10 +129,10 @@ func TestConduitDrainStepBound(t *testing.T) {
 // exception outside these files: it removes the broker record and calls the
 // same run-once shutdown.)
 func TestHubServerPathSubscribesToSignalsOnce(t *testing.T) {
-	// Files allowed their own subscription, with the reason. Empty today;
-	// the relay role (server_relay.go, a separate process mode dispatched
-	// before installServerShutdownSignals) joins it after its rebase.
-	exceptions := map[string]string{}
+	// Files allowed their own subscription, with the reason.
+	exceptions := map[string]string{
+		"server_relay.go": "the relay role is a separate process mode: runServerStart dispatches it before installServerShutdownSignals, so a relay process has exactly one subscriber (its own NotifyContext)",
+	}
 	call := regexp.MustCompile(`signal\.Notify(Context)?\(`)
 	files, err := filepath.Glob("server_*.go")
 	require.NoError(t, err)
