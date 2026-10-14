@@ -148,14 +148,12 @@ func loadUseContext(stderr io.Writer) *config.CLIContext {
 // Source codes of the effective hub and project (JSON "source"), and their
 // display labels.
 const (
-	useSourceFlag            = "flag"
-	useSourceEnv             = "env"
-	useSourceProjectSettings = "project_settings"
-	useSourceDirectory       = "directory"
-	useSourceContext         = targetSourceContext
-	useSourceGlobalSettings  = "global_settings"
-	useSourceGlobal          = "global"
-	useSourceNone            = "none"
+	useSourceFlag      = "flag"
+	useSourceEnv       = "env"
+	useSourceDirectory = targetSourceDirectory
+	useSourceContext   = targetSourceContext
+	useSourceGlobal    = "global"
+	useSourceNone      = "none"
 )
 
 // useTarget is the effective hub and project of the invocation, computed
@@ -193,19 +191,6 @@ func describeUseTarget(c *config.CLIContext) useTarget {
 		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
 	case envHub != "":
 		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	case inDir:
-		if ep, scope := fileHubEndpoint(dir, dirIsGlobal); ep != "" {
-			t.HubEndpoint = ep
-			if scope == "project" {
-				t.HubSource, t.HubLabel = useSourceProjectSettings, "project settings: "+displayProjectDir(dir)
-			} else {
-				t.HubSource, t.HubLabel = useSourceGlobalSettings, "global settings"
-			}
-		}
-	default:
-		if ep, _ := fileHubEndpoint("", true); ep != "" {
-			t.HubEndpoint, t.HubSource, t.HubLabel = ep, useSourceGlobalSettings, "global settings"
-		}
 	}
 	if t.HubEndpoint == "" {
 		t.HubSource, t.HubLabel = useSourceNone, "none"
@@ -339,7 +324,7 @@ func hubLoginCommand(c *config.CLIContext, endpoint string) string {
 	if name, _ := c.HubByEndpoint(endpoint); name != "" {
 		return "scion hub auth login --hub " + name
 	}
-	return "scion hub auth login --hub " + endpoint
+	return "scion hub auth login --hub " + config.RedactURL(endpoint)
 }
 
 // useAuthLine is the human "Auth:" text. Bare 'scion use' makes no network
@@ -394,7 +379,7 @@ func runUseShow(out, stderr io.Writer) error {
 	if isJSONOutput() {
 		res := useShowJSON{
 			Effective: useEffectiveJSON{
-				Hub: useHubJSON{Name: hubName, Endpoint: t.HubEndpoint, Source: t.HubSource},
+				Hub: useHubJSON{Name: hubName, Endpoint: config.RedactURL(t.HubEndpoint), Source: t.HubSource},
 				Project: useProjectJSON{
 					ID: t.ProjectID, Slug: t.ProjectSlug, Name: t.ProjectName,
 					Path: t.ProjectDir, Source: t.ProjectSource,
@@ -425,7 +410,9 @@ func runUseShow(out, stderr io.Writer) error {
 			projectValue = t.ProjectID
 		}
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, t.HubEndpoint, t.HubLabel)
+		// The endpoint may come from SCION_HUB_ENDPOINT/SCION_HUB_URL,
+		// where a user may have put credentials: they are never printed.
+		_, _ = fmt.Fprintf(w, "Hub:\t%s\t%s\t(%s)\n", shownHub, config.RedactURL(t.HubEndpoint), t.HubLabel)
 		_, _ = fmt.Fprintf(w, "Project:\t%s\t%s\t(%s)\n", shownProject, projectValue, t.ProjectLabel)
 		_ = w.Flush()
 		_, _ = fmt.Fprintf(out, "Auth:     %s\n", useAuthLine(info, hubLoginCommand(c, t.HubEndpoint)))
@@ -443,8 +430,13 @@ func runUseShow(out, stderr io.Writer) error {
 		}
 		_, _ = fmt.Fprintf(out, "Saved context (applies outside scion project directories): %s / %s\n", saved.Hub, project)
 	}
-	if envHub, envName := envHubEndpoint(); envHub != "" && saved != nil && !sameHubURL(envHub, c.Hubs[saved.Hub].Endpoint) {
-		_, _ = fmt.Fprintf(out, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+	if envHub, envName := envHubEndpoint(); envHub != "" {
+		if _, h := c.HubByEndpoint(envHub); h == nil {
+			// The environment's hub is a one-off override; it is not saved.
+			_, _ = fmt.Fprintf(out, "Note: %s=%s overrides the current hub in this shell; 'scion hub add <name> <url>' saves it.\n", envName, config.RedactURL(envHub))
+		} else if saved != nil && !sameHubURL(envHub, c.Hubs[saved.Hub].Endpoint) {
+			_, _ = fmt.Fprintf(out, "Note: %s is set and overrides the current hub in this shell.\n", envName)
+		}
 	}
 	return nil
 }

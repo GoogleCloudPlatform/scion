@@ -514,11 +514,16 @@ func init() {
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
 // context that create uses for skill resolution. A project named with a
-// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123).
+// flag keeps its own ID over SCION_PROJECT_ID (ptone/scion#3123). The hub
+// is the one selected for this invocation, as for requireHub: the hub
+// selected with 'scion use' never links or registers a project that is
+// already linked to a hub.
 func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
-		AutoConfirm:     true,
-		NonInteractive:  nonInteractive,
-		ExplicitProject: explicitProjectTargetFor(projectPath),
+		AutoConfirm:      true,
+		NonInteractive:   nonInteractive,
+		EndpointOverride: hubEndpoint,
+		ExplicitProject:  explicitProjectTargetFor(projectPath),
+		HubFromContext:   hubSource == targetSourceContext,
 	}
 }

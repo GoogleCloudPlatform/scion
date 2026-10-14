@@ -142,7 +142,7 @@
         "endpoint": {
           "type": "string",
           "format": "uri",
-          "description": "Hub API endpoint URL to connect to as a client.",
+          "description": "Deprecated and ignored by the CLI, which takes its hub from the hub list ('scion hub add', 'scion use --hub'); accepted so existing settings files still load. A server still reads it as a legacy fallback for its own endpoint (see server.hub.public_url and server.broker.hub_endpoint).",
           "x-env-var": "SCION_HUB_ENDPOINT",
           "x-since": "1"
         },
@@ -160,7 +160,7 @@
         },
         "transport": {
           "type": "object",
-          "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",
+          "description": "Deprecated and ignored by the CLI: transport auth is set on the hub's entry in the hub list. Accepted so existing settings files still load.",
           "x-since": "1",
           "properties": {
             "mode": {
@@ -1399,13 +1399,13 @@
         },
         "start_unconfirmed_hold": {
           "type": "string",
-          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '13m', minimum 12m40s.",
+          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '17m', minimum 16m.",
           "x-env-var": "SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD",
           "x-since": "1"
         },
         "start_create_unconfirmed_hold": {
           "type": "string",
-          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '5m', allowed 3m up to start_unconfirmed_hold.",
+          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '16m', allowed 16m up to start_unconfirmed_hold.",
           "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
           "x-since": "1"
         },
@@ -1961,7 +1961,13 @@
                 }
               }
             },
-            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." }
+            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." },
+            "driver_principals": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Exact emails of the browser drivers (for example a test-UI service account) that may carry test identity web sessions through the proxy. No wildcards. A driver principal never gets a hub account. Startup config only; never writable through the API. A hub whose auth mode is not 'proxy' refuses to start with a non-empty list."
+            },
+            "driver_token_audience": { "type": "string", "description": "Audience (the IAP OAuth client ID) a driver's Google ID token must carry before a test identity web session may take its place on an API request. Startup config only; never writable through the API." }
           }
         },
         "transport": {
