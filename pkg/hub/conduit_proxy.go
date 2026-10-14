@@ -95,7 +95,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_TCP,
 			Params: params,
 			Grant:  tok,
@@ -104,7 +104,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
-		target := conduitTargetOf(res, st)
+		target := conduitLeafTarget(res, st, bridge)
 		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindTCP,
 			Identity:  identity,
@@ -115,6 +115,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			StreamID:  target.StreamID,
 			Close:     sc.closeWithCode,
 			Renew:     conduitStreamRenewal(res, st.ID()),
+			Bridge:    bridge,
 		})
 		conn = sc
 		return nil

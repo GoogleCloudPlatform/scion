@@ -62,6 +62,8 @@ type separateRelayWorld struct {
 	userTokenB           string
 	relay                *relayserver.Server
 	release              chan struct{} // feeds the app's event stream
+	// spawnPTY, when set, makes the agent serve pty streams with it.
+	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
 
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
@@ -77,7 +79,7 @@ func (w *separateRelayWorld) lastAgentStream(t *testing.T) uint32 {
 	return w.agentOpened[len(w.agentOpened)-1]
 }
 
-func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
+func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *separateRelayWorld {
 	t.Helper()
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -160,6 +162,9 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 			return []*conduitv1.Frame{f}
 		}},
 	}
+	for _, m := range mods {
+		m(w)
+	}
 	w.startAgentDialingRelay(t, addr)
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
@@ -211,11 +216,12 @@ func (w *separateRelayWorld) startAgentDialingRelay(t *testing.T, relayAddr stri
 			w.sessions.Add(1)
 			admitted <- wel
 		},
-		OnEnd:   w.onEnd,
-		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
-		Clock:   fixtureClock{Fake: w.agentClock, now: w.clock.Now},
-		Session: w.agentSession,
-		WS:      toRelay,
+		OnEnd:    w.onEnd,
+		Backoff:  &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
+		Clock:    fixtureClock{Fake: w.agentClock, now: w.clock.Now},
+		Session:  w.agentSession,
+		WS:       toRelay,
+		SpawnPTY: w.spawnPTY,
 	})
 	require.NoError(t, err)
 	w.sciontool = a
