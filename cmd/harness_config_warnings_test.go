@@ -47,17 +47,34 @@ func TestPrintHarnessConfigWarnings(t *testing.T) {
 }
 
 func TestHarnessConfigInstall_UnknownTopLevelKeyWarns(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
 	orig := saveTemplateTestState()
 	defer orig.restore()
 	tmpHome := t.TempDir()
 	require.NoError(t, os.Setenv("HOME", tmpHome))
 	globalMode = false
-	noHub = true
+	noHub = false
 	autoConfirm = true
 
-	project := filepath.Join(tmpHome, "project", ".scion")
-	require.NoError(t, os.MkdirAll(project, 0o755))
-	projectPath = project
+	// Install always goes to a hub now: use the mock hub the sync test uses.
+	const projectID = "proj-4975-install"
+	rec := &hcScopeRecorder{}
+	scopeHub := harnessConfigScopeHubHandler(t, rec)
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "test-project"})
+		default:
+			scopeHub(w, r)
+		}
+	}))
+	defer hub.Close()
+	projectPath = setupHubProject(t, tmpHome, hub.URL, projectID)
 
 	src := filepath.Join(tmpHome, "source", "future-hc")
 	createTestHarnessConfig(t, src)
@@ -72,14 +89,16 @@ func TestHarnessConfigInstall_UnknownTopLevelKeyWarns(t *testing.T) {
 	cmd.Flags().Bool("force", false, "")
 	var stderr bytes.Buffer
 	cmd.SetErr(&stderr)
+	// Assert outside captureStdout: a failing require inside it would leave os.Stdout redirected for later tests.
+	var runErr error
 	_ = captureStdout(t, func() {
-		require.NoError(t, runHarnessConfigInstall(cmd, []string{"file://" + src}))
+		runErr = runHarnessConfigInstall(cmd, []string{"file://" + src})
 	})
+	require.NoError(t, runErr)
 
 	assert.Contains(t, stderr.String(), "warning: claude: "+futureKeyWarning)
-	installed, err := os.ReadFile(filepath.Join(project, "harness-configs", "claude", "config.yaml"))
-	require.NoError(t, err)
-	assert.Contains(t, string(installed), "future_block:", "install must copy config.yaml unchanged")
+	require.Len(t, rec.createReqs, 1, "install must still create the config on the hub")
+	assert.Equal(t, "project", rec.createReqs[0].Scope)
 }
 
 func TestHarnessConfigUpgrade_UnknownTopLevelKeyWarns(t *testing.T) {
