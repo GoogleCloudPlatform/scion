@@ -620,3 +620,82 @@ func captureHubLogs(t *testing.T, fn func()) string {
 	fn()
 	return buf.String()
 }
+
+// A failing or timed-out count keeps the previous references.
+func TestProfileReferences_FailedCountKeepsReferences(t *testing.T) {
+	for _, mode := range []string{"fail", "block"} {
+		t.Run(mode, func(t *testing.T) {
+			srv, s, fs, fault := newRefFaultServer(t, mode)
+			ctx := context.Background()
+			project := &store.Project{ID: tid("pr-keep-" + mode), Name: "pr-keep", Slug: "pr-keep-" + mode}
+			require.NoError(t, s.CreateProject(ctx, project))
+			require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pr-keep-agent-" + mode), Slug: "keep", Name: "keep",
+				ProjectID: project.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "local"}}))
+			overlay := config.NewSettingsOverlay()
+			overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+			srv.EnableProfileReferences(ctx, overlay, "b", t.TempDir())
+			require.NoError(t, resolvesThrough(overlay, "local"))
+			ps, _ := overlay.RetainedState()
+			require.Len(t, ps, 1)
+			require.Equal(t, 1, ps[0].Agents, "precondition: the unplaced agent is counted")
+
+			prev := profileReferenceRunTimeout
+			profileReferenceRunTimeout = 200 * time.Millisecond
+			t.Cleanup(func() { profileReferenceRunTimeout = prev })
+			fault.Arm()
+			srv.runProfileReferenceCount(ctx)
+			calls, _, _ := fs.snapshot()
+			require.GreaterOrEqual(t, calls, 2, "the failing count ran")
+			ps, _ = overlay.RetainedState()
+			require.Len(t, ps, 1)
+			assert.Equal(t, 1, ps[0].Agents, "a %s count keeps the previous references", mode)
+		})
+	}
+}
+
+// A project activeProfile save triggers a recount.
+func TestProfileReferences_ProjectSaveTriggersCount(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	ch := f.srv.profileRefs.triggerChan()
+	for len(ch) > 0 {
+		<-ch
+	}
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, "/api/v1/projects/"+f.proj.ID+"/settings",
+		map[string]any{"activeProfile": "local"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, len(ch), "the activeProfile save must trigger a recount")
+}
+
+// Save then create: a create right after a project activeProfile save of a
+// built-in, dispatched to the co-located broker, resolves it the first time.
+func TestProfileReferences_SaveThenCreateRetainsFirstTime(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	require.Error(t, resolvesThrough(overlay, "local"), "precondition: local is not retained before the save")
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, "/api/v1/projects/"+f.proj.ID+"/settings",
+		map[string]any{"activeProfile": "local"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	disp := &resolveAtDispatchDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}, overlay: overlay}
+	f.srv.SetDispatcher(disp)
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
+		CreateAgentRequest{Name: "save-then-create-agent", RuntimeBrokerID: f.broker.ID})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	require.True(t, disp.called, "the create must dispatch")
+	assert.NoError(t, disp.err, "local must resolve at the first dispatch after the save")
+}
