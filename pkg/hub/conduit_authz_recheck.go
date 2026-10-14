@@ -378,9 +378,12 @@ type conduitUserStreamAuthz struct {
 	// ConfirmDeny, if set, is asked before an action deny is reported;
 	// false makes the decision unavailable instead.
 	ConfirmDeny func() bool
-	// Authorize decides each action; nil means authorizeConduitAction.
-	Authorize conduitActionAuthorizer
 }
+
+// conduitAuthorizeActionTestHook, when non-nil, decides each action in
+// authorizeConduitUserStream instead of authorizeConduitAction. Only tests
+// set it (from _test.go files); production code never does.
+var conduitAuthorizeActionTestHook func(s *Server, ctx context.Context, identity Identity, agent *store.Agent, action Action) error
 
 // authorizeConduitUserStream decides a user stream against current state.
 // The tunnel open path and every re-check of an open user stream decide
@@ -412,9 +415,11 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if len(actions) == 0 {
 		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
 	}
-	authorize := req.Authorize
-	if authorize == nil {
-		authorize = s.authorizeConduitAction
+	authorize := s.authorizeConduitAction
+	if hook := conduitAuthorizeActionTestHook; hook != nil {
+		authorize = func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error {
+			return hook(s, ctx, identity, agent, action)
+		}
 	}
 	for _, action := range actions {
 		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {

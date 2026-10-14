@@ -387,30 +387,28 @@ func TestConduitRenewStream_StateChanges(t *testing.T) {
 // a TCP stream opened through the tunnel path gets no renewal and a TCP
 // stream to the same port opened through the port proxy keeps renewing.
 //
-// The authorizer exists only in this test (renewConduitStream always uses
-// authorizeConduitAction). Real roles cannot hold port access without
-// ActionTunnel until ActionTunnel has a permission of its own
-// (conduitAuthzFor decides it as agent.port_access).
+// The authorizer is installed through conduitAuthorizeActionTestHook, which
+// only tests set. Real roles cannot hold port access without ActionTunnel
+// until ActionTunnel has a permission of its own (conduitAuthzFor decides it
+// as agent.port_access).
 func TestConduitRenewStream_TunnelTCPNeedsActionTunnel(t *testing.T) {
 	f := newRenewalFixture(t)
-	noTunnel := func(ctx context.Context, ident Identity, agent *store.Agent, action Action) error {
+	tunnelTok, tunnelOpen := f.openGrant(t, grant.ViaTunnel, tcpHeader("3000"), nil)
+	proxyTok, proxyOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+
+	_, err := f.renew(tunnelTok, tunnelOpen, 1)
+	require.NoError(t, err, "with the hub's own authorizer both origins renew")
+
+	conduitAuthorizeActionTestHook = func(s *Server, ctx context.Context, ident Identity, agent *store.Agent, action Action) error {
 		if action == ActionTunnel {
 			return errConduitForbidden
 		}
-		return f.srv.authorizeConduitAction(ctx, ident, agent, action)
+		return s.authorizeConduitAction(ctx, ident, agent, action)
 	}
-	tunnelTok, tunnelOpen := f.openGrant(t, grant.ViaTunnel, tcpHeader("3000"), nil)
-	proxyTok, proxyOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
-	req := func(tok []byte, open grant.Claims) conduitRenewalRequest {
-		return conduitRenewalRequest{LatestGrant: tok, TargetSessionID: renewalSessionID, TargetStreamID: 1, OpenJTI: open.JTI}
-	}
-	ctx := context.Background()
-
-	_, err := f.srv.renewConduitStreamWith(ctx, req(tunnelTok, tunnelOpen), f.srv.authorizeConduitAction)
-	require.NoError(t, err, "with the hub's own authorizer both origins renew")
-	_, err = f.srv.renewConduitStreamWith(ctx, req(tunnelTok, tunnelOpen), noTunnel)
+	t.Cleanup(func() { conduitAuthorizeActionTestHook = nil })
+	_, err = f.renew(tunnelTok, tunnelOpen, 1)
 	assert.ErrorIs(t, err, errConduitForbidden, "via=tunnel without ActionTunnel")
-	_, err = f.srv.renewConduitStreamWith(ctx, req(proxyTok, proxyOpen), noTunnel)
+	_, err = f.renew(proxyTok, proxyOpen, 1)
 	assert.NoError(t, err, "via=proxy needs only ActionPortAccess")
 }
 

@@ -417,16 +417,6 @@ type conduitRenewal struct {
 // errConduitAuthzUnavailable (a lookup failed: no renewal, and the stream
 // is not closed early), or errConduitAgentGone.
 func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalRequest) (*conduitRenewal, error) {
-	return s.renewConduitStreamWith(ctx, req, s.authorizeConduitAction)
-}
-
-// conduitActionAuthorizer decides one action for identity on agent, as
-// authorizeConduitAction does.
-type conduitActionAuthorizer func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
-
-// renewConduitStreamWith is renewConduitStream deciding each action with
-// authorize. renewConduitStream always passes authorizeConduitAction.
-func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalRequest, authorize conduitActionAuthorizer) (*conduitRenewal, error) {
 	if !s.experimentEnabled(conduitExperiment) {
 		return nil, errConduitDisabled
 	}
@@ -490,7 +480,6 @@ func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalR
 		Kind:      c.Stream.Kind,
 		ViaTunnel: c.Via == grant.ViaTunnel,
 		Port:      port,
-		Authorize: authorize,
 		ConfirmDeny: func() bool {
 			_, err := s.store.GetAgent(ctx, agent.ID)
 			return err == nil && ctx.Err() == nil
