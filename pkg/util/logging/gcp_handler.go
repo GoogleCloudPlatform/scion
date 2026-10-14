@@ -471,7 +471,9 @@ func extractTraceIDFromAttrs(attrs []slog.Attr) string {
 // emptyTraceID reports whether a is a trace_id whose value normalizes to
 // empty: no valid trace ID, so no trace field or label. Such a trace_id,
 // from With or from the record, is dropped and never overrides an earlier
-// one. a's value must be resolved.
+// one. a's value must be resolved. The check reads the value as logged,
+// before a caller's ReplaceAttr runs: such a ReplaceAttr never sees an
+// empty trace_id, and the trace label ignores any rewrite it makes.
 func emptyTraceID(a slog.Attr) bool {
 	return a.Key == AttrTraceID && NormalizeTraceID(a.Value.String()) == ""
 }
