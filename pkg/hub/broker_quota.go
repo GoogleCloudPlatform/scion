@@ -277,8 +277,19 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 	return s.reassertBrokerReservationAt(ctx, agent, backstopSiteRestart)
 }
 
+// restoreBrokerReservation records agent's max_agents_per_broker reservation
+// if it holds none, without the cap check and without the backstop metric,
+// log or audit: for a caller that released the slot itself just before (the
+// reincarnation move worker's rollback of its own quota move), so the write
+// is expected and is not a slipped release. Otherwise as
+// reassertBrokerReservation.
+func (s *Server) restoreBrokerReservation(ctx context.Context, agent *store.Agent) bool {
+	return s.reassertBrokerReservationAt(ctx, agent, "")
+}
+
 // reassertBrokerReservationAt is reassertBrokerReservation with the backstop
-// site that a write is counted and audited under.
+// site that a write is counted and audited under; an empty site records
+// nothing (restoreBrokerReservation).
 func (s *Server) reassertBrokerReservationAt(ctx context.Context, agent *store.Agent, site string) bool {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return false
@@ -314,7 +325,7 @@ func (s *Server) reassertBrokerReservationAt(ctx context.Context, agent *store.A
 			"site", site, "agent_id", agent.ID, "error", err)
 		return false
 	}
-	if created {
+	if created && site != "" {
 		s.recordBackstopWrite(ctx, agent, site)
 	}
 	return created

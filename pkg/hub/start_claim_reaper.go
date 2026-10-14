@@ -179,9 +179,10 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 		// The agent's Runtime Broker is confirmed deregistered: no report
 		// can show this start's outcome any more. Release the unconfirmed
 		// claim (of any kind), audited. A live claim never reaches here: it
-		// is demoted on lease expiry first. The slot is freed by the
-		// sweep's deregistered-scope pass, not here: the agent row normally
-		// still reads a counted phase.
+		// is demoted on lease expiry first. The slot is normally freed by
+		// the sweep's deregistered-scope pass: the agent row still reads a
+		// counted phase, so the releaseSlotIfIdle that follows the release
+		// frees it only for an agent already at rest.
 		s.releaseClaimOfDeregisteredBroker(ctx, a)
 		return
 	}

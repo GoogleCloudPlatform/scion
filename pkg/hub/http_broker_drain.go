@@ -132,7 +132,7 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 		// the run is the one just read and the queued stop is still the
 		// intent at the same RunIntentAt, so a start that claimed the agent
 		// after the re-read keeps the slot.
-		s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
+		released := s.releaseBrokerQuotaIf(ctx, cur, store.AgentReleaseCond{
 			ExpectedRunID:         cur.RunID,
 			QueuedStopIntent:      true,
 			QueuedStopRunIntentAt: a.RunIntentAt,
@@ -171,7 +171,7 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 			s.agentLifecycleLog.Warn("Queued stop: confirming termination failed", "agent_id", a.ID, "error", err)
 			continue
 		}
-		s.agentLifecycleLog.Info("Queued stop: container confirmed gone; capacity released", "agent_id", a.ID)
+		s.agentLifecycleLog.Info("Queued stop: container confirmed gone", "agent_id", a.ID, "capacity_released", released)
 	}
 }
 
@@ -200,7 +200,11 @@ func queuedStopAppliedElsewhere(after *store.Agent, intentAt *time.Time) bool {
 // its recorded runtime target. A pinned agent whose target is not recorded
 // yet (it is recorded once two heartbeats confirm it) uses the single
 // target of a report from its own Runtime Broker: a flat instance reports
-// exactly one target. Otherwise "" (not settled).
+// exactly one target. The pin's target ID is the registration descriptor's
+// ID and the inventory's target keys are runtime target keys (for example
+// "docker" or "kubernetes|context=...|namespace=..."), so the two are not
+// compared: the report's broker ID is the agent's own, which is what ties
+// the target to the agent. Otherwise "" (not settled).
 func settleTarget(a *store.Agent, brokerID string, hb *brokerHeartbeatRequest) string {
 	if t := agentRuntimeTarget(a); t != "" {
 		return t
