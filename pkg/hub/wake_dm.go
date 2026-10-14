@@ -321,6 +321,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 						Code:       ErrCodeQuotaExceeded,
 						Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
 						HTTPStatus: http.StatusTooManyRequests,
+						Details:    quotaExceededDetails(err),
 					}
 				}
 				return nil, &AgentDMError{
