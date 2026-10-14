@@ -881,7 +881,7 @@ async function topElementAt(page: Page, x: number, y: number): Promise<unknown> 
   return withTimeout(
     page
       .evaluate(
-        ([px, py]) => {
+        ({ px, py }) => {
           let el: Element | null = document.elementFromPoint(px, py);
           for (let i = 0; i < 10 && el?.shadowRoot; i++) {
             const inner = el.shadowRoot.elementFromPoint(px, py);
@@ -896,7 +896,7 @@ async function topElementAt(page: Page, x: number, y: number): Promise<unknown> 
               }
             : null;
         },
-        [x, y] as [number, number]
+        { px: x, py: y }
       )
       .catch(() => 'unreadable'),
     2_500,
@@ -926,7 +926,7 @@ async function scriptClickInFrame(page: Page, link: string): Promise<string> {
   return withTimeout(
     f
       .evaluate((sel) => {
-        const a = document.querySelector(sel) as HTMLElement | null;
+        const a = document.querySelector<HTMLElement>(sel);
         if (!a) return 'no link';
         a.click();
         return 'clicked';
