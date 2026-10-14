@@ -136,6 +136,12 @@ var expectedSelectorRegistry = map[string][]string{
 	"agent:set_message_mode": {"agent.set_message_mode"},
 	"agent:stop_all":         {"agent.stop_all"},
 	"agent:update":           {"agent.update"},
+
+	// quota selectors (hub-wide limit, entitlement and usage administration).
+	"quota:create": {"quota.create"},
+	"quota:delete": {"quota.delete"},
+	"quota:read":   {"quota.read"},
+	"quota:update": {"quota.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {
