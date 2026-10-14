@@ -588,20 +588,27 @@ func TestHTTPAgentDispatcher_DeferredDefiniteFailureRevokesAll(t *testing.T) {
 	assert.NotNil(t, getTestAgentCredential(t, memStore, "owner-kept-jti").RevokedAt, "the credential the owning node kept is revoked too")
 }
 
-// reReadFailStore fails GetAgent, so keepUnknownOutcomeStart's re-read of the
-// kept agent fails with a store error.
+// reReadFailStore fails GetAgent once its switch is armed, so
+// keepUnknownOutcomeStart's re-read of the kept agent fails with a store
+// error.
 type reReadFailStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (reReadFailStore) GetAgent(context.Context, string) (*store.Agent, error) {
+func (r *reReadFailStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if !r.fault.Active() {
+		return r.Store.GetAgent(ctx, id)
+	}
 	return nil, errors.New("store unavailable")
 }
 
 // A kept start whose re-read fails is still answered 504 with the dispatched
 // copy's phase, and the store error is logged. A nil cause does not panic.
 func TestKeepUnknownOutcomeStart_ReReadFailureAndNilCause(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *reReadFailStore {
+		return &reReadFailStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 	project := &store.Project{ID: tid("kuo-project"), Slug: "kuo-project", Name: "kuo-project", Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateProject(ctx, project))
@@ -613,7 +620,7 @@ func TestKeepUnknownOutcomeStart_ReReadFailureAndNilCause(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	logs := &strings.Builder{}
 	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
-	srv.store = reReadFailStore{Store: s}
+	fault.Arm()
 
 	rec := httptest.NewRecorder()
 	require.NotPanics(t, func() {
