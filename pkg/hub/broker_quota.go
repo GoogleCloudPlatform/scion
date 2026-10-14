@@ -215,18 +215,47 @@ func (s *Server) releaseBrokerQuotaIf(ctx context.Context, agent *store.Agent, c
 	return released, nil
 }
 
-// releaseSlotIfIdle releases agentID's max_agents_per_broker reservation if
-// the agent, as stored at the write, holds no capacity
-// (store.AgentHoldsBrokerCapacity is false) and no start-kind claim, keyed on
-// the run ID it reads. The check is the store's, on the locked row
-// (NotCounted), so this costs one read and one conditional write. It runs
-// right after a claim is released without a running outcome, so a release
-// that was skipped while the claim was held does not wait for the hourly
-// sweep (design §4.4, k8s merge condition 2). On a running agent it is a
-// no-op. Best-effort.
+// releaseSlotIfIdle releases agentID's max_agents_per_broker reservation on
+// the agent row's own Runtime Broker if the agent, as stored at the write,
+// holds no capacity (store.AgentHoldsBrokerCapacity is false) and no
+// start-kind claim, keyed on the run ID it reads (releaseSlotIfIdleOn with
+// the row's RuntimeBrokerID). It runs where a claim or a launch ends with no
+// claim run in hand: the launch-report hook, the reaper's unconfirmed release
+// and SettleEndedLaunchClaim. A reservation on another broker is never
+// released here; the sweep's rules decide it.
 func (s *Server) releaseSlotIfIdle(ctx context.Context, agentID string) {
-	if s.quotaService == nil || agentID == "" {
+	row := s.readAgentForIdleRelease(ctx, agentID)
+	if row == nil {
 		return
+	}
+	s.releaseIdleSlotOn(ctx, row, row.RuntimeBrokerID)
+}
+
+// releaseSlotIfIdleOn is releaseSlotIfIdle for a start claim's holder: broker
+// is the Runtime Broker the claim's start targeted, recorded when the claim
+// was taken. It runs right after the claim is released without a hand-off,
+// so a release that was skipped while the claim was held does not wait for
+// the hourly sweep (design §4.4, k8s merge condition 2, R6-B1). The slot it
+// may free is the one that start held: a reservation on broker, which must
+// also be the agent row's broker. If the broker recorded at the claim ever
+// differs from the row's or from the reservation's scope, or is empty, the
+// release is skipped and the reservation is left to the sweep: the safe
+// side. No caller relies on an unconditional release here. On a running
+// agent it is a no-op. Best-effort.
+func (s *Server) releaseSlotIfIdleOn(ctx context.Context, agentID, broker string) {
+	row := s.readAgentForIdleRelease(ctx, agentID)
+	if row == nil {
+		return
+	}
+	s.releaseIdleSlotOn(ctx, row, broker)
+}
+
+// readAgentForIdleRelease reads agentID's row for an idle release; nil when
+// there is nothing to do (no quota service, no row, or a read error, which
+// is logged).
+func (s *Server) readAgentForIdleRelease(ctx context.Context, agentID string) *store.Agent {
+	if s.quotaService == nil || agentID == "" {
+		return nil
 	}
 	row, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -234,15 +263,49 @@ func (s *Server) releaseSlotIfIdle(ctx context.Context, agentID string) {
 			s.agentLifecycleLog.Warn("quota: release after the claim cleared: reading the agent failed",
 				"agent_id", agentID, "error", err)
 		}
+		return nil
+	}
+	return row
+}
+
+// releaseIdleSlotOn releases row's active max_agents_per_broker reservation
+// only if broker is set, is the row's RuntimeBrokerID, and is the
+// reservation's broker scope, and only that reservation: its ID is part of
+// the condition (store.ReleaseReservationIfAgent evaluates it with the rest
+// on the locked rows), with the run ID read here, no start-kind claim and
+// the agent holding no capacity (NotCounted). One read of the reservation
+// and one conditional write.
+func (s *Server) releaseIdleSlotOn(ctx context.Context, row *store.Agent, broker string) {
+	if broker == "" || row.RuntimeBrokerID != broker {
+		return
+	}
+	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: release after the claim cleared: limit lookup failed",
+				"agent_id", row.ID, "error", err)
+		}
+		return
+	}
+	res, err := s.store.GetActiveReservation(ctx, def.ID, row.ID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: release after the claim cleared: reading the reservation failed",
+				"agent_id", row.ID, "error", err)
+		}
+		return
+	}
+	if res.ScopeType != store.QuotaScopeBroker || res.ScopeID != broker {
 		return
 	}
 	if released, _ := s.releaseBrokerQuotaIf(ctx, row, store.AgentReleaseCond{
 		ExpectedRunID:    row.RunID,
 		NoStartKindClaim: true,
 		NotCounted:       true,
+		ReservationID:    res.ID,
 	}); released {
 		s.agentLifecycleLog.Info("quota: released the slot of an agent left idle when its claim cleared",
-			"agent_id", agentID, "runtime_broker_id", row.RuntimeBrokerID)
+			"agent_id", row.ID, "runtime_broker_id", broker)
 	}
 }
 

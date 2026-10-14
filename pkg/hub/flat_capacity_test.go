@@ -208,7 +208,9 @@ func TestFlatCapacity_ZeroNilCapPerInstance(t *testing.T) {
 		a := flatPinnedAgent(t, s, capped, cp, fmt.Sprintf("zn-cap-%d", i), state.PhaseStopped)
 		assert.Equal(t, want, startCode(t, srv, a.ID), "a cap of 2 (#%d)", i)
 	}
-	assert.EqualValues(t, 3, brokerReservationCount(t, s, unlimited.ID))
+	// An unlimited limit records no reservation (QuotaService.Reserve,
+	// "Unlimited — no enforcement"), so the maxAgents=0 instance holds none.
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, unlimited.ID))
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, inherit.ID))
 	assert.EqualValues(t, 2, brokerReservationCount(t, s, capped.ID))
 }

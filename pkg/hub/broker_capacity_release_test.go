@@ -310,11 +310,12 @@ func TestSyncCreate_ExitObservedDuringDispatch_SlotFreed(t *testing.T) {
 
 // launchClaimedAgent creates a counted agent of f's broker with its slot,
 // a create claim and an active launch linked to that claim, as an async
-// create leaves it. It returns the agent and the launch ID.
+// create leaves it: phase provisioning, the only phases BeginLaunch accepts
+// being created and provisioning. It returns the agent and the launch ID.
 func launchClaimedAgent(t *testing.T, f *reconcileFixture, slug string) (*store.Agent, string) {
 	t.Helper()
 	ctx := context.Background()
-	a := f.addAgent(slug, string(state.PhaseStarting), "")
+	a := f.addAgent(slug, string(state.PhaseProvisioning), "")
 	seedSlot(t, f.s, f.brokerID, a.ID)
 	_, err := f.s.ClaimAgentStart(ctx, a.ID, "hub-x", store.StartClaimCreate, "", time.Minute)
 	require.NoError(t, err)
@@ -790,4 +791,117 @@ func TestSweep_StaleDeletedObservationDoesNotReleaseAReReservedSlot(t *testing.T
 	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
 	require.NotNil(t, held, "the re-reserved slot is not freed by the stale observation")
 	assert.Equal(t, fresh.ID, held.ID)
+}
+
+// The idle release frees only the slot the claim's start held: a
+// reservation on the broker that start targeted, which is also the agent
+// row's broker (k8s merge condition 2, R6-B1). A start refused because the
+// agent's reservation is on another broker releases its claim, and the
+// reservation on the other broker is kept; the sweep decides it.
+func TestStartRefusedScopeConflict_StoppedAgent_KeepsOtherBrokerRow(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 5)
+	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "keep-a")
+	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "keep-b")
+	a := newQuotaTestAgent(t, s, brokerB, projectB, "keep-other", state.PhaseStopped)
+	held := seedSlot(t, s, brokerA.ID, a.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeBrokerReservationScopeConflict)
+	assert.Empty(t, getAgent(t, s, a.ID).StartClaimID, "the refused start released its claim")
+	after := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, after, "the reservation on the other broker is kept")
+	assert.Equal(t, held.ID, after.ID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerA.ID))
+	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID))
+	assert.Zero(t, disp.startCount.Load(), "nothing was dispatched")
+}
+
+// An empty broker skips the idle release: there is no start target to scope
+// it to. The same idle agent's slot is freed on its own broker (control).
+func TestReleaseSlotIfIdle_EmptyBrokerSkips(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "idle-empty")
+	a := newQuotaTestAgent(t, s, broker, project, "idle-empty", state.PhaseStopped)
+	seedSlot(t, s, broker.ID, a.ID)
+
+	srv.releaseSlotIfIdleOn(ctx, a.ID, "")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "an empty broker skips the release")
+	srv.releaseSlotIfIdleOn(ctx, a.ID, broker.ID)
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the idle agent's slot on its broker is freed")
+}
+
+// The launch-report hook (a caller with no claim run) scopes the idle
+// release to the agent row's broker: an async create's launch ends while
+// the agent's reservation is on another broker, and that reservation is
+// kept.
+func TestLaunchEnd_HookKeepsOtherBrokerRow(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("le-other", string(state.PhaseProvisioning), "")
+	other := seedSlot(t, f.s, tid("le-other-broker"), a.ID)
+	_, err := f.s.ClaimAgentStart(ctx, a.ID, "hub-x", store.StartClaimCreate, "", time.Minute)
+	require.NoError(t, err)
+	launchID, err := f.s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+	a = getAgent(t, f.s, a.ID)
+	selfReport(t, f.srv, a, state.PhaseStopped)
+
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", Seq: 1, State: store.LaunchReportStateFailed, ErrorCode: "runtime_error",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the launch end released the claim")
+	after := activeReservation(t, f.s, brokerLimitDefID(t, f.s), a.ID)
+	require.NotNil(t, after, "the reservation on the other broker is kept")
+	assert.Equal(t, other.ID, after.ID)
+}
+
+// reservationSwapStore, once armed, answers the first GetActiveReservation
+// of agentID with the row it read, then releases that row and records a new
+// one on swapTo, as a concurrent move between the idle release's read and
+// its write would.
+type reservationSwapStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	t       *testing.T
+	agentID string
+	swapTo  string
+	swapped bool
+}
+
+func (w *reservationSwapStore) GetActiveReservation(ctx context.Context, limitDefID, resourceID string) (*store.UsageReservation, error) {
+	got, err := w.Store.GetActiveReservation(ctx, limitDefID, resourceID)
+	if err != nil || w.swapped || !w.fault.Active() || resourceID != w.agentID {
+		return got, err
+	}
+	w.swapped = true
+	require.NoError(w.t, w.Store.ReleaseReservationByID(ctx, got.ID))
+	seedBrokerRow(w.t, w.Store, limitDefID, w.swapTo, resourceID, time.Time{})
+	return got, nil
+}
+
+// The idle release's write names the reservation it read
+// (AgentReleaseCond.ReservationID): a row that replaced it in between, here
+// on another broker, is not released.
+func TestReleaseSlotIfIdle_WriteNamesTheReservationRead(t *testing.T) {
+	srv, s, swap, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *reservationSwapStore {
+		return &reservationSwapStore{Store: inner, fault: fault, t: t}
+	})
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "idle-swap")
+	a := newQuotaTestAgent(t, s, broker, project, "idle-swap", state.PhaseStopped)
+	seedSlot(t, s, broker.ID, a.ID)
+	otherBroker := tid("idle-swap-other")
+	swap.agentID, swap.swapTo = a.ID, otherBroker
+	fault.Arm()
+
+	srv.releaseSlotIfIdleOn(ctx, a.ID, broker.ID)
+	after := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, after, "the row that replaced the one read is kept")
+	assert.Equal(t, otherBroker, after.ScopeID)
 }
