@@ -224,6 +224,17 @@ func TestRedactEndpointIn(t *testing.T) {
 		redactEndpointIn("plain https://hub.example.com error", "https://hub.example.com"))
 }
 
+// TestRedactEndpointIn_UnparseableEndpointFailsClosed: an endpoint that
+// url.Parse rejects (here, for its invalid port) is redacted whole wherever
+// the text quotes it, and the user info of any other URL in the text is
+// masked.
+func TestRedactEndpointIn_UnparseableEndpointFailsClosed(t *testing.T) {
+	endpoint := "http://user:s3cret@127.0.0.1:99999x"
+	text := `parse "http://user:s3cret@127.0.0.1:99999x": invalid port; Get "http://user:s3cret@127.0.0.1:99999x/healthz"; see http://tok@hub.example.com/x`
+	require.Equal(t, `parse "[redacted hub URL]": invalid port; Get "[redacted hub URL]/healthz"; see http://xxxxx@hub.example.com/x`,
+		redactEndpointIn(text, endpoint))
+}
+
 // hubSettingsReadAllowed lists, by file, the lines outside server_*.go
 // that the hub settings guard accepts. Each one is not a CLI read of hub
 // configuration from settings:

@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -706,12 +707,17 @@ func endpointSourceNote(s hubEndpointScope) string {
 // but not a user name given without a password, which may be a token.
 func redactEndpointIn(text, endpoint string) string {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return redactUnparsedEndpointIn(text, endpoint)
+	}
+	if u.User == nil {
 		return text
 	}
 	r, err := url.Parse(config.RedactURL(endpoint))
 	if err != nil || r.User == nil {
-		return text
+		// Not reached (the redacted form of a parsed URL parses); mask any
+		// user info all the same.
+		return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
 	}
 	masked := "//" + r.User.String() + "@"
 	// The user info as url.URL writes it, and as written in endpoint.
@@ -723,6 +729,24 @@ func redactEndpointIn(text, endpoint string) string {
 		}
 	}
 	return text
+}
+
+// redactedHubURL replaces, whole, a hub URL whose user info cannot be
+// located (see redactUnparsedEndpointIn).
+const redactedHubURL = "[redacted hub URL]"
+
+// urlUserInfoInTextRe matches the user info of a URL anywhere in a text.
+var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@\s"'<>]*@`)
+
+// redactUnparsedEndpointIn is redactEndpointIn for an endpoint that
+// url.Parse rejects, so its user info cannot be located: it fails closed.
+// Every occurrence of the endpoint in text is replaced whole, and the user
+// info of any URL still in text is masked.
+func redactUnparsedEndpointIn(text, endpoint string) string {
+	if endpoint != "" {
+		text = strings.ReplaceAll(text, endpoint, redactedHubURL)
+	}
+	return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
 }
 
 // hubStatusName returns the nickname of the hub at endpoint for hub
