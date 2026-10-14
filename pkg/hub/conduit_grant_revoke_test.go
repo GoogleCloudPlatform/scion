@@ -325,3 +325,66 @@ func TestConduitGrantFreshFetchDoesNotHoldSigning(t *testing.T) {
 	}
 	assert.True(t, found, "the fetch's answer predates a rotation stored before its read")
 }
+
+// heldReadGrantKeyStore reads the stored ring at once, then, while held,
+// holds the result until released.
+type heldReadGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	held    atomic.Bool
+	read    chan struct{}
+	release chan struct{}
+}
+
+func (h *heldReadGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	ring, rev, err := h.memoryConduitGrantKeyStore.Load(ctx)
+	if h.held.Load() {
+		h.read <- struct{}{}
+		<-h.release
+	}
+	return ring, rev, err
+}
+
+// TestConduitGrantFreshFetchDoesNotUndoInvalidate: a hub-direct fetch that
+// read the ring before a revocation, and finishes after the change event
+// dropped the cache, does not put the ring it read back into the cache; the
+// node's next use reads the revoked state.
+func TestConduitGrantFreshFetchDoesNotUndoInvalidate(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	a := newConduitGrantKeys(mem, clk.Now)
+	_, err := a.signer(ctx)
+	require.NoError(t, err)
+	// The rotated-in key stays pending: it can be revoked, and there is
+	// nothing to settle.
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	held := &heldReadGrantKeyStore{memoryConduitGrantKeyStore: mem, read: make(chan struct{}, 1), release: make(chan struct{})}
+	b := newConduitGrantKeys(held, clk.Now)
+	_, err = b.publicKeys(ctx)
+	require.NoError(t, err)
+
+	held.held.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.freshPublicKeys(ctx)
+		done <- err
+	}()
+	select {
+	case <-held.read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch did not read the store")
+	}
+	// Stored after the fetch's read; then the change event reaches b.
+	require.NoError(t, a.revoke(ctx, rot.KeyID))
+	b.invalidate()
+	held.held.Store(false)
+	close(held.release)
+	require.NoError(t, <-done)
+
+	pubs, err := b.publicKeys(ctx)
+	require.NoError(t, err)
+	for _, k := range pubs {
+		assert.NotEqual(t, rot.KeyID, k.KeyID, "the fetch put the ring it read before the revocation back into the cache")
+	}
+}
