@@ -108,6 +108,73 @@ func TestValidateServerPreflight_RelayMode(t *testing.T) {
 	}
 }
 
+// TestValidateServerPreflight_SessionSecretOnlyInTheEnv: with the session
+// secret given only in the env, the preflight still refuses an equal
+// peer_secret in external relay mode after scrubServerSecretEnv has removed
+// it from the env.
+func TestValidateServerPreflight_SessionSecretOnlyInTheEnv(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	enableHub = true
+	t.Setenv(sessionSecretEnv, relayModeTestSessionSecret)
+	scrubServerSecretEnv()
+	_, inEnv := os.LookupEnv(sessionSecretEnv)
+	require.False(t, inEnv, "the scrub left the session secret in the env")
+
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestSessionSecret}
+	err := validateServerPreflight(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must differ from the session secret")
+	assert.NotContains(t, err.Error(), relayModeTestSessionSecret)
+}
+
+// TestExternalPeerAuthOptions_SessionSecretOnlyInTheEnv: in the same case
+// the external relay mode peer auth options carry the session secret as
+// the shared signing secret, so peer auth can refuse an equal peer secret.
+func TestExternalPeerAuthOptions_SessionSecretOnlyInTheEnv(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	t.Setenv(sessionSecretEnv, relayModeTestSessionSecret)
+	scrubServerSecretEnv()
+
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+	opts := externalPeerAuthOptions(context.Background(), cfg, "hub-0", false)
+	assert.NotEmpty(t, opts.SharedSecret, "no shared signing secret after the scrub")
+	assert.True(t, opts.SharedSecret == relayModeTestSessionSecret, "the shared signing secret is not the session secret")
+	assert.Equal(t, relayModeTestPeerSecret, opts.PeerSecret)
+}
+
+// TestSessionSecretValue_AfterTheScrub: sessionSecretValue returns the flag,
+// else the value scrubServerSecretEnv captured, else the env, without a
+// deprecation warning. An env-only reader fails the captured case, whose
+// env is empty after the scrub.
+func TestSessionSecretValue_AfterTheScrub(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	resetServerFlags()
+	isolateServerSecretEnv(t)
+	t.Setenv(sessionSecretEnv, "captured-value")
+	scrubServerSecretEnv()
+	assert.True(t, sessionSecretValue() == "captured-value", "the captured value is not used after the scrub")
+
+	webSessionSecret = "flag-value"
+	assert.True(t, sessionSecretValue() == "flag-value", "the flag does not win")
+	webSessionSecret = ""
+
+	t.Setenv(sessionSecretEnv, "later-env-value")
+	assert.True(t, sessionSecretValue() == "captured-value", "the env wins over the captured value")
+
+	capturedSessionSecret = ""
+	require.NoError(t, os.Unsetenv(sessionSecretEnv))
+	logs := captureSecretEnvSlog(t)
+	t.Setenv(legacySessionSecretEnv, "legacy-value")
+	assert.True(t, sessionSecretValue() == "legacy-value", "the legacy env name is not read")
+	assert.NotContains(t, logs.String(), "deprecated", "sessionSecretValue logged a warning")
+}
+
 // TestStartConduit_ExternalRelayNeedsExperiment: external relay mode with
 // hub.conduit off is a startup error.
 func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {

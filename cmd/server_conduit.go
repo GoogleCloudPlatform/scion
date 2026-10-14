@@ -423,9 +423,7 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 		return errConduitExternalNoInternalListen
 	}
 	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
-	opts := conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE())
-	opts.PeerSecret = cfg.Hub.Conduit.PeerSecretValue()
-	opts.SharedSecret = sessionSecretValue()
+	opts := externalPeerAuthOptions(ctx, cfg, id, metadata.OnGCE())
 	if opts.PeerSecret == "" {
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
 	}
@@ -442,6 +440,16 @@ func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv 
 	}
 	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode, "internal_listen", addr.String())
 	return nil
+}
+
+// externalPeerAuthOptions is the hub's relay-peer auth configuration in
+// external relay mode: keyed from the dedicated peer secret, with the hub's
+// shared signing secret passed so peer auth refuses an equal peer secret.
+func externalPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, id string, onGCP bool) hub.ConduitPeerAuthOptions {
+	opts := conduitPeerAuthOptions(ctx, cfg, id, onGCP)
+	opts.PeerSecret = cfg.Hub.Conduit.PeerSecretValue()
+	opts.SharedSecret = sessionSecretValue()
+	return opts
 }
 
 // serveConduitInternalListener opens the internal listener on listen and
