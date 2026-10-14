@@ -8,7 +8,7 @@ Scion is an open-source orchestration platform for teams of AI agents and the pe
 
 As agents take on longer, more complex projects, the challenge becomes how they work together: who owns a task, what context they share, when they ask for help, and how you follow their progress. Scion provides the running environments, communication, identity, and visibility to explore those questions in practice.
 
-Run harnesses such as Claude Code, Gemini CLI, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
+Run harnesses such as Claude Code, Antigravity, Codex, and OpenCode as independent processes, with per-agent configuration and credentials. Choose shared workspaces or separate Git worktrees and clones to suit the work. Start with a local CLI or the Workstation web UI, then move to a hosted Hub when your team needs shared access and remote execution.
 
 Scion's philosophy is **less is more**. Agents learn the `scion` CLI through skills and help text; you describe responsibilities and collaboration patterns in instructions. Teams can grow, delegate, review, and regroup as a task unfolds. Use Scion as a practical testbed for emerging patterns in agent collaboration, with the freedom to choose your models, tools, and infrastructure. Read more in [Philosophy](https://googlecloudplatform.github.io/scion/philosophy/).
 
