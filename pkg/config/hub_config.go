@@ -1996,7 +1996,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, true)
+	return loadBootstrapKoanf(configPath, true, true)
 }
 
 // LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
@@ -2006,43 +2006,26 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 // view takes the public URL it shows when none is saved from this merge
 // (ptone/scion#4826).
 func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, false)
+	return loadBootstrapKoanf(configPath, false, true)
+}
+
+// LoadAboveSeedBootstrapKoanfWithConfigPath is the bootstrap merge with only
+// the layers above SCION_SEED_*: settings.yaml (and the --config location)
+// and SCION_SERVER_*, without the coded defaults. A key it has gets its
+// bootstrap value from one of these layers, so the admin view can tell a
+// value from them apart from a coded default or a seed value equal to the
+// default (ptone/scion#4983).
+func LoadAboveSeedBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false, false)
 }
 
 // loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
-// layer when withSeed is true.
-func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
+// layer when withSeed is true and the coded defaults when withDefaults is
+// true.
+func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.Koanf {
 	k := koanf.New(".")
-
-	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
-	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
-	// If new defaulted keys are added to GlobalConfig (or its nested structs),
-	// they must be added here too, otherwise bootstrap material will be
-	// incomplete for sections that rely on them during initial seeding.
-	defaults := DefaultGlobalConfig()
-	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.port":         defaults.Hub.Port,
-		"server.hub.host":         defaults.Hub.Host,
-		"server.hub.admin_emails": defaults.Hub.AdminEmails,
-		"server.database.driver":  defaults.Database.Driver,
-		"server.database.url":     defaults.Database.URL,
-		"server.auth.dev_mode":    defaults.Auth.Enabled,
-		"server.auth.dev_token":   defaults.Auth.Token,
-		"server.storage.provider": defaults.Storage.Provider,
-		"server.secrets.backend":  defaults.Secrets.Backend,
-		"server.log_level":        defaults.LogLevel,
-	}, "."), nil)
-
-	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
-	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
-	// "coded defaults" layer for default_template/default_harness_config:
-	// without it, an un-seeded instance (no settings.yaml on disk, no
-	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
-	// from bootstrap material, so agent-create requests that omit
-	// harnessConfig resolve to an empty name instead of the product default
-	// (ptone/scion#1306).
-	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
-		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	if withDefaults {
+		loadBootstrapDefaults(k)
 	}
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
@@ -2085,6 +2068,40 @@ func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadBootstrapDefaults loads the coded defaults of the bootstrap merge into k.
+func loadBootstrapDefaults(k *koanf.Koanf) {
+	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
+	// If new defaulted keys are added to GlobalConfig (or its nested structs),
+	// they must be added here too, otherwise bootstrap material will be
+	// incomplete for sections that rely on them during initial seeding.
+	defaults := DefaultGlobalConfig()
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.port":         defaults.Hub.Port,
+		"server.hub.host":         defaults.Hub.Host,
+		"server.hub.admin_emails": defaults.Hub.AdminEmails,
+		"server.database.driver":  defaults.Database.Driver,
+		"server.database.url":     defaults.Database.URL,
+		"server.auth.dev_mode":    defaults.Auth.Enabled,
+		"server.auth.dev_token":   defaults.Auth.Token,
+		"server.storage.provider": defaults.Storage.Provider,
+		"server.secrets.backend":  defaults.Secrets.Backend,
+		"server.log_level":        defaults.LogLevel,
+	}, "."), nil)
+
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
 }
 
 // loadConfigPathFiles layers the --config location over k using the same

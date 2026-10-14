@@ -1958,6 +1958,88 @@ func TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault(t *testing.T) {
 	}
 }
 
+// TestGetServerConfigDB_SupersededKeyDefaultSource checks the source
+// reported for superseded keys with the unseeded and above-seed bootstraps
+// set, as startup does: a seed value equal to the coded default is
+// attributed to the seed layer, a settings.yaml value equal to the coded
+// default to settings.yaml, a key only the coded defaults set to the
+// defaults, and a public URL with both a seed and a settings.yaml value to
+// settings.yaml (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededKeyDefaultSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTTEMPLATE", "SCION_SERVER_DEFAULTHARNESSCONFIG",
+		"SCION_SEED_DEFAULTHARNESSCONFIG", "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SEED_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultsK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	defaultTemplate := defaultsK.String("default_template")
+	defaultHarnessConfig := defaultsK.String("default_harness_config")
+	if defaultTemplate == "" || defaultHarnessConfig == "" {
+		t.Fatalf("precondition: coded defaults should set default_template and default_harness_config, got %q and %q", defaultTemplate, defaultHarnessConfig)
+	}
+	if !defaultsK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the coded defaults should set server.hub.admin_emails")
+	}
+
+	// A seed value equal to the coded default.
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A settings.yaml value equal to the coded default.
+	settings := `schema_version: "1"
+default_harness_config: ` + defaultHarnessConfig + `
+server:
+  hub:
+    public_url: https://file.example.com
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	ops.SetAboveSeedBootstrap(config.LoadAboveSeedBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_template":"db-template","default_harness_config":"db-harness"}`), "managed")
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	for key, want := range map[string]string{
+		"default_template":        "seed_env", // seed value equal to the default
+		"default_harness_config":  "yaml",     // settings.yaml value equal to the default
+		"server.hub.admin_emails": "default",  // only the coded default
+		"server.hub.public_url":   "yaml",     // seed and settings.yaml
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := emptyKoanf()
