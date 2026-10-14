@@ -3402,18 +3402,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
-// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
-// plaintext together with verification or client certificate options, and
-// a client certificate without its key (or the reverse).
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings;
+// see ValidateTelemetryTLS.
 func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
-	clientCert := tls.CertFile != "" || tls.KeyFile != ""
-	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
-		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
-	}
-	if (tls.CertFile == "") != (tls.KeyFile == "") {
-		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
-	}
-	return nil
+	return ValidateTelemetryTLS(&api.TelemetryTLS{
+		Enabled:            tls.Enabled,
+		InsecureSkipVerify: tls.InsecureSkipVerify,
+		CAFile:             tls.CAFile,
+		CertFile:           tls.CertFile,
+		KeyFile:            tls.KeyFile,
+	})
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
