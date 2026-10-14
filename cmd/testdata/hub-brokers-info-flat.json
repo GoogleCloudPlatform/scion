@@ -71,6 +71,7 @@
             }
           ],
           "resources": {
+            "requests": {},
             "limits": {
               "memory": "8Gi"
             }
