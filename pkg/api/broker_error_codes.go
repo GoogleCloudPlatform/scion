@@ -64,7 +64,11 @@ const (
 
 	// BrokerErrCodeBrokerDraining marks a create, start or restart the
 	// broker refused because it is shutting down (503, with Retry-After).
-	// It was refused before any work, so nothing was created; retrying
+	// The handlers refuse at entry, before any work. An async create can
+	// also be refused later, in admission, after its start context (and
+	// so possibly its worktree) was prepared but before the launch was
+	// accepted, like the other pre-acceptance refusals (start_cancelled,
+	// prior_start_in_progress). Either way no agent was started; retrying
 	// shortly, against the restarted broker, is expected to succeed
 	// (ptone/scion#4668).
 	BrokerErrCodeBrokerDraining = "broker_draining"

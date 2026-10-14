@@ -15,7 +15,9 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -37,7 +40,7 @@ var journalAllowedKeys = map[string]bool{
 	"version": true, "launchId": true, "agentId": true, "kind": true, "runId": true,
 	"instanceId": true, "hubName": true, "ownerHub": true, "deadline": true, "seq": true,
 	"projectId": true, "slug": true, "agentName": true, "projectPath": true,
-	"hubProjectId": true, "sharedWorkspace": true, "runtimeName": true, "profile": true,
+	"hubProjectId": true, "sharedWorkspace": true, "runtimeName": true, "runtimeIdentity": true, "profile": true,
 	"ownedRun": true, "handles": true, "lastStep": true, "state": true, "terminal": true,
 }
 
@@ -192,47 +195,149 @@ func TestWriteJournalFile_UniqueTempNames(t *testing.T) {
 	assertMode(t, path, 0o600)
 }
 
-// TestAsyncCreate_JournalHoldsNoSecrets is C-AC6 end to end: an async create
-// whose request carries env values and secrets journals none of them, and
-// its record holds only allowlisted keys.
-func TestAsyncCreate_JournalHoldsNoSecrets(t *testing.T) {
-	mgr := newAsyncManager()
-	mgr.startBlock = make(chan struct{})
-	srv, _ := newAsyncTestServer(t, mgr)
-	t.Cleanup(func() {
-		// Let the launch finish before the temp dirs go.
-		close(mgr.startBlock)
-		waitUntil(t, 5*time.Second, func() bool { return registryEmpty(srv) })
-	})
-	if srv.launchJournal == nil {
-		t.Fatal("test server has no launch journal")
-	}
+// canaryManager is an async manager whose Start reports a resource and a
+// step through the launch hooks (with the canary in the step's message),
+// then blocks until ctx' ends, fails with the canary in its error, or
+// succeeds, by mode.
+type canaryManager struct {
+	*asyncManager
+	mode      string // "shutdown", "failed" or "succeeded"
+	canary    string
+	hooksDone chan struct{}
+}
 
-	const secret = "s3cr3t-journal-canary"
-	w := postCreate(t, srv, map[string]any{
-		"name": "agent-sec", "asyncLaunch": true, "launchId": "L-sec",
-		"launchTimeoutSeconds": 300,
-		"config":               map[string]any{"template": "claude", "env": []string{"PLAIN_KEY=" + secret + "-env"}},
-		"resolvedEnv":          map[string]string{"API_KEY": secret + "-resolved"},
-		"resolvedSecrets":      []map[string]string{{"name": "tok", "type": "environment", "target": "TOK", "value": secret + "-secret"}},
+func (m *canaryManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	opts.OnResourceCreated(api.ResourceHandle{Kind: "Pod", Namespace: "ns", Name: opts.Name, UID: "uid-canary"})
+	opts.Progress(api.LaunchStepContainerCreate, "pulling with "+m.canary)
+	close(m.hooksDone)
+	switch m.mode {
+	case "shutdown":
+		<-ctx.Done()
+		return nil, ctx.Err()
+	case "failed":
+		return nil, errors.New("runtime said " + m.canary)
+	default:
+		return &api.AgentInfo{ID: "c-canary", Name: opts.Name, Phase: "running", Runtime: "mock"}, nil
+	}
+}
+
+// assertJournalDirClean checks every file under the journal root: none
+// holds the canary, no temp file is left, and every record holds only
+// allowlisted keys.
+func assertJournalDirClean(t *testing.T, root, canary, when string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if strings.HasSuffix(path, ".tmp") {
+			t.Fatalf("%s: temp file left: %s", when, path)
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if strings.Contains(string(raw), canary) {
+			t.Fatalf("%s: %s contains request secret material: %s", when, path, raw)
+		}
+		if strings.HasSuffix(path, ".json") {
+			assertJournalKeysAllowed(t, raw)
+		}
+		return nil
 	})
-	if w.Code != 201 {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	if err != nil {
+		t.Fatalf("%s: walk %s: %v", when, root, err)
 	}
-	path := filepath.Join(srv.launchJournal.dir(), "L-sec.json")
-	var raw []byte
-	if !waitUntil(t, 2*time.Second, func() bool {
-		b, err := os.ReadFile(path)
-		raw = b
-		return err == nil
-	}) {
-		t.Fatalf("no journal record at %s", path)
+}
+
+// TestAsyncCreate_JournalHoldsNoSecrets is C-AC6 end to end, over every
+// journal write: an async create whose request carries env values and
+// secrets journals none of them in its admission record, its handle and
+// step writes, or its terminal_pending record (a shutdown broker_restarted,
+// a failure whose runtime error carries the canary, and a success with its
+// agent info), and every record holds only allowlisted keys.
+func TestAsyncCreate_JournalHoldsNoSecrets(t *testing.T) {
+	const canary = "s3cr3t-journal-canary"
+	cases := []struct {
+		mode     string
+		wantCode string
+		wantSucc bool
+	}{
+		{"shutdown", api.LaunchCodeBrokerRestarted, false},
+		{"failed", api.LaunchCodeRuntimeError, false},
+		{"succeeded", "", true},
 	}
-	if strings.Contains(string(raw), secret) {
-		t.Fatalf("journal record contains request secret material: %s", raw)
+	for _, c := range cases {
+		t.Run(c.mode, func(t *testing.T) {
+			mgr := &canaryManager{asyncManager: newAsyncManager(), mode: c.mode, canary: canary, hooksDone: make(chan struct{})}
+			srv, rtb := newAsyncTestServer(t, mgr)
+			srv.launchTimingOverride = fastLaunchTimings(fastTestKeepaliveInterval)
+			// Terminals are never answered, so terminal_pending stays on disk.
+			rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+				if req.State == hubclient.AgentLaunchReportStateFailed || req.State == hubclient.AgentLaunchReportStateSucceeded {
+					return nil, errors.New("simulated unreachable")
+				}
+				return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+			}
+			t.Cleanup(func() {
+				srv.DrainLaunches(context.Background(), time.Second)
+				waitUntil(t, 5*time.Second, func() bool { return registryEmpty(srv) })
+			})
+			if srv.launchJournal == nil {
+				t.Fatal("test server has no launch journal")
+			}
+
+			w := postCreate(t, srv, map[string]any{
+				"name": "agent-sec", "asyncLaunch": true, "launchId": "L-sec",
+				"launchTimeoutSeconds": 300,
+				"config":               map[string]any{"template": "claude", "env": []string{"PLAIN_KEY=" + canary + "-env"}},
+				"resolvedEnv":          map[string]string{"API_KEY": canary + "-resolved"},
+				"resolvedSecrets":      []map[string]string{{"name": "tok", "type": "environment", "target": "TOK", "value": canary + "-secret"}},
+			})
+			if w.Code != 201 {
+				t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+			}
+			path := filepath.Join(srv.launchJournal.dir(), "L-sec.json")
+			root := srv.launchJournal.root
+			select {
+			case <-mgr.hooksDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Start never ran its hooks")
+			}
+
+			if c.mode == "shutdown" {
+				// The handle and step writes.
+				if !waitUntil(t, 2*time.Second, func() bool {
+					jr, err := readJournalRecord(path)
+					return err == nil && jr.LastStep == api.LaunchStepContainerCreate && len(jr.Handles) == 1
+				}) {
+					t.Fatalf("the handle and step writes never landed: %+v", readJournalFileT(t, path))
+				}
+				assertJournalDirClean(t, root, canary, "launching")
+				assertMode(t, path, 0o600)
+			} else if !waitUntil(t, 2*time.Second, func() bool {
+				jr, err := readJournalRecord(path)
+				return err == nil && jr.State == "terminal_pending"
+			}) {
+				t.Fatal("the terminal was never journalled")
+			}
+
+			// End the launch; its undelivered terminal stays on disk.
+			srv.DrainLaunches(context.Background(), 300*time.Millisecond)
+			if !waitUntil(t, 5*time.Second, func() bool { return registryEmpty(srv) }) {
+				t.Fatal("the launch did not end after the drain")
+			}
+			jr := readJournalFileT(t, path)
+			if jr.State != "terminal_pending" || jr.Terminal == nil || jr.Terminal.Succeeded != c.wantSucc || jr.Terminal.ErrorCode != c.wantCode {
+				t.Fatalf("unexpected terminal record: %+v / %+v", jr, jr.Terminal)
+			}
+			if c.wantSucc && (jr.Terminal.AgentInfo == nil || jr.Terminal.AgentInfo.ID != "c-canary") {
+				t.Fatalf("the succeeded terminal lacks its agent info: %+v", jr.Terminal)
+			}
+			assertJournalDirClean(t, root, canary, "terminal_pending")
+			assertMode(t, path, 0o600)
+		})
 	}
-	assertJournalKeysAllowed(t, raw)
-	assertMode(t, path, 0o600)
 }
 
 // TestLaunchJournal_Ordering is C-T1b (design wave 3 §1 C-a, R4, Nit-3).
@@ -258,6 +363,75 @@ func TestLaunchJournal_Ordering(t *testing.T) {
 		jr := readJournalFileT(t, path)
 		if jr.State != "terminal_pending" || jr.Terminal == nil || jr.Terminal.ErrorCode != "runtime_error" {
 			t.Fatalf("terminal_pending was replaced by a later launching write: %+v", jr)
+		}
+	})
+
+	// (a) interleaved: a launching write held between its snapshot and its
+	// file write while the terminal is issued from another goroutine
+	// leaves terminal_pending on disk once both finish.
+	t.Run("launching write held across the terminal", func(t *testing.T) {
+		j, e, _, path := newEntry(t, "La2")
+		held := make(chan struct{})
+		release := make(chan struct{})
+		var calls atomic.Int32
+		j.testHookAfterSnapshot = func(_ *journalEntry, state journalState) {
+			if state == journalLaunching && calls.Add(1) == 1 {
+				close(held)
+				<-release
+			}
+		}
+		stepDone := make(chan struct{})
+		go func() { e.update(); close(stepDone) }()
+		<-held
+		termDone := make(chan struct{})
+		go func() { e.terminal(journalTerminal{ErrorCode: "runtime_error"}); close(termDone) }()
+		// Give a terminal that does not wait for the held write time to
+		// land first.
+		select {
+		case <-termDone:
+		case <-time.After(200 * time.Millisecond):
+		}
+		close(release)
+		<-stepDone
+		<-termDone
+		jr := readJournalFileT(t, path)
+		if jr.State != "terminal_pending" || jr.Terminal == nil || jr.Terminal.ErrorCode != "runtime_error" {
+			t.Fatalf("a launching write held across the terminal left %+v on disk", jr)
+		}
+	})
+
+	// (c) held snapshot: a handle added while the first write is held
+	// after its snapshot, and after a second write was already issued,
+	// is in the final file. The second write's snapshot must be taken
+	// under the entry lock, after the first write finished.
+	t.Run("handle added while a write is held", func(t *testing.T) {
+		j, e, rec, path := newEntry(t, "Lc2")
+		held := make(chan struct{})
+		release := make(chan struct{})
+		var calls atomic.Int32
+		j.testHookAfterSnapshot = func(_ *journalEntry, state journalState) {
+			if calls.Add(1) == 1 {
+				close(held)
+				<-release
+			}
+		}
+		rec.AddHandle(api.ResourceHandle{Kind: "Pod", Name: "h1", UID: "u1"})
+		first := make(chan struct{})
+		go func() { e.update(); close(first) }()
+		<-held
+		second := make(chan struct{})
+		go func() { e.update(); close(second) }()
+		select { // let the second write reach the point where it waits
+		case <-second:
+		case <-time.After(100 * time.Millisecond):
+		}
+		rec.AddHandle(api.ResourceHandle{Kind: "Secret", Name: "h2", UID: "u2"})
+		close(release)
+		<-first
+		<-second
+		jr := readJournalFileT(t, path)
+		if len(jr.Handles) != 2 {
+			t.Fatalf("a handle added while a write was held is missing from the final record: %+v", jr.Handles)
 		}
 	})
 
@@ -359,5 +533,39 @@ func TestLaunchJournal_LockContention(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("recovered record not removed: %v", err)
+	}
+}
+
+// TestLaunchJournal_OwnLockBrieflyHeld covers O3 of the C1 review: a
+// sibling's boot recovery holding this fresh instance's lock-only entry for
+// a moment (it finds no records and removes the entry) does not disable the
+// journal: open retries, and the launch is journalled.
+func TestLaunchJournal_OwnLockBrieflyHeld(t *testing.T) {
+	j, stateDir := newTestJournal(t, "inst-fresh")
+	root := filepath.Join(stateDir, journalDirName)
+	if err := mkdirPrivate(root); err != nil {
+		t.Fatal(err)
+	}
+	other, err := lockJournalInstance(root, "inst-fresh", false)
+	if err != nil {
+		t.Fatalf("test setup: take the lock as the sibling: %v", err)
+	}
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		// The sibling's recovery found no records: it removes the entry
+		// and releases the lock, as recoverInstance does.
+		_ = os.Remove(filepath.Join(root, "inst-fresh.lock"))
+		unlockJournalInstance(other)
+	}()
+	rec := newLaunchRecord("L-fresh", "agent-fresh", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+	if e := j.admit(rec, journalRecord{Slug: "agent-fresh", AgentName: "agent-fresh"}); e == nil {
+		t.Fatal("the journal gave up on a briefly held lock of its own instance")
+	}
+	if _, err := os.Stat(filepath.Join(root, "inst-fresh", "L-fresh.json")); err != nil {
+		t.Fatalf("launch not journalled: %v", err)
+	}
+	// The lock it holds is the one at the path.
+	if _, err := lockJournalInstance(root, "inst-fresh", true); err != errJournalLocked {
+		t.Fatalf("the journal does not hold its instance lock: %v", err)
 	}
 }

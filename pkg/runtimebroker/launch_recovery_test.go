@@ -117,7 +117,7 @@ func launchingRecord(id string) journalRecord {
 	return journalRecord{
 		LaunchID: id, AgentID: "agent-id-" + id, Kind: store.LaunchKindCreate, RunID: "run-" + id,
 		Deadline: time.Now().Add(5 * time.Minute), Seq: 3, ProjectID: "proj", Slug: "agent-" + id,
-		AgentName: "agent-" + id, LastStep: api.LaunchStepContainerCreate, State: journalLaunching.String(),
+		AgentName: "agent-" + id, RuntimeName: "mock", RuntimeIdentity: "mock", LastStep: api.LaunchStepContainerCreate, State: journalLaunching.String(),
 		Handles: []api.ResourceHandle{{Kind: "Pod", Namespace: "ns", Name: "agent-" + id, UID: "uid-" + id}},
 	}
 }
@@ -236,7 +236,7 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 			installRecoveryManager(srv, rtName, mgr)
 			rtb.launchReportFunc = appliedReports
 			jr := launchingRecord("L5")
-			jr.RuntimeName = rtName
+			jr.RuntimeName, jr.RuntimeIdentity = rtName, rtName
 			writeDeadRecord(t, srv, jr)
 			runRecovery(t, srv)
 			if d := mgr.Deleted(); len(d) != 0 {
@@ -249,7 +249,7 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 			installRecoveryManager(srv, rtName, mgr)
 			rtb.launchReportFunc = appliedReports
 			jr := launchingRecord("L5")
-			jr.RuntimeName = rtName
+			jr.RuntimeName, jr.RuntimeIdentity = rtName, rtName
 			writeDeadRecord(t, srv, jr)
 			runRecovery(t, srv)
 			if d := mgr.Deleted(); len(d) != 1 || d[0].ID != "c-run" || d[0].RunID != "run-L5" {
@@ -262,7 +262,7 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		jr := launchingRecord("L5x")
-		jr.RuntimeName = "podman"
+		jr.RuntimeName, jr.RuntimeIdentity = "podman", "podman"
 		path := writeDeadRecord(t, srv, jr)
 		runRecovery(t, srv)
 		if len(terminalReports(rtb)) != 1 {
@@ -288,7 +288,8 @@ func installRecoveryManager(srv *Server, rtName string, mgr agent.Manager) {
 		return
 	}
 	srv.auxiliaryRuntimesMu.Lock()
-	srv.auxiliaryRuntimes["aux-"+rtName] = auxiliaryRuntime{Runtime: &runtime.MockRuntime{NameFunc: func() string { return rtName }}, Manager: mgr}
+	rt := &runtime.MockRuntime{NameFunc: func() string { return rtName }}
+	srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(rt)] = auxiliaryRuntime{Runtime: rt, Manager: mgr}
 	srv.auxiliaryRuntimesMu.Unlock()
 }
 
@@ -306,6 +307,22 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		}
 		if cancelled || r.records[key] != holder {
 			t.Fatal("TryBegin disturbed the holder")
+		}
+	})
+
+	t.Run("synchronous start of the name in flight", func(t *testing.T) {
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = appliedReports
+		_, finish := srv.startsInFlight.begin(context.Background(), key)
+		defer finish()
+		writeDeadRecord(t, srv, launchingRecord("L9"))
+		runRecovery(t, srv)
+		if d := mgr.Deleted(); len(d) != 0 {
+			t.Fatalf("name-addressed delete ran while a start of the name was tracked: %+v", d)
+		}
+		if !registryEmpty(srv) {
+			t.Fatal("recovery left a registry slot")
 		}
 	})
 
@@ -462,5 +479,80 @@ func TestRecoverLaunches_DispatchAttemptReplay(t *testing.T) {
 	reports := terminalReports(rtb2)
 	if len(reports) != 1 || reports[0].LaunchID != "L-6" || reports[0].ErrorCode != api.LaunchCodeBrokerRestarted || reports[0].InstanceID != srv1.launchInstanceID {
 		t.Fatalf("expected failed{broker_restarted} for L-6 under the dead instance, got %+v", reports)
+	}
+}
+
+// TestRecoverLaunches_ResolvesRuntimeByIdentity covers R1 of the C1 review
+// (design wave 3 §1 C-c step 2): with two runtimes of one type (two
+// Kubernetes clusters), recovery cleans up on the one the launch ran on,
+// matched by its journalled identity, and never on the other; a launch
+// whose identity is unknown is cleaned up nowhere.
+func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
+	rtA := &runtime.KubernetesRuntime{DefaultNamespace: "ns-a"}
+	rtB := &runtime.KubernetesRuntime{DefaultNamespace: "ns-b"}
+	if auxiliaryRuntimeIdentity(rtA) == auxiliaryRuntimeIdentity(rtB) {
+		t.Fatal("test setup: the two runtimes must differ in identity")
+	}
+	setup := func(t *testing.T) (*Server, *mockRuntimeBrokerService, *recFakeManager, *recFakeManager) {
+		entry := api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"}
+		mgrA, mgrB := newRecFakeManager(entry), newRecFakeManager(entry)
+		srv, rtb := newAsyncTestServer(t, newAsyncManager())
+		srv.auxiliaryRuntimesMu.Lock()
+		srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(rtA)] = auxiliaryRuntime{Runtime: rtA, Manager: mgrA}
+		srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(rtB)] = auxiliaryRuntime{Runtime: rtB, Manager: mgrB}
+		srv.auxiliaryRuntimesMu.Unlock()
+		rtb.launchReportFunc = appliedReports
+		return srv, rtb, mgrA, mgrB
+	}
+
+	t.Run("launch on the second cluster", func(t *testing.T) {
+		srv, _, mgrA, mgrB := setup(t)
+		jr := launchingRecord("LK")
+		jr.RuntimeName, jr.RuntimeIdentity = "kubernetes", auxiliaryRuntimeIdentity(rtB)
+		writeDeadRecord(t, srv, jr)
+		runRecovery(t, srv)
+		if mgrB.CleanupCallCount() != 1 || len(mgrB.Deleted()) != 1 {
+			t.Fatalf("the launch's own cluster was not cleaned up (cleanup %d, deleted %+v)", mgrB.CleanupCallCount(), mgrB.Deleted())
+		}
+		if mgrA.CleanupCallCount() != 0 || len(mgrA.Deleted()) != 0 {
+			t.Fatalf("the other cluster of the same type was cleaned up (cleanup %d, deleted %+v)", mgrA.CleanupCallCount(), mgrA.Deleted())
+		}
+	})
+	t.Run("identity unknown", func(t *testing.T) {
+		srv, rtb, mgrA, mgrB := setup(t)
+		jr := launchingRecord("LK")
+		jr.RuntimeName, jr.RuntimeIdentity = "kubernetes", ""
+		writeDeadRecord(t, srv, jr)
+		runRecovery(t, srv)
+		if len(terminalReports(rtb)) != 1 {
+			t.Fatal("the launch was not reported")
+		}
+		if mgrA.CleanupCallCount()+mgrB.CleanupCallCount() != 0 || len(mgrA.Deleted())+len(mgrB.Deleted()) != 0 {
+			t.Fatal("recovery guessed a runtime for a launch of unknown identity")
+		}
+	})
+}
+
+// TestLaunchRuntimeIdentity covers the identity admission journals: an
+// AgentManager's own runtime, else the default or auxiliary runtime the
+// manager belongs to.
+func TestLaunchRuntimeIdentity(t *testing.T) {
+	srv, _ := newAsyncTestServer(t, newAsyncManager())
+	rtB := &runtime.KubernetesRuntime{DefaultNamespace: "ns-b"}
+	if got := srv.launchRuntimeIdentity(agent.NewManager(rtB)); got != auxiliaryRuntimeIdentity(rtB) {
+		t.Fatalf("AgentManager identity = %q, want %q", got, auxiliaryRuntimeIdentity(rtB))
+	}
+	if got := srv.launchRuntimeIdentity(srv.currentManager()); got != "mock" {
+		t.Fatalf("default manager identity = %q, want mock", got)
+	}
+	auxMgr := newAsyncManager()
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes|context=c|namespace=x"] = auxiliaryRuntime{Runtime: rtB, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+	if got := srv.launchRuntimeIdentity(auxMgr); got != "kubernetes|context=c|namespace=x" {
+		t.Fatalf("auxiliary manager identity = %q", got)
+	}
+	if got := srv.launchRuntimeIdentity(newAsyncManager()); got != "" {
+		t.Fatalf("unknown manager identity = %q, want empty", got)
 	}
 }

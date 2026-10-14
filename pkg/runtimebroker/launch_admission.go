@@ -171,6 +171,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		HubProjectID:    opts.HubProjectID,
 		SharedWorkspace: opts.SharedWorkspace,
 		RuntimeName:     runtimeName,
+		RuntimeIdentity: s.launchRuntimeIdentity(mgr),
 		Profile:         opts.Profile,
 	})
 

@@ -59,6 +59,10 @@ const (
 	// broker's user.
 	journalDirMode  os.FileMode = 0o700
 	journalFileMode os.FileMode = 0o600
+	// journalLockRetries and journalLockRetryDelay bound the retry of this
+	// instance's own lock (see open).
+	journalLockRetries    = 10
+	journalLockRetryDelay = 100 * time.Millisecond
 )
 
 // journalState is a record's state. Its order is the writer's rank: a write
@@ -109,23 +113,28 @@ type journalOwnedRun struct {
 // journalRecord is the on-disk record. It is an allowlist: every field is a
 // plain identifier, time, step name or the terminal the hub will be sent.
 type journalRecord struct {
-	Version         int                  `json:"version"`
-	LaunchID        string               `json:"launchId"`
-	AgentID         string               `json:"agentId"`
-	Kind            string               `json:"kind"`
-	RunID           string               `json:"runId,omitempty"`
-	InstanceID      string               `json:"instanceId"`
-	HubName         string               `json:"hubName,omitempty"`
-	OwnerHub        string               `json:"ownerHub,omitempty"`
-	Deadline        time.Time            `json:"deadline"`
-	Seq             int64                `json:"seq"`
-	ProjectID       string               `json:"projectId,omitempty"`
-	Slug            string               `json:"slug"`
-	AgentName       string               `json:"agentName"`
-	ProjectPath     string               `json:"projectPath,omitempty"`
-	HubProjectID    string               `json:"hubProjectId,omitempty"`
-	SharedWorkspace bool                 `json:"sharedWorkspace,omitempty"`
-	RuntimeName     string               `json:"runtimeName,omitempty"`
+	Version         int       `json:"version"`
+	LaunchID        string    `json:"launchId"`
+	AgentID         string    `json:"agentId"`
+	Kind            string    `json:"kind"`
+	RunID           string    `json:"runId,omitempty"`
+	InstanceID      string    `json:"instanceId"`
+	HubName         string    `json:"hubName,omitempty"`
+	OwnerHub        string    `json:"ownerHub,omitempty"`
+	Deadline        time.Time `json:"deadline"`
+	Seq             int64     `json:"seq"`
+	ProjectID       string    `json:"projectId,omitempty"`
+	Slug            string    `json:"slug"`
+	AgentName       string    `json:"agentName"`
+	ProjectPath     string    `json:"projectPath,omitempty"`
+	HubProjectID    string    `json:"hubProjectId,omitempty"`
+	SharedWorkspace bool      `json:"sharedWorkspace,omitempty"`
+	RuntimeName     string    `json:"runtimeName,omitempty"`
+	// RuntimeIdentity is the identity the broker keys the launch runtime by
+	// (auxiliaryRuntimeIdentity: the type, plus context and namespace for
+	// Kubernetes), so recovery resolves the same runtime, not merely one of
+	// the same type.
+	RuntimeIdentity string               `json:"runtimeIdentity,omitempty"`
 	Profile         string               `json:"profile,omitempty"`
 	OwnedRun        *journalOwnedRun     `json:"ownedRun,omitempty"`
 	Handles         []api.ResourceHandle `json:"handles,omitempty"`
@@ -207,8 +216,19 @@ func (j *launchJournal) open() error {
 	}
 	// The lock is taken before the record directory exists, so a booting
 	// process's recovery, which only acts on directories whose lock it can
-	// take, never sees this instance's records unlocked.
-	f, err := lockJournalInstance(j.root, j.instanceID, false)
+	// take, never sees this instance's records unlocked. A sibling's boot
+	// recovery may hold this fresh instance's lock-only entry for a moment
+	// (it finds no records and removes it), so contention is retried
+	// briefly before the journal is given up.
+	var f *os.File
+	var err error
+	for attempt := 0; ; attempt++ {
+		f, err = lockJournalInstance(j.root, j.instanceID, false)
+		if !errors.Is(err, errJournalLocked) || attempt >= journalLockRetries {
+			break
+		}
+		time.Sleep(journalLockRetryDelay)
+	}
 	if err != nil {
 		return err
 	}
@@ -302,8 +322,10 @@ type journalEntry struct {
 	mu sync.Mutex
 	// written is the highest state this entry has written.
 	written journalState
-	// lastStep is the step the last launching write recorded.
-	lastStep string
+	// lastStep is the step the last launching write recorded. Atomic, so
+	// the progress hook (stepChanged) never takes mu, which write holds
+	// across file I/O.
+	lastStep atomic.Pointer[string]
 
 	stepQueued atomic.Bool
 }
@@ -364,9 +386,11 @@ func (e *journalEntry) stepChanged() {
 	if s == nil {
 		return
 	}
-	e.mu.Lock()
-	same := s.LastStep() == e.lastStep
-	e.mu.Unlock()
+	last := ""
+	if p := e.lastStep.Load(); p != nil {
+		last = *p
+	}
+	same := s.LastStep() == last
 	if same || !e.stepQueued.CompareAndSwap(false, true) {
 		return
 	}
@@ -400,9 +424,6 @@ func (e *journalEntry) remove() {
 func (e *journalEntry) write(state journalState, t *journalTerminal) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.written == journalRemoved {
-		return false
-	}
 	if e.written == journalTerminalPending && state != journalRemoved {
 		return false
 	}
@@ -437,7 +458,8 @@ func (e *journalEntry) write(state journalState, t *journalTerminal) bool {
 	}
 	e.written = state
 	if state == journalLaunching {
-		e.lastStep = snap.LastStep
+		step := snap.LastStep
+		e.lastStep.Store(&step)
 	}
 	return true
 }

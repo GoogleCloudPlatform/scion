@@ -17,8 +17,10 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -214,28 +216,81 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 // recorded at create time, so a newer launch's objects are untouched), then
 // its name-addressed leftovers inside a registry slot.
 func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *launchRecord) {
-	mgr := s.recoveryManager(jr.RuntimeName)
+	mgr := s.recoveryManager(jr)
 	if mgr == nil {
 		s.agentLifecycleLog.Warn("Launch recovery: the launch's runtime is no longer configured; its resources are left for `scion delete`",
-			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName)
+			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName, "runtime_identity", jr.RuntimeIdentity)
 		return
 	}
 	s.cleanupLaunchResources(mgr, rec)
 	s.recoveryNameCleanup(ctx, mgr, jr, rec)
 }
 
-// recoveryManager resolves the manager of the runtime a launch ran on: the
-// default runtime, or an auxiliary runtime of that name. Nil if neither is
-// configured any more.
-func (s *Server) recoveryManager(runtimeName string) agent.Manager {
-	mgr, rt := s.defaultPair()
-	if s.isFlat() || runtimeName == "" || (rt != nil && rt.Name() == runtimeName) {
-		return mgr
+// recoveryManager resolves the manager of the exact runtime a launch ran on,
+// by the identity journalled at admission (auxiliaryRuntimeIdentity: for
+// Kubernetes the context and namespace too, so a broker with two clusters
+// never recovers a launch against the other one). It looks at the default
+// runtime, then the auxiliary runtimes (keyed by that identity), then
+// resolves the launch's profile and keeps the result only if its identity
+// matches. Nil when none matches, or when the launch's identity is unknown:
+// recovery then cleans up nothing rather than guess.
+func (s *Server) recoveryManager(jr *journalRecord) agent.Manager {
+	defMgr, defRT := s.defaultPair()
+	if s.isFlat() {
+		// A flat instance serves exactly one runtime target.
+		return defMgr
 	}
-	if aux, ok := s.findAuxiliaryRuntimeByType(runtimeName); ok {
+	id := jr.RuntimeIdentity
+	if id == "" {
+		return nil
+	}
+	if defRT != nil && auxiliaryRuntimeIdentity(defRT) == id {
+		return defMgr
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	aux, ok := s.auxiliaryRuntimes[id]
+	s.auxiliaryRuntimesMu.RUnlock()
+	if ok && aux.Manager != nil {
 		return aux.Manager
 	}
-	return nil
+	if jr.Profile == "" {
+		return nil
+	}
+	mgr, _, err := s.resolveManagerForOptsStrict(api.StartOptions{Name: jr.AgentName, ProjectPath: jr.ProjectPath, Profile: jr.Profile}, profileLenient, slog.LevelWarn)
+	if err != nil || mgr == nil || s.launchRuntimeIdentity(mgr) != id {
+		return nil
+	}
+	return mgr
+}
+
+// launchRuntimeIdentity returns the identity of the runtime behind mgr
+// (auxiliaryRuntimeIdentity), for the launch journal: the runtime of an
+// agent.AgentManager, else the default or auxiliary runtime mgr is the
+// manager of. "" if unknown.
+func (s *Server) launchRuntimeIdentity(mgr agent.Manager) string {
+	if mgr == nil {
+		return ""
+	}
+	if am, ok := mgr.(*agent.AgentManager); ok {
+		if am.Runtime == nil {
+			return ""
+		}
+		return auxiliaryRuntimeIdentity(am.Runtime)
+	}
+	if !reflect.TypeOf(mgr).Comparable() {
+		return ""
+	}
+	if defMgr, defRT := s.defaultPair(); defRT != nil && defMgr != nil && reflect.TypeOf(defMgr).Comparable() && defMgr == mgr {
+		return auxiliaryRuntimeIdentity(defRT)
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+	for id, aux := range s.auxiliaryRuntimes {
+		if aux.Manager != nil && reflect.TypeOf(aux.Manager).Comparable() && aux.Manager == mgr {
+			return id
+		}
+	}
+	return ""
 }
 
 // recoveryNameCleanup runs a recovered launch's name-addressed cleanup: the
