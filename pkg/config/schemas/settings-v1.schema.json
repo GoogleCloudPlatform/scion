@@ -1439,6 +1439,25 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS",
               "x-since": "1"
             },
+            "disable_ssh": {
+              "type": "boolean",
+              "description": "Turn off the agents' embedded SSH server (scion ssh, scion tunnel --ssh, ssh-config and VS Code Remote-SSH: shell, exec, sftp and SSH port and socket forwarding) while other conduit streams keep working. The hub refuses ssh streams, and agents started after the change do not serve them. Default false.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_DISABLESSH",
+              "x-since": "1"
+            },
+            "deny_ports": {
+              "type": "array",
+              "items": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "description": "Agent-local ports no tunnel may reach: TCP streams (scion tunnel --port), the port proxy (over conduit or the port-forward tunnel) and SSH direct-tcpip forwarding. It wins over exposed ports and tcp_allowed_ports. The hub refuses these ports, and agents refuse them too. It restricts forwarding only: a shell or attached terminal in the agent is not restricted by it. The env var takes a comma-separated list.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_DENYPORTS",
+              "x-since": "1"
+            },
+            "disable_ssh_socket_forwarding": {
+              "type": "boolean",
+              "description": "Refuse SSH Unix socket forwarding (direct-streamlocal) to every agent-local socket. Applied by agents started after the change. It restricts forwarding only: a shell or attached terminal in the agent is not restricted by it. Default false.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_DISABLESSHSOCKETFORWARDING",
+              "x-since": "1"
+            },
             "internal_listen": {
               "type": "string",
               "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",

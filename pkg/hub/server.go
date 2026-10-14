@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -126,6 +127,9 @@ type ServerConfig struct {
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
 	ConduitTCPAllowedPorts []int
+	// ConduitPolicy is server.hub.conduit.disable_ssh, deny_ports and
+	// disable_ssh_socket_forwarding, also sent to agents.
+	ConduitPolicy conduit.Policy
 	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
 	// is published before it signs (default 15m). It must be at least the
 	// maximum interval at which grant targets refresh their key set
@@ -4701,6 +4705,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
+	dispatcher.SetConduitPolicyProvider(s.conduitAgentPolicy)
 
 	// Set image registry so bare image names are rewritten before dispatch.
 	// It is read per dispatch, so a saved image_registry applies to the

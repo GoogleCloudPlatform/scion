@@ -40,6 +40,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -106,6 +107,9 @@ type Config struct {
 	// seam; default: the helper at HelperPath). It is only ever called
 	// with a path that passed the profile.
 	DialUnix func(ctx context.Context, path string) (net.Conn, error)
+	// Policy restricts forwarding destinations only; a shell or exec can
+	// reach any local service itself.
+	Policy conduit.Policy
 }
 
 // NewHostKey generates an ed25519 host key.

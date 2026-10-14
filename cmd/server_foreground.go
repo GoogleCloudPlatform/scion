@@ -2437,6 +2437,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
+		ConduitPolicy:                conduitPolicySetting(cfg),
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),

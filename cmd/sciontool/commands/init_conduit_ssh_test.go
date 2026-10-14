@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
@@ -105,6 +106,37 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			t.Fatalf("%d status POSTs with conduit disabled, want none", len(posts))
 		}
 	})
+	// A policy sciontool cannot parse fails closed.
+	for name, raw := range map[string]string{"ssh disabled by policy": `{"disable_ssh":true}`, "malformed policy": `{`} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(hub.SetTokenHome(t.TempDir()))
+			n := countSSHBuilds(t)
+			h := newPFHub(t, true)
+			client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
+			env := map[string]string{
+				conduit.EnvHubExperiments: conduit.ExperimentConduit,
+				envProjectID:              "project-1",
+				conduit.EnvLaunchID:       "launch-1",
+				core.EnvPolicy:            raw,
+			}
+			getenv := func(k string) string { return env[k] }
+			if ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv); ssh != nil || n.Load() != 0 {
+				t.Fatal("SSH server prepared with ssh disabled by policy")
+			}
+			if posts := h.statusPosts(); len(posts) != 0 {
+				t.Fatalf("%d status POSTs with ssh disabled, want none", len(posts))
+			}
+			runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, getenv))
+			select {
+			case hello := <-h.hellos:
+				if kinds := hello.GetCapabilities().GetStreamKinds(); slices.Contains(kinds, grant.StreamKindSSH) || !slices.Contains(kinds, grant.StreamKindTCP) {
+					t.Fatalf("Hello stream kinds %v, want tcp without ssh", kinds)
+				}
+			case <-time.After(pfWait):
+				t.Fatal("no conduit Hello with ssh disabled")
+			}
+		})
+	}
 	t.Run("conduit on", func(t *testing.T) {
 		t.Cleanup(hub.SetTokenHome(t.TempDir()))
 		n := countSSHBuilds(t)
@@ -114,11 +146,15 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			conduit.EnvHubExperiments: conduit.ExperimentConduit,
 			envProjectID:              "project-1",
 			conduit.EnvLaunchID:       "launch-1",
+			core.EnvPolicy:            `{"deny_ports":[9999]}`,
 		}
 		getenv := func(k string) string { return env[k] }
 		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
 		if ssh == nil {
 			t.Fatal("no SSH server with conduit on")
+		}
+		if !ssh.Policy.PortDenied(9999) {
+			t.Fatal("SSH server did not get the operator policy")
 		}
 		if got := n.Load(); got != 1 {
 			t.Fatalf("SSH server built %d times, want 1", got)

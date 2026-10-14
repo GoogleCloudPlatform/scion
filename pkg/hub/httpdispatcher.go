@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -241,6 +242,8 @@ type HTTPAgentDispatcher struct {
 	// change broker or agent behaviour, read once on every create, start
 	// and restart dispatch. Nil provider = none sent.
 	dispatchExperimentsProvider func() []string
+	// conduitPolicyProvider returns the agent conduit policy value, "" for none.
+	conduitPolicyProvider func() string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -361,6 +364,22 @@ func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, d
 	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
+// applyConduitPolicy sets or removes conduit.EnvPolicy. The hub owns
+// the variable so a project or template cannot relax the policy.
+func (d *HTTPAgentDispatcher) applyConduitPolicy(env map[string]string, cls *map[string]api.EnvKind) {
+	policy := ""
+	if d.conduitPolicyProvider != nil {
+		policy = d.conduitPolicyProvider()
+	}
+	if policy == "" {
+		delete(env, conduit.EnvPolicy)
+		delete(*cls, conduit.EnvPolicy)
+		return
+	}
+	env[conduit.EnvPolicy] = policy
+	classifyEnv(cls, conduit.EnvPolicy, api.EnvKindPlain)
+}
+
 // SetSecretBackend sets the secret backend for resolving secrets.
 func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 	d.secretBackend = b
@@ -450,6 +469,11 @@ func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool)
 // (applyAgentExperiments).
 func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
 	d.dispatchExperimentsProvider = fn
+}
+
+// SetConduitPolicyProvider sets the source of the agent conduit policy.
+func (d *HTTPAgentDispatcher) SetConduitPolicyProvider(fn func() string) {
+	d.conduitPolicyProvider = fn
 }
 
 // dispatchExperiments returns the enabled dispatch experiments, or nil.
@@ -1298,6 +1322,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		req.ResolvedEnv = make(map[string]string)
 	}
 	applyAgentExperiments(req.ResolvedEnv, &req.EnvClassifications, experiments)
+	d.applyConduitPolicy(req.ResolvedEnv, &req.EnvClassifications)
 
 	resolvedSkillsCount := 0
 	if req.PreResolvedSkills != nil {
@@ -3403,6 +3428,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Read once: DispatchAgentStart/Restart send the same set to the broker.
 	experiments := d.dispatchExperiments()
 	applyAgentExperiments(resolvedEnv, &envClassifications, experiments)
+	d.applyConduitPolicy(resolvedEnv, &envClassifications)
 
 	return startEnvResult{
 		env:             resolvedEnv,

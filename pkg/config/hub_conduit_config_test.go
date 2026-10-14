@@ -83,6 +83,7 @@ func TestHubConduitConfig_Validate(t *testing.T) {
 			wantErr: []string{"stream_authz_max.user", "stream_authz_max.broker", "stream_authz_max.agent"}},
 		{name: "port out of range", cfg: HubConduitConfig{TCPAllowedPorts: []int{0, 65536}}, wantErr: []string{"port 0 is outside", "port 65536 is outside"}},
 		{name: "port duplicated", cfg: HubConduitConfig{TCPAllowedPorts: []int{22, 22}}, wantErr: []string{"port 22 is listed twice"}},
+		{name: "deny port out of range", cfg: HubConduitConfig{DenyPorts: []int{0, 65536}}, wantErr: []string{"deny_ports: port 0 is outside", "deny_ports: port 65536 is outside"}},
 		{name: "listen without port", cfg: HubConduitConfig{InternalListen: "10.0.0.5"}, wantErr: []string{"internal_listen"}},
 		{name: "listen bad port", cfg: HubConduitConfig{InternalListen: "10.0.0.5:http"}, wantErr: []string{"internal_listen"}},
 		{name: "listen port too big", cfg: HubConduitConfig{InternalListen: ":70000"}, wantErr: []string{"internal_listen"}},
@@ -187,6 +188,9 @@ func TestHubConduitConfig_IsZero(t *testing.T) {
 	for name, c := range map[string]HubConduitConfig{
 		"activation": {GrantKeyActivation: "1m"},
 		"ports":      {TCPAllowedPorts: []int{22}},
+		"no ssh":     {DisableSSH: true},
+		"deny ports": {DenyPorts: []int{9999}},
+		"no sockets": {DisableSSHSocketForwarding: true},
 		"listen":     {InternalListen: ":1"},
 		"advertise":  {InternalAdvertise: "http://h:1"},
 		"peer auth":  {PeerAuth: "hmac"},
@@ -209,6 +213,7 @@ func TestConduitConfig_V1RoundTrip(t *testing.T) {
 	gc := &GlobalConfig{}
 	gc.Hub.Conduit = HubConduitConfig{
 		GrantKeyActivation: "20m", TCPAllowedPorts: []int{22, 8080}, InternalListen: ":9810",
+		DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true,
 		InternalAdvertise: "http://10.0.0.5:9810", PeerAuth: "oidc",
 		PeerServiceAccounts: []string{"hub@p.iam.gserviceaccount.com"}, PeerAudience: "aud", ReconnectWindow: "7s",
 		InstanceID: "hub-0", AuthzRecheckInterval: "45s", LifetimeCap: "1800s", ShutdownGrace: "10s",
@@ -248,6 +253,9 @@ server:
     conduit:
       grant_key_activation: 20m
       tcp_allowed_ports: [22, 3000]
+      disable_ssh: true
+      deny_ports: [9999]
+      disable_ssh_socket_forwarding: true
       internal_listen: ":9810"
       peer_auth: hmac
       reconnect_window: 3s
@@ -263,6 +271,9 @@ server:
 	c := cfg.Hub.Conduit
 	assert.Equal(t, "20m", c.GrantKeyActivation)
 	assert.Equal(t, []int{22, 3000}, c.TCPAllowedPorts)
+	assert.True(t, c.DisableSSH)
+	assert.Equal(t, []int{9999}, c.DenyPorts)
+	assert.True(t, c.DisableSSHSocketForwarding)
 	assert.Equal(t, ":9810", c.InternalListen)
 	assert.Equal(t, "hmac", c.PeerAuth)
 	assert.Equal(t, "3s", c.ReconnectWindow)
@@ -318,6 +329,17 @@ server:
 		}
 	})
 
+	t.Run("deny env vars", func(t *testing.T) {
+		t.Setenv(conduitSchemaEnvVar(t, "disable_ssh"), "false")
+		t.Setenv(conduitSchemaEnvVar(t, "deny_ports"), "9999, 9000")
+		t.Setenv(conduitSchemaEnvVar(t, "disable_ssh_socket_forwarding"), "false")
+		cfg, err := LoadGlobalConfig(configPath)
+		require.NoError(t, err)
+		assert.False(t, cfg.Hub.Conduit.DisableSSH)
+		assert.Equal(t, []int{9999, 9000}, cfg.Hub.Conduit.DenyPorts)
+		assert.False(t, cfg.Hub.Conduit.DisableSSHSocketForwarding)
+	})
+
 	t.Run("authz recheck interval env", func(t *testing.T) {
 		t.Setenv(conduitSchemaEnvVar(t, "authz_recheck_interval"), "15s")
 		cfg, err := LoadGlobalConfig(configPath)
@@ -359,10 +381,12 @@ func TestConduitListKeysSplit(t *testing.T) {
 		require.NoError(t, k.Load(confmap.Provider(map[string]interface{}{
 			"server.hub.conduit.peer_service_accounts": "a@p.iam.gserviceaccount.com, b@p.iam.gserviceaccount.com",
 			"server.hub.conduit.tcp_allowed_ports":     "22,3000",
+			"server.hub.conduit.deny_ports":            "9999,9000",
 		}, "."), nil))
 		splitKoanfListKeys(k, keys)
 		assert.Equal(t, []string{"a@p.iam.gserviceaccount.com", "b@p.iam.gserviceaccount.com"}, k.Strings("server.hub.conduit.peer_service_accounts"))
 		assert.Equal(t, []int{22, 3000}, k.Ints("server.hub.conduit.tcp_allowed_ports"))
+		assert.Equal(t, []int{9999, 9000}, k.Ints("server.hub.conduit.deny_ports"))
 	}
 }
 

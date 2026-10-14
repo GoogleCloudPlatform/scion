@@ -156,6 +156,8 @@ type Options struct {
 	// §3.8). When nil the agent neither advertises nor serves the ssh
 	// kind. New validates it.
 	SSH *sshd.Config
+	// Policy is the operator's conduit policy for TCP streams.
+	Policy core.Policy
 	// OnSession is called after each session is admitted. Optional.
 	OnSession func(*conduitv1.Welcome)
 	// OnEnd is called after each attempt or session ends with the

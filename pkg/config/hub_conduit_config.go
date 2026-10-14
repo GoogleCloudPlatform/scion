@@ -89,6 +89,13 @@ type HubConduitConfig struct {
 	// grant may target besides the agent's exposed ports. The reserved
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcpAllowedPorts,omitempty" yaml:"tcpAllowedPorts,omitempty" koanf:"tcpAllowedPorts"`
+	// DisableSSH turns off the agents' SSH server; other streams still work.
+	DisableSSH bool `json:"disableSsh,omitempty" yaml:"disableSsh,omitempty" koanf:"disableSsh"`
+	// DenyPorts are agent-local ports no tunnel may reach; they win over
+	// exposed ports and TCPAllowedPorts.
+	DenyPorts []int `json:"denyPorts,omitempty" yaml:"denyPorts,omitempty" koanf:"denyPorts"`
+	// DisableSSHSocketForwarding refuses SSH Unix socket forwarding.
+	DisableSSHSocketForwarding bool `json:"disableSshSocketForwarding,omitempty" yaml:"disableSshSocketForwarding,omitempty" koanf:"disableSshSocketForwarding"`
 	// InternalListen is the host:port of the internal relay API listener
 	// ("" = none). It must be reachable only inside the cluster/VPC; TLS
 	// on the internal hop is recommended (http:// is accepted).
@@ -163,7 +170,8 @@ type ConduitStreamAuthzMax struct {
 
 // IsZero reports whether nothing is configured.
 func (c HubConduitConfig) IsZero() bool {
-	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
+	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && !c.DisableSSH &&
+		len(c.DenyPorts) == 0 && !c.DisableSSHSocketForwarding && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
 		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero()
@@ -346,6 +354,11 @@ func (c HubConduitConfig) Validate() error {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.tcp_allowed_ports: port %d is listed twice", p))
 		}
 		seen[p] = true
+	}
+	for _, p := range c.DenyPorts {
+		if p < 1 || p > 65535 {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.deny_ports: port %d is outside 1-65535", p))
+		}
 	}
 	if c.InternalListen != "" {
 		_, port, err := net.SplitHostPort(c.InternalListen)

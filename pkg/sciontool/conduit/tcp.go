@@ -120,6 +120,9 @@ func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps co
 		return ps.Reject(core.CloseForbidden, reason)
 	}
 	port, err := TCPTarget(open.GetParams())
+	if err == nil && a.opts.Policy.PortDenied(port) {
+		err = fmt.Errorf("tcp port %d is denied by the operator policy", port)
+	}
 	if err != nil {
 		log.Warn("Conduit: refused TCP stream %d: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reasonForbidden)

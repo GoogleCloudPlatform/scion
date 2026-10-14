@@ -1953,6 +1953,12 @@ type V1ServerHubConduitConfig struct {
 	// grant may target besides the agent's exposed ports. The reserved
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
+	// DisableSSH turns off the agents' SSH server; other streams still work.
+	DisableSSH bool `json:"disable_ssh,omitempty" yaml:"disable_ssh,omitempty" koanf:"disable_ssh"`
+	// DenyPorts are agent-local ports no tunnel may reach, even if allowed.
+	DenyPorts []int `json:"deny_ports,omitempty" yaml:"deny_ports,omitempty" koanf:"deny_ports"`
+	// DisableSSHSocketForwarding refuses SSH Unix socket forwarding.
+	DisableSSHSocketForwarding bool `json:"disable_ssh_socket_forwarding,omitempty" yaml:"disable_ssh_socket_forwarding,omitempty" koanf:"disable_ssh_socket_forwarding"`
 	// InternalListen is the host:port of the internal relay API listener.
 	// It must be reachable only inside the cluster/VPC. TLS on the
 	// internal hop is recommended (a service mesh or TLS-terminating proxy,
@@ -3975,12 +3981,14 @@ func versionedEnvKeyMapper(s string) string {
 var conduitV1EnvListKeys = []string{
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+	"server.hub.conduit.deny_ports",
 }
 
 // knownCompoundFields lists multi-word snake_case field names used in server config.
 // These must be recognized as single fields rather than split into nested keys.
 // IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
 var knownCompoundFields = []string{
+	"disable_ssh_socket_forwarding",
 	"start_create_unconfirmed_hold",
 	"response_header_timeout",
 	"require_trusted_proxy_ip",
@@ -4003,7 +4011,9 @@ var knownCompoundFields = []string{
 	"shutdown_grace",
 	"peer_audience",
 	"lifetime_cap",
+	"disable_ssh",
 	"instance_id",
+	"deny_ports",
 	"port_proxy",
 	"peer_auth",
 	"authorized_domains",
@@ -4374,6 +4384,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.Conduit = HubConduitConfig{
 				GrantKeyActivation:   c.GrantKeyActivation,
 				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+				DisableSSH:           c.DisableSSH,
+				DenyPorts:            append([]int(nil), c.DenyPorts...),
 				InternalListen:       c.InternalListen,
 				InternalAdvertise:    c.InternalAdvertise,
 				PeerAuth:             c.PeerAuth,
@@ -4386,6 +4398,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				ShutdownGrace:        c.ShutdownGrace,
 				ProxySessionMaxAge:   c.ProxySessionMaxAge,
 			}
+			gc.Hub.Conduit.DisableSSHSocketForwarding = c.DisableSSHSocketForwarding
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 			}
@@ -4737,6 +4750,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
 			GrantKeyActivation:   c.GrantKeyActivation,
 			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
+			DisableSSH:           c.DisableSSH,
+			DenyPorts:            append([]int(nil), c.DenyPorts...),
 			InternalListen:       c.InternalListen,
 			InternalAdvertise:    c.InternalAdvertise,
 			PeerAuth:             c.PeerAuth,
@@ -4749,6 +4764,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			ShutdownGrace:        c.ShutdownGrace,
 			ProxySessionMaxAge:   c.ProxySessionMaxAge,
 		}
+		v1Hub.Conduit.DisableSSHSocketForwarding = c.DisableSSHSocketForwarding
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
 		}

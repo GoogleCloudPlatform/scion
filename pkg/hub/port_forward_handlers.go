@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -402,6 +403,17 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 				"The requested port is not exposed on this agent.")
 		} else {
 			NotFound(w, "Port")
+		}
+		return
+	}
+	// Checked here too: the port-forward tunnel below applies no operator
+	// policy at its agent end.
+	if slices.Contains(s.config.ConduitPolicy.DenyPorts, exposed.Port) {
+		if isBrowserRequest(r) {
+			writeProxyErrorHTML(w, http.StatusForbidden, "Port Not Available",
+				"The operator does not allow access to this port.")
+		} else {
+			Forbidden(w)
 		}
 		return
 	}

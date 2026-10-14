@@ -382,8 +382,8 @@ type conduitUserStreamAuthz struct {
 // The tunnel open path and every re-check of an open user stream decide
 // with it, so a re-check evaluates the same authorization as the open:
 // the principal (a user identity, by its id), the user-status rule
-// (conduitUserStatus), every action conduitStreamActions requires, and for
-// tcp the agent-local target port.
+// (conduitUserStatus), every action conduitStreamActions requires, for ssh
+// that disable_ssh is off, and for tcp the agent-local target port.
 //
 // It returns conduitAuthzAllowed, conduitAuthzDenied or
 // conduitAuthzUnavailable, the re-check's reason, and the cause: a deny by
@@ -418,6 +418,10 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			}
 			return conduitAuthzDenied, "permission no longer held", err
 		}
+	}
+	// An agent started before disable_ssh was set may still serve ssh.
+	if req.Kind == grant.StreamKindSSH && s.config.ConduitPolicy.DisableSSH {
+		return conduitAuthzDenied, "ssh disabled", fmt.Errorf("%w: ssh is disabled by server.hub.conduit.disable_ssh", errConduitForbidden)
 	}
 	if req.Kind == grant.StreamKindTCP {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {

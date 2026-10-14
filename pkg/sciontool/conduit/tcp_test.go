@@ -240,3 +240,19 @@ func TestAgentTCPReservedPortsBothFamilies(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentTCPPolicyDeniedPort: refused with 4403 before any dial.
+func TestAgentTCPPolicyDeniedPort(t *testing.T) {
+	key := newTestKey(t, "k1")
+	h := newFakeHub(t, key.public)
+	startAgent(t, h, func(o *Options) {
+		o.Policy = core.Policy{DenyPorts: []int{9999}}
+		o.DialLocal = func(_ context.Context, _, addr string) (net.Conn, error) {
+			t.Errorf("DialLocal(%s) called for a denied port", addr)
+			return nil, net.ErrClosed
+		}
+	})
+	s := h.nextSession(t)
+	_, err := s.OpenStream(context.Background(), tcpOpen(t, key, s.Info(), "launch-1", 9999))
+	wantRefusal(t, err, core.CloseForbidden, reasonForbidden)
+}
