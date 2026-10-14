@@ -268,18 +268,18 @@ func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
 	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
 
-	before := catalogView(t, globalDir, []string{"gke"})
-	after := catalogView(t, globalDir, []string{})
+	oneStored := catalogView(t, globalDir, []string{"gke"})
+	unmanaged := catalogView(t, globalDir, []string{})
 	for _, name := range []string{"gke", "local-nfs", "local", "remote"} {
-		if !hasProfile(after, name) {
+		if !hasProfile(unmanaged, name) {
 			t.Fatalf("after with an empty stored set lacks %q: the global overlay was applied", name)
 		}
 	}
-	if before.activeProfileFallbackFrom == nil || *before.activeProfileFallbackFrom != "local" {
-		t.Fatalf("before lost the configured active_profile: fallback from %v, want \"local\"", before.activeProfileFallbackFrom)
+	if oneStored.activeProfileFallbackFrom == nil || *oneStored.activeProfileFallbackFrom != "local" {
+		t.Fatalf("the one-profile view lost the configured active_profile: fallback from %v, want \"local\"", oneStored.activeProfileFallbackFrom)
 	}
-	// The change from the unmanaged view to the one-profile stored set.
-	got := CheckProfileCatalog(before, after, catalogOrigins(t, globalDir), nil, map[string]int{"": 2})
+	// The change from the unmanaged view (before) to the one-profile stored set (after).
+	got := CheckProfileCatalog(oneStored, unmanaged, catalogOrigins(t, globalDir), nil, map[string]int{"": 2})
 	want := []ProfileCatalogFinding{
 		{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
 		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
