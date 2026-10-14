@@ -120,17 +120,14 @@ func ensureDeriveHC(t *testing.T, srv *Server, s store.Store) *store.HarnessConf
 	return hc
 }
 
+// finalizeHCManifest stages files under a fresh upload ID, as the upload
+// URLs do, and finalizes that upload with them as the full manifest.
 func finalizeHCManifest(t *testing.T, srv *Server, hc *store.HarnessConfig, files map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	stor := srv.GetStorage()
-	manifest := make([]map[string]interface{}, 0, len(files))
-	for p, c := range files {
-		_, err := stor.Upload(context.Background(), hc.StoragePath+"/"+p, strings.NewReader(c), storage.UploadOptions{})
-		require.NoError(t, err)
-		manifest = append(manifest, map[string]interface{}{"path": p, "size": len(c), "hash": commitFileHash(c)})
-	}
+	uploadID, manifest := stageHCUpload(t, srv, hc, files)
 	return doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", map[string]interface{}{
 		"manifest": map[string]interface{}{"version": "1.0", "files": manifest},
+		"uploadId": uploadID,
 	})
 }
 
@@ -185,17 +182,14 @@ var harnessConfigCommitPaths = []commitPath{
 		return globalHC(t, s, deriveHCName)
 	}},
 	{"repair", func(t *testing.T, srv *Server, s store.Store, yaml string) *store.HarnessConfig {
-		hc := globalHC(t, s, deriveHCName)
-		if hc == nil {
-			hc = ensureDeriveHC(t, srv, s)
-			rec := finalizeHCManifest(t, srv, hc, map[string]string{"config.yaml": "name: derive-hc\nharness: claude\nmodel: seed\n"})
-			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-			hc = globalHC(t, s, deriveHCName)
-		}
-		// Change the stored object under the row, as an interrupted
-		// upload or a manual storage edit would, then repair.
-		_, err := srv.GetStorage().Upload(context.Background(), hc.StoragePath+"/config.yaml", strings.NewReader(yaml), storage.UploadOptions{})
-		require.NoError(t, err)
+		// Repair from storage only rewrites legacy rows (a blob row's
+		// content cannot drift). Put the row in the legacy layout with a
+		// stored config.yaml that differs from its manifest, as an
+		// interrupted upload or a manual storage edit would, then repair.
+		hc := ensureDeriveHC(t, srv, s)
+		hc = resetHCToLegacy(t, srv, s, hc,
+			map[string]string{"config.yaml": "name: derive-hc\nharness: claude\nmodel: seed\n"},
+			map[string]string{"config.yaml": yaml})
 		require.NoError(t, srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{ID: hc.ID}))
 		return globalHC(t, s, deriveHCName)
 	}},
@@ -348,15 +342,18 @@ func TestHarnessConfigBootstrap_UnusableProvisionerWarnsAndSkips(t *testing.T) {
 func TestHarnessConfigRepair_UnusableProvisionerLeavesRowAndStorage(t *testing.T) {
 	srv, s, stor := newHCCommitTestServer(t)
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
-	_, err := stor.Upload(context.Background(), hc.StoragePath+"/config.yaml", strings.NewReader(unusableHCYAML), storage.UploadOptions{})
-	require.NoError(t, err)
+	// A legacy row whose stored config.yaml was replaced by an unusable one.
+	hc = resetHCToLegacy(t, srv, s, hc,
+		map[string]string{"config.yaml": deriveFullYAML},
+		map[string]string{"config.yaml": unusableHCYAML})
 	snap := storageSnapshot(stor)
 
-	err = srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{ID: hc.ID})
+	err := srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{ID: hc.ID})
 	require.Error(t, err)
 
 	after := globalHC(t, s, deriveHCName)
 	assert.Equal(t, hc.ContentHash, after.ContentHash)
+	assert.Equal(t, "", after.Layout, "the refused repair does not migrate the row")
 	assertDerivedFrom(t, after, deriveFullYAML)
 	assert.True(t, maps.EqualFunc(snap, storageSnapshot(stor), bytes.Equal), "repair must not change storage")
 }
@@ -427,18 +424,17 @@ func TestHarnessConfigReimport_UpdatesRowByIDAfterSlugRename(t *testing.T) {
 
 // Acceptance 5: two finalizes that read the same row give exactly one 409.
 func TestHarnessConfigFinalize_ConcurrentCommitsGiveOneConflict(t *testing.T) {
-	srv, s, stor := newHCCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
 	stale := *hc
 
 	finalize := func(content string) *httptest.ResponseRecorder {
 		read := stale // both requests read the row before either wrote
-		_, err := stor.Upload(context.Background(), hc.StoragePath+"/config.yaml", strings.NewReader(content), storage.UploadOptions{})
-		require.NoError(t, err)
+		uploadID, manifest := stageHCUpload(t, srv, hc, map[string]string{"config.yaml": content})
 		body, _ := json.Marshal(map[string]interface{}{"manifest": map[string]interface{}{
 			"version": "1.0",
-			"files":   []map[string]interface{}{{"path": "config.yaml", "size": len(content), "hash": commitFileHash(content)}},
-		}})
+			"files":   manifest,
+		}, "uploadId": uploadID})
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -529,16 +525,17 @@ func TestHarnessConfigFileDelete_ConfigYAMLRefused(t *testing.T) {
 	}
 	assert.Equal(t, before.ContentHash, globalHC(t, s, deriveHCName).ContentHash)
 
-	// Another file still deletes through the commit, and its object goes
-	// only after the row no longer lists it.
+	// Another file still deletes through the commit. Its blob stays for
+	// in-flight hydrations until the blob garbage collector removes it
+	// (ptone/scion#4219 part 2).
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+hc.ID+"/files/extra.txt", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	after := globalHC(t, s, deriveHCName)
 	require.Len(t, after.Files, 1)
 	assertDerivedFrom(t, after, deriveFullYAML)
-	exists, err := srv.GetStorage().Exists(context.Background(), hc.StoragePath+"/extra.txt")
+	exists, err := srv.GetStorage().Exists(context.Background(), hcBlobPath(after, "x"))
 	require.NoError(t, err)
-	assert.False(t, exists)
+	assert.True(t, exists, "a commit never deletes a blob")
 }
 
 // Acceptance 7: a clone re-derives Harness and Config from the copied files
@@ -647,9 +644,8 @@ func TestHarnessConfigBootstrap_RetriesOnceOnConflict(t *testing.T) {
 	other.ContentHash = "sha256:other-commit"
 	require.NoError(t, setHarnessConfigContentForTest(ctx, s, &other))
 
+	// The retry writes the new blob from the directory.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
-	_, err = srv.GetStorage().Upload(ctx, row.StoragePath+"/config.yaml", strings.NewReader(deriveFullYAML), storage.UploadOptions{})
-	require.NoError(t, err)
 	rec.Files = []store.TemplateFile{{Path: "config.yaml", Size: int64(len(deriveFullYAML)), Hash: commitFileHash(deriveFullYAML)}}
 	rec.Status = store.HarnessConfigStatusActive
 	require.NoError(t, p.Update(ctx, rec, filepath.Join(dir, deriveHCName)))
@@ -712,8 +708,8 @@ func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testin
 	require.Len(t, before.Files, 2)
 
 	// The new directory drops extra.txt. A bootstrap that loses the
-	// compare-and-swap must not reconcile storage to its directory: the row
-	// keeps the other commit's manifest, which still lists extra.txt.
+	// compare-and-swap leaves the row with the other commit's manifest,
+	// which still lists extra.txt, and its blob in place.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
 	require.NoError(t, os.Remove(filepath.Join(dir, deriveHCName, "extra.txt")))
 	fault.Arm()
@@ -724,28 +720,36 @@ func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testin
 	assert.Equal(t, before.ContentHash, after.ContentHash)
 	assert.Len(t, after.Files, 2)
 	assertDerivedFrom(t, after, deriveBareYAML)
-	exists, err := srv.GetStorage().Exists(ctx, after.StoragePath+"/extra.txt")
+	exists, err := srv.GetStorage().Exists(ctx, hcBlobPath(after, "x"))
 	require.NoError(t, err)
-	assert.True(t, exists, "a lost commit must not reconcile away a file the row still lists")
+	assert.True(t, exists, "a lost commit must not remove a file the row still lists")
 }
 
-// A bootstrap whose commit succeeds reconciles storage after the row write:
-// an object under the storage path that no manifest lists is removed.
-func TestHarnessConfigBootstrap_ReconcilesAfterSuccessfulCommit(t *testing.T) {
+// A bootstrap whose commit succeeds deletes nothing (ptone/scion#3170, the
+// prefix reconcile is gone): a file the new directory drops keeps its blob
+// until the blob garbage collector's grace period has passed, and an object
+// the bootstrap never wrote under the row's paths is left alone.
+func TestHarnessConfigBootstrap_SuccessfulCommitDeletesNothing(t *testing.T) {
 	srv, s, _ := newHCCommitTestServer(t)
 	ctx := context.Background()
-	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
+	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML, "extra.txt": "x"})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
 	row := globalHC(t, s, deriveHCName)
-	_, err := srv.GetStorage().Upload(ctx, row.StoragePath+"/stray.txt", strings.NewReader("stray"), storage.UploadOptions{})
+	stray := templateStagedObjectPath(row.StoragePath, "other-upload", "stray.txt")
+	_, err := srv.GetStorage().Upload(ctx, stray, strings.NewReader("stray"), storage.UploadOptions{})
 	require.NoError(t, err)
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
+	require.NoError(t, os.Remove(filepath.Join(dir, deriveHCName, "extra.txt")))
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
-	assertDerivedFrom(t, globalHC(t, s, deriveHCName), deriveFullYAML)
-	exists, err := srv.GetStorage().Exists(ctx, row.StoragePath+"/stray.txt")
-	require.NoError(t, err)
-	assert.False(t, exists, "the reconcile still runs after a successful commit")
+	after := globalHC(t, s, deriveHCName)
+	assertDerivedFrom(t, after, deriveFullYAML)
+	require.Len(t, after.Files, 1)
+	for _, obj := range []string{hcBlobPath(after, "x"), hcBlobPath(after, deriveBareYAML), stray} {
+		exists, err := srv.GetStorage().Exists(ctx, obj)
+		require.NoError(t, err)
+		assert.True(t, exists, "%s: a commit deletes nothing; the blob garbage collector does", obj)
+	}
 }
 
 // OnHashMatch re-derive: when the re-read row no longer has the directory's
@@ -765,8 +769,9 @@ func TestHarnessConfigOnHashMatch_SkipsWhenContentReplaced(t *testing.T) {
 	w.onConflict = func(ctx context.Context, inner store.Store, hc *store.HarnessConfig) {
 		other, err := inner.GetHarnessConfig(ctx, hc.ID)
 		require.NoError(t, err)
+		expected := harnessConfigCommitPrecondition(other)
 		other.ContentHash = "sha256:replaced"
-		require.NoError(t, inner.UpdateHarnessConfigContent(ctx, other, store.HarnessConfigContentPrecondition{ContentHash: row.ContentHash}))
+		require.NoError(t, inner.UpdateHarnessConfigContent(ctx, other, expected))
 	}
 	fault.Arm()
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
@@ -781,8 +786,9 @@ func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
 	srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 	ctx := context.Background()
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
-	_, err := srv.GetStorage().Upload(ctx, hc.StoragePath+"/config.yaml", strings.NewReader(deriveBareYAML), storage.UploadOptions{})
-	require.NoError(t, err)
+	hc = resetHCToLegacy(t, srv, s, hc,
+		map[string]string{"config.yaml": deriveFullYAML},
+		map[string]string{"config.yaml": deriveBareYAML})
 
 	fault.Arm()
 	require.NoError(t, srv.syncHarnessConfigFromStorage(ctx, HarnessConfigRepairRef{ID: hc.ID}))
@@ -793,10 +799,10 @@ func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
 	assertDerivedFrom(t, after, deriveFullYAML)
 }
 
-// BootstrapSource (the bundled/built-in startup path) gates its reconcile the
-// same way as Bootstrap (ts4a-rev R2): an update or a storage repair whose
-// commit loses the compare-and-swap twice leaves storage as it was, so the
-// row's manifest never lists objects the reconcile deleted.
+// BootstrapSource (the bundled/built-in startup path): an update or a
+// storage repair whose commit loses the compare-and-swap twice deletes
+// nothing, so the row's manifest never lists objects that are gone
+// (ts4a-rev R2; with the blob layout no path reconciles storage at all).
 func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
 		srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
@@ -821,9 +827,9 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 		after := globalHC(t, s, deriveHCName)
 		assert.Equal(t, before.ContentHash, after.ContentHash)
 		assert.Len(t, after.Files, 2)
-		exists, err := srv.GetStorage().Exists(ctx, after.StoragePath+"/extra.txt")
+		exists, err := srv.GetStorage().Exists(ctx, hcBlobPath(after, "x"))
 		require.NoError(t, err)
-		assert.True(t, exists, "a lost commit must not reconcile away a file the row still lists")
+		assert.True(t, exists, "a lost commit must not remove a file the row still lists")
 	})
 
 	t.Run("storage repair", func(t *testing.T) {
@@ -835,10 +841,11 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 		_, err := srv.harnessConfigStore("claude").BootstrapSource(ctx, NewFSResourceSource(v1), BootstrapOptions{OverwritePolicy: OverwriteBuiltinManaged})
 		require.NoError(t, err)
 		row := globalHC(t, s, deriveHCName)
-		// A missing listed object triggers the repair; a stray object shows
-		// whether the reconcile ran.
-		require.NoError(t, srv.GetStorage().Delete(ctx, row.StoragePath+"/extra.txt"))
-		_, err = srv.GetStorage().Upload(ctx, row.StoragePath+"/stray.txt", strings.NewReader("stray"), storage.UploadOptions{})
+		// A missing listed blob triggers the repair; an unreferenced blob
+		// shows whether anything was swept.
+		require.NoError(t, srv.GetStorage().Delete(ctx, hcBlobPath(row, "x")))
+		stray := hcBlobPath(row, "stray")
+		_, err = srv.GetStorage().Upload(ctx, stray, strings.NewReader("stray"), storage.UploadOptions{})
 		require.NoError(t, err)
 
 		fault.Arm()
@@ -847,8 +854,8 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 		})
 		require.ErrorIs(t, err, store.ErrHarnessConfigConflict)
 		assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
-		exists, err := srv.GetStorage().Exists(ctx, row.StoragePath+"/stray.txt")
+		exists, err := srv.GetStorage().Exists(ctx, stray)
 		require.NoError(t, err)
-		assert.True(t, exists, "a lost repair commit must not reconcile storage")
+		assert.True(t, exists, "a lost repair commit must not sweep storage")
 	})
 }
