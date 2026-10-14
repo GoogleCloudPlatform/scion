@@ -228,19 +228,13 @@ func stageOne(home *os.Root, pluginsRel string, c *candidate, reserved map[strin
 		return nil, err
 	}
 
-	staged, err := home.OpenRoot(finalRel)
+	// The staged root is closed before any cleanup removes finalRel (an
+	// open directory handle blocks its removal on Windows).
+	digest, skills, mcp, idiags, err := inspectStaged(home, finalRel, c.manifest.Schema)
 	if err != nil {
 		return cleanup(err)
 	}
-	defer func() { _ = staged.Close() }()
-	digest, err := TreeDigest(staged, ".")
-	if err != nil {
-		return cleanup(fmt.Errorf("digest: %w", err))
-	}
-	skills, sdiags := DiscoverSkills(staged)
-	diags = append(diags, sdiags...)
-	mcp, mdiags := LoadMCP(staged, c.manifest.Schema)
-	diags = append(diags, mdiags...)
+	diags = append(diags, idiags...)
 	if skills == nil {
 		skills = []string{}
 	}
@@ -256,6 +250,23 @@ func stageOne(home *os.Root, pluginsRel string, c *candidate, reserved map[strin
 		MCP:               mcp,
 		Diagnostics:       diags,
 	}, nil
+}
+
+// inspectStaged digests the staged bundle at rel and discovers its skills
+// and MCP servers. The root it opens on rel is closed before it returns.
+func inspectStaged(home *os.Root, rel, manifestSchema string) (string, []string, *MCPConfig, []Diagnostic, error) {
+	staged, err := home.OpenRoot(rel)
+	if err != nil {
+		return "", nil, nil, nil, err
+	}
+	defer func() { _ = staged.Close() }()
+	digest, err := TreeDigest(staged, ".")
+	if err != nil {
+		return "", nil, nil, nil, fmt.Errorf("digest: %w", err)
+	}
+	skills, diags := DiscoverSkills(staged)
+	mcp, mdiags := LoadMCP(staged, manifestSchema)
+	return digest, skills, mcp, append(diags, mdiags...), nil
 }
 
 func writeIndex(home *os.Root, indexRel string, idx *Index) error {
