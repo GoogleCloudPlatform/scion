@@ -2805,6 +2805,53 @@ func injectPlatformSkills(
 	return nil
 }
 
+// SavedProfileState says where SavedProfileOnDisk found an agent's profile.
+type SavedProfileState int
+
+const (
+	// SavedProfileMissing: the agent has no agent-info.json (it was never
+	// provisioned on this host, or projectPath does not resolve).
+	SavedProfileMissing SavedProfileState = iota
+	// SavedProfileFound: the profile is the Profile in agent-info.json.
+	SavedProfileFound
+	// SavedProfileUnreadable: agent-info.json exists but could not be read
+	// or parsed; the profile is the provisioned one from the image
+	// provenance record when there is one, else "".
+	SavedProfileUnreadable
+)
+
+// SavedProfileOnDisk returns the saved profile of the agent agentName in
+// projectPath on this host, as the start path would see it, for the hub's
+// built-in profile reference count (ptone/scion#5113). It reads
+// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// then GetAgentHomePath). When that file exists but cannot be used, the
+// start path's runtime selection would use the provisioned profile from the
+// image provenance record (ProvisionedProfile), so that is returned instead.
+// sharedWorkspace and hubProjectID are passed to ProvisionedProfile.
+//
+// It is read-only and has no other side effects (no writes, no caches, no
+// logging), so the rebuild preflight can call it directly.
+func SavedProfileOnDisk(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) (string, SavedProfileState) {
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return "", SavedProfileMissing
+	}
+	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
+	if _, err := os.Stat(agentInfoPath); err != nil {
+		return "", SavedProfileMissing
+	}
+	if data, err := os.ReadFile(agentInfoPath); err == nil {
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err == nil {
+			return info.Profile, SavedProfileFound
+		}
+	}
+	if profile, ok, err := ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, false); err == nil && ok {
+		return profile, SavedProfileUnreadable
+	}
+	return "", SavedProfileUnreadable
+}
+
 func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
