@@ -971,12 +971,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
-	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
-	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
-	// Removal is tracked in https://github.com/ptone/scion/issues/575.
+	// The agent learns its workspace mode from SCION_WORKSPACE_MODE and
+	// SCION_WORKSPACE_GIT; the legacy SCION_SHARED_WORKSPACE var is no longer
+	// emitted (ptone/scion#575).
 	if in.Config != nil && in.Config.SharedWorkspace {
-		env["SCION_SHARED_WORKSPACE"] = "true"
-		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
 		}
