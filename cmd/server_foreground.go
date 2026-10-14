@@ -3102,7 +3102,9 @@ func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub 
 // syncHubSettings performs every-boot re-sync of hub_settings from bootstrap
 // material. For each registered section:
 //   - If the row is absent or origin=="seeded": write the bootstrap doc
-//     (skip-write-on-equality to avoid revision bumps and event churn).
+//     (skip-write-on-equality to avoid revision bumps and event churn),
+//     except that an absent catalog section (runtimes, profiles,
+//     harness_configs) with an empty bootstrap doc stays absent.
 //   - If origin=="managed": skip — admin owns this section.
 //
 // Also runs BackfillOrigin for pre-origin rows and writes the _meta sentinel.
@@ -3131,6 +3133,14 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 		}
 
 		if existing == nil {
+			// An empty catalog section is left absent: an empty stored
+			// runtimes, profiles or harness_configs map means "not managed
+			// in the hub", and absent says so without a row
+			// (ptone/scion#5007).
+			if isEmptyCatalogSeed(sec.Name, bootstrapDoc) {
+				slog.Debug("Empty catalog section not seeded", "section", sec.Name)
+				continue
+			}
 			// No row — create with bootstrap material.
 			if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
 				return fmt.Errorf("seeding section %q: %w", sec.Name, err)
@@ -3169,6 +3179,22 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
+}
+
+// isEmptyCatalogSeed reports whether doc is an empty bootstrap document for
+// one of the map-of-objects catalog sections (runtimes, profiles,
+// harness_configs), which syncHubSettings does not create a row for.
+func isEmptyCatalogSeed(section string, doc json.RawMessage) bool {
+	switch section {
+	case "runtimes", "profiles", "harness_configs":
+	default:
+		return false
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return false
+	}
+	return len(m) == 0
 }
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
