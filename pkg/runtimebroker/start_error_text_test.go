@@ -235,7 +235,7 @@ func TestClassifyStartError_FixedText(t *testing.T) {
 		{&config.HarnessConfigNotFoundError{Name: "x", Searched: []string{"/srv/y"}}, `Failed to create agent: harness-config "x" not found`},
 	}
 	for _, c := range cases {
-		_, got := classifyStartError(t.Context(), c.err, "claude")
+		_, _, got := classifyStartError(t.Context(), c.err, "claude", "")
 		if got != c.want {
 			t.Errorf("classifyStartError(%q) message = %q, want %q", c.err, got, c.want)
 		}

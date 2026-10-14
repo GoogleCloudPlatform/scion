@@ -44,7 +44,7 @@ func TestCreateAgentViaHub_SendsProfileAndBroker(t *testing.T) {
 			stub := newHubStartStub(t, projectID, agentName, "")
 			var err error
 			captureStdIO(t, func() {
-				err = createAgentViaHub(stub.hubCtx(t, projectID), agentName, "")
+				err = createAgentViaHub(stub.hubCtx(t, projectID), agentName, "", nil)
 			})
 			require.NoError(t, err)
 			require.Equal(t, 1, stub.createCalls)

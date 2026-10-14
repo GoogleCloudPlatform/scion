@@ -56,10 +56,9 @@ Detaching:
   move to Ctrl-\ then Ctrl-^: a lone Ctrl-\ is delayed until the next key,
   and the full sequence ends the attach (the agent keeps running).
 
-Local vs Hub mode:
-  With a local project, scion attach runs the container runtime's exec on this
-  machine. When the project is linked to a Hub, the session goes through the
-  Hub to the runtime broker running the agent, over a WebSocket. Anyone with
+Sessions:
+  The session goes through the Hub to the runtime broker running the agent,
+  over a WebSocket. Anyone with
   attach permission on the agent can attach. Several people can be attached at
   once and see the same session.
 
@@ -94,7 +93,7 @@ Disconnects:
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

@@ -44,6 +44,22 @@ func newFromEmbedFS(name string) api.Harness {
 	return NewDeclarativeGenericHarness(entry)
 }
 
+// embeddedReadyConfig returns a copy of the ready block of the embedded
+// harnesses/<harnessName>/config.yaml, or nil if the harness has no bundle,
+// the bundle does not parse, or it declares no ready block.
+func embeddedReadyConfig(harnessName string) *config.HarnessReadyConfig {
+	data, err := fs.ReadFile(harnessesEmbed.FS, harnessName+"/config.yaml")
+	if err != nil {
+		return nil
+	}
+	entry, err := config.ParseHarnessConfigYAML(data)
+	if err != nil || entry.Ready == nil {
+		return nil
+	}
+	ready := *entry.Ready
+	return &ready
+}
+
 // DefaultModelAliases returns the built-in model_aliases map declared in the
 // embedded harnesses/<name>/config.yaml, or nil if the harness is unknown or
 // declares no aliases. This is the source of truth for a harness's size

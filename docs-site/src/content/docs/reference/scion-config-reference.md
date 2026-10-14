@@ -25,7 +25,7 @@ Server configuration (for Hub and Runtime Broker) is now integrated into `settin
 
 ## Telemetry Configuration
 
-Telemetry settings control agent observability — trace collection, cloud forwarding, privacy filtering, and debug output. These are configured via the `telemetry` block in `settings.yaml` and can be overridden per-template or per-agent in `scion-agent.yaml`.
+Telemetry settings control agent observability — trace collection, cloud forwarding, privacy filtering, and debug output. These are configured via the `telemetry` block in `settings.yaml` and can be overridden per agent in `scion-agent.yaml` (a template's `telemetry` block is ignored).
 
 - [Orchestrator Settings — Telemetry](/scion/reference/orchestrator-settings/#telemetry-configuration-telemetry)
 - [Metrics & OpenTelemetry Guide](/scion/hosted/single-node/metrics/)

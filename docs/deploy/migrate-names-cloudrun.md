@@ -731,7 +731,7 @@ Checked against `cmd/hub_secret_migrate_names.go` and `config.LoadGlobalConfig`:
 | `settings.yaml` secret, mounted at `/home/scion/.scion/settings.yaml` | Yes. `migrate-names` reads `server.database.driver`, `server.database.url` (the DSN) and `server.hub.hub_id` from the file named by `--config`. | Yes, `--set-secrets`, mounted at `/run/secrets/settings.yaml`, as in §3 |
 | `HOME` | Yes, indirectly. `LoadGlobalConfig` reads `$HOME/.scion/settings.yaml` before the directory of `--config`, and skips settings files entirely if `$HOME` cannot be resolved. The guide's image (the default target of the repository `Dockerfile`) does not set `HOME`. `HOME=/tmp` is always resolvable, writable, and has no `.scion/settings.yaml` that could shadow `--config`. | Yes, `--set-env-vars` |
 | Kubeconfig secret, `KUBECONFIG`, `SCION_K8S_NAMESPACE` | No. migrate-names does not talk to Kubernetes. | **No** |
-| `SESSION_SECRET`, `SCION_DEPLOY` | No. | **No** |
+| `SCION_DEPLOY` | No. | **No** |
 
 The job does not pass `--hub-id`. The command then takes the hub ID from
 `server.hub.hub_id` in the mounted settings file, which is the value the running

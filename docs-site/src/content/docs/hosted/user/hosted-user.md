@@ -38,6 +38,22 @@ scion hub auth login --hub-url https://scion.yourcompany.com
 
 This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
 
+### Working with several Hubs
+
+Instead of pinning one `hub.endpoint`, you can keep a list of Hubs with nicknames and pick a current Hub and project per user:
+
+```bash
+scion hub add prod https://scion.yourcompany.com
+```
+
+```bash
+scion use my-project
+```
+
+`scion use <project>` (alias of `scion project use`) checks the known-project list first, then searches the registered Hubs you are logged in to, plus the `hub.endpoint` Hub if it is not in the hub list (or only the Hub given with `--hub`, `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and asks you to pick one when several have the project. `scion use --hub prod` switches the current Hub, and `scion use` on its own shows the effective Hub and project and where each came from. A nickname works anywhere `--hub` takes a URL, except in `scion server` and `scion runtime-broker` commands, or inside agents, which need a URL. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it).
+
+The current project applies only outside a scion project directory. Inside one, the current Hub is used only when the project has no link entry and no `hub.endpoint` (its own or the global one). Flags and `SCION_HUB_ENDPOINT` always take precedence, and while `SCION_HUB_URL` is set, link entries and the current Hub are not used; `scion hub link` records the project's Hub in the hub list, so a linked checkout keeps targeting its own Hub after you switch. The list and the current context are stored in `~/.scion/context.yaml`. See [`scion project use`](/scion/reference/cli/#scion-project) and [`scion hub`](/scion/reference/cli/#scion-hub).
+
 To let a coding agent on your machine (for example Claude Code or Gemini CLI) drive the CLI under a scoped token, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
 Commands that take a Hub project reference, such as `scion start -g <hub-project>`, need Hub mode. When you are logged in, an interactive run offers to enable it; otherwise the error tells you to run `scion hub enable`.
@@ -69,6 +85,8 @@ hub:
 ### Workspace Mode Change for Git Projects
 
 Once a git project is linked to a Hub, agents started via the Hub use **HTTPS clone-based provisioning** by default rather than local Git worktrees — even if the broker machine already has the repository on disk — unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
+
+**Exception: the local workstation Hub.** A git project that linking creates on the local workstation Hub is created with workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout under `.scion/agents/<name>/workspace`, as in local mode. A project that already existed on the Hub keeps its mode. This needs git 2.48 or later. If git is older, or the checkout's `origin` does not match the project's repository, agent creation fails with an error instead of falling back to a clone. Agents on a Kubernetes runtime do not use the checkout.
 
 For clone-based provisioning, this means:
 - A `GITHUB_TOKEN` with at least **Contents: Read** access is required. Set it as a secret or ensure it is in your local environment:

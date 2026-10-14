@@ -228,7 +228,7 @@ func projectInfoFromExternal(configPath, dirName, slug string) ProjectInfo {
 
 	// Check if workspace still exists and has a valid marker pointing back here
 	if pi.WorkspacePath != "" {
-		if !isValidWorkspace(pi.WorkspacePath, pi.ProjectID, configPath) {
+		if !isValidWorkspace(pi.WorkspacePath, pi.ProjectID, configPath) || isScionDirWorkspace(pi.WorkspacePath) {
 			pi.Status = ProjectStatusOrphaned
 		}
 	} else {
@@ -435,6 +435,34 @@ func isValidWorkspace(workspacePath, expectedProjectID string, configPath ...str
 		return marker.ProjectID == expectedProjectID
 	}
 	return true
+}
+
+// isScionDirWorkspace reports whether workspacePath is itself a scion
+// directory: a directory named .scion that holds a project-id file or a
+// settings file, or that is the global directory. An external project
+// recorded with such a workspace path is a stray config, not a live project.
+// Before the hub used a provider path ending in .scion as the project's
+// .scion directory, it initialized "<dir>/.scion/.scion" for such a path,
+// which created an external config with workspace path "<dir>/.scion" and a
+// marker file inside that directory pointing back at it. A project created
+// with 'scion init' in an ordinary directory that happens to be named .scion
+// does not match, because that directory holds only the project's marker.
+func isScionDirWorkspace(workspacePath string) bool {
+	dir := filepath.Clean(workspacePath)
+	if filepath.Base(dir) != DotScion {
+		return false
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, projectkeys.ProjectIDFile)); err == nil {
+		return true
+	}
+	if GetSettingsPath(dir) != "" {
+		return true
+	}
+	return IsGlobalProjectDir(dir)
 }
 
 // countAgents counts agent subdirectories in an agents directory.

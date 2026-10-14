@@ -28,10 +28,11 @@ import (
 // /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch. `claim` and
 // `checkpoint` are sent synchronously and gate the launch (§3.8.2); `progress`
 // covers step changes and the keepalive. Agent is present only on a
-// `succeeded` report; of its fields the hub applies only Runtime (through
-// store.LaunchReport), WorkspacePlacement and RunID (see
-// handleAgentLaunchReport). The rest of the echo (exposed ports, applied
-// config, etc.) is not applied.
+// `succeeded` report; of its fields the hub applies the broker-resolved
+// config (template, harness config and auth, image, profile, runtime: see
+// store.ApplyBrokerAgentConfig), WorkspacePlacement and RunID (see
+// handleAgentLaunchReport). The rest of the echo (phase, activity, container
+// status, etc.) is not applied.
 type AgentLaunchReport struct {
 	LaunchID   string           `json:"launchId"`
 	InstanceID string           `json:"instanceId"`
@@ -41,6 +42,7 @@ type AgentLaunchReport struct {
 	Step       string           `json:"step,omitempty"`
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
+	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -79,6 +81,21 @@ func hasControlCharacter(s string) bool {
 		}
 	}
 	return false
+}
+
+// launchReportCause returns the cause the hub stores for report r
+// (ptone/scion#4666): r.Cause when r is a failed report whose code is
+// runtime_error (the code a cause qualifies, as on a synchronous create's
+// details.cause) and r.Cause is one of the fixed relayable codes
+// (relayableRuntimeCause), else "". An older broker sends no cause, and a
+// cause this hub does not know is dropped rather than rejected: rejecting
+// the terminal report would leave the broker retrying it and skipping its
+// cleanup.
+func launchReportCause(r AgentLaunchReport) string {
+	if r.State != store.LaunchReportStateFailed || r.ErrorCode != ErrCodeRuntimeError {
+		return ""
+	}
+	return relayableRuntimeCause(r.Cause)
 }
 
 // handleAgentLaunchReport implements the broker->Hub launch report endpoint
@@ -132,9 +149,21 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Step:       sanitizeFailureReason(req.Step),
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
+		Cause:      launchReportCause(req),
+	}
+	if req.Cause != "" && sr.Cause == "" {
+		// The raw cause is untrusted broker text, so only its length is
+		// logged, with the sanitized code it came with.
+		s.agentLifecycleLog.Debug("Launch report: dropped a cause the hub does not relay",
+			"agent_id", agentID, "broker_id", brokerID,
+			"error_code", sr.ErrorCode, "cause_len", len(req.Cause))
 	}
 	if req.Agent != nil {
-		sr.Runtime = req.Agent.Runtime
+		// The broker-resolved config is applied in the store's launch
+		// transaction with the same rules (and the same conversion) as a
+		// synchronous dispatch (ptone/scion#4818), so a report the launch
+		// fencing rejects writes none of it.
+		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)
