@@ -163,6 +163,15 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			},
 		},
 		{
+			// Before resolves active_profile only through the single-stored
+			// fallback; after stores two profiles without it: a change.
+			name: "active profile only via fallback before", active: "local", fileProfiles: []string{"gke", "local-nfs"},
+			before: []string{"gke"}, after: []string{"gke", "local-nfs"}, agents: map[string]int{"": 2},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingActiveProfile, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+			},
+		},
+		{
 			// Fixture 4: a project's activeProfile is missing.
 			name: "project active profile missing", active: "gke", fileProfiles: []string{"gke", "local-nfs"},
 			after: []string{"gke", "local-nfs"}, projectActive: map[string]string{"p1": "local", "p2": ""},
