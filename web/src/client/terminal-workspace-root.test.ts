@@ -2015,39 +2015,25 @@ describe('show() frame-mode ref counting', () => {
 
 describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
   let root: TerminalWorkspaceRoot;
-  /**
-   * happy-dom's own window. Under vitest the global `window` is a facade
-   * whose setters never reach it, so a width written there would not change
-   * what CSS media queries see.
-   */
-  const domWindow = document.defaultView as unknown as { innerWidth: number };
-  let savedInnerWidth: number;
 
   /**
    * Creates and shows the root with the keyboard up or not, as
-   * client/viewport.ts marks it, and at `width` (the viewport width CSS
-   * media queries see). Each test reads one state only: happy-dom clears
-   * its computed-style cache on child-list mutations, not on attribute
-   * changes, so the state is set before the root is added and read.
+   * client/viewport.ts marks it. Each test reads one state only: happy-dom
+   * clears its computed-style cache on child-list mutations, not on
+   * attribute changes, so the state is set before the root is added and read.
    */
-  function showRoot({ keyboard, width }: { keyboard: boolean; width?: number }): void {
-    if (width !== undefined) domWindow.innerWidth = width;
+  function showRoot({ keyboard }: { keyboard: boolean }): void {
     if (keyboard) document.documentElement.dataset['keyboard'] = 'open';
     root = new WorkspaceRoot();
     document.body.append(root.element);
     root.show(true);
   }
 
-  beforeEach(() => {
-    savedInnerWidth = domWindow.innerWidth;
-  });
-
   afterEach(() => {
     document.documentElement.removeAttribute('data-keyboard');
     root.show(false);
     root.dispose();
     root.element.remove();
-    domWindow.innerWidth = savedInnerWidth;
   });
 
   function part(selector: string): HTMLElement {
@@ -2076,7 +2062,6 @@ describe('an open on-screen keyboard collapses the chrome around the terminal (p
   }
 
   const ONE_CELL = 'minmax(0, 1fr)';
-  const NARROW_WIDTH = 375;
 
   it('shows the chrome while no keyboard is up', () => {
     showRoot({ keyboard: false });
@@ -2112,15 +2097,28 @@ describe('an open on-screen keyboard collapses the chrome around the terminal (p
     expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
   });
 
-  it('keeps the narrow shell in a rail row and a pane row while no keyboard is up', () => {
-    showRoot({ keyboard: false, width: NARROW_WIDTH });
-    expect(shellGrid().rows).toContain('35vh');
-  });
+  it('collapses the narrow shell too: the keyboard rule follows and outranks the 760px rule', () => {
+    // happy-dom does not apply the (max-width: 760px) rule in this setup, so
+    // the narrow case is checked on the stylesheet text instead.
+    showRoot({ keyboard: false });
+    const css = root.element.querySelector('style')?.textContent ?? '';
+    const narrowStart = css.indexOf('@media (max-width: 760px) {');
+    const selector = "html[data-keyboard='open'] #terminal-workspace .terminal-workspace-shell";
+    const ruleStart = css.indexOf(`${selector} {`);
+    expect(narrowStart).toBeGreaterThan(-1);
+    expect(ruleStart).toBeGreaterThan(-1);
 
-  it('collapses the narrow shell to one cell while the keyboard is up', () => {
-    // Otherwise the pane area, now the only grid item, is held to the 35vh rail row.
-    showRoot({ keyboard: true, width: NARROW_WIDTH });
-    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+    // Outside any @media block: every brace before it is closed.
+    const before = css.slice(0, ruleStart);
+    expect(before.split('{').length).toBe(before.split('}').length);
+    // After the 760px block, which sets .terminal-workspace-shell (0,1,0);
+    // the keyboard selector, (1,2,1), outranks it as well.
+    expect(ruleStart).toBeGreaterThan(narrowStart);
+    expect(css.slice(narrowStart, ruleStart)).toContain('.terminal-workspace-shell {');
+
+    const body = css.slice(ruleStart, css.indexOf('}', ruleStart));
+    expect(body).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(body).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\);/);
   });
 });
 // ────────────────────────────────────────────────────────────────────────────
