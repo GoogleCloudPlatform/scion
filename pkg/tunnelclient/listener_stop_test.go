@@ -30,7 +30,7 @@ import (
 
 // stopLine is the line a listener prints when it stops accepting while
 // connections are still open.
-const stopLine = "not accepting new connections: "
+const stopLine = "not accepting new connections; open tunnels continue until they end\n"
 
 // lineWatch is a goroutine-safe stderr that closes seen once its output
 // contains want.
@@ -219,6 +219,68 @@ func TestListenerFinalRefusalWithNothingOpenExitsAtOnce(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), stopLine) {
 		t.Fatalf("stop line printed with nothing open: %q", stderr.String())
+	}
+}
+
+// With exactly one other connection open, a final refusal prints the stop
+// line once and waits for that connection, then exits with the refusal's
+// code.
+func TestListenerFinalRefusalWithOneOpenWaitsForIt(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() { h.handle = firstOpensThenRefuses(respond(403, "forbidden", "")) })
+	stderr := newLineWatch(stopLine)
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1")))
+	cfg.Stderr = stderr
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+
+	open := dialListener(t, addr)
+	roundTrip(t, open, "the one open tunnel")
+	assertRefusedConn(t, dialListener(t, addr))
+	stderr.wait(t)
+	assertRunning(t, done)
+	roundTrip(t, open, "still carrying data")
+	assertRunning(t, done)
+
+	_ = open.Close()
+	if err := <-done; CodeOf(err) != ExitForbidden {
+		t.Fatalf("Run = %v (exit %d), want %d", err, CodeOf(err), ExitForbidden)
+	}
+	if n := strings.Count(stderr.String(), stopLine); n != 1 {
+		t.Fatalf("stop line printed %d times, want once: %q", n, stderr.String())
+	}
+}
+
+// During a drain the reason, with its login hint for a credential
+// refusal, is reported exactly once: in the exit error, not in the stop
+// line.
+func TestListenerDrainReportsTheReasonOnce(t *testing.T) {
+	h := newFakeHub(t)
+	h.set(func() {
+		h.handle = firstOpensThenRefuses(respond(401, "unauthorized", ""))
+	})
+	stderr := newLineWatch(stopLine)
+	cfg := testConfig(h, newFakeREST(), credSeq(oauth("tok1"), Credential{}))
+	cfg.Stderr = stderr
+	addr, cancel, done := listen(t, cfg, Request{Agent: "a1", Project: "proj", Port: 8080})
+	defer cancel()
+
+	open := dialListener(t, addr)
+	roundTrip(t, open, "before expiry")
+	assertRefusedConn(t, dialListener(t, addr))
+	stderr.wait(t)
+	_ = open.Close()
+	err := <-done
+	if CodeOf(err) != ExitCredential {
+		t.Fatalf("Run = %v (exit %d), want %d", err, CodeOf(err), ExitCredential)
+	}
+	const hint = "log in with: scion hub auth login"
+	all := stderr.String() + "Error: " + err.Error() + "\n" // what the command prints in total
+	if n := strings.Count(all, hint); n != 1 {
+		t.Fatalf("login hint reported %d times, want once: %q", n, all)
+	}
+	if n := strings.Count(all, "expired or was refused"); n != 1 {
+		t.Fatalf("reason reported %d times, want once: %q", n, all)
 	}
 }
 

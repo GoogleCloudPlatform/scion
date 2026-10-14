@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -682,6 +683,8 @@ func (c *client) runListener(ctx context.Context) error {
 
 	fatal := make(chan error, 1)
 	var conns sync.WaitGroup
+	// open counts accepted connections whose serveConn has not returned.
+	var open atomic.Int64
 	connCtx, cancelConns := context.WithCancel(ctx)
 	acceptDone := make(chan struct{})
 	defer func() {
@@ -699,9 +702,14 @@ func (c *client) runListener(ctx context.Context) error {
 				return
 			}
 			conns.Add(1)
+			open.Add(1)
 			go func() {
-				defer conns.Done()
-				if err := c.serveConn(connCtx, conn); err != nil {
+				err := c.serveConn(connCtx, conn)
+				// Counted out before the fatal is sent, so stopAccepting
+				// sees only the other connections as open.
+				open.Add(-1)
+				conns.Done()
+				if err != nil {
 					select {
 					case fatal <- err:
 					default:
@@ -716,7 +724,7 @@ func (c *client) runListener(ctx context.Context) error {
 	case err := <-c.lost:
 		return err
 	case err := <-fatal:
-		return c.stopAccepting(ctx, ln, acceptDone, &conns, err)
+		return c.stopAccepting(ctx, ln, acceptDone, &conns, &open, err)
 	}
 }
 
@@ -728,22 +736,23 @@ func (c *client) runListener(ctx context.Context) error {
 // refused, and an expired credential bounds new tunnels only (design §3.8
 // rules 3 and 6). It returns err, the reason the listener stopped, once
 // the last connection has ended, or ctx's error on a signal (the caller's
-// deferred cleanup then closes what is left).
-func (c *client) stopAccepting(ctx context.Context, ln net.Listener, acceptDone <-chan struct{}, conns *sync.WaitGroup, err error) error {
+// deferred cleanup then closes what is left). The reason is printed once,
+// by the caller, with the exit; while connections are open, one line says
+// that the listener waits for them.
+func (c *client) stopAccepting(ctx context.Context, ln net.Listener, acceptDone <-chan struct{}, conns *sync.WaitGroup, open *atomic.Int64, err error) error {
 	_ = ln.Close()
-	// No conns.Add can run once the accept loop has exited.
+	// No connection is accepted or counted once the accept loop has
+	// exited.
 	<-acceptDone
+	if open.Load() == 0 {
+		return err
+	}
+	_, _ = fmt.Fprintln(c.cfg.stderr(), "not accepting new connections; open tunnels continue until they end")
 	drained := make(chan struct{})
 	go func() {
 		conns.Wait()
 		close(drained)
 	}()
-	select {
-	case <-drained:
-		return err
-	default:
-	}
-	_, _ = fmt.Fprintf(c.cfg.stderr(), "not accepting new connections: %v; open tunnels continue until they end\n", err)
 	select {
 	case <-drained:
 		return err
