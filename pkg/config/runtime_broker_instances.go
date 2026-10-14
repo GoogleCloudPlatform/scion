@@ -16,6 +16,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,8 +24,11 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	yamlv3 "gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -86,6 +90,9 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		}
 		if inst.Name == "" {
 			errs = append(errs, ValidationError{Path: p + ".name", Message: "name is required"})
+		}
+		if d := inst.AgentDefaults; d != nil {
+			errs = append(errs, validateInstanceAgentDefaults(p+".agent_defaults", d)...)
 		}
 		t := inst.RuntimeTarget
 		if t == nil || t.Type == "" {
@@ -429,6 +436,37 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				}
 			}
 		}
+		if d, present := m["agent_defaults"]; present && d != nil {
+			dm, ok := d.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("%s.agent_defaults must be a mapping", p)
+			}
+			if err := checkStrings(p+".agent_defaults", dm, "default_harness_config", "image_registry"); err != nil {
+				return err
+			}
+			overrides, _ := dm["harness_overrides"].(map[string]interface{})
+			names := make([]string, 0, len(overrides))
+			for name := range overrides {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				om, _ := overrides[name].(map[string]interface{})
+				op := p + ".agent_defaults.harness_overrides." + name
+				if err := checkStrings(op, om, "image", "image_pull_policy", "user", "auth_selected_type"); err != nil {
+					return err
+				}
+				env, _ := om["env"].(map[string]interface{})
+				envKeys := make([]string, 0, len(env))
+				for k := range env {
+					envKeys = append(envKeys, k)
+				}
+				sort.Strings(envKeys)
+				if err := checkStrings(op+".env", env, envKeys...); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -450,8 +488,8 @@ func rawMapKeys(m map[string]interface{}) []string {
 // it, so a key is never accepted without its effect. A change that wires a
 // key removes it here, adds the Go field and adds it to the JSON schema.
 var (
-	reservedInstanceKeys = []string{"agent_defaults"}
-	// Every frozen runtime_target key is wired.
+	// Every frozen instance and runtime_target key is wired.
+	reservedInstanceKeys      []string
 	reservedRuntimeTargetKeys []string
 )
 
@@ -470,6 +508,12 @@ func knownYAMLKeys(v interface{}) map[string]bool {
 var (
 	knownInstanceKeys      = knownYAMLKeys(V1RuntimeBrokerInstanceConfig{})
 	knownRuntimeTargetKeys = knownYAMLKeys(V1RuntimeTargetConfig{})
+	knownAgentDefaultsKeys = knownYAMLKeys(V1InstanceAgentDefaults{})
+	knownHarnessOverKeys   = knownYAMLKeys(V1HarnessOverride{})
+	knownVolumeMountKeys   = knownYAMLKeys(api.VolumeMount{})
+	knownSecretKeys        = knownYAMLKeys(api.RequiredSecret{})
+	knownResourceSpecKeys  = knownYAMLKeys(api.ResourceSpec{})
+	knownResourceListKeys  = knownYAMLKeys(api.ResourceList{})
 )
 
 // checkInstanceKeys refuses every key of an instance entry or its
@@ -505,6 +549,11 @@ func checkInstanceKeys(instRaw interface{}) error {
 		}
 		if tm, ok := m["runtime_target"].(map[string]interface{}); ok {
 			if err := check(p+".runtime_target", tm, knownRuntimeTargetKeys, reservedRuntimeTargetKeys); err != nil {
+				return err
+			}
+		}
+		if dm, ok := m["agent_defaults"].(map[string]interface{}); ok {
+			if err := checkAgentDefaultsKeys(p+".agent_defaults", dm, check); err != nil {
 				return err
 			}
 		}
@@ -547,6 +596,172 @@ func joinValidationErrors(errs []ValidationError) error {
 	return errors.Join(all...)
 }
 
+var (
+	agentDefaultsSchemaOnce sync.Once
+	agentDefaultsSchema     *jsonschema.Schema
+	agentDefaultsSchemaErr  error
+)
+
+// validateInstanceAgentDefaults checks d against the settings schema's
+// $defs/instanceAgentDefaults, which reuses the definitions profiles are
+// validated with (scion config validate): harnessOverride, volumeMount,
+// requiredSecret, resourceSpec and the clone_depth pattern. For example an
+// out-of-range image_pull_policy, auth_selected_type, volume type or secret
+// type is refused. A volume target and a secret key, which the schema
+// requires but a marshalled struct always carries, must be non-empty. Each
+// problem is one ValidationError whose path is under path.
+func validateInstanceAgentDefaults(path string, d *V1InstanceAgentDefaults) []ValidationError {
+	var errs []ValidationError
+	for i, v := range d.Volumes {
+		if v.Target == "" {
+			errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.volumes[%d].target", path, i), Message: "target is required"})
+		}
+	}
+	for i, sec := range d.Secrets {
+		if sec.Key == "" {
+			errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.secrets[%d].key", path, i), Message: "key is required"})
+		}
+	}
+	names := make([]string, 0, len(d.HarnessOverrides))
+	for name := range d.HarnessOverrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for i, v := range d.HarnessOverrides[name].Volumes {
+			if v.Target == "" {
+				errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.harness_overrides.%s.volumes[%d].target", path, name, i), Message: "target is required"})
+			}
+		}
+	}
+
+	agentDefaultsSchemaOnce.Do(func() {
+		schemaPath := settingsSchemaFiles["1"]
+		data, err := schemasFS.ReadFile(schemaPath)
+		if err != nil {
+			agentDefaultsSchemaErr = err
+			return
+		}
+		var doc interface{}
+		if err := json.Unmarshal(data, &doc); err != nil {
+			agentDefaultsSchemaErr = err
+			return
+		}
+		compiler := jsonschema.NewCompiler()
+		if err := compiler.AddResource(schemaPath, doc); err != nil {
+			agentDefaultsSchemaErr = err
+			return
+		}
+		agentDefaultsSchema, agentDefaultsSchemaErr = compiler.Compile(schemaPath + "#/$defs/instanceAgentDefaults")
+	})
+	if agentDefaultsSchemaErr != nil {
+		return append(errs, ValidationError{Path: path, Message: "cannot load the agent_defaults schema: " + agentDefaultsSchemaErr.Error()})
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return append(errs, ValidationError{Path: path, Message: err.Error()})
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+	if err != nil {
+		return append(errs, ValidationError{Path: path, Message: err.Error()})
+	}
+	if err := agentDefaultsSchema.Validate(inst); err != nil {
+		for _, e := range extractValidationErrors(err) {
+			e.Path = path + settingsPathSuffix(e.Path)
+			errs = append(errs, e)
+		}
+	}
+	return errs
+}
+
+// settingsPathSuffix turns a JSON pointer without its leading "/" (for
+// example "harness_overrides/claude/volumes/0/type") into the settings path
+// style the loader's other errors use (".harness_overrides.claude.volumes[0].type").
+func settingsPathSuffix(pointer string) string {
+	if pointer == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, seg := range strings.Split(pointer, "/") {
+		seg = strings.ReplaceAll(strings.ReplaceAll(seg, "~1", "/"), "~0", "~")
+		if _, err := strconv.Atoi(seg); err == nil {
+			b.WriteString("[" + seg + "]")
+		} else {
+			b.WriteString("." + seg)
+		}
+	}
+	return b.String()
+}
+
+// checkAgentDefaultsKeys refuses every unknown key of an instance's
+// agent_defaults, of each of its harness overrides, and of each resources
+// block, volume and secret declaration in them, naming its settings path.
+func checkAgentDefaultsKeys(path string, dm map[string]interface{}, check func(string, map[string]interface{}, map[string]bool, []string) error) error {
+	if err := check(path, dm, knownAgentDefaultsKeys, nil); err != nil {
+		return err
+	}
+	checkList := func(path string, v interface{}, known map[string]bool) error {
+		list, _ := v.([]interface{})
+		for i, e := range list {
+			if em, ok := e.(map[string]interface{}); ok {
+				if err := check(fmt.Sprintf("%s[%d]", path, i), em, known, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	checkResources := func(path string, v interface{}) error {
+		rm, ok := v.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		if err := check(path, rm, knownResourceSpecKeys, nil); err != nil {
+			return err
+		}
+		for _, list := range []string{"limits", "requests"} {
+			if lm, ok := rm[list].(map[string]interface{}); ok {
+				if err := check(path+"."+list, lm, knownResourceListKeys, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := checkResources(path+".resources", dm["resources"]); err != nil {
+		return err
+	}
+	if err := checkList(path+".volumes", dm["volumes"], knownVolumeMountKeys); err != nil {
+		return err
+	}
+	if err := checkList(path+".secrets", dm["secrets"], knownSecretKeys); err != nil {
+		return err
+	}
+	overrides, _ := dm["harness_overrides"].(map[string]interface{})
+	names := make([]string, 0, len(overrides))
+	for name := range overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		om, ok := overrides[name].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		op := path + ".harness_overrides." + name
+		if err := check(op, om, knownHarnessOverKeys, nil); err != nil {
+			return err
+		}
+		if err := checkResources(op+".resources", om["resources"]); err != nil {
+			return err
+		}
+		if err := checkList(op+".volumes", om["volumes"], knownVolumeMountKeys); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // v1InstancesToGlobal deep-copies settings instances into server-config form.
 func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	if len(in) == 0 {
@@ -573,6 +788,17 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
 				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
 				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
+			}
+		}
+		if d := copyInstanceAgentDefaults(i.AgentDefaults); d != nil {
+			o.AgentDefaults = &InstanceAgentDefaultsConfig{
+				DefaultHarnessConfig: d.DefaultHarnessConfig,
+				ImageRegistry:        d.ImageRegistry,
+				Volumes:              d.Volumes,
+				Resources:            d.Resources,
+				HarnessOverrides:     d.HarnessOverrides,
+				Secrets:              d.Secrets,
+				CloneDepth:           d.CloneDepth,
 			}
 		}
 		out = append(out, o)
@@ -608,6 +834,17 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
 			}
 		}
+		if i.AgentDefaults != nil {
+			o.AgentDefaults = copyInstanceAgentDefaults(&V1InstanceAgentDefaults{
+				DefaultHarnessConfig: i.AgentDefaults.DefaultHarnessConfig,
+				ImageRegistry:        i.AgentDefaults.ImageRegistry,
+				Volumes:              i.AgentDefaults.Volumes,
+				Resources:            i.AgentDefaults.Resources,
+				HarnessOverrides:     i.AgentDefaults.HarnessOverrides,
+				Secrets:              i.AgentDefaults.Secrets,
+				CloneDepth:           i.AgentDefaults.CloneDepth,
+			})
+		}
 		out = append(out, o)
 	}
 	return out
@@ -618,6 +855,60 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 // comparison against GlobalConfig.RuntimeBroker.Instances.
 func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInstanceConfig {
 	return v1InstancesToGlobal(in)
+}
+
+// copyInstanceAgentDefaults returns a deep copy of d (nil for nil): no map,
+// slice or pointer is shared with d. Empty maps and slices copy as nil.
+func copyInstanceAgentDefaults(d *V1InstanceAgentDefaults) *V1InstanceAgentDefaults {
+	if d == nil {
+		return nil
+	}
+	out := *d
+	out.Volumes = copyVolumeMounts(d.Volumes)
+	out.Resources = copyResourceSpec(d.Resources)
+	out.Secrets = copyRequiredSecrets(d.Secrets)
+	out.HarnessOverrides = nil
+	if len(d.HarnessOverrides) > 0 {
+		out.HarnessOverrides = make(map[string]V1HarnessOverride, len(d.HarnessOverrides))
+		for name, o := range d.HarnessOverrides {
+			o.Env = copyStringMap(o.Env)
+			o.Volumes = copyVolumeMounts(o.Volumes)
+			o.Resources = copyResourceSpec(o.Resources)
+			out.HarnessOverrides[name] = o
+		}
+	}
+	return &out
+}
+
+func copyVolumeMounts(v []api.VolumeMount) []api.VolumeMount {
+	if len(v) == 0 {
+		return nil
+	}
+	return append([]api.VolumeMount(nil), v...)
+}
+
+func copyResourceSpec(r *api.ResourceSpec) *api.ResourceSpec {
+	if r == nil {
+		return nil
+	}
+	cpy := *r
+	return &cpy
+}
+
+func copyRequiredSecrets(s []api.RequiredSecret) []api.RequiredSecret {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]api.RequiredSecret, len(s))
+	for i, sec := range s {
+		if len(sec.AlternativeEnvKeys) > 0 {
+			sec.AlternativeEnvKeys = append([]string(nil), sec.AlternativeEnvKeys...)
+		} else {
+			sec.AlternativeEnvKeys = nil
+		}
+		out[i] = sec
+	}
+	return out
 }
 
 // copyStringMap returns a copy of m (nil for an empty map).

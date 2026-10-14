@@ -465,7 +465,16 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"docker evict":      {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, safe_to_evict: false}}"), false},
 		"docker home":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, home_storage_backend: local}}"), false},
 		"docker leaf":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, home_storage_leaf: pod}}"), false},
-		"reserved entry":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: r}}"), false},
+		"agent defaults":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: r, clone_depth: full}}"), true},
+		"ad int depth":      {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {clone_depth: 5}}"), true},
+		"ad bad depth":      {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {clone_depth: shallow}}"), false},
+		"ad unknown key":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {template: t}}"), false},
+		"ad ho unknown":     {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {imag: i}}}}"), false},
+		"ad num registry":   {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {image_registry: 5}}"), false},
+		"ad ho bad policy":  {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {image_pull_policy: Sometimes}}}}"), false},
+		"ad ho bad auth":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {auth_selected_type: magic}}}}"), false},
+		"ad ho valid":       {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {image_pull_policy: Never, auth_selected_type: api-key}}}}"), true},
+		"ad num env":        {instancesYAML("- {key: a, name: x, runtime_target: {type: docker}, agent_defaults: {harness_overrides: {claude: {env: {A: 1}}}}}"), false},
 		"unknown target":    {instancesYAML("- {key: a, name: x, runtime_target: {type: docker, bogus: 1}}"), false},
 	}
 	for name, c := range cases {

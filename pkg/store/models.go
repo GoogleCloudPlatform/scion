@@ -2089,7 +2089,27 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent. Rows
+	// stored before attempts were recorded read 0.
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is NotificationOutcomeDelivered, NotificationOutcomeFailed,
+	// or empty when no outcome is recorded (pending, in flight, or a row
+	// stored before outcomes were recorded, whose Dispatched flag keeps its
+	// old meaning).
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
+
+// Notification.DispatchOutcome values.
+const (
+	// NotificationOutcomeDelivered: the notification was delivered to its
+	// subscriber agent.
+	NotificationOutcomeDelivered = "delivered"
+	// NotificationOutcomeFailed: dispatch gave up without delivering, either
+	// because retries were exhausted (notificationRetryMaxAge in pkg/hub) or
+	// because the subscription, subscriber or watched agent is gone. The row
+	// stays dispatched so the sweep does not retry it.
+	NotificationOutcomeFailed = "failed"
+)
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {

@@ -3103,7 +3103,7 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 // writer never sees or keeps only half of the soft-delete mark.
 func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.Phase = "deleted"
+		info.Phase = softDeletedPhase
 		if !deletedAt.IsZero() {
 			info.DeletedAt = deletedAt
 		}

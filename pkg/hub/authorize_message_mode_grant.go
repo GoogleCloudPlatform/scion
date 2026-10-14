@@ -38,6 +38,7 @@ type MessageModeGrantDecision struct {
 //   - If the resolved mode is not "hub", retain existing mode rules (no new check).
 //   - If human caller: retain existing action-specific human authorization
 //     (humans can always grant hub mode if they pass existing authorization).
+//     A user access token additionally needs a hub boundary.
 //   - If agent caller:
 //   - Load caller's current stored record; lookup failure denies the grant.
 //   - Require caller's stored role == full AND stored message mode == hub.
@@ -69,6 +70,14 @@ func (s *Server) AuthorizeMessageModeGrant(
 
 	switch actor.Type() {
 	case "user", "dev", "federated_user":
+		// A user access token grants hub mode only on a hub boundary: hub
+		// mode reaches agents in every project, beyond a project boundary.
+		// A boundary that is not the hub, or not known, denies.
+		if scoped, ok := actor.(*ScopedUserIdentity); ok {
+			if scoped.Boundary().Kind != BoundaryKindHub {
+				return MessageModeGrantDecision{Allowed: false, Reason: "a user access token grants hub mode only on a hub boundary"}
+			}
+		}
 		// Human callers retain existing action-specific authorization.
 		// If they passed the existing authorization checks (project owner,
 		// lineage owner, super-admin), they may grant hub mode.

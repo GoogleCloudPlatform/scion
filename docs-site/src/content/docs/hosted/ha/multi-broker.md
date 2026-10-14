@@ -26,7 +26,7 @@ Each broker maintains a persistent WebSocket connection to the Hub. The Hub acts
 
 On each machine you want to register:
 
-1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`).
+1. **Install Scion**, sign in to the Hub (`scion hub auth login --hub-url <hub-url>`), and set the Hub endpoint in your global settings (`scion config set --global hub.endpoint <hub-url>`). The `scion runtime-broker` commands read it (or `--hub`, which takes a URL or a hub list nickname); they do not use the current Hub selected with `scion use`. To keep the Runtime Broker process off the deprecated `hub.endpoint` fallback, also set `server.broker.hub_endpoint` (see [Runtime Broker prerequisites](/scion/hosted/ha/runtime-broker/#0-prerequisites)).
 2. **Start the broker**:
    ```bash
    scion runtime-broker start
@@ -103,6 +103,8 @@ A flat instance never uses Runtime Broker Profiles: not the active profile, and 
 - the shared directory and home storage backends.
 
 Each default keeps its usual precedence. An agent's own Kubernetes setting still wins over it, and an unset field falls back to the same global setting as before. An agent keeps the storage backends it recorded at its first start. See [the runtime target fields](/scion/reference/server-config/#flat-instance-runtime-target-serverbrokerinstancesruntime_target) for every field.
+
+A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
 
 ## Moving an Agent to Another Runtime Broker
 
