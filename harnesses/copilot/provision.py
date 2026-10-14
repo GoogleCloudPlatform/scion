@@ -572,7 +572,7 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
 #
 # Route: `copilot plugin install <abs dir>` from the mirrored bundle
 # (~/.scion/agent-plugins/bundles/<name>) and `copilot plugin uninstall
-# <name>`. Observed with copilot 1.0.97:
+# <name>@` (the direct install only; see below). Observed with copilot 1.0.97:
 #   - install has no --json flag; it prints a plain-text result and a
 #     deprecation warning for direct (non-marketplace) installs;
 #   - it copies the source into ~/.copilot/installed-plugins/_direct/<id>,
@@ -621,15 +621,27 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
     def prepare(self, desired: list[scion_harness.AgentPlugin]) -> None:
         os.makedirs(self.copilot_home, exist_ok=True)
 
-    def registration(self, name: str) -> dict[str, Any] | None:
+    def registration(self, name: str, *, strict: bool = False) -> dict[str, Any] | None:
         """The direct-install entry for name in config.json installedPlugins,
-        or None. Read-only and lenient: unreadable content means not
-        registered (the plugin is then reinstalled)."""
+        or None. Read-only.
+
+        Lenient by default: a config.json that exists but cannot be parsed
+        here (invalid UTF-8, an over-long integer, NaN, too deep) counts as
+        not registered, so install and is_present reinstall. With strict, an
+        unparseable file raises PluginInstallError instead: copilot's own
+        parser may still list the plugin, so uninstall must not take it as
+        removed. A missing file is "not registered" either way."""
         path = os.path.join(self.copilot_home, "config.json")
         try:
             with open(path, "rb") as f:
                 data = _load_config_strictly(f.read())
-        except (OSError, ValueError, RecursionError):
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, RecursionError) as exc:
+            if strict:
+                raise scion_harness.PluginInstallError(
+                    f"cannot read ~/.copilot/config.json to confirm the result ({type(exc).__name__})"
+                ) from None
             return None
         plugins = data.get("installedPlugins") if isinstance(data, dict) else None
         if not isinstance(plugins, list):
@@ -712,7 +724,14 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         already gone (an auth-file start rewrites config.json), the CLI
         removes nothing."""
         proc = self._run("plugin", "uninstall", f"{name}@")
-        if self.registration(name) is not None:
+        try:
+            entry = self.registration(name, strict=True)
+        except scion_harness.PluginInstallError as exc:
+            # Unknown outcome: keep the state record and the install dir,
+            # and retry next start.
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin uninstall exit {proc.returncode}, but {exc}") from None
+        if entry is not None:
             if proc.returncode != 0:
                 raise scion_harness.cli_failure("copilot plugin uninstall", proc)
             raise scion_harness.PluginInstallError(

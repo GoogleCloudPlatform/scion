@@ -886,6 +886,7 @@ class _FakeCopilotCLI:
         self.user_marketplace_disabled = False
         self.uninstall_keeps_entry = False
         self.uninstall_rc = 0
+        self.unreadable_uninstall_rc = 1
 
     def _config_path(self, home: str) -> str:
         return os.path.join(home, "config.json")
@@ -950,7 +951,12 @@ class _FakeCopilotCLI:
                 return subprocess.CompletedProcess(
                     argv, 0, f'Plugin "{arg}@usermkt" disabled. It is still on disk at /mkt — nothing was removed.\n', "")
             name = arg[:-1] if arg.endswith("@") else arg
-            data = self._load(home)
+            try:
+                data = self._load(home)
+            except ValueError:
+                # Content the provisioner's strict loader cannot parse; the
+                # real CLI's parser may differ, so the outcome is scripted.
+                return subprocess.CompletedProcess(argv, self.unreadable_uninstall_rc, "", "")
             plugins = data.get("installedPlugins", [])
             entry = next((e for e in plugins if e.get("name") == name and not e.get("marketplace")), None)
             if self.uninstall_keeps_entry:
@@ -1202,6 +1208,35 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         self.assertTrue(os.path.isdir(os.path.join(self.copilot_home, "installed-plugins", "_direct")))
         self.assertEqual(self.status()["removed"], ["a"])
         self.assertEqual(self.state(), {})
+
+    def test_uninstall_with_unreadable_config_keeps_state(self) -> None:
+        # Round 2: an existing config.json the strict loader cannot parse
+        # (here an integer beyond Python's conversion limit) is not "not
+        # registered": copilot may still list the plugin. The removal fails,
+        # the state record and the _direct dir are kept, and it is retried.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        data = self.config()
+        with open(self.config_path, "w") as f:
+            f.write(json.dumps(data)[:-1] + ', "n": ' + "9" * 5000 + "}")
+        self.stage({})
+        for rc in (1, 0):
+            self.cli.unreadable_uninstall_rc = rc
+            warnings: list[str] = []
+            self.reconcile(warnings)
+            self.assertEqual(len(warnings), 1, warnings)
+            self.assertIn(f"agent plugin a: removal failed (copilot plugin uninstall exit {rc}, "
+                          "but cannot read ~/.copilot/config.json to confirm the result (ValueError))", warnings[0])
+            self.assertIn("a", self.state())
+            self.assertTrue(os.path.isdir(self.direct_dir("a")))
+        # Lenient elsewhere: is_present treats it as not registered.
+        inst = provision.CopilotPluginInstaller(self.ctx())
+        self.assertFalse(inst.is_present("a", self.state()["a"]["native_ref"]))
+        # Missing config.json is still "not registered": the removal succeeds.
+        os.remove(self.config_path)
+        self.reconcile()
+        self.assertEqual(self.state(), {})
+        self.assertFalse(os.path.exists(self.direct_dir("a")))
 
     def test_leftover_dir_removal_is_confined_to_direct(self) -> None:
         inst = provision.CopilotPluginInstaller(self.ctx(infos=[]))
