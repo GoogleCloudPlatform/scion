@@ -228,7 +228,7 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. This release accepts one entry, requires the Hub in the same process, and is only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type: docker` and an optional `display_name`. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Only read from `settings.yaml` (not `server.yaml`). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` with `type` (`docker` or `kubernetes`), an optional `display_name`, and for `kubernetes` the optional `context`, `namespace`, `kubeconfig`, `kubernetes_service_account_mappings`, `kubernetes_block_service_account`, `shared_dir_storage_class` and `shared_dir_size`. |
 
 ### Database (`server.database`)
 
@@ -910,6 +910,8 @@ There are two exceptions to the pattern:
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
 
+A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make the server ignore the whole `server` section, at startup or when it reloads settings.
+
 ### Logging Environment Variables
 
 These environment variables control server-side logging behavior. They are not part of the `settings.yaml` structure.
@@ -1005,13 +1007,15 @@ The operator-configured Hub endpoint is resolved from the environment, flags and
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
 1. `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` — explicit Hub public URL.
-2. Project-level `hub.endpoint` setting.
-3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+2. The `--base-url` flag or `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+3. `hub.endpoint` (or `SCION_HUB_ENDPOINT`) — deprecated, see below.
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
    - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
      The derived URL is the IAP front end, which the Hub's own host does not serve. On a co-located broker (for example, the single-node VM deployment), agents dispatched to Docker therefore receive `http://scion-hub.internal:<hub listen port>` instead. That hostname is mapped to the Docker host gateway, so the agents reach the Hub directly while staying on bridge networking. Agents dispatched to Podman receive `http://host.containers.internal:<port>`, which Podman resolves itself. On rootless Podman 5.0 to 5.2 with pasta networking, that name can be missing or unreachable (fixed in Podman 5.3). A host-gateway mapping has the same gap there, so upgrade Podman if agents cannot reach the Hub. This applies whatever the broker's default runtime is, including Docker or Podman runtime profiles on a Kubernetes-default broker. Agents dispatched to Kubernetes runtime profiles, Cloud Run, or Apple container still receive the derived URL.
    - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
 5. Auto-computed `http://localhost:{port}` (last resort).
+
+Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is deprecated: the server logs a warning at startup, `scion doctor` reports it, and the fallback is removed in the next release. Set `server.hub.public_url` or `server.broker.hub_endpoint` instead. A server that runs only the Runtime Broker uses `hub.endpoint` right after item 1. A workstation whose `hub.endpoint` is its own loopback URL is not affected.
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 

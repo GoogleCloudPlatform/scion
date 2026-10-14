@@ -16,7 +16,7 @@ Scion provides built-in telemetry collection via `sciontool`, which runs as the 
 
 ## Configuration
 
-Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-template and per-agent overrides). Environment variables provide the highest-priority override.
+Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-agent overrides; a template's `telemetry` block is ignored with a warning). Environment variables provide the highest-priority override.
 
 ### Configuration Hierarchy
 
@@ -24,7 +24,7 @@ Telemetry settings resolve across scopes using **last-write-wins** semantics:
 
 1.  **Global settings** (`~/.scion/settings.yaml`) — Organization-wide defaults.
 2.  **Project settings** (`.scion/settings.yaml`) — Project-level overrides.
-3.  **Template config** (`scion-agent.yaml` in template) — Role-specific overrides.
+3.  **Hub default telemetry** (for Hub-dispatched agents) — The Hub's agent defaults.
 4.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
 5.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
 
@@ -32,7 +32,7 @@ At each scope, only the fields you specify are overridden; unset fields inherit 
 
 ### Settings File Configuration
 
-The `telemetry` block can appear in any `settings.yaml` (global or project) or `scion-agent.yaml` (template or agent):
+The `telemetry` block can appear in any `settings.yaml` (global or project) or an agent's `scion-agent.yaml`:
 
 ```yaml
 # In settings.yaml or scion-agent.yaml
@@ -105,10 +105,10 @@ Environment variables override any settings file value and are the most convenie
 
 #### Client certificates (mTLS)
 
-For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. Where a half pair is caught depends on where it comes from:
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a `volumes` entry in settings or the harness-config. Set both or neither. Where a half pair is caught depends on where it comes from:
 
 - In settings files or the host environment, a half pair (or a client certificate together with `tls.enabled: false`) fails settings load, so `scion` commands that load settings fail with that error, on the host or inside the agent.
-- A half pair that reaches the agent only through a template or the agent environment is caught by `sciontool` at startup. The same happens when a file cannot be read, or when a client certificate is combined with plaintext transport or GCP-native export. `sciontool` logs the error (naming the path for file problems) and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs. A half pair, or a client certificate with plaintext transport, is also in the agent environment, so `scion` commands inside the agent that load settings fail with the settings-load error as well.
+- A half pair that reaches the agent only through the agent environment is caught by `sciontool` at startup. The same happens when a file cannot be read, or when a client certificate is combined with plaintext transport or GCP-native export. `sciontool` logs the error (naming the path for file problems) and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs. A half pair, or a client certificate with plaintext transport, is also in the agent environment, so `scion` commands inside the agent that load settings fail with the settings-load error as well.
 
 The key pair is read once, when the exporter starts, so rotated certificate files take effect after the agent restarts. When neither path is set, behavior is unchanged.
 
