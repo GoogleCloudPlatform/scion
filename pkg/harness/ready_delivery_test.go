@@ -16,7 +16,6 @@ package harness
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -90,7 +89,8 @@ func intPtr(n int) *int { return &n }
 // resolves to that bundle's ready block (hook for claude), one for a harness
 // with no built-in bundle keeps the delay default, and an explicit block
 // always wins. The metadata-less rows resolve to the plain Generic harness,
-// which carries the entry's ready spec too.
+// which carries the entry's ready spec too; a declared ready block is itself
+// declarative metadata, so a config with only that block is declarative.
 func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
 	const declarative = "command:\n  base: [tool]\n"
 	hook := api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}
@@ -106,22 +106,11 @@ func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
 			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
 		{"metadata-less built-in harness, no block", "harness: claude\n", true, hook},
 		{"metadata-less custom harness, no block", "harness: some-custom\n", true, delay},
-		{"metadata-less built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n", true,
+		{"built-in harness, explicit block only", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n", false,
 			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			hcDir := filepath.Join(home, ".scion", "harness-configs", "hc")
-			writeFile(t, filepath.Join(hcDir, "config.yaml"), tc.config+"image: img:test\n")
-
-			resolved, err := Resolve(context.Background(), ResolveOptions{Name: "hc"})
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-			if resolved.ConfigDir == nil || resolved.ConfigDir.Path != hcDir {
-				t.Fatalf("resolved config dir = %+v, want %s", resolved.ConfigDir, hcDir)
-			}
+			resolved := resolveHC(t, tc.config+"image: img:test\n", nil)
 			if _, isGeneric := resolved.Harness.(*Generic); isGeneric != tc.generic {
 				t.Fatalf("harness is %T, want plain Generic = %v", resolved.Harness, tc.generic)
 			}
