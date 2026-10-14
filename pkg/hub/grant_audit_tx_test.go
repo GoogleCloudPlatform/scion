@@ -145,17 +145,72 @@ func TestGroupMemberAuditFailureRollsBack(t *testing.T) {
 	assert.NotEmpty(t, audits[0].ActorPrincipalID)
 }
 
+// grantAuditFaultStore is a switch-gated wrapper for the group rollback
+// tests below. It injects its faults while fault is armed and heal is not:
+// the test arms fault for the failing request and heal for the request
+// that must succeed, so srv.store is installed once, before any request,
+// and never reassigned (ptone/scion#3435). auditErrFor fails
+// CreateMutationAudit for records of that mutation type; ownerAddFails
+// fails every owner-role AddGroupMember. Both apply inside and outside
+// transactions.
+type grantAuditFaultStore struct {
+	store.Store
+	fault, heal   *storeFaultSwitch
+	auditErrFor   string
+	ownerAddFails bool
+}
+
+// newGrantAuditFaultServer is a test server whose store is a disarmed
+// grantAuditFaultStore configured by cfg. It returns the raw store for
+// setup and assertions, and the fault and heal switches.
+func newGrantAuditFaultServer(t *testing.T, cfg grantAuditFaultStore) (*Server, store.Store, *storeFaultSwitch, *storeFaultSwitch) {
+	t.Helper()
+	heal := &storeFaultSwitch{}
+	srv, real, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *grantAuditFaultStore {
+		w := cfg
+		w.Store, w.fault, w.heal = inner, f, heal
+		return &w
+	})
+	return srv, real, fault, heal
+}
+
+func (s *grantAuditFaultStore) injecting() bool {
+	return s.fault.Active() && !s.heal.Active()
+}
+
+func (s *grantAuditFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		c := *s
+		c.Store = tx
+		return fn(&c)
+	})
+}
+
+func (s *grantAuditFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if s.injecting() && s.auditErrFor != "" && r.MutationType == s.auditErrFor {
+		return errors.New("injected mutation audit write fault")
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+func (s *grantAuditFaultStore) AddGroupMember(ctx context.Context, m *store.GroupMember) error {
+	if s.injecting() && s.ownerAddFails && m.Role == store.GroupMemberRoleOwner {
+		return errors.New("injected group owner add fault")
+	}
+	return s.Store.AddGroupMember(ctx, m)
+}
+
 // Group create with a parent writes the parent membership's audit record
 // in the same transaction; an injected audit failure leaves no group and
 // no child edge under the parent.
 func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
-	srv, real := testServer(t)
+	srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{auditErrFor: "group_member_add"})
 	ctx := context.Background()
 	parent := &store.Group{ID: tid("cg-audit-parent"), Name: "cg audit parent", Slug: "cg-audit-parent", GroupType: store.GroupTypeExplicit}
 	require.NoError(t, real.CreateGroup(ctx, parent))
 	req := CreateGroupRequest{Name: "cg audit child", Slug: "cg-audit-child", ParentID: parent.ID}
 
-	srv.store = &createTxFaultStore{Store: real, auditErrFor: "group_member_add"}
+	fault.Arm()
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	_, err := real.GetGroupBySlug(ctx, req.Slug)
@@ -165,7 +220,7 @@ func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
 	assert.Empty(t, children.Items, "no child edge after the audit failure")
 	assert.Empty(t, grantAudits(t, real, "group_member_add", parent.ID))
 
-	srv.store = real
+	heal.Arm()
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var child store.Group
@@ -179,7 +234,7 @@ func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
 // Group-member removal writes exactly one audit record in the same
 // transaction; an injected audit failure leaves the membership in place.
 func TestGroupMemberRemoveAuditFailureRollsBack(t *testing.T) {
-	srv, real := testServer(t)
+	srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{auditErrFor: "group_member_remove"})
 	ctx := context.Background()
 	group := &store.Group{ID: tid("gm-rm-audit-group"), Name: "gm rm audit", Slug: "gm-rm-audit", GroupType: store.GroupTypeExplicit}
 	require.NoError(t, real.CreateGroup(ctx, group))
@@ -190,14 +245,14 @@ func TestGroupMemberRemoveAuditFailureRollsBack(t *testing.T) {
 	}))
 	path := "/api/v1/groups/" + group.ID + "/members/" + store.GroupMemberTypeUser + "/" + userID
 
-	srv.store = &createTxFaultStore{Store: real, auditErrFor: "group_member_remove"}
+	fault.Arm()
 	rec := doRequest(t, srv, http.MethodDelete, path, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	_, err := real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	require.NoError(t, err, "membership kept after the audit failure")
 	assert.Empty(t, grantAudits(t, real, "group_member_remove", group.ID))
 
-	srv.store = real
+	heal.Arm()
 	rec = doRequest(t, srv, http.MethodDelete, path, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	_, err = real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
@@ -208,57 +263,42 @@ func TestGroupMemberRemoveAuditFailureRollsBack(t *testing.T) {
 	assert.NotEmpty(t, audits[0].ActorPrincipalID)
 }
 
-// groupOwnerAddFaultStore fails every owner-role group membership add,
-// inside and outside transactions.
-type groupOwnerAddFaultStore struct {
-	store.Store
-}
-
-func (s *groupOwnerAddFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
-	return s.Store.WithTx(ctx, func(tx store.Store) error { return fn(&groupOwnerAddFaultStore{Store: tx}) })
-}
-
-func (s *groupOwnerAddFaultStore) AddGroupMember(ctx context.Context, m *store.GroupMember) error {
-	if m.Role == store.GroupMemberRoleOwner {
-		return errors.New("injected group owner add fault")
-	}
-	return s.Store.AddGroupMember(ctx, m)
-}
-
 // Group create adds the creator's owner membership and its audit record in
 // the same transaction as the group; a failure of either write leaves no
-// group.
+// group. Each case runs on its own server, so the store is installed once
+// and the fault is switched on and off rather than swapped.
 func TestCreateGroupCreatorOwnerFailureRollsBack(t *testing.T) {
-	srv, real := testServer(t)
-	ctx := context.Background()
 	req := CreateGroupRequest{Name: "cg owner audit", Slug: "cg-owner-audit"}
 
-	for name, faulty := range map[string]store.Store{
-		"owner add fails":   &groupOwnerAddFaultStore{Store: real},
-		"owner audit fails": &createTxFaultStore{Store: real, auditErrFor: "group_member_add"},
+	for name, cfg := range map[string]grantAuditFaultStore{
+		"owner add fails":   {ownerAddFails: true},
+		"owner audit fails": {auditErrFor: "group_member_add"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv.store = faulty
+			srv, real, fault, heal := newGrantAuditFaultServer(t, cfg)
+			ctx := context.Background()
+
+			fault.Arm()
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
 			assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 			_, err := real.GetGroupBySlug(ctx, req.Slug)
 			assert.ErrorIs(t, err, store.ErrNotFound, "no group after the failure")
+
+			heal.Arm()
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			var group store.Group
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&group))
+			owner, err := real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, DevUserID)
+			require.NoError(t, err, "the creator is an owner of the new group")
+			assert.Equal(t, store.GroupMemberRoleOwner, owner.Role)
+			audits := grantAudits(t, real, "group_member_add", group.ID)
+			require.Len(t, audits, 1, "exactly one audit record, written synchronously")
+			assert.Contains(t, audits[0].AfterSummary, DevUserID)
+			assert.Contains(t, audits[0].AfterSummary, `"role":"owner"`)
+			assert.Equal(t, DevUserID, audits[0].ActorPrincipalID)
 		})
 	}
-
-	srv.store = real
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var group store.Group
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&group))
-	owner, err := real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, DevUserID)
-	require.NoError(t, err, "the creator is an owner of the new group")
-	assert.Equal(t, store.GroupMemberRoleOwner, owner.Role)
-	audits := grantAudits(t, real, "group_member_add", group.ID)
-	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
-	assert.Contains(t, audits[0].AfterSummary, DevUserID)
-	assert.Contains(t, audits[0].AfterSummary, `"role":"owner"`)
-	assert.Equal(t, DevUserID, audits[0].ActorPrincipalID)
 }
 
 // The role-binding audit summary is valid JSON for any field value,
