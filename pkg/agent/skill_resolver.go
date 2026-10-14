@@ -103,6 +103,9 @@ const (
 	// resolved but could not be downloaded, verified or installed into the
 	// agent home. The create path keeps it on the 5xx path.
 	SkillErrCodeInstallFailed = "install_failed"
+	// SkillErrCodeInvalidURI is the code for a skill reference that does
+	// not parse as a URI the resolver accepts.
+	SkillErrCodeInvalidURI = "invalid_uri"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill

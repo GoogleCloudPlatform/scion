@@ -449,7 +449,7 @@ func (r *GitHubSkillResolver) resolveAll(ctx context.Context, refs []api.SkillRe
 		ghRef, err := ParseGitHubSkillURI(ref.URI)
 		if err != nil {
 			outcomes[i].rerr = &ResolveError{
-				URI: ref.URI, Code: "invalid_uri", Message: err.Error(),
+				URI: ref.URI, Code: SkillErrCodeInvalidURI, Message: err.Error(),
 			}
 			continue
 		}

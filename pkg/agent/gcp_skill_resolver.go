@@ -81,7 +81,7 @@ func (r *GCPSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 		gcpRef, err := ParseGCPSkillURI(ref.URI)
 		if err != nil {
 			result.Errors = append(result.Errors, ResolveError{
-				URI: ref.URI, Code: "invalid_uri", Message: err.Error(),
+				URI: ref.URI, Code: SkillErrCodeInvalidURI, Message: err.Error(),
 			})
 			continue
 		}
