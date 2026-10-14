@@ -40,7 +40,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -109,7 +109,7 @@ type Config struct {
 	DialUnix func(ctx context.Context, path string) (net.Conn, error)
 	// Policy restricts forwarding destinations only; a shell or exec can
 	// reach any local service itself.
-	Policy localpolicy.Policy
+	Policy conduit.Policy
 }
 
 // NewHostKey generates an ed25519 host key.

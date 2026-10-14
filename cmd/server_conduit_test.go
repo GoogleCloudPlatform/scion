@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -622,7 +622,7 @@ func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
 	cfg.Hub.Conduit.DisableSSH = true
 	cfg.Hub.Conduit.DenyPorts = []int{9999}
 	cfg.Hub.Conduit.DisableSSHSocketForwarding = true
-	want := localpolicy.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
+	want := conduit.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
 	assert.Equal(t, want, buildHubServerConfig(&cfg, "", "", nil, false, "", nil).ConduitPolicy)
 }
 

@@ -28,7 +28,6 @@ import (
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 )
 
 // requireIPv6Loopback skips the test when the host has no ::1.
@@ -247,7 +246,7 @@ func TestAgentTCPPolicyDeniedPort(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)
 	startAgent(t, h, func(o *Options) {
-		o.Policy = localpolicy.Policy{DenyPorts: []int{9999}}
+		o.Policy = core.Policy{DenyPorts: []int{9999}}
 		o.DialLocal = func(_ context.Context, _, addr string) (net.Conn, error) {
 			t.Errorf("DialLocal(%s) called for a denied port", addr)
 			return nil, net.ErrClosed

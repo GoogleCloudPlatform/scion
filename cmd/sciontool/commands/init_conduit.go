@@ -24,7 +24,6 @@ import (
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/hostkey"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -286,9 +285,9 @@ func sshMaxChannels(getenv func(string) string) int {
 	return n
 }
 
-// conduitPolicy reads localpolicy.EnvPolicy, failing closed on a bad value.
-func conduitPolicy(getenv func(string) string) localpolicy.Policy {
-	p, err := localpolicy.ParsePolicy(getenv(localpolicy.EnvPolicy))
+// conduitPolicy reads core.EnvPolicy, failing closed on a bad value.
+func conduitPolicy(getenv func(string) string) core.Policy {
+	p, err := core.ParsePolicy(getenv(core.EnvPolicy))
 	if err != nil {
 		log.Error("Conduit: %v; refusing ssh and every port", err)
 	}

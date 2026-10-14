@@ -29,9 +29,9 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
@@ -117,7 +117,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 				conduit.EnvHubExperiments: conduit.ExperimentConduit,
 				envProjectID:              "project-1",
 				conduit.EnvLaunchID:       "launch-1",
-				localpolicy.EnvPolicy:     raw,
+				core.EnvPolicy:            raw,
 			}
 			getenv := func(k string) string { return env[k] }
 			if ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv); ssh != nil || n.Load() != 0 {
@@ -146,7 +146,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			conduit.EnvHubExperiments: conduit.ExperimentConduit,
 			envProjectID:              "project-1",
 			conduit.EnvLaunchID:       "launch-1",
-			localpolicy.EnvPolicy:     `{"deny_ports":[9999]}`,
+			core.EnvPolicy:            `{"deny_ports":[9999]}`,
 		}
 		getenv := func(k string) string { return env[k] }
 		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)

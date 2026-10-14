@@ -15,7 +15,6 @@
 package localpolicy
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -39,29 +38,5 @@ func TestReservedPortsList(t *testing.T) {
 func TestReservedSocketsEmpty(t *testing.T) {
 	if IsReservedSocket("/tmp/x.sock") {
 		t.Error("no socket is reserved today")
-	}
-}
-
-func TestParsePolicy(t *testing.T) {
-	p, err := ParsePolicy("")
-	if err != nil || p.DisableSSH || p.DisableSSHSocketForwarding || p.PortDenied(9999) {
-		t.Errorf("ParsePolicy(\"\") = %+v, %v; want no restriction", p, err)
-	}
-	p, err = ParsePolicy(`{"disable_ssh":true,"deny_ports":[9999],"disable_ssh_socket_forwarding":true}`)
-	if err != nil || !p.DisableSSH || !p.DisableSSHSocketForwarding || !p.PortDenied(9999) || p.PortDenied(8463) {
-		t.Errorf("ParsePolicy = %+v, %v", p, err)
-	}
-}
-
-// TestParsePolicyFailsClosed: a value from a newer hub (unknown field) too.
-func TestParsePolicyFailsClosed(t *testing.T) {
-	for _, raw := range []string{`{`, `[]`, `null`, `{"allow_ports":[22]}`, `{} {}`, `{"disable_ssh":true}}`} {
-		p, err := ParsePolicy(raw)
-		if err == nil || !strings.Contains(err.Error(), EnvPolicy) {
-			t.Errorf("ParsePolicy(%q) error = %v, want an error naming %s", raw, err, EnvPolicy)
-		}
-		if !p.DisableSSH || !p.DisableSSHSocketForwarding || !p.PortDenied(22) {
-			t.Errorf("ParsePolicy(%q) = %+v, want everything refused", raw, p)
-		}
 	}
 }

@@ -38,7 +38,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -158,7 +157,7 @@ type Options struct {
 	// kind. New validates it.
 	SSH *sshd.Config
 	// Policy is the operator's conduit policy for TCP streams.
-	Policy localpolicy.Policy
+	Policy core.Policy
 	// OnSession is called after each session is admitted. Optional.
 	OnSession func(*conduitv1.Welcome)
 	// OnEnd is called after each attempt or session ends with the

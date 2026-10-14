@@ -32,10 +32,10 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -364,7 +364,7 @@ func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, d
 	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
-// applyConduitPolicy sets or removes localpolicy.EnvPolicy. The hub owns
+// applyConduitPolicy sets or removes conduit.EnvPolicy. The hub owns
 // the variable so a project or template cannot relax the policy.
 func (d *HTTPAgentDispatcher) applyConduitPolicy(env map[string]string, cls *map[string]api.EnvKind) {
 	policy := ""
@@ -372,12 +372,12 @@ func (d *HTTPAgentDispatcher) applyConduitPolicy(env map[string]string, cls *map
 		policy = d.conduitPolicyProvider()
 	}
 	if policy == "" {
-		delete(env, localpolicy.EnvPolicy)
-		delete(*cls, localpolicy.EnvPolicy)
+		delete(env, conduit.EnvPolicy)
+		delete(*cls, conduit.EnvPolicy)
 		return
 	}
-	env[localpolicy.EnvPolicy] = policy
-	classifyEnv(cls, localpolicy.EnvPolicy, api.EnvKindPlain)
+	env[conduit.EnvPolicy] = policy
+	classifyEnv(cls, conduit.EnvPolicy, api.EnvKindPlain)
 }
 
 // SetSecretBackend sets the secret backend for resolving secrets.

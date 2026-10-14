@@ -30,7 +30,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 )
 
 // echoServer accepts connections on l and echoes them (test fixture).
@@ -398,7 +398,7 @@ func TestDirectTCPIPDenyPorts(t *testing.T) {
 	echoServer(t, allowed)
 	d := &recordingDialer{}
 	cfg := testConfig(t)
-	cfg.Policy = localpolicy.Policy{DenyPorts: []int{9999}}
+	cfg.Policy = conduit.Policy{DenyPorts: []int{9999}}
 	cfg.DialTCP = d.dial
 	client := serve(t, cfg, "scion")
 
@@ -421,7 +421,7 @@ func TestDirectTCPIPDenyPorts(t *testing.T) {
 
 func TestStreamlocalDisabledByPolicy(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Policy = localpolicy.Policy{DisableSSHSocketForwarding: true}
+	cfg.Policy = conduit.Policy{DisableSSHSocketForwarding: true}
 	cfg.DialUnix = func(context.Context, string) (net.Conn, error) {
 		t.Error("DialUnix called with socket forwarding disabled")
 		return nil, errors.New("unexpected dial")

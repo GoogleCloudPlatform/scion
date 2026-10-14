@@ -137,7 +137,7 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	return nil
 }
 
-// conduitAgentPolicy returns the localpolicy.EnvPolicy value, or "" when
+// conduitAgentPolicy returns the conduit.EnvPolicy value, or "" when
 // nothing is restricted.
 func (s *Server) conduitAgentPolicy() string {
 	b, _ := json.Marshal(s.config.ConduitPolicy)

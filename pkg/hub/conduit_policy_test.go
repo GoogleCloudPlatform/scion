@@ -22,8 +22,8 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,8 +49,8 @@ func TestConduitAgentPolicy(t *testing.T) {
 	s := &Server{}
 	assert.Empty(t, s.conduitAgentPolicy())
 
-	s.config.ConduitPolicy = localpolicy.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
-	p, err := localpolicy.ParsePolicy(s.conduitAgentPolicy())
+	s.config.ConduitPolicy = conduit.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
+	p, err := conduit.ParsePolicy(s.conduitAgentPolicy())
 	require.NoError(t, err)
 	assert.Equal(t, s.config.ConduitPolicy, p)
 }
@@ -95,15 +95,15 @@ func TestDispatchConduitPolicyEnv(t *testing.T) {
 					RuntimeBrokerID: tid("broker-" + id),
 					AppliedConfig: &store.AgentAppliedConfig{
 						HarnessConfig: "claude",
-						Env:           map[string]string{localpolicy.EnvPolicy: "{}"},
+						Env:           map[string]string{conduit.EnvPolicy: "{}"},
 					},
 				}
 				if err := p.dispatch(ctx, d, agent); err != nil {
 					t.Fatalf("dispatch: %v", err)
 				}
-				got, ok := p.env(mock)[localpolicy.EnvPolicy]
+				got, ok := p.env(mock)[conduit.EnvPolicy]
 				if set == "" {
-					assert.False(t, ok, "%s = %q, want absent", localpolicy.EnvPolicy, got)
+					assert.False(t, ok, "%s = %q, want absent", conduit.EnvPolicy, got)
 				} else {
 					assert.Equal(t, set, got)
 				}
@@ -114,7 +114,7 @@ func TestDispatchConduitPolicyEnv(t *testing.T) {
 
 func TestConduitTunnel_OperatorPolicy(t *testing.T) {
 	tf := newTunnelFixture(t)
-	tf.srv.config.ConduitPolicy = localpolicy.Policy{DisableSSH: true, DenyPorts: []int{3000}}
+	tf.srv.config.ConduitPolicy = conduit.Policy{DisableSSH: true, DenyPorts: []int{3000}}
 	tf.startAgent(t, tf.public.URL, tf.launched)
 	c := tf.ownerClient(t)
 	for _, k := range []struct {
