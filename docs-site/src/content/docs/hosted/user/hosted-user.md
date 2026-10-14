@@ -86,7 +86,7 @@ hub:
 
 Once a git project is linked to a Hub, agents started via the Hub use **HTTPS clone-based provisioning** by default rather than local Git worktrees — even if the broker machine already has the repository on disk — unless the project is configured for worktree-per-agent mode (requires git 2.48+ on the broker).
 
-**Exception: the local workstation Hub.** A git project that linking creates on the local workstation Hub is created with workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout under `.scion/agents/<name>/workspace`, as in local mode. A project that already existed on the Hub keeps its mode.
+**Exception: the local workstation Hub.** A git project that linking creates on the local workstation Hub is created with workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout under `.scion/agents/<name>/workspace`, as in local mode. A project that already existed on the Hub keeps its mode. This needs git 2.48 or later. If git is older, or the checkout's `origin` does not match the project's repository, agent creation fails with an error instead of falling back to a clone. Agents on a Kubernetes runtime do not use the checkout.
 
 For clone-based provisioning, this means:
 - A `GITHUB_TOKEN` with at least **Contents: Read** access is required. Set it as a secret or ensure it is in your local environment:
