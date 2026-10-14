@@ -143,7 +143,7 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 	if err != nil {
 		return err
 	}
-	if err := s.store.AddProjectProvider(ctx, &store.ProjectProvider{
+	if err := s.linkProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  mv.ProjectID,
 		BrokerID:   dst.ID,
 		BrokerName: dst.Name,

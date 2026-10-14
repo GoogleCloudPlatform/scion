@@ -2255,12 +2255,11 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 			Status:     autoBroker.Status,
 			LinkedBy:   autoProvideLinkedBy,
 		}
-		if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+		if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 			s.envSecretLog.Warn("Failed to auto-link broker to project",
 				"broker", autoBroker.Name, "project_id", project.ID, "error", addErr)
 			continue
 		}
-		s.onColocatedPlacement(ctx, project.ID, autoBroker.ID, "")
 
 		// Set first auto-provided broker as default if project has none
 		if project.DefaultRuntimeBrokerID == "" {
@@ -2570,11 +2569,10 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		LinkedBy:   linkedBy,
 	}
 
-	if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+	if err := s.linkProjectProvider(ctx, provider); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	s.onColocatedPlacement(ctx, projectID, broker.ID, "")
 
 	// For linked projects (local directory) on the embedded broker, initialize
 	// the .scion directory so agents and templates directories exist before

@@ -2071,7 +2071,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				Status:     broker.Status,
 				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
-			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+			// linkProjectProvider also retains the project's activeProfile
+			// built-in before this request dispatches (ptone/scion#5113).
+			if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
 				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())
@@ -2079,9 +2081,6 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 			slog.Info("Auto-linked broker as project provider",
 				"broker", broker.Name, "brokerID", broker.ID, "project_id", project.ID)
-			// The project's activeProfile is retained before this
-			// request dispatches (ptone/scion#5113).
-			s.onColocatedPlacement(ctx, project.ID, broker.ID, "")
 			LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, "",
 				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "agent_create"))
 

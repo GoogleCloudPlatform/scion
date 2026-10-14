@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -237,90 +240,267 @@ func TestProfileReferences_CountReadsAgentInfoWhereDispatchPoints(t *testing.T) 
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pr-count-otherb"), Slug: "otherb", Name: "otherb",
 		ProjectID: native.ID, RuntimeBrokerID: other.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "remote"}}))
 
+	// Counting table row 1: the file wins, even with an empty profile over a
+	// hub value. DR2-C3: a corrupt file with no provenance counts "", as
+	// start would, and is unreadable, not missing.
+	nativePath := config.BrokerProjectPath(globalDir, "", "pr-native")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pr-count-emptyfile"), Slug: "emptyfile", Name: "emptyfile",
+		ProjectID: native.ID, RuntimeBrokerID: broker.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "local"}}))
+	writeAgentInfo(t, nativePath, "emptyfile", "")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pr-count-corrupt"), Slug: "corrupt", Name: "corrupt",
+		ProjectID: native.ID, RuntimeBrokerID: broker.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "local"}}))
+	writeAgentInfo(t, nativePath, "corrupt", "x")
+	projectDir, err := config.GetResolvedProjectDir(nativePath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(config.GetAgentHomePath(projectDir, "corrupt"), "agent-info.json"), []byte("{not json"), 0o644))
+
 	refs, err := srv.countProfileReferences(ctx, broker.ID, globalDir)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]int{"local": 3, "remote": 1, "hubval": 2}, refs.Agents)
+	assert.Equal(t, map[string]int{"local": 3, "remote": 1, "hubval": 2, "": 2}, refs.Agents)
 	assert.Equal(t, 1, refs.AgentInfoMissing)
-	assert.Equal(t, 0, refs.AgentInfoUnreadable)
+	assert.Equal(t, 1, refs.AgentInfoUnreadable)
 }
 
-// With no published target the worker does nothing, triggers never block,
-// and the worker stops with its context, cancelling a count in progress.
-func TestProfileReferences_WorkerLifetime(t *testing.T) {
-	srv, s := testServer(t)
-	for i := 0; i < 5; i++ {
-		srv.triggerProfileReferences() // no worker yet: must not block
-	}
+// publishTarget publishes overlay and brokerID as the reference target
+// without a count (worker tests).
+func publishTarget(srv *Server, overlay *config.SettingsOverlay, brokerID, globalDir string) {
+	srv.profileRefs.mu.Lock()
+	srv.profileRefs.overlay, srv.profileRefs.brokerID, srv.profileRefs.globalDir = overlay, brokerID, globalDir
+	srv.profileRefs.mu.Unlock()
+}
 
-	blocking := &blockingBrokerProjectsStore{Store: s, started: make(chan struct{}, 1)}
-	srv.store = blocking
+// refFaultStore gates GetBrokerProjects behind its switch: blocking until
+// release (or ctx ends), failing, or panicking, and counts calls and their
+// concurrency.
+type refFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	mode    string // "block", "fail" or "panic"
+	started chan struct{}
+	release chan struct{}
+
+	mu        sync.Mutex
+	calls     int
+	inFlight  int
+	maxFlight int
+	ctxErr    error
+}
+
+func (r *refFaultStore) GetBrokerProjects(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
+	r.mu.Lock()
+	r.calls++
+	r.inFlight++
+	if r.inFlight > r.maxFlight {
+		r.maxFlight = r.inFlight
+	}
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.inFlight--
+		r.mu.Unlock()
+	}()
+	r.mu.Lock()
+	mode := r.mode
+	r.mu.Unlock()
+	if !r.fault.Active() || mode == "pass" {
+		return r.Store.GetBrokerProjects(ctx, brokerID)
+	}
+	switch mode {
+	case "fail":
+		return nil, errors.New("store unavailable")
+	case "panic":
+		panic("boom")
+	}
+	if r.started != nil {
+		select {
+		case r.started <- struct{}{}:
+		default:
+		}
+	}
+	select {
+	case <-ctx.Done():
+		r.mu.Lock()
+		r.ctxErr = ctx.Err()
+		r.mu.Unlock()
+		return nil, ctx.Err()
+	case <-r.release:
+		return r.Store.GetBrokerProjects(ctx, brokerID)
+	}
+}
+
+func (r *refFaultStore) snapshot() (calls, maxFlight int, ctxErr error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, r.maxFlight, r.ctxErr
+}
+
+func newRefFaultServer(t *testing.T, mode string) (*Server, store.Store, *refFaultStore, *storeFaultSwitch) {
+	t.Helper()
+	return testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *refFaultStore {
+		return &refFaultStore{Store: inner, fault: f, mode: mode, started: make(chan struct{}, 1), release: make(chan struct{})}
+	})
+}
+
+// startPropagation starts settings propagation (and so the reference
+// worker) on srv with a channel publisher.
+func startPropagation(t *testing.T, srv *Server, s store.Store, poll time.Duration) *OperationalSettings {
+	t.Helper()
+	ops := NewOperationalSettings(s.(store.HubSettingStore), koanf.New("."), koanf.New("."))
+	ops.PollInterval = poll
+	ops.SetEventPublisher(NewChannelEventPublisher())
+	ops.StartPropagation(context.Background(), srv)
+	return ops
+}
+
+// DR2-RQ1: the worker runs under the propagation lifecycle; StopPropagation
+// returns while a count is blocked and cancels it; triggers never block,
+// before the worker exists and after it stopped.
+func TestProfileReferences_WorkerStopsWithPropagation(t *testing.T) {
+	srv, s, fs, fault := newRefFaultServer(t, "block")
+	for i := 0; i < 5; i++ {
+		srv.triggerProfileReferences()
+	}
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	srv.profileRefs.mu.Lock()
-	srv.profileRefs.overlay, srv.profileRefs.brokerID, srv.profileRefs.globalDir = overlay, "b", t.TempDir()
-	srv.profileRefs.mu.Unlock()
+	publishTarget(srv, overlay, "b", t.TempDir())
+	ops := startPropagation(t, srv, s, time.Hour)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		srv.runProfileReferenceWorker(ctx)
-		close(done)
-	}()
+	fault.Arm()
 	srv.triggerProfileReferences()
 	select {
-	case <-blocking.started:
+	case <-fs.started:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the worker did not start a count")
 	}
-	cancel()
+	stopped := make(chan struct{})
+	go func() {
+		ops.StopPropagation()
+		close(stopped)
+	}()
 	select {
-	case <-done:
+	case <-stopped:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the worker did not stop when its context ended")
+		t.Fatal("StopPropagation did not return while a count was blocked")
 	}
-	assert.ErrorIs(t, blocking.ctxErr(), context.Canceled, "the count in progress was cancelled")
-	srv.triggerProfileReferences() // after stop: must not block
+	_, _, ctxErr := fs.snapshot()
+	assert.ErrorIs(t, ctxErr, context.Canceled, "the count in progress was cancelled")
+	srv.triggerProfileReferences()
 	srv.triggerProfileReferences()
 }
 
-// A panicking count is recovered and the next trigger runs again.
-func TestProfileReferences_PanicRecovered(t *testing.T) {
-	srv, s := testServer(t)
-	p := &panickingBrokerProjectsStore{Store: s}
-	srv.store = p
+// DR-R3: triggers during a blocked count coalesce into exactly one more
+// count, and counts never overlap.
+func TestProfileReferences_TriggersCoalesce(t *testing.T) {
+	srv, _, fs, fault := newRefFaultServer(t, "block")
 	overlay := config.NewSettingsOverlay()
-	srv.profileRefs.mu.Lock()
-	srv.profileRefs.overlay, srv.profileRefs.brokerID = overlay, "b"
-	srv.profileRefs.mu.Unlock()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	publishTarget(srv, overlay, "b", t.TempDir())
+	fault.Arm()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.runProfileReferenceWorker(ctx)
 
-	srv.runProfileReferenceCount(context.Background())
-	srv.runProfileReferenceCount(context.Background())
-	assert.Equal(t, 2, p.calls)
+	srv.triggerProfileReferences()
+	select {
+	case <-fs.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker did not start a count")
+	}
+	for i := 0; i < 3; i++ {
+		srv.triggerProfileReferences()
+	}
+	fs.release <- struct{}{} // finish the first count
+	select {
+	case <-fs.started: // the one coalesced count
+	case <-time.After(10 * time.Second):
+		t.Fatal("no coalesced count followed")
+	}
+	fs.release <- struct{}{}
+	time.Sleep(200 * time.Millisecond)
+	calls, maxFlight, _ := fs.snapshot()
+	assert.Equal(t, 2, calls, "three triggers during a count give exactly one more count")
+	assert.Equal(t, 1, maxFlight, "counts never overlap")
 }
 
-// A failed install count enables conservative retention: local resolves,
-// remote does not; a later successful zero-reference count keeps local.
+// The poll tick triggers a count even when no settings section changed.
+func TestProfileReferences_PollTickTriggersCount(t *testing.T) {
+	srv, s, fs, _ := newRefFaultServer(t, "block") // disarmed: counts pass through
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	publishTarget(srv, overlay, "b", t.TempDir())
+	ops := startPropagation(t, srv, s, 50*time.Millisecond)
+	t.Cleanup(ops.StopPropagation)
+	require.Eventually(t, func() bool {
+		calls, _, _ := fs.snapshot()
+		return calls >= 2
+	}, 10*time.Second, 20*time.Millisecond, "poll ticks must trigger counts")
+}
+
+// R5: a repeated count failure is logged once; a success logs recovery.
+func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
+	srv, _, _, fault := newRefFaultServer(t, "fail")
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
+	fault.Arm()
+	logs := captureHubLogs(t, func() {
+		srv.runProfileReferenceCount(context.Background())
+		srv.runProfileReferenceCount(context.Background())
+		srv.runProfileReferenceCount(context.Background())
+	})
+	assert.Equal(t, 1, strings.Count(logs, "could not be counted"), logs)
+}
+
+// A panicking count is recovered and the next count runs again.
+func TestProfileReferences_PanicRecovered(t *testing.T) {
+	srv, _, fs, fault := newRefFaultServer(t, "panic")
+	publishTarget(srv, config.NewSettingsOverlay(), "b", t.TempDir())
+	fault.Arm()
+	srv.runProfileReferenceCount(context.Background())
+	srv.runProfileReferenceCount(context.Background())
+	calls, _, _ := fs.snapshot()
+	assert.Equal(t, 2, calls)
+}
+
+// DR2-C2 (final ruling): a failed install count enables conservative
+// retention: local resolves, remote and its runtime do not; the ERROR and
+// the conservative WARN are logged; a later successful zero-reference
+// count keeps local.
 func TestProfileReferences_InstallFailureIsConservative(t *testing.T) {
-	srv, s := testServer(t)
-	srv.store = &failingBrokerProjectsStore{Store: s}
+	srv, _, fs, fault := newRefFaultServer(t, "fail")
+	fault.Arm()
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}}, storedGkeNFSProfiles(), nil, "")
-	srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
-
+	var localErr, remoteErr error
+	logs := captureHubLogs(t, func() {
+		srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
+		localErr = resolvesThrough(overlay, "local")
+		remoteErr = resolvesThrough(overlay, "remote")
+	})
 	require.True(t, overlay.RetentionEnabled())
-	assert.NoError(t, resolvesThrough(overlay, "local"))
-	assert.Error(t, resolvesThrough(overlay, "remote"))
+	assert.NoError(t, localErr)
+	assert.Error(t, remoteErr)
+	assert.Contains(t, logs, "could not be counted at start")
+	assert.Contains(t, logs, "References could not be counted; retaining every built-in default profile")
 
-	srv.store = s
+	// Same server, store healthy again: a later count never removes local.
+	fs.mu.Lock()
+	fs.mode = "pass"
+	fs.mu.Unlock()
 	srv.runProfileReferenceCount(context.Background())
 	assert.NoError(t, resolvesThrough(overlay, "local"), "a later count never removes a retained name")
 }
 
-// LegacyColocatedBrokerID never returns a flat instance ID, and no ID means
-// no retention.
-func TestProfileReferences_NoLegacyBrokerNoRetention(t *testing.T) {
+// DR2-C5 / R10: a flat instance ID known to the hub is never the
+// co-located ID; with no legacy ID, nothing is enabled.
+func TestProfileReferences_FlatIDIsNotColocated(t *testing.T) {
 	srv, _ := testServer(t)
+	srv.mu.Lock()
+	srv.recordEmbeddedFlatActivatedLocked("flat-key", "flat-broker-id")
+	srv.mu.Unlock()
+	require.Equal(t, "flat-broker-id", srv.GetEmbeddedBrokerID(), "precondition: the hub knows the flat instance")
 	assert.Equal(t, "", srv.LegacyColocatedBrokerID())
+
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	srv.EnableProfileReferences(context.Background(), overlay, srv.LegacyColocatedBrokerID(), t.TempDir())
@@ -330,40 +510,106 @@ func TestProfileReferences_NoLegacyBrokerNoRetention(t *testing.T) {
 	assert.Equal(t, "legacy-id", srv.LegacyColocatedBrokerID())
 }
 
-type blockingBrokerProjectsStore struct {
-	store.Store
-	started chan struct{}
-	mu      sync.Mutex
-	err     error
+// R7: a reincarnate move onto the co-located broker records the project's
+// activeProfile and the moved agent's profile, on both branches (target
+// already serves the project, and the target is linked by the move).
+func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
+	for _, linked := range []bool{true, false} {
+		t.Run(map[bool]string{true: "target serves the project", false: "move links the target"}[linked], func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			broker := newLocalPathTestBroker(t, s, "pr-move-broker")
+			project := &store.Project{ID: tid("pr-move"), Name: "pr-move", Slug: "pr-move",
+				Annotations: map[string]string{projectSettingActiveProfile: "local"}}
+			require.NoError(t, s.CreateProject(ctx, project))
+			if linked {
+				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+					ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+				}))
+			}
+			overlay := config.NewSettingsOverlay()
+			overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}}, storedGkeNFSProfiles(), nil, "")
+			srv.EnableProfileReferences(ctx, overlay, broker.ID, t.TempDir())
+			require.Error(t, resolvesThrough(overlay, "local"))
+			require.Error(t, resolvesThrough(overlay, "remote"))
+
+			require.NoError(t, srv.linkMoveTargetProvider(ctx, &reincarnationMove{
+				SourceBrokerID: "elsewhere", TargetBrokerID: broker.ID, ProjectID: project.ID, Profile: "remote",
+			}))
+			assert.NoError(t, resolvesThrough(overlay, "local"), "the project's activeProfile")
+			assert.NoError(t, resolvesThrough(overlay, "remote"), "the moved agent's profile, with its runtime")
+		})
+	}
 }
 
-func (b *blockingBrokerProjectsStore) GetBrokerProjects(ctx context.Context, brokerID string) ([]store.ProjectProvider, error) {
-	b.started <- struct{}{}
-	<-ctx.Done()
-	b.mu.Lock()
-	b.err = ctx.Err()
-	b.mu.Unlock()
-	return nil, ctx.Err()
+// R7 (structural): every pkg/hub provider link goes through
+// linkProjectProvider, so none can skip the placement hook.
+func TestProfileReferences_EveryProviderLinkIsHooked(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || name == "profile_references.go" {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), ".store.AddProjectProvider(",
+			"%s links a provider without linkProjectProvider (built-in profile retention would miss it)", name)
+	}
 }
 
-func (b *blockingBrokerProjectsStore) ctxErr() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.err
+// R8: the project settings PUT of an activeProfile on a project the
+// co-located broker provides retains it at once.
+func TestProfileReferences_ProjectSettingsPutRetains(t *testing.T) {
+	f := bypassAgentsSetup(t)
+	ctx := context.Background()
+	f.srv.seedProjectCreatorMembership(ctx, f.proj)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, f.proj.ID, f.owner.ID))
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
+	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	require.Error(t, resolvesThrough(overlay, "local"))
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, "/api/v1/projects/"+f.proj.ID+"/settings",
+		map[string]any{"activeProfile": "local"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NoError(t, resolvesThrough(overlay, "local"))
 }
 
-type panickingBrokerProjectsStore struct {
-	store.Store
-	calls int
+// R11(c): the DB-tier GET shows the retained built-ins read-only, while
+// profiles and runtimes stay the stored sets, and no request field can
+// carry them.
+func TestProfileReferences_ServerConfigGetShowsRetained(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, _, ops := newHubNameDBServer(t, "")
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		map[string]config.V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local-nfs": {Runtime: "docker"}}, nil, "")
+	overlay.SetProfileReferences(config.ProfileReferences{Agents: map[string]int{"local": 2}})
+	require.NoError(t, resolvesThrough(overlay, "local"))
+	publishTarget(srv, overlay, "b", t.TempDir())
+
+	resp := getServerConfigDB(t, srv, ops)
+	require.Len(t, resp.RetainedBuiltinProfiles, 1)
+	assert.Equal(t, "local", resp.RetainedBuiltinProfiles[0].Name)
+	assert.Equal(t, 2, resp.RetainedBuiltinProfiles[0].Agents)
+	require.NotEmpty(t, resp.RetainedBuiltinRuntimes)
+	assert.NotContains(t, resp.Profiles, "local", "profiles stay the stored set")
+
+	reqType := reflect.TypeOf(ServerConfigUpdateRequest{})
+	for i := 0; i < reqType.NumField(); i++ {
+		assert.NotContains(t, reqType.Field(i).Tag.Get("json"), "retained", "no request field may carry retained built-ins")
+	}
 }
 
-func (p *panickingBrokerProjectsStore) GetBrokerProjects(context.Context, string) ([]store.ProjectProvider, error) {
-	p.calls++
-	panic("boom")
-}
-
-type failingBrokerProjectsStore struct{ store.Store }
-
-func (failingBrokerProjectsStore) GetBrokerProjects(context.Context, string) ([]store.ProjectProvider, error) {
-	return nil, errors.New("store unavailable")
+// captureHubLogs runs fn with the default slog logger writing to a buffer.
+func captureHubLogs(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf syncBuffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+	fn()
+	return buf.String()
 }

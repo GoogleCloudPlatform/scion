@@ -60,6 +60,11 @@ type profileReferences struct {
 	overlay   *config.SettingsOverlay
 	brokerID  string
 	globalDir string
+
+	// lastErr is the text of the last count failure logged (guarded by
+	// runMu); a failure with the same text is not logged again until a
+	// count succeeds.
+	lastErr string
 }
 
 func (p *profileReferences) triggerChan() chan struct{} {
@@ -101,6 +106,7 @@ func (s *Server) EnableProfileReferences(ctx context.Context, overlay *config.Se
 	refs, err := s.countProfileReferences(runCtx, brokerID, globalDir)
 	cancel()
 	if err != nil {
+		p.lastErr = err.Error()
 		slog.Error("Built-in profile references could not be counted at start; retaining built-in profiles conservatively until they can be", "error", err)
 		overlay.EnableConservativeRetention()
 	} else {
@@ -161,12 +167,28 @@ func (s *Server) runProfileReferenceCount(ctx context.Context) {
 	defer cancel()
 	refs, err := s.countProfileReferences(runCtx, brokerID, globalDir)
 	if err != nil {
-		if ctx.Err() == nil {
-			slog.Error("Built-in profile references could not be counted; keeping the previous references", "error", err)
+		if ctx.Err() == nil && err.Error() != p.lastErr {
+			p.lastErr = err.Error()
+			slog.Error("Built-in profile references could not be counted; keeping the previous references (logged again only when the error changes)", "error", err)
 		}
 		return
 	}
+	if p.lastErr != "" {
+		p.lastErr = ""
+		slog.Info("Built-in profile references counted again")
+	}
 	overlay.SetProfileReferences(refs)
+}
+
+// linkProjectProvider is the one way pkg/hub links a broker to a project: it
+// stores the provider row and then records the placement for built-in
+// profile retention (onColocatedPlacement), so no link site can forget it.
+func (s *Server) linkProjectProvider(ctx context.Context, provider *store.ProjectProvider) error {
+	if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		return err
+	}
+	s.onColocatedPlacement(ctx, provider.ProjectID, provider.BrokerID, "")
+	return nil
 }
 
 // onColocatedPlacement records, at once, the references a placement on the
@@ -280,11 +302,10 @@ func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir
 						case agent.SavedProfileFound:
 							row.SavedProfile = profile
 						case agent.SavedProfileUnreadable:
+							// What start's runtime selection uses: the
+							// provisioned profile, else "" (GetSavedProfile).
 							unreadable++
 							row.SavedProfile = profile
-							if profile == "" {
-								row.SavedProfile = hubProfile
-							}
 						default:
 							missing++
 						}
