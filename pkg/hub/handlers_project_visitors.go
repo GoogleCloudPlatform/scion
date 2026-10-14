@@ -350,17 +350,23 @@ func (s *Server) visitorGrantNonAmplification(w http.ResponseWriter, ctx context
 }
 
 // actorHoldsVisitorPermissions reports whether actor holds every
-// permission of the project-visitor role on projectID. An unscoped local
-// platform admin does, as in CanDelegate.
+// permission of the project-visitor role on projectID, decided by
+// CanDelegate for a binding of that role at the project's scope. The
+// descriptor names no grantee: CanDelegate refuses a federated grantee on
+// the paths it gates, and the visitor routes are the path that binds one.
 func (s *Server) actorHoldsVisitorPermissions(ctx context.Context, actor UserIdentity, projectID string) (bool, error) {
-	if IsUnscopedLocalPlatformAdmin(actor) {
-		return true, nil
-	}
 	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
 	if err != nil {
 		return false, err
 	}
-	return s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID).Allowed, nil
+	decision := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:             GrantTypeRoleBinding,
+		RoleDefinitionID: rd.ID,
+		RolePermissions:  rd.Permissions,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	return decision.Allowed, nil
 }
 
 // visitorWindowExtends reports whether the window (newNotBefore,
