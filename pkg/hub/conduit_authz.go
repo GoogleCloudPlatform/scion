@@ -576,7 +576,8 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 // *PlacementConflictError: no renewal is minted, and the stream is not
 // closed from here; it ends at its current deadline. A failed placement
 // read for a pinned agent wraps errConduitAuthzUnavailable, like the other
-// lookups that fail during a renewal: no renewal this attempt. As for an
+// lookups that fail during a renewal, and errConduitRenewalUnavailable: no
+// renewal this attempt, and nothing closes. As for an
 // open, an unpinned agent keeps today's path when the read fails, and a
 // managed runtime is not checked.
 func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent, req conduitRenewalRequest) error {
@@ -594,7 +595,7 @@ func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent
 		return fmt.Errorf("%w: agent placement: %w", errConduitRenewalUnavailable, err)
 	}
 	if agent.IsPinned() {
-		return fmt.Errorf("%w: agent placement check: %w", errConduitAuthzUnavailable, err)
+		return fmt.Errorf("%w: %w: agent placement check: %w", errConduitAuthzUnavailable, errConduitRenewalUnavailable, err)
 	}
 	return nil
 }

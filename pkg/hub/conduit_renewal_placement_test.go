@@ -132,6 +132,7 @@ func TestConduitRenewStream_PlacementReadFailure(t *testing.T) {
 		r, err := f.renew(tok, open, 7)
 		assert.Nil(t, r, "a renewal was minted without a placement answer")
 		require.ErrorIs(t, err, errConduitAuthzUnavailable)
+		require.ErrorIs(t, err, errConduitRenewalUnavailable)
 		require.ErrorIs(t, err, boom)
 		assert.NotErrorIs(t, err, errConduitRenewalRefused, "a placement read failure must not close the stream")
 		_, refused := placementRefusalOf(err)
