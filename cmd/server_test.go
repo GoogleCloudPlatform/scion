@@ -18,7 +18,9 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,9 +32,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testStoreSeq makes each test store's in-memory database name unique
+// per run, so repeated runs of one test (-count) never share a database.
+var testStoreSeq atomic.Int64
+
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
-	dbName := strings.ReplaceAll(t.Name(), "/", "_")
+	dbName := fmt.Sprintf("%s_%d", strings.ReplaceAll(t.Name(), "/", "_"), testStoreSeq.Add(1))
 	client, err := entc.OpenSQLite("file:"+dbName+"?mode=memory&cache=shared", entc.PoolConfig{})
 	require.NoError(t, err)
 	require.NoError(t, entc.AutoMigrate(context.Background(), client))

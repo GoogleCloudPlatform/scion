@@ -298,11 +298,6 @@ spec:
           env:
             - name: HOME
               value: /home/scion
-            # SCION_HUB_ENDPOINT is a fallback the broker reads if settings.yaml
-            # doesn't resolve one (cmd/root.go GetHubEndpoint); harmless to set
-            # alongside the ConfigMap's server.broker.hub_endpoint.
-            - name: SCION_HUB_ENDPOINT
-              value: "${HUB_ENDPOINT}"
           ports:
             - name: broker-api
               containerPort: 9800

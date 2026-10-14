@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID = "", "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
 	contextWarned = false
 }
 
@@ -61,6 +61,10 @@ func setupContextTest(t *testing.T) string {
 	for _, name := range []string{
 		"SCION_AGENT_ID", "SCION_HUB_TOKEN", "SCION_AUTH_TOKEN",
 		"SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
+		// Transport auth from the runner's environment would turn a hub
+		// with no credential into proxy-auth.
+		"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_MODE",
+		"SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -99,6 +103,16 @@ func makeDirProject(t *testing.T, endpoint string) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(settings), 0o644))
 	t.Chdir(root)
 	return root
+}
+
+// useHubForTest makes endpoint the hub of the invocation, as the --hub
+// flag would (resolveInvocationTarget leaves it in hubEndpoint), for tests
+// that call a command's RunE directly, and restores the previous value.
+func useHubForTest(t *testing.T, endpoint string) {
+	t.Helper()
+	origEP, origSrc := hubEndpoint, hubSource
+	t.Cleanup(func() { hubEndpoint, hubSource = origEP, origSrc })
+	hubEndpoint, hubSource = endpoint, ""
 }
 
 func findCommand(t *testing.T, args ...string) *cobra.Command {
@@ -162,9 +176,10 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "directory project with an endpoint beats the context",
+			name:  "an unlinked directory project's hub.endpoint is not read: the context hub applies",
 			setup: func(t *testing.T) { makeDirProject(t, "http://dir.example.com") },
 			cmd:   []string{"list"},
+			want:  hubOnly,
 		},
 		{
 			name:  "directory project without an endpoint uses the context hub but not its project",
@@ -173,18 +188,25 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want:  hubOnly,
 		},
 		{
-			name: "global settings endpoint inside a directory project counts as the directory's",
+			name: "the global settings endpoint is not read inside a directory project",
 			setup: func(t *testing.T) {
 				writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
 				makeDirProject(t, "")
 			},
-			cmd: []string{"list"},
+			cmd:  []string{"list"},
+			want: hubOnly,
 		},
 		{
-			name:  "outside a project the context hub beats the global settings endpoint",
+			name:  "the global settings endpoint is not read outside a project",
 			setup: func(t *testing.T) { writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n") },
 			cmd:   []string{"list"},
 			want:  filled,
+		},
+		{
+			name:  "with the imports off, a linked project's settings endpoint is not read",
+			setup: func(t *testing.T) { makeLinkedDirProject(t, "http://dir.example.com") },
+			cmd:   []string{"list"},
+			want:  hubOnly,
 		},
 		{
 			name:  "--global is not injected",
@@ -218,25 +240,27 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "--no-hub ignores the context",
-			setup: func(t *testing.T) { noHub = true },
-			cmd:   []string{"list"},
-		},
-		{
 			name: "server subtree ignores the context",
 			cmd:  []string{"server", "start"},
 		},
 		{
-			name: "runtime-broker subtree ignores the context",
+			name: "runtime-broker commands see the context hub",
 			cmd:  []string{"runtime-broker", "status"},
+			want: hubOnly,
 		},
 		{
-			name: "broker alias ignores the context",
+			name: "runtime-broker start (the broker process) ignores the context",
+			cmd:  []string{"runtime-broker", "start"},
+		},
+		{
+			name: "runtime-broker join sees the context hub",
+			cmd:  []string{"runtime-broker", "join"},
+			want: hubOnly,
+		},
+		{
+			name: "broker alias sees the context hub",
 			cmd:  []string{"broker", "register"},
-		},
-		{
-			name: "hub shadow ignores the context",
-			cmd:  []string{"hub", "shadow"},
+			want: hubOnly,
 		},
 		{
 			name: "hub auth login sees the context hub",
@@ -249,8 +273,40 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want: hubOnly,
 		},
 		{
-			name: "hub-only command gets the hub but no project",
+			name: "tunnel gets the hub and the project",
 			cmd:  []string{"tunnel"},
+			want: filled,
+		},
+		{
+			name: "ssh gets the hub and the project",
+			cmd:  []string{"ssh"},
+			want: filled,
+		},
+		{
+			name: "ssh-config gets the hub and the project",
+			cmd:  []string{"ssh-config"},
+			want: filled,
+		},
+		{
+			name: "vscode gets the hub and the project",
+			cmd:  []string{"vscode"},
+			want: filled,
+		},
+		{
+			name:  "tunnel in a directory project gets no context project",
+			setup: func(t *testing.T) { makeDirProject(t, "") },
+			cmd:   []string{"tunnel"},
+			want:  hubOnly,
+		},
+		{
+			name:  "ssh with --project keeps the flag",
+			setup: func(t *testing.T) { projectPath = "bar" },
+			cmd:   []string{"ssh"},
+			want:  want{hub: ctxTestHub, hubSource: targetSourceContext, project: "bar"},
+		},
+		{
+			name: "expose gets the hub but no project",
+			cmd:  []string{"expose"},
 			want: hubOnly,
 		},
 		{
@@ -289,7 +345,7 @@ func TestResolveInvocationTarget(t *testing.T) {
 			if mode == "" {
 				mode = ModeHuman
 			}
-			resolveInvocationTarget(findCommand(t, tt.cmd...), mode)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, tt.cmd...), mode))
 			assert.Equal(t, want.hub, hubEndpoint, "hubEndpoint")
 			assert.Equal(t, want.hubSource, hubSource, "hubSource")
 			assert.Equal(t, want.project, projectPath, "projectPath")
@@ -307,7 +363,7 @@ func writeHomeGlobalSettings(t *testing.T, content string) {
 
 func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 	setupContextTest(t)
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Empty(t, hubEndpoint)
 	assert.Empty(t, projectPath)
 	assert.Empty(t, hubSource)
@@ -317,7 +373,7 @@ func TestResolveInvocationTarget_NoContextFile(t *testing.T) {
 func TestResolveInvocationTarget_HubWithoutProject(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, "")
-	resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	assert.Equal(t, ctxTestHub, hubEndpoint)
 	assert.Empty(t, projectPath)
 }
@@ -327,7 +383,7 @@ func TestResolveInvocationTarget_CorruptContextIsAWarning(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
 	stderr := captureStderr(t, func() {
-		resolveInvocationTarget(findCommand(t, "list"), ModeHuman)
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
 	})
 	assert.Contains(t, stderr, "Warning: ignoring the current context")
 	assert.Empty(t, hubEndpoint)
@@ -351,8 +407,7 @@ func TestPersistentPreRun_ContextProjectSatisfiesProjectRequirement(t *testing.T
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	assert.Equal(t, ctxTestProjectID, projectPath)
 	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.True(t, isContextProject(projectPath))
-	assert.False(t, isContextProject("some-other-ref"))
+	assert.Equal(t, targetSourceContext, projectSource)
 }
 
 // TestPersistentPreRun_AgentContainerIgnoresContext covers the acceptance
@@ -386,10 +441,12 @@ func TestCommandRequiresProject_TopLevelUse(t *testing.T) {
 	assert.True(t, commandRequiresProject(nested))
 }
 
-// TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint: a config
-// subcommand's own --global counts as --global for the hook, so the global
-// settings endpoint beats the context hub, as with the root --global.
-func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T) {
+// TestPersistentPreRun_ConfigSubcommandGlobalCountsAsGlobal: a config
+// subcommand's own --global counts as --global for the hook, as the root
+// --global does: the global project is the target and no context project
+// is injected. The hub is the current hub; the global settings'
+// hub.endpoint is not read.
+func TestPersistentPreRun_ConfigSubcommandGlobalCountsAsGlobal(t *testing.T) {
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	resetConfigSetFlags(t)
@@ -398,8 +455,11 @@ func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T)
 
 	rootCmd.SetArgs([]string{"config", "set", "--global", "image_registry", "registry.example.test/team"})
 	require.NoError(t, rootCmd.Execute())
-	assert.Empty(t, hubEndpoint, "the context hub must not fill in under --global")
-	assert.Empty(t, hubSource)
+	assert.True(t, globalMode, "the config subcommand's --global counts as the root --global")
+	assert.Equal(t, "global", projectPath)
+	assert.Empty(t, projectSource, "no context project is injected under --global")
+	assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies; the settings endpoint is not read")
+	assert.Equal(t, targetSourceContext, hubSource)
 }
 
 // TestPersistentPreRun_ConfigOutsideProjectKeepsError: outside any project,
@@ -430,7 +490,7 @@ func TestResolveInvocationTarget_WarningToCommandErr(t *testing.T) {
 	list.SetErr(&errOut)
 	t.Cleanup(func() { list.SetErr(nil) })
 
-	stderr := captureStderr(t, func() { resolveInvocationTarget(list, ModeHuman) })
+	stderr := captureStderr(t, func() { require.NoError(t, resolveInvocationTarget(list, ModeHuman)) })
 	assert.Contains(t, errOut.String(), "Warning: ignoring the current context")
 	assert.Empty(t, stderr)
 }

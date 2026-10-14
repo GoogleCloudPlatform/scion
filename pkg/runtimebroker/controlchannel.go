@@ -164,6 +164,11 @@ type ControlChannelClient struct {
 	// (conn.WritePing is used); tests set it to simulate a failed write.
 	writePing func(conn *wsprotocol.Connection) error
 
+	// afterDial, when set, runs after a successful dial and before the
+	// connection is stored. It is nil in production; tests set it to order a
+	// Close against a dial that has just completed.
+	afterDial func()
+
 	// Connection state
 	connected   bool
 	sessionID   string
@@ -335,6 +340,13 @@ func (c *ControlChannelClient) connectWithBackoff() error {
 		}
 
 		if err := c.doConnect(); err != nil {
+			// A connect that failed because the client was closed, or the
+			// context passed to Connect was cancelled, is the ordinary end of
+			// the loop, not a connection failure.
+			if c.ctx.Err() != nil {
+				c.log.Debug("Control channel connect ended: client closed or context cancelled", "error", err)
+				return c.ctx.Err()
+			}
 			c.log.Error("Control channel connection failed", "error", err, "retry_in", backoff)
 
 			select {
@@ -400,10 +412,22 @@ func (c *ControlChannelClient) doConnect() error {
 		}
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
+	if c.afterDial != nil {
+		c.afterDial()
+	}
 
 	// Close, SendStreamData and CloseStream read c.conn under c.mu from other
-	// goroutines.
+	// goroutines. Close also cancels c.ctx under c.mu before it reads c.conn,
+	// so checking c.ctx and storing conn under c.mu here means either Close
+	// sees conn and closes it, or this sees the cancellation: a connect that
+	// completes after Close never sends the connect message, so no session is
+	// registered for a closed client.
 	c.mu.Lock()
+	if err := c.ctx.Err(); err != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return err
+	}
 	c.conn = conn
 	c.mu.Unlock()
 
@@ -729,9 +753,11 @@ func (c *ControlChannelClient) dispatchRequest(conn *wsprotocol.Connection, req 
 // it gives up waiting, e.g. its own dispatch timeout elapsed or the original
 // caller's request was itself cancelled) can abort the request: while it is
 // queued for a dispatch slot, or while its handler runs. Without this, a
-// slow create (e.g. a cold-start container/sandbox build) keeps running and
-// can leak a started sandbox the Hub no longer knows about, and a queued
-// request keeps its place in the queue after nobody is waiting for it.
+// queued request keeps its place in the queue after nobody is waiting for
+// it, and a handler keeps running for a caller that has gone. The handler
+// decides what the cancel ends: a synchronous create's start, once begun,
+// deliberately does not follow it (syncStart.bind, ptone/scion#4817); the
+// hub ends such a start with a stop or delete of the agent.
 //
 // The returned done func unregisters and cancels the context; call it
 // exactly once, when the request has finished.

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
@@ -80,7 +81,6 @@ var layer0Prefixes = []string{
 	"server.native_chat",
 	// Async agent create (design §3.7) — the reaper's dedicated scheduler
 	// ticker and the clamp on LaunchTimeout are both established at startup.
-	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
 	// Request performance tracing — the middleware and the authorization
@@ -154,6 +154,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
 		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
 	},
+	"hub_observability": {
+		config.HubMetricsEnabledKey: "metrics_enabled",
+		config.HubTracingEnabledKey: "tracing_enabled",
+	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
 	},
@@ -210,6 +214,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"gcp_iam": {
 		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
 		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
+	},
+	"hub_observability": {
+		"metrics_enabled": config.HubMetricsEnabledKey,
+		"tracing_enabled": config.HubTracingEnabledKey,
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",
@@ -537,7 +545,7 @@ type DeprecatedEnvVar struct {
 func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	var deprecated []DeprecatedEnvVar
 	for _, key := range serverEnvKoanf.Keys() {
-		if !IsLayer1Key(key) {
+		if !IsLayer1Key(key) || envPinnedLayer1Keys[key] {
 			continue
 		}
 		// koanfKeyToEnvSuffix strips the "server." prefix, so the suffix
@@ -564,12 +572,30 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	return deprecated
 }
 
+// envSuffixOverrides lists the keys whose env variable is not the spelling
+// derived from the koanf path. It is the reverse of the opsettings env key
+// aliases in pkg/config (opsettingsEnvKeyAliases).
+var envSuffixOverrides = map[string]string{
+	"server.hub.public_url": "HUB_ENDPOINT", // SCION_SERVER_HUB_ENDPOINT
+}
+
+// envPinnedLayer1Keys lists the Layer-1 keys for which a SCION_SERVER_*
+// variable is the supported way to pin the value on a node, not a
+// deprecated seed input. server.hub.public_url resolves env first, then the
+// database, then settings.yaml (ptone/scion#3905).
+var envPinnedLayer1Keys = map[string]bool{
+	"server.hub.public_url": true,
+}
+
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
 // e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS"
 // The "server." prefix is stripped because it corresponds to the SCION_SERVER_
 // env prefix that was already removed during key mapping. Without stripping,
 // the output would produce double-SERVER var names (SCION_SERVER_SERVER_HUB_...).
 func koanfKeyToEnvSuffix(key string) string {
+	if suffix, ok := envSuffixOverrides[key]; ok {
+		return suffix
+	}
 	key = strings.TrimPrefix(key, "server.")
 	parts := strings.Split(key, ".")
 	for i, part := range parts {

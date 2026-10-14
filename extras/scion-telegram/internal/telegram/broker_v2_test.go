@@ -146,6 +146,7 @@ type fakeTGServerV2 struct {
 	answeredCallbacks []answerCallbackQueryRequest
 	nextSendMessageID int64
 	webhookURL        string
+	webhookSecret     string
 	// chatMembers maps chatID → userID → member status for getChatMember.
 	chatMembers map[int64]map[int64]string
 	// failChatMember makes getChatMember fail with a server error for
@@ -163,6 +164,11 @@ type fakeTGServerV2 struct {
 	chatMemberMaxInFlight int
 	// failSetWebhook makes setWebhook fail with a Telegram error.
 	failSetWebhook bool
+	// failDeleteWebhook makes deleteWebhook fail with a Telegram error.
+	failDeleteWebhook bool
+	// deleteWebhookCalls and getUpdatesCalls count those requests.
+	deleteWebhookCalls int
+	getUpdatesCalls    int
 }
 
 // chatMemberStats returns the getChatMember call count and peak concurrency.
@@ -272,6 +278,9 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getUpdates":
+			f.mu.Lock()
+			f.getUpdatesCalls++
+			f.mu.Unlock()
 			json.NewEncoder(w).Encode(apiResponse{
 				OK:     true,
 				Result: mustJSONRawV2(t, []Update{}),
@@ -287,6 +296,7 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 			fail := f.failSetWebhook
 			if !fail {
 				f.webhookURL = req.URL
+				f.webhookSecret = req.SecretToken
 			}
 			f.mu.Unlock()
 			if fail {
@@ -297,8 +307,17 @@ func newFakeTGServerV2(t *testing.T) *fakeTGServerV2 {
 
 		case "/bottest-token/deleteWebhook":
 			f.mu.Lock()
-			f.webhookURL = ""
+			f.deleteWebhookCalls++
+			fail := f.failDeleteWebhook
+			if !fail {
+				f.webhookURL = ""
+				f.webhookSecret = ""
+			}
 			f.mu.Unlock()
+			if fail {
+				json.NewEncoder(w).Encode(apiResponse{OK: false, ErrorCode: 500, Description: "Internal Server Error"})
+				return
+			}
 			json.NewEncoder(w).Encode(apiResponse{OK: true, Result: mustJSONRawV2(t, true)})
 
 		case "/bottest-token/getChatMember":
@@ -2402,6 +2421,12 @@ func TestV2_Reconfigure_FailureKeepsRunningConfig(t *testing.T) {
 			e.tgSrv.failSetWebhook = true
 			e.tgSrv.mu.Unlock()
 		}, "failed to set webhook", true, true},
+		{"deleteWebhook rejected on switch to poll", func(cfg map[string]string, e env) {
+			cfg["inbound_mode"] = "poll"
+			e.tgSrv.mu.Lock()
+			e.tgSrv.failDeleteWebhook = true
+			e.tgSrv.mu.Unlock()
+		}, "failed to delete webhook", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tgSrv := newFakeTGServerV2(t)
@@ -2517,6 +2542,7 @@ func TestV2_Reconfigure_NewListenAddressSwitchesServer(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, status)
 
+	waitRetired(t, b) // the old server is stopped in the background
 	_, err = postWebhookUpdate(t, oldAddr, "test-secret")
 	assert.Error(t, err, "the old webhook server must be stopped")
 }

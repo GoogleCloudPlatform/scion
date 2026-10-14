@@ -91,6 +91,11 @@ type ArtifactResponse struct {
 	// under the artifact's lock and can still be refused, for example for an
 	// existing admin grant or a concurrent move.
 	CanGrantReview bool `json:"canGrantReview,omitempty"`
+	// ScopeDeleted, on a GET of the artifact or of one of its versions, is
+	// true when the artifact's home project no longer exists, as on list
+	// rows. It is advisory: when the host cannot tell, it is left unset
+	// (see scopeDeleted).
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an
@@ -148,8 +153,30 @@ type UploadInfo struct {
 // the ready versions, newest first, without their files.
 type VersionListResponse struct {
 	Versions []VersionInfo `json:"versions"`
-	// NextBefore, when set, is the before= value of the next page.
+	// Discarded lists the versions in the same page that stopped being
+	// pending without becoming ready (ptone/scion#4577), so gaps in the
+	// numbering are explained. Each carries only DiscardedVersionInfo's
+	// fields.
+	Discarded []DiscardedVersionInfo `json:"discarded"`
+	// NextBefore, when set, is the before= value of the next page. A page
+	// covers ready and discarded versions together, so it can hold fewer
+	// than limit ready versions; clients follow NextBefore.
 	NextBefore int `json:"nextBefore,omitempty"`
+}
+
+// DiscardedVersionInfo is a discarded version as the versions list shows
+// it: only its number, state, reason and the time its number was taken.
+// It never names who submitted it, its note, kind or files, which stay as
+// hidden as before.
+type DiscardedVersionInfo struct {
+	Seq int `json:"seq"`
+	// State is VersionStateFailed.
+	State string `json:"state"`
+	// Reason is one of the FailReason codes; FailReasonDiscarded for a
+	// version discarded before reasons were recorded.
+	Reason string `json:"reason"`
+	// CreatedAt is when the version number was taken.
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ArtifactInfo describes an artifact.

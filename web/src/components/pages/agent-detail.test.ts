@@ -1093,3 +1093,49 @@ describe('scion-page-agent-detail phase 2: shared delete helper and failure bann
     expect(showToast).toHaveBeenCalledWith(START_BLOCKED_BY_DELETE_MESSAGE);
   });
 });
+
+describe('scion-page-agent-detail start warnings (ptone/scion#4569)', () => {
+  type ActionInternals = { handleAction(action: string): Promise<void> };
+  const WARNING =
+    'agent token issued without the project:artifact:read, project:artifact:write scopes: ...';
+
+  beforeEach(() => {
+    fakeStateManager.reset();
+    vi.mocked(showToast).mockClear();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  function answerActions(body: unknown): void {
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.endsWith('/start') || url.endsWith('/stop')
+          ? okJson(body)
+          : ({ ok: false, status: 404, json: () => Promise.resolve({}) } as unknown as Response)
+      )
+    );
+  }
+
+  it('Start shows the warnings of the start response', async () => {
+    const el = await mount(makeAgent({ phase: 'stopped' }));
+    answerActions({ agent: makeAgent(), warnings: [WARNING] });
+    await (el as unknown as ActionInternals).handleAction('start');
+    expect(showToast).toHaveBeenCalledWith(WARNING, 'warning', { duration: Infinity });
+  });
+
+  it('Start without warnings shows no toast', async () => {
+    const el = await mount(makeAgent({ phase: 'stopped' }));
+    answerActions({ agent: makeAgent() });
+    await (el as unknown as ActionInternals).handleAction('start');
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('Stop does not read warnings', async () => {
+    const el = await mount(makeAgent());
+    answerActions({ warnings: [WARNING] });
+    await (el as unknown as ActionInternals).handleAction('stop');
+    expect(showToast).not.toHaveBeenCalled();
+  });
+});

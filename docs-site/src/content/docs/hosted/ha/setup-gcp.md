@@ -277,8 +277,8 @@ account's ambient credentials. This works because the Hub SA has `roles/containe
 The Hub uses a 32-byte hex session signing key:
 
 ```bash
-export SESSION_SECRET=$(openssl rand -hex 32)
-echo "Session secret: $SESSION_SECRET"
+export SCION_SERVER_SESSION_SECRET=$(openssl rand -hex 32)
+echo "Session secret: $SCION_SERVER_SESSION_SECRET"
 # Save this — you'll use it in the deploy command.
 ```
 
@@ -999,11 +999,12 @@ gcloud run deploy scion-hub \
   --project=$PROJECT_ID \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
-  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SESSION_SECRET=$SESSION_SECRET" \
+  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SCION_SERVER_SESSION_SECRET=$SCION_SERVER_SESSION_SECRET,SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true" \
   --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
   --min-instances=2 \
   --max-instances=3 \
   --cpu=1 \
+  --no-cpu-throttling \
   --memory=512Mi \
   --port=8080 \
   --timeout=900 \
@@ -1012,6 +1013,8 @@ gcloud run deploy scion-hub \
   --no-allow-unauthenticated \
   --quiet
 ```
+
+`--no-cpu-throttling` keeps CPU allocated outside requests. The Runtime Broker in this service needs it to finish asynchronous agent launches after the create response. `SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true` tells the server that CPU is always allocated, which silences its startup warning; remove the variable if you deploy with CPU throttling. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create).
 
 :::note[Why min-instances=2?]
 An HA Hub needs at least two running replicas, so that losing one instance

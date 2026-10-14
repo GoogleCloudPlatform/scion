@@ -251,6 +251,13 @@ const (
 	// reaper (ptone/scion#4240, Phase 3b), so one replica per tick holds
 	// expired identities' agents and purges what each one created.
 	LockTestIdentityReaper AdvisoryLockKey = 0x5C10002D
+
+	// LockAgentDelegatedCredentialPurge guards the hourly purge of agent
+	// delegated credential rows that expired more than the retention
+	// period ago (.design/agent-delegation.md §18.1). A value in an unused
+	// gap of the range, so it does not collide with a key added next to
+	// the highest one.
+	LockAgentDelegatedCredentialPurge AdvisoryLockKey = 0x5C10001E
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

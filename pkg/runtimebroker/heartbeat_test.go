@@ -722,6 +722,48 @@ func TestHeartbeatService_AuxiliaryRuntimeSlugCollisionAcrossProjects(t *testing
 	}
 }
 
+// TestHeartbeatService_ForwardsStartingAgent (ptone/scion#4756): an agent
+// the manager lists with Phase and ContainerStatus "starting" (a start the
+// runtime has not confirmed, for example one interrupted by a crash) is
+// reported to the hub with those values, so the hub does not treat it as
+// missing.
+func TestHeartbeatService_ForwardsStartingAgent(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	mgr := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "starter", ProjectID: "project-1", Phase: "starting", ContainerStatus: "starting"},
+		},
+	}
+
+	svc := NewHeartbeatService(client, "test-host", time.Hour, mgr, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("Expected 1 heartbeat call, got %d", len(calls))
+	}
+	var found []hubclient.AgentHeartbeat
+	for _, p := range calls[0].Heartbeat.Projects {
+		if p.ProjectID != "project-1" {
+			continue
+		}
+		for _, a := range p.Agents {
+			if a.Slug == "starter" {
+				found = append(found, a)
+			}
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("starting agent reported %d times in project-1, want 1: %+v", len(found), calls[0].Heartbeat.Projects)
+	}
+	got := found[0]
+	if got.Phase != "starting" || got.ContainerStatus != "starting" || got.Status != "starting" {
+		t.Errorf("starting agent reported as Phase=%q ContainerStatus=%q Status=%q, want all \"starting\"", got.Phase, got.ContainerStatus, got.Status)
+	}
+}
+
 // TestHeartbeatService_AuxiliaryRuntimeDedupSameAgent verifies the dedup still
 // collapses the *same* agent (same slug and project) reported by both the
 // default and auxiliary managers, so it is not double-counted.

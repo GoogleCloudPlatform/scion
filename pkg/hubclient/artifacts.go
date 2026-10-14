@@ -65,6 +65,11 @@ type ArtifactService interface {
 	// first, without their files.
 	ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error)
 
+	// ListVersionHistory returns the ready versions of an artifact, as
+	// ListVersions does, and the discarded ones (versions that stopped
+	// being pending without becoming ready), both newest first.
+	ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error)
+
 	// GetVersion returns an artifact with version seq and its files.
 	GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
 
@@ -82,6 +87,22 @@ type ArtifactService interface {
 	// Delete deletes an artifact (a soft delete: its grants and share
 	// links end with it, and its bytes are removed later).
 	Delete(ctx context.Context, id string) error
+
+	// MintView mints a short-lived view capability for version seq of an
+	// artifact whose entry is HTML (POST /api/v1/artifacts/{id}/versions/{seq}/view)
+	// and returns its path and expiry. It requires read access.
+	MintView(ctx context.Context, id string, seq int) (*ArtifactView, error)
+
+	// ListGrants lists an artifact's grants (GET /api/v1/artifacts/{id}/grants).
+	// The hub serves it to the artifact's administrators only.
+	ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error)
+
+	// PutGrant adds a grant or changes the permission of the subject's
+	// existing grant (POST /api/v1/artifacts/{id}/grants).
+	PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error)
+
+	// DeleteGrant removes a grant (DELETE /api/v1/artifacts/{id}/grants/{grantId}).
+	DeleteGrant(ctx context.Context, id, grantID string) error
 }
 
 // ArtifactLink describes a share link. It never carries the token.
@@ -161,6 +182,12 @@ type ListArtifactsOptions struct {
 	Limit int
 	// Cursor is the NextCursor of the previous page.
 	Cursor string
+	// Scope keeps artifacts homed in this project (a project id) or
+	// shared with it.
+	Scope string
+	// Shared keeps only artifacts shared with the caller (or, with Scope,
+	// with that project) from elsewhere.
+	Shared bool
 }
 
 // ArtifactListResponse mirrors the hub's list response body.
@@ -174,6 +201,55 @@ type ArtifactListResponse struct {
 type ArtifactListItem struct {
 	Artifact
 	ReviewPending bool `json:"reviewPending"`
+	// Access is why the caller sees the artifact: "owned", "project" or
+	// "shared".
+	Access string `json:"access,omitempty"`
+	// SharedWithScope is true, in a list narrowed with Scope, for an
+	// artifact homed elsewhere and shared with that project.
+	SharedWithScope bool `json:"sharedWithScope,omitempty"`
+	// ScopeDeleted is true when the artifact's home project no longer
+	// exists.
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
+}
+
+// ArtifactView is a minted view capability: URL is the hub path of the
+// version's entry under the capability, valid until ExpiresAt.
+type ArtifactView struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	// RemoteImages is true when the entry references absolute http(s)
+	// images, which the view does not load.
+	RemoteImages bool `json:"remoteImages,omitempty"`
+}
+
+// ArtifactGrant is one grant on an artifact.
+type ArtifactGrant struct {
+	ID string `json:"id"`
+	// SubjectKind is "principal" (SubjectRef "user:<id>" or "agent:<id>")
+	// or "scope" (SubjectRef a project id).
+	SubjectKind string `json:"subjectKind"`
+	SubjectRef  string `json:"subjectRef"`
+	// Permission is "read", "review", "write" or "admin".
+	Permission string `json:"permission"`
+	// Home marks the grant to the artifact's home project.
+	Home      bool      `json:"home,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ArtifactGrantList is the body of GET /api/v1/artifacts/{id}/grants.
+type ArtifactGrantList struct {
+	Grants []ArtifactGrant `json:"grants"`
+	// CrossProjectSharing reports whether grants to other projects are
+	// allowed on this hub.
+	CrossProjectSharing bool `json:"crossProjectSharing"`
+}
+
+// ArtifactGrantRequest is the body of POST /api/v1/artifacts/{id}/grants.
+type ArtifactGrantRequest struct {
+	SubjectKind string `json:"subjectKind"`
+	SubjectRef  string `json:"subjectRef"`
+	Permission  string `json:"permission"`
 }
 
 // ArtifactResponse mirrors the hub's artifact response body.
@@ -214,6 +290,16 @@ type ArtifactVersion struct {
 	CreatedAt     time.Time      `json:"createdAt"`
 	State         string         `json:"state"`
 	Files         []ArtifactFile `json:"files"`
+}
+
+// ArtifactDiscardedVersion is a discarded version as the versions list
+// shows it: its number, state, reason code and the time its number was
+// taken (ptone/scion#4577).
+type ArtifactDiscardedVersion struct {
+	Seq       int       `json:"seq"`
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ArtifactFile describes one file of a version.
@@ -299,6 +385,12 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 		}
 		if opts.Cursor != "" {
 			q.Set("cursor", opts.Cursor)
+		}
+		if opts.Scope != "" {
+			q.Set("scope", opts.Scope)
+		}
+		if opts.Shared {
+			q.Set("shared", "1")
 		}
 	}
 	resp, err := s.c.getWithQuery(ctx, "/api/v1/artifacts", q, nil)
@@ -436,7 +528,14 @@ func (s *artifactService) FinalizeReview(ctx context.Context, id string, seq, ba
 
 // ListVersions implements ArtifactService.
 func (s *artifactService) ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error) {
+	versions, _, err := s.ListVersionHistory(ctx, id)
+	return versions, err
+}
+
+// ListVersionHistory implements ArtifactService.
+func (s *artifactService) ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error) {
 	var all []ArtifactVersion
+	var discarded []ArtifactDiscardedVersion
 	before := 0
 	for {
 		p := artifactPath(id) + "/versions"
@@ -445,18 +544,20 @@ func (s *artifactService) ListVersions(ctx context.Context, id string) ([]Artifa
 		}
 		resp, err := s.c.get(ctx, p, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		page, err := apiclient.DecodeRequired[struct {
-			Versions   []ArtifactVersion `json:"versions"`
-			NextBefore int               `json:"nextBefore"`
+			Versions   []ArtifactVersion          `json:"versions"`
+			Discarded  []ArtifactDiscardedVersion `json:"discarded"`
+			NextBefore int                        `json:"nextBefore"`
 		}](resp)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		all = append(all, page.Versions...)
+		discarded = append(discarded, page.Discarded...)
 		if page.NextBefore <= 0 || (before > 0 && page.NextBefore >= before) {
-			return all, nil
+			return all, discarded, nil
 		}
 		before = page.NextBefore
 	}
@@ -512,6 +613,51 @@ func (s *artifactService) RevokeLink(ctx context.Context, id, linkID string) err
 // Delete implements ArtifactService.
 func (s *artifactService) Delete(ctx context.Context, id string) error {
 	resp, err := s.c.delete(ctx, artifactPath(id), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// MintView implements ArtifactService. It is sent once, never retried:
+// each call mints a new capability.
+func (s *artifactService) MintView(ctx context.Context, id string, seq int) (*ArtifactView, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/view", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactView](resp)
+}
+
+// ListGrants implements ArtifactService.
+func (s *artifactService) ListGrants(ctx context.Context, id string) (*ArtifactGrantList, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/grants", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactGrantList](resp)
+}
+
+// PutGrant implements ArtifactService. Adding or changing a grant is
+// idempotent for the same subject and permission, but it is sent once, as
+// the other mutating artifact calls are.
+func (s *artifactService) PutGrant(ctx context.Context, id string, req *ArtifactGrantRequest) (*ArtifactGrant, error) {
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/grants", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[struct {
+		Grant ArtifactGrant `json:"grant"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	return &out.Grant, nil
+}
+
+// DeleteGrant implements ArtifactService.
+func (s *artifactService) DeleteGrant(ctx context.Context, id, grantID string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id)+"/grants/"+url.PathEscape(grantID), nil)
 	if err != nil {
 		return err
 	}

@@ -1527,6 +1527,73 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	}, nil
 }
 
+// RemoveVisitor revokes the visitor grant of the federated account
+// visitorID on projectID: it deletes the account's project-visitor binding
+// and writes the project_visitor_revoke audit record in one transaction,
+// and returns the deleted binding.
+//
+// The caller has already admitted the actor with project.manage_visitors
+// on the project (authorizeProjectVisitorManagement), so RemoveVisitor
+// applies no governance matrix of its own. A visitor binding confers no
+// project membership, so RemoveVisitor takes no project membership lock
+// and enqueues no membership loss check.
+//
+// Only a project-visitor binding is removed: when visitorID has no visitor
+// grant on projectID the result is store.ErrNotFound, and a binding of any
+// other role, scope or principal type is refused with
+// store.ErrVisitorBindingRefused. The caller publishes the conduit
+// authorization change once RemoveVisitor returns, as the callers of
+// RemoveMember do.
+func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID string) (*store.RoleBinding, error) {
+	var removed *store.RoleBinding
+	err := svc.store.WithTx(ctx, func(tx store.Store) error {
+		u, rb, err := projectVisitorBinding(ctx, tx, projectID, visitorID)
+		if err != nil {
+			return err
+		}
+		if err := requireProjectVisitorBinding(ctx, tx, rb, projectID); err != nil {
+			return err
+		}
+		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
+			return err
+		}
+		subject, err := federationSubjectOf(ctx, tx, u.ID)
+		if err != nil {
+			return err
+		}
+		if err := writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRevoke, projectID,
+			visitorAuditSummary(u, rb, subject), nil); err != nil {
+			return err
+		}
+		removed = rb
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	svc.logger.Info("project visitor removed via service",
+		"project_id", projectID, "binding_id", removed.ID, "visitor_id", visitorID)
+	return removed, nil
+}
+
+// requireProjectVisitorBinding returns store.ErrVisitorBindingRefused
+// unless rb binds the seeded project-visitor role to a user principal at
+// the scope of projectID.
+func requireProjectVisitorBinding(ctx context.Context, st store.Store, rb *store.RoleBinding, projectID string) error {
+	if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID ||
+		rb.PrincipalType != store.RoleBindingPrincipalUser {
+		return store.ErrVisitorBindingRefused
+	}
+	rd, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	if err != nil {
+		return err
+	}
+	if !rd.System || rd.ConfersProjectMembership() || rb.RoleDefinitionID != rd.ID {
+		return store.ErrVisitorBindingRefused
+	}
+	return nil
+}
+
 // TransferOwnership atomically transfers project ownership from one user to
 // another. The new owner gets a project-owner binding; the current actor's
 // owner binding is downgraded to project-member. This is one atomic operation
@@ -2220,7 +2287,7 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 }
 
 // refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
-// test identity (403), reading the kind through kindForPrincipal (the row's
+// test identity or a federated account (403), reading the kind through kindForPrincipal (the row's
 // own classification when no authorization service is wired). A read
 // error or an unrecognized kind refuses too.
 func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
@@ -2233,6 +2300,9 @@ func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context
 	}
 	if err != nil || k.isTestAdmin() {
 		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
+	}
+	if k.isFederated() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: federatedGranteeReasonRefused, HTTPStatus: 403}
 	}
 	return nil
 }

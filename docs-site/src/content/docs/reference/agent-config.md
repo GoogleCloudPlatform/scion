@@ -31,6 +31,11 @@ Previous versions of Scion used `scion-agent.json`. The new versioned settings s
 | `command_args` | list | Additional arguments passed to the harness entrypoint. |
 | `task_flag` | string | CLI flag name for passing the task (e.g., `--input`). When set, the task is delivered as a flag value instead of a positional argument. |
 | `model` | string | LLM model identifier override. |
+| `message_mode` | string | Hub only: the initial message mode (`none`, `lineage`, `branch`, `project`, `hub`) for agents created from this template when the create request names none. |
+
+:::caution[Environment keys are ignored in templates]
+`image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes`, and `env` entries whose name starts with `SCION_`, describe the environment an agent runs in, not its job. In a **template's** `scion-agent.yaml` they are ignored with a warning; an upload that contains them is not rejected. Set them in settings, a profile, the harness-config or the Hub defaults instead. In a template, the other `env` entries are set only when no other source sets the variable, with literal values. See [Environment keys are ignored](/scion/local/templates/#environment-keys-are-ignored).
+:::
 
 :::caution[Harness Field Deprecated]
 The `harness` field is no longer supported in `scion-agent.yaml`. Templates must be harness-agnostic. Use `default_harness_config` to specify a preferred harness, which can be overridden by users at runtime.
@@ -132,7 +137,7 @@ gemini:
 
 ### Telemetry (`telemetry`)
 
-Override telemetry settings for this template or agent. These merge on top of any telemetry configuration defined in `settings.yaml` (global or project scope), using last-write-wins semantics.
+Override telemetry settings for this agent (a template's `telemetry` block is ignored). These merge on top of any telemetry configuration defined in `settings.yaml` (global or project scope), using last-write-wins semantics.
 
 ```yaml
 telemetry:
@@ -215,9 +220,10 @@ See **[Settings Precedence](/scion/reference/settings-precedence/)** for both sy
 full, the `SCION_*` variables Scion injects, and the known gaps.
 :::
 
-`resources` merges **field by field** rather than as a whole block. A template
+`resources` merges **field by field** rather than as a whole block. A value
 that sets only a memory limit keeps that limit and still picks up the project's
-CPU and disk defaults. The same is true of the three limit fields.
+CPU and disk defaults. The same is true of the three limit fields. A template's
+`resources` is ignored (see above).
 
 :::caution[Behaviour change]
 Before this was corrected, three project settings were accepted and persisted

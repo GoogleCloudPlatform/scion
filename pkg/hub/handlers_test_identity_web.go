@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -57,9 +58,12 @@ import (
 //     startup (DEC-8). With no usable key, web sessions are unavailable and
 //     the member tier still starts. There is never a fallback to a key
 //     derived from the shared session secret;
-//   - the hub is not in proxy auth mode. Proxy hubs need the driver binding
-//     of phase WS2; until then redeem answers 403 there and any marked
-//     session is cleared.
+//   - in proxy auth mode (phase WS2), a proxy authenticator and at least
+//     one driver principal (auth.proxy.driverPrincipals). A proxy hub
+//     with no driver principals still starts, with web sessions
+//     unavailable: redeem answers 403 and any marked session is cleared.
+//     Behind the proxy every session is bound to the driver that redeemed
+//     it (test_identity_web_driver.go).
 //
 // A test identity web session is two cookies: the ordinary scion_sess
 // session (uid, email, role, sessGen and the marker values) and the
@@ -101,7 +105,7 @@ const (
 const (
 	sessKeyTIMarker = "tiMarker" // code id of the redeemed code
 	sessKeyTIExpiry = "tiExpiry" // identity expiry, Unix milliseconds
-	sessKeyTIDriver = "tiDriver" // verified driver principal; "" in WS1
+	sessKeyTIDriver = "tiDriver" // verified driver principal (proxy mode); "" otherwise
 )
 
 // Mutation audit types and details.reason values.
@@ -115,9 +119,8 @@ const (
 	// why (testIdentityWebSessionGate).
 	testIdentityWebReasonUnavailable = "test_identity_web_sessions_unavailable"
 
-	testIdentityWebCauseDisabled  = "test_identities_disabled"
-	testIdentityWebCauseNoKey     = "web_session_key_unavailable"
-	testIdentityWebCauseProxyMode = "proxy_mode"
+	testIdentityWebCauseDisabled = "test_identities_disabled"
+	testIdentityWebCauseNoKey    = "web_session_key_unavailable"
 
 	testIdentityWebErrInvalidCode = "invalid_or_expired_code"
 	testIdentityWebErrEnded       = "test_identity_session_ended"
@@ -194,10 +197,26 @@ func (s *Server) testIdentityWebSessionGate() (bool, string) {
 		return false, testIdentityWebCauseDisabled
 	case s.testIdentityWeb.codec == nil:
 		return false, testIdentityWebCauseNoKey
-	case s.config.AuthMode == "proxy":
-		return false, testIdentityWebCauseProxyMode
+	case s.config.AuthMode == "proxy" && s.config.ProxyAuth == nil:
+		return false, testIdentityWebCauseNoProxyAuthenticator
+	case s.config.AuthMode == "proxy" && s.proxyDrivers.empty():
+		return false, testIdentityWebCauseNoDriverPrincipals
 	}
 	return true, ""
+}
+
+// testIdentityWebSessionsUnavailableReason is the reason hub status reports
+// for unavailable test identity web sessions: the gate's cause while the
+// member tier is on and web sessions are unavailable, and "" otherwise
+// (available, or the member tier off).
+func (s *Server) testIdentityWebSessionsUnavailableReason() string {
+	if !s.testIdentities.enabled {
+		return ""
+	}
+	if ok, cause := s.testIdentityWebSessionGate(); !ok {
+		return cause
+	}
+	return ""
 }
 
 // logTestIdentityWebSessionState writes the startup log line for test
@@ -209,6 +228,11 @@ func (s *Server) logTestIdentityWebSessionState() {
 	ok, cause := s.testIdentityWebSessionGate()
 	if ok {
 		slog.Info("Test identity web sessions are available: single-use web-login codes let a test identity hold a browser session on this hub")
+		return
+	}
+	if cause == testIdentityWebCauseNoDriverPrincipals {
+		// One clear line: the member tier runs, browser sessions do not.
+		slog.Warn(testIdentityWebNoDriversLogLine, "cause", cause)
 		return
 	}
 	attrs := []any{"cause", cause}
@@ -223,6 +247,24 @@ func (s *Server) logTestIdentityWebSessionState() {
 // admin kinds are refused at mint, at redeem, and on every session check.
 func testIdentityWebKindAdmitted(u *store.User) bool {
 	return u != nil && u.IsTestFixture()
+}
+
+// workloadWebCodeAdmitted reports whether the request may mint a web-login
+// code for u as far as a workload delegation is concerned. A request that
+// is not a workload delegation request is not restricted here. A workload
+// delegation is admitted only with the member scope, and only for a
+// member-tier identity (kind test_fixture, never an admin kind; admin tiers
+// come with X4). The caller answers 404 otherwise, as for an identity the
+// delegation did not issue.
+func workloadWebCodeAdmitted(ctx context.Context, u *store.User) bool {
+	st := workloadDelegationCaller(ctx)
+	if st == nil {
+		return GetCredentialContextFromContext(ctx).Kind != CredentialKindWorkloadDelegation
+	}
+	if st.delegation == nil || st.delegation.Scope != testIdentityDelegationScope {
+		return false
+	}
+	return u.IsTestFixture() && !u.IsTestAdmin()
 }
 
 // writeTestIdentityWebUnavailable answers 404 with the unavailable reason.
@@ -288,8 +330,11 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	u, err := s.store.GetUser(ctx, id)
 	// One answer for a missing user, a user of a kind that cannot hold a
 	// web session, and an identity the caller did not issue, as for
-	// re-issue: the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !canManageTestIdentity(ctx, caller, u))) {
+	// re-issue: the route is no user-existence oracle. A workload
+	// delegation (ptone/scion#4240, X3b) reaches only the member-tier
+	// identities it issued itself (canManageTestIdentity,
+	// workloadWebCodeAdmitted).
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !s.canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u))) {
 		NotFound(w, "test identity")
 		return
 	}
@@ -321,6 +366,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		expiresAt = *u.ExpiresAt
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
+	workload := workloadDelegationCaller(ctx)
 	row := &store.TestIdentityLoginCode{
 		UserID:             u.ID,
 		CodeHash:           hash,
@@ -330,16 +376,24 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		Created:            now,
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		// A workload delegation must still be live at the mint itself
+		// (DEC-3 C3), as for token re-issue.
+		if workload != nil {
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+		}
 		if err := tx.ReplaceTestIdentityLoginCode(ctx, row); err != nil {
 			return fmt.Errorf("store web-login code: %w", err)
 		}
 		summary, _ := json.Marshal(struct {
-			UserID         string `json:"user_id"`
-			CodeID         string `json:"code_id"`
-			CodeExpiresAt  string `json:"code_expires_at"`
-			IssuedBy       string `json:"issued_by"`
-			CredentialKind string `json:"credential_kind"`
-		}{u.ID, row.ID, expiresAt.UTC().Format(time.RFC3339), caller.ID(), auditActor.CredentialKind})
+			UserID         string                     `json:"user_id"`
+			CodeID         string                     `json:"code_id"`
+			CodeExpiresAt  string                     `json:"code_expires_at"`
+			IssuedBy       string                     `json:"issued_by"`
+			CredentialKind string                     `json:"credential_kind"`
+			Workload       *testIdentityWorkloadAudit `json:"workload_delegation,omitempty"`
+		}{u.ID, row.ID, expiresAt.UTC().Format(time.RFC3339), caller.ID(), auditActor.CredentialKind, testIdentityWorkloadAuditOf(ctx)})
 		record := &store.MutationAuditRecord{
 			MutationType: testIdentityWebCodeIssueMutation,
 			TargetType:   testIdentityAuditTargetType,
@@ -352,6 +406,8 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errTestIdentityDelegationNotLive):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
 		case errors.Is(err, store.ErrAlreadyExists), isTransientIssuanceConflict(err):
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "web-login code issuance is busy; retry shortly",
@@ -381,16 +437,30 @@ func (ws *WebServer) SetTestIdentityWebSessions(s *Server) {
 }
 
 // testIdentityWebGate is the web server's view of
-// Server.testIdentityWebSessionGate. It also refuses on its own proxy auth
-// configuration, so either side being in proxy mode fails closed.
+// Server.testIdentityWebSessionGate. It also checks its own proxy auth
+// configuration (proxyWebSessionGate) and that the web server and the hub
+// agree about proxy auth mode, so either side failing fails closed.
 func (ws *WebServer) testIdentityWebGate() (bool, string) {
 	if ws.testIdentityHub == nil {
 		return false, testIdentityWebCauseDisabled
 	}
-	if ws.config.AuthMode == "proxy" {
-		return false, testIdentityWebCauseProxyMode
+	if ws.proxyMode() != (ws.testIdentityHub.config.AuthMode == "proxy") {
+		return false, testIdentityWebCauseAuthModeMismatch
+	}
+	if ok, cause := ws.proxyWebSessionGate(); !ok {
+		return false, cause
 	}
 	return ws.testIdentityHub.testIdentityWebSessionGate()
+}
+
+// testIdentityWebProxyCause reports whether cause is a proxy-mode reason
+// for unavailable web sessions (redeem then answers 403, not 404).
+func testIdentityWebProxyCause(cause string) bool {
+	switch cause {
+	case testIdentityWebCauseNoDriverPrincipals, testIdentityWebCauseNoProxyAuthenticator, testIdentityWebCauseAuthModeMismatch:
+		return true
+	}
+	return false
 }
 
 // testIdentitiesEnabled reports the member-level switch, for
@@ -510,12 +580,17 @@ type tiSessionResult struct {
 	reason string
 	row    *store.User
 	marker *tiMarkerValue
+	// assertionEmail is the verified proxy assertion email the driver
+	// binding matched (proxy mode, tiSessionValid only), or "".
+	assertionEmail string
 }
 
 // classifyTestIdentitySession is the one decision every web session
-// consumer makes before it honours a scion_sess session: sessionToBearer,
-// sessionAuth, devAuth, /auth/me, the event stream, logout and redeem
-// (proxyAuth refuses every test identity session outright). It is
+// consumer makes before it honours a scion_sess session: sessionToBearer
+// (and its fixture session bearer rule), proxyAuth, sessionAuth, devAuth,
+// /auth/me, the event stream at accept and on each heartbeat, logout and
+// redeem. In proxy mode it includes the driver binding to this request's
+// verified proxy assertion (fixtureSessionValid). It is
 // row-authoritative: whenever the session names a user it reads that
 // user's row (or uses row, when the caller already read it), and the
 // session is a test identity session when the row is kind test_fixture or
@@ -591,10 +666,11 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 		// ignored: it does not match this user and grants nothing.
 		return tiSessionResult{state: tiSessionNotFixture, row: row}
 	}
-	if reason := ws.fixtureSessionValid(session, marker, row, ws.testIdentityNow()); reason != "" {
+	assertionEmail, reason := ws.fixtureSessionValid(r, session, marker, row, ws.testIdentityNow())
+	if reason != "" {
 		return tiSessionResult{state: tiSessionInvalid, reason: reason, row: row}
 	}
-	return tiSessionResult{state: tiSessionValid, row: row, marker: marker}
+	return tiSessionResult{state: tiSessionValid, row: row, marker: marker, assertionEmail: assertionEmail}
 }
 
 // tiKind is a cached user kind for the classifier's fast path.
@@ -644,55 +720,60 @@ func (res tiSessionResult) isTestIdentitySession() bool {
 	return res.state == tiSessionValid || res.state == tiSessionInvalid
 }
 
-// fixtureSessionValid returns "" when session (with its decoded marker
-// cookie) is a valid test identity web session for row at now, and the
-// refusal reason otherwise. Every condition is required:
-//   - web sessions are available (member level on, hub-local key, not proxy
-//     mode; WS1 refuses every marked session in proxy mode);
+// fixtureSessionValid returns reason "" when session (with its decoded marker
+// cookie) is a valid test identity web session for row at now on request
+// r, and the refusal reason otherwise. With "" it also returns the verified
+// proxy assertion email the driver binding matched (proxy mode only).
+// Every condition is required:
+//   - web sessions are available (member level on, hub-local key, and in
+//     proxy mode a proxy authenticator and driver principals);
 //   - the marker cookie decodes with this hub's key and names row, and the
 //     session carries the same code id and expiry;
+//   - the driver binding holds (testIdentityDriverBinding): in proxy mode
+//     r carries a valid assertion for exactly the session's driver;
+//     outside proxy mode the session names no driver;
 //   - row is an admitted kind (test_fixture), active, and passes
 //     testFixtureRejection (feature on, not expired);
 //   - now is before the session's identity expiry;
 //   - the session generation equals the row's.
-func (ws *WebServer) fixtureSessionValid(session *sessions.Session, marker *tiMarkerValue, row *store.User, now time.Time) string {
+func (ws *WebServer) fixtureSessionValid(r *http.Request, session *sessions.Session, marker *tiMarkerValue, row *store.User, now time.Time) (assertionEmail, reason string) {
 	if ok, cause := ws.testIdentityWebGate(); !ok {
-		return "unavailable_" + cause
+		return "", "unavailable_" + cause
 	}
 	if marker == nil {
-		return "marker_missing_or_invalid"
+		return "", "marker_missing_or_invalid"
 	}
 	uid, _ := session.Values[sessKeyUserID].(string)
 	sessMarker, _ := session.Values[sessKeyTIMarker].(string)
 	sessExpiry, _ := session.Values[sessKeyTIExpiry].(int64)
+	sessDriver, _ := session.Values[sessKeyTIDriver].(string)
 	switch {
 	case row == nil:
-		return "identity_not_found"
+		return "", "identity_not_found"
 	case uid == "" || uid != row.ID || marker.UserID != row.ID:
-		return "user_mismatch"
+		return "", "user_mismatch"
 	case sessMarker == "" || marker.CodeID != sessMarker:
-		return "marker_mismatch"
+		return "", "marker_mismatch"
 	case marker.Expiry <= 0 || sessExpiry != marker.Expiry:
-		return "expiry_mismatch"
-	case marker.Driver != "":
-		// No driver binding exists before WS2.
-		return "driver_binding_unsupported"
+		return "", "expiry_mismatch"
 	case !testIdentityWebKindAdmitted(row):
-		return "kind_not_admitted"
+		return "", "kind_not_admitted"
 	case row.Status != store.UserStatusActive:
-		return "identity_not_active"
+		return "", "identity_not_active"
 	}
 	if reason := testFixtureRejection(row, ws.testIdentitiesEnabled(), now); reason != "" {
-		return reason
+		return "", reason
 	}
 	if !now.Before(time.UnixMilli(marker.Expiry)) {
-		return "session_expired"
+		return "", "session_expired"
 	}
 	cookieGen, _ := session.Values[sessKeySessionGeneration].(int64)
 	if row.SessionGeneration != cookieGen {
-		return "session_generation_mismatch"
+		return "", "session_generation_mismatch"
 	}
-	return ""
+	// The binding runs last: the assertion is verified only for a session
+	// that passes every other check.
+	return ws.testIdentityDriverBinding(r, marker, sessDriver)
 }
 
 // testIdentityWebSessionUser is the context user of a valid test identity
@@ -798,8 +879,17 @@ type testIdentityRedeemRequest struct {
 	Code string `json:"code"`
 }
 
-// redeemClientIP returns the host part of the connection's remote address.
-func redeemClientIP(r *http.Request) string {
+// redeemClientIP returns the client address of a redeem request, for the
+// audit and the per-IP rate limit. Behind proxy auth the connection comes
+// from the proxy, so the client is read through the hub's trusted proxies
+// (server trusted_proxies): X-Forwarded-For right to left past trusted hops
+// (geExchangeClientIP). A forwarding header from a peer that is not a
+// trusted proxy is ignored. Otherwise it is the host part of the
+// connection's remote address.
+func (ws *WebServer) redeemClientIP(r *http.Request) string {
+	if ws.proxyMode() && ws.testIdentityHub != nil {
+		return geExchangeClientIP(r, parseTrustedProxies(ws.testIdentityHub.config.TrustedProxies))
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -833,11 +923,12 @@ func (ws *WebServer) redeemOriginAllowed(r *http.Request) bool {
 }
 
 // auditTestIdentityRedeemRefusal writes the failure audit of a refused
-// redeem: the reason, the code hash prefix (never the code), and the client
-// address. A write failure is logged and does not change the answer.
-func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, hashPrefix, userID string) {
+// redeem: the reason, the code hash prefix (never the code), the client
+// address, and in proxy mode the verified proxy assertion email ("" when
+// there is none). A write failure is logged and does not change the answer.
+func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, clientIP, reason, hashPrefix, userID, assertionEmail string) {
 	slog.WarnContext(r.Context(), "test identity web session redeem refused", "reason", reason,
-		"code_hash_prefix", hashPrefix, "client_ip", redeemClientIP(r))
+		"code_hash_prefix", hashPrefix, "client_ip", clientIP, "assertion_email", assertionEmail)
 	if ws.store == nil {
 		return
 	}
@@ -851,7 +942,7 @@ func (ws *WebServer) auditTestIdentityRedeemRefusal(r *http.Request, reason, has
 		UserID         string `json:"user_id,omitempty"`
 		ClientIP       string `json:"client_ip"`
 		AssertionEmail string `json:"assertion_email"`
-	}{reason, hashPrefix, userID, redeemClientIP(r), ""})
+	}{reason, hashPrefix, userID, clientIP, assertionEmail})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionRefuseMutation,
 		ActorPrincipalKind:  "system",
@@ -876,14 +967,20 @@ func writeRedeemInvalid(w http.ResponseWriter) {
 // handleTestIdentityRedeem handles POST /auth/test-identity/redeem: it
 // redeems a web-login code for a fresh test identity web session.
 func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Request) {
+	// The client address, read once (behind proxy auth through the hub's
+	// trusted proxies), for the per-IP limit (IPv4 address or IPv6 /64,
+	// testLoginRateKey) and every audit row.
+	clientIP := ws.redeemClientIP(r)
 	ok, cause := ws.testIdentityWebGate()
 	if !ok {
-		if cause == testIdentityWebCauseProxyMode && ws.testIdentitiesEnabled() {
-			// WS1 serves no proxy hub: refuse, and clear any test
+		if testIdentityWebProxyCause(cause) && ws.testIdentitiesEnabled() {
+			// A proxy hub without what the driver binding needs (driver
+			// principals, a proxy authenticator, or agreement between
+			// the web server and the hub): refuse, and clear any test
 			// identity session this browser carries. The rate limit
 			// runs first, so refusals cannot drive unbounded audit
 			// writes.
-			if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
+			if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(clientIP)) {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 				return
@@ -895,7 +992,8 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 			} else if _, present := ws.readTestIdentityMarker(r); present {
 				ws.expireTestIdentityMarker(w)
 			}
-			ws.auditTestIdentityRedeemRefusal(r, "proxy_mode", "", "")
+			email, _ := ws.verifiedProxyAssertion(r)
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, cause, "", "", email)
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "test identity web sessions are not available behind proxy auth on this hub",
 				map[string]interface{}{"reason": testIdentityWebReasonUnavailable, "cause": cause})
 			return
@@ -907,7 +1005,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
-	if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(r.RemoteAddr)) {
+	if !ws.testIdentityRedeemLimiter.Allow(testLoginRateKey(clientIP)) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
 		return
@@ -916,8 +1014,40 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json", nil)
 		return
 	}
+	// Proxy mode (WS2): the handler verifies the proxy assertion itself
+	// and requires a driver principal. Every driver refusal comes before
+	// the code is read, so a refused request never consumes the code.
+	assertionEmail := ""
+	if ws.proxyMode() {
+		email, problem := ws.verifiedProxyAssertion(r)
+		if problem != "" {
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, problem, "", "", "")
+			status, code := http.StatusForbidden, ErrCodeForbidden
+			if problem == "driver_assertion_invalid" {
+				status, code = http.StatusUnauthorized, ErrCodeUnauthorized
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			writeError(w, status, code, "redeem behind proxy auth needs a valid proxy assertion for a driver principal",
+				map[string]interface{}{"reason": problem})
+			return
+		}
+		// Per verified assertion email, apart from the per-IP limit.
+		if !ws.testIdentityRedeemLimiter.Allow(testIdentityRedeemEmailRateKey(email)) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many redeem requests", nil)
+			return
+		}
+		if !ws.proxyDrivers.contains(email) {
+			ws.auditTestIdentityRedeemRefusal(r, clientIP, "driver_principal_required", "", "", email)
+			w.Header().Set("Cache-Control", "no-store")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "redeem behind proxy auth needs a driver principal",
+				map[string]interface{}{"reason": "driver_principal_required"})
+			return
+		}
+		assertionEmail = email
+	}
 	if !ws.redeemOriginAllowed(r) {
-		ws.auditTestIdentityRedeemRefusal(r, "origin_refused", "", "")
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "origin_refused", "", "", assertionEmail)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "cross-origin redeem is not allowed", nil)
 		return
 	}
@@ -936,7 +1066,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if req.Code == "" {
-		ws.auditTestIdentityRedeemRefusal(r, "malformed_request", "", "")
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "malformed_request", "", "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
@@ -949,15 +1079,15 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	code, err := ws.store.ConsumeTestIdentityLoginCode(ctx, hash, now)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		ws.auditTestIdentityRedeemRefusal(r, "unknown_code", prefix, "")
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "unknown_code", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case errors.Is(err, store.ErrTestIdentityLoginCodeConsumed):
-		ws.auditTestIdentityRedeemRefusal(r, "code_already_used", prefix, "")
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "code_already_used", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case errors.Is(err, store.ErrTestIdentityLoginCodeExpired):
-		ws.auditTestIdentityRedeemRefusal(r, "code_expired", prefix, "")
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "code_expired", prefix, "", assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	case err != nil:
@@ -976,7 +1106,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	}
 	if err != nil || !testIdentityWebKindAdmitted(row) || row.Status != store.UserStatusActive ||
 		testFixtureRejection(row, ws.testIdentitiesEnabled(), now) != "" {
-		ws.auditTestIdentityRedeemRefusal(r, "identity_not_admitted", prefix, code.UserID)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "identity_not_admitted", prefix, code.UserID, assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
@@ -984,12 +1114,12 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	remaining := expiry.Sub(now)
 	maxAge := int((remaining + time.Second - 1) / time.Second)
 	if maxAge < 1 {
-		ws.auditTestIdentityRedeemRefusal(r, "identity_not_admitted", prefix, code.UserID)
+		ws.auditTestIdentityRedeemRefusal(r, clientIP, "identity_not_admitted", prefix, code.UserID, assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
 
-	marker := tiMarkerValue{UserID: row.ID, CodeID: code.ID, Expiry: expiry.UnixMilli(), Driver: ""}
+	marker := tiMarkerValue{UserID: row.ID, CodeID: code.ID, Expiry: expiry.UnixMilli(), Driver: assertionEmail}
 	encoded, err := ws.testIdentityCodec().Encode(testIdentitySessionCookie, marker)
 	if err != nil {
 		slog.ErrorContext(ctx, "test identity redeem: failed to encode session marker", "code_id", code.ID, "error", err)
@@ -1004,7 +1134,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		DriverPrincipal  string `json:"driver_principal"`
 		SessionExpiresAt string `json:"session_expires_at"`
 		ClientIP         string `json:"client_ip"`
-	}{row.ID, code.ID, prefix, "none", expiry.UTC().Format(time.RFC3339), redeemClientIP(r)})
+	}{row.ID, code.ID, prefix, driverPrincipalOrNone(assertionEmail), expiry.UTC().Format(time.RFC3339), clientIP})
 	record := &store.MutationAuditRecord{
 		MutationType:        testIdentityWebSessionCreateMutation,
 		ActorPrincipalKind:  "system",
@@ -1042,7 +1172,7 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	session.Values[sessKeySessionGeneration] = row.SessionGeneration
 	session.Values[sessKeyTIMarker] = code.ID
 	session.Values[sessKeyTIExpiry] = marker.Expiry
-	session.Values[sessKeyTIDriver] = ""
+	session.Values[sessKeyTIDriver] = assertionEmail
 	session.Options.MaxAge = maxAge
 	if err := session.Save(r, w); err != nil {
 		slog.ErrorContext(ctx, "test identity redeem: failed to save session", "code_id", code.ID, "error", err)
@@ -1052,13 +1182,22 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 	http.SetCookie(w, ws.testIdentityCookie(encoded, maxAge))
 
 	slog.InfoContext(ctx, "test identity web session created", "test_identity_id", row.ID, "code_id", code.ID,
-		"code_hash_prefix", prefix, "session_expires_at", expiry)
+		"code_hash_prefix", prefix, "session_expires_at", expiry, "driver_principal", driverPrincipalOrNone(assertionEmail))
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// driverPrincipalOrNone is the audit value of a session's driver.
+func driverPrincipalOrNone(email string) string {
+	if email == "" {
+		return "none"
+	}
+	return email
+}
+
 // sseTestIdentitySessionStillValid re-checks the test identity web session
-// of an open event stream (row, expiry, generation, gate).
+// of an open event stream (row, expiry, generation, gate, and in proxy mode
+// the driver binding to the stream request's assertion).
 func (ws *WebServer) sseTestIdentitySessionStillValid(r *http.Request) bool {
 	if ws.sessionStore == nil {
 		return false

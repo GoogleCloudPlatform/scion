@@ -55,10 +55,15 @@ type tokenService struct {
 
 // CreateTokenRequest is the request for creating a user access token.
 type CreateTokenRequest struct {
-	Name      string     `json:"name"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Name string `json:"name"`
+	// ProjectID is the project-boundary shorthand. Leave it empty when
+	// Boundary is set.
+	ProjectID string `json:"projectId,omitempty"`
+	// Boundary is the explicit boundary, e.g. {"kind":"hub"} for a token
+	// not tied to a project. Nil means the project boundary of ProjectID.
+	Boundary  *TokenBoundary `json:"boundary,omitempty"`
+	Scopes    []string       `json:"scopes"`
+	ExpiresAt *time.Time     `json:"expiresAt,omitempty"`
 
 	// E.1 descriptive credential metadata: optional, bounded, immutable
 	// after issuance (there is no update endpoint).
@@ -74,15 +79,18 @@ type CreateTokenResponse struct {
 
 // TokenInfo represents token metadata (without the actual token value).
 type TokenInfo struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Prefix    string     `json:"prefix"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	Revoked   bool       `json:"revoked"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-	LastUsed  *time.Time `json:"lastUsed,omitempty"`
-	Created   time.Time  `json:"created"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Prefix    string `json:"prefix"`
+	ProjectID string `json:"projectId"`
+	// Boundary is the boundary the token was issued under; nil from a hub
+	// that does not report it.
+	Boundary  *TokenBoundary `json:"boundary,omitempty"`
+	Scopes    []string       `json:"scopes"`
+	Revoked   bool           `json:"revoked"`
+	ExpiresAt *time.Time     `json:"expiresAt,omitempty"`
+	LastUsed  *time.Time     `json:"lastUsed,omitempty"`
+	Created   time.Time      `json:"created"`
 
 	// E.1 descriptive credential metadata: empty for tokens created before
 	// E.1 or without metadata supplied at issuance.

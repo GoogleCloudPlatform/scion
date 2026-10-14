@@ -22,21 +22,31 @@ import (
 
 // hubUserLevelCommands are direct "scion hub" subcommands that act on the
 // user's hub connection or login rather than on a local project. Outside a
-// project they read and write the global settings, as with --global.
+// project they read and write the global settings, as with --global. The
+// hub list commands (add, list, rename, remove) act on the user's hub list
+// in ~/.scion/context.yaml.
 var hubUserLevelCommands = map[string]bool{
 	"status":  true,
 	"enable":  true,
 	"disable": true,
+	"add":     true,
+	"list":    true,
+	"rename":  true,
+	"remove":  true,
 }
 
 // hubOnlyCommands are top-level commands that need only the hub endpoint,
 // the credential and an agent reference: they never resolve, create,
 // register or sync a local project, even when --project names one. One
-// command per line.
+// command per line. (expose and unexpose act as the calling agent, with
+// its own hub identity and no agent reference.)
 var hubOnlyCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
+	"vscode":     true,
+	"expose":     true,
+	"unexpose":   true,
 }
 
 // brokerMachineLevelCommands are "scion runtime-broker" subcommands that act
@@ -71,12 +81,6 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "init":
 		// Both top-level init and project init don't require existing project
 		return false
-	case "shadow", "unshadow":
-		// hub shadow/unshadow create/remove the project marker — they must
-		// run in a directory with no existing project.
-		if parentName == "hub" {
-			return false
-		}
 	case "migrate-names", "migrate":
 		// hub secret migrate-names (GCP SM name migration) and hub secret
 		// migrate (DB -> GCP SM value migration) operate directly against
@@ -165,27 +169,19 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 // isHubDispatchInvocation reports whether agent work for this invocation is
 // sent to a hub instead of run locally. It matches how hub dispatch is
 // decided (hubsync.EnsureHubReady) and how the endpoint is resolved
-// (GetHubEndpoint: --hub, then settings, then environment):
+// (invocationHub: --hub, the environment, a link entry or the current hub):
 //
 //   - inside a hub-connected container (config.IsHubContext);
 //   - a hub project reference (slug, name or git URL) for --project, which
 //     goes to the hub or fails with a hub-mode error;
-//   - hub enabled in settings with an endpoint from any source.
-//
-// --no-hub turns off the last two.
+//   - a hub endpoint from any source (local-only mode was removed, so a
+//     configured endpoint is what makes the CLI use a hub).
 func isHubDispatchInvocation(projectPath string) bool {
 	if config.IsHubContext() {
 		return true
 	}
-	if noHub {
-		return false
-	}
 	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		return true
 	}
-	settings, err := config.LoadSettings(projectPath)
-	if err != nil || settings == nil {
-		return false
-	}
-	return settings.IsHubEnabled() && GetHubEndpoint(settings) != ""
+	return hubConfigured()
 }

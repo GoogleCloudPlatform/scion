@@ -271,6 +271,12 @@ func TestConduitBrokerTunnel_LostResponseIsOutcomeUnknown(t *testing.T) {
 	if isConfirmedStartNotActedOnError(err) {
 		t.Fatalf("a lost response must not be confirmed not acted on: %v", err)
 	}
+	if !errors.Is(err, errBrokerConnectionLost) || !isUnknownDispatchOutcome(err) {
+		t.Fatalf("a session lost after the send must be an unknown outcome (errBrokerConnectionLost): %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "conduit request failed: ") {
+		t.Fatalf("the error keeps its text: %v", err)
+	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("broker handled %d requests, want 1", n)
 	}
@@ -351,10 +357,18 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 	}
 	for dir, g := range guarded {
 		// pkgmove:scan-covers pkg/hub/apierr
-		// unaffected: guards conduitBrokerTunnel construction, which errors.go and json_response.go do not contain.
+		// scanned through guardScanSubdirs; guards conduitBrokerTunnel construction (pkg/hub only; ../runtimebroker is scanned alone).
 		// pkgmove:scan-covers pkg/hub/internal/principal
-		// unaffected: guards conduitBrokerTunnel construction, which identity.go and identity_credential.go do not contain.
-		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		// scanned through guardScanSubdirs; guards conduitBrokerTunnel construction (pkg/hub only; ../runtimebroker is scanned alone).
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// scanned through guardScanSubdirs once it exists; guards conduitBrokerTunnel construction (pkg/hub only; ../runtimebroker is scanned alone).
+		var files []string
+		var err error
+		if dir == "." {
+			files, err = globGuardScanDirs(dir, "*.go")
+		} else {
+			files, err = filepath.Glob(filepath.Join(dir, "*.go"))
+		}
 		if err != nil {
 			t.Fatal(err)
 		}

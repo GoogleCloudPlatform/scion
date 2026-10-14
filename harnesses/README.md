@@ -9,7 +9,8 @@ Each bundle includes everything needed to run the harness: configuration
 and a Cloud Build configuration.
 
 Building your own harness? See the [Harness-Config Authoring
-Guide](authoring-guide.md).
+Guide](authoring-guide.md). Its [Readiness and delivery](authoring-guide.md#readiness-and-delivery)
+section covers the `ready` and `delivery` blocks.
 
 ## Available Bundles
 

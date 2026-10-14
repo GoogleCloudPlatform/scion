@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -264,27 +265,6 @@ func NewGitHubSkillResolverWithCredentials(defaultToken string, provisionCredent
 	return r
 }
 
-// normalizeGitHubName uppercases a GitHub name and replaces hyphens and dots
-// with underscores to produce a valid env-var-style key segment.
-func normalizeGitHubName(name string) string {
-	s := strings.ToUpper(name)
-	s = strings.ReplaceAll(s, "-", "_")
-	s = strings.ReplaceAll(s, ".", "_")
-	return s
-}
-
-// deriveGitHubTokenKey converts a GitHub owner/repo pair into the conventional
-// project secret key name: GH_{OWNER}__{REPO}.
-func deriveGitHubTokenKey(owner, repo string) string {
-	return "GH_" + normalizeGitHubName(owner) + "__" + normalizeGitHubName(repo)
-}
-
-// deriveGitHubOwnerKey converts a GitHub owner into the owner-level
-// fallback key: GH_{OWNER}.
-func deriveGitHubOwnerKey(owner string) string {
-	return "GH_" + normalizeGitHubName(owner)
-}
-
 // tokenForRef returns the appropriate GitHub token for the given ref.
 //
 // Resolution precedence:
@@ -303,9 +283,9 @@ func (r *GitHubSkillResolver) tokenForRef(ref *GitHubSkillRef) (string, error) {
 	}
 	switch source {
 	case tokenSourceRepoKey:
-		util.Debugf("github: using credential %s for %s/%s", deriveGitHubTokenKey(ref.Owner, ref.Repo), ref.Owner, ref.Repo)
+		util.Debugf("github: using credential %s for %s/%s", ghauth.RepoKey(ref.Owner, ref.Repo), ref.Owner, ref.Repo)
 	case tokenSourceOwnerKey:
-		util.Debugf("github: using credential %s for %s/%s", deriveGitHubOwnerKey(ref.Owner), ref.Owner, ref.Repo)
+		util.Debugf("github: using credential %s for %s/%s", ghauth.OwnerKey(ref.Owner), ref.Owner, ref.Repo)
 	case tokenSourceDefault:
 		util.Debugf("github: no convention credential for %s/%s, using default", ref.Owner, ref.Repo)
 	case tokenSourceNone:
@@ -338,12 +318,12 @@ func (r *GitHubSkillResolver) lookupToken(ref *GitHubSkillRef) (string, tokenSou
 	}
 
 	// Priority 2: Repo-specific convention key (GH_OWNER__REPO).
-	if val := r.provisionCredentials[deriveGitHubTokenKey(ref.Owner, ref.Repo)]; val != "" {
+	if val := r.provisionCredentials[ghauth.RepoKey(ref.Owner, ref.Repo)]; val != "" {
 		return val, tokenSourceRepoKey, nil
 	}
 
 	// Priority 3: Owner-level convention key (GH_OWNER).
-	if val := r.provisionCredentials[deriveGitHubOwnerKey(ref.Owner)]; val != "" {
+	if val := r.provisionCredentials[ghauth.OwnerKey(ref.Owner)]; val != "" {
 		return val, tokenSourceOwnerKey, nil
 	}
 
@@ -373,6 +353,32 @@ func (r *GitHubSkillResolver) CredentialForURI(uri string) string {
 	return token
 }
 
+// CredentialSourceForURI returns a label naming where CredentialForURI's
+// credential for uri comes from: the secret named by ?token=, the GH_*
+// convention key that matched (names only, never values), or the default
+// GITHUB_TOKEN. It returns "" when CredentialForURI would return "".
+func (r *GitHubSkillResolver) CredentialSourceForURI(uri string) string {
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		return ""
+	}
+	_, source, err := r.lookupToken(ghRef)
+	if err != nil {
+		return ""
+	}
+	switch source {
+	case tokenSourceSecretParam:
+		return fmt.Sprintf("the credential %s named by ?token=", ghRef.TokenSecretName)
+	case tokenSourceRepoKey:
+		return "the credential " + ghauth.RepoKey(ghRef.Owner, ghRef.Repo)
+	case tokenSourceOwnerKey:
+		return "the credential " + ghauth.OwnerKey(ghRef.Owner)
+	case tokenSourceDefault:
+		return gitHubCredSourceDefault
+	}
+	return ""
+}
+
 // WithInstallCredentials returns ctx with what the install step needs to
 // download files of gh:// skills: this resolver's CredentialForURI as the
 // GitHub credential lookup, and defaultToken (when non-empty) as the default
@@ -383,6 +389,7 @@ func (r *GitHubSkillResolver) WithInstallCredentials(ctx context.Context, defaul
 	if defaultToken != "" {
 		ctx = ContextWithGitHubToken(ctx, defaultToken)
 	}
+	ctx = contextWithGitHubCredentialSourceLookup(ctx, r.CredentialSourceForURI)
 	return ContextWithGitHubCredentialLookup(ctx, r.CredentialForURI)
 }
 
@@ -799,11 +806,11 @@ func (r *GitHubSkillResolver) credentialSource(ghRef *GitHubSkillRef) string {
 	if ghRef.TokenSecretName != "" {
 		return "token:" + ghRef.TokenSecretName
 	}
-	repoKey := deriveGitHubTokenKey(ghRef.Owner, ghRef.Repo)
+	repoKey := ghauth.RepoKey(ghRef.Owner, ghRef.Repo)
 	if val := r.provisionCredentials[repoKey]; val != "" {
 		return "cred:" + repoKey
 	}
-	ownerKey := deriveGitHubOwnerKey(ghRef.Owner)
+	ownerKey := ghauth.OwnerKey(ghRef.Owner)
 	if val := r.provisionCredentials[ownerKey]; val != "" {
 		return "cred:" + ownerKey
 	}

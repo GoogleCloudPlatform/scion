@@ -60,37 +60,43 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/workspace/sync-from", AgentRouteWorkspace, "", AgentSubRouteSuffix{Opaque: "/sync-from"}),
 		byID(post, "/workspace/sync-to/finalize", AgentRouteWorkspace, "", AgentSubRouteSuffix{Opaque: "/sync-to/finalize"}),
 		byID(get, "/groups", AgentRouteGroups, "", none),
-		byID(get, "/ports", AgentRoutePorts, opAgentPortAccess, none),
-		byID(get, "/ports/", AgentRoutePorts, opAgentPortAccess, none),
-		byID(post, "/ports", AgentRoutePorts, "", none),
-		byID(get, "/ports/tunnel", AgentRoutePortsTunnel, "", none),
-		byID(http.MethodDelete, "/ports/3000", AgentRoutePortItem, "", AgentSubRouteSuffix{Param: "3000"}),
+		byID(get, "/ports", AgentRoutePorts, opAgentPortList, none),
+		byID(get, "/ports/", AgentRoutePorts, opAgentPortList, none),
+		byID(post, "/ports", AgentRoutePorts, opAgentPortRegister, none),
+		byID(get, "/ports/tunnel", AgentRoutePortsTunnel, opAgentPortTunnel, none),
+		byID(http.MethodDelete, "/ports/3000", AgentRoutePortItem, opAgentPortRegister, AgentSubRouteSuffix{Param: "3000"}),
 		byID(get, "/ports/3000/proxy", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000"}),
 		byID(http.MethodPut, "/ports/3000/proxy/", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/"}),
 		byID(get, "/ports/3000/proxy/a/b%2Fc", AgentRoutePortProxy, opAgentPortAccess, AgentSubRouteSuffix{Param: "3000", Opaque: "/a/b%2Fc"}),
-		byID(get, "/logs", AgentRouteLogs, "", none),
+		byID(get, "/logs", AgentRouteLogs, opAgentLogsRead, none),
 		byID(http.MethodPatch, "/logs", AgentRouteLogs, "", none),
-		byID(get, "/cloud-logs", AgentRouteCloudLogs, "", none),
+		byID(get, "/cloud-logs", AgentRouteCloudLogs, opAgentLogsRead, none),
 		byID(get, "/cloud-logs/stream", AgentRouteCloudLogsStream, "", none),
-		byID(get, "/message-logs", AgentRouteMessageLogs, "", none),
+		byID(get, "/message-logs", AgentRouteMessageLogs, opAgentMessagesRead, none),
 		byID(get, "/message-logs/stream", AgentRouteMessageLogsStream, "", none),
-		byID(get, "/messages", AgentRouteMessages, "", none),
+		byID(get, "/messages", AgentRouteMessages, opAgentMessagesRead, none),
 		byID(get, "/messages/stream", AgentRouteMessagesStream, "", none),
 		byID(get, "/secrets", AgentRouteSecrets, "", none),
 		byID(http.MethodPut, "/secrets/MY_KEY", AgentRouteSecrets, "", AgentSubRouteSuffix{Opaque: "/MY_KEY"}),
-		byID(get, "/metrics/summary", AgentRouteMetricsSummary, "", none),
+		byID(get, "/metrics/summary", AgentRouteMetricsSummary, opAgentMetricsRead, none),
 		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
 		byID(post, "/delegations", AgentRouteDelegations, opAgentDelegationCreate, none),
-		byID(get, "/delegations", AgentRouteDelegations, "", none),
+		byID(get, "/delegations", AgentRouteDelegations, opAgentDelegationList, none),
+		byID(http.MethodPut, "/delegations", AgentRouteDelegations, "", none),
+		byID(get, "/delegations/g-1", AgentRouteDelegationItem, opAgentDelegationRead, AgentSubRouteSuffix{Param: "g-1"}),
+		byID(http.MethodDelete, "/delegations/g-1", AgentRouteDelegationItem, opAgentDelegationRevoke, AgentSubRouteSuffix{Param: "g-1"}),
+		byID(post, "/delegations/g-1", AgentRouteDelegationItem, "", AgentSubRouteSuffix{Param: "g-1"}),
+		byID(http.MethodDelete, "/delegations/g-1/credentials/c-1", AgentRouteDelegationCredential, opAgentDelegationCredentialRevoke, AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}),
+		byID(get, "/delegations/g-1/credentials/c-1", AgentRouteDelegationCredential, "", AgentSubRouteSuffix{Param: "g-1", SecondParam: "c-1"}),
 		byID(post, "/delegations/g-1/exchange", AgentRouteDelegationExchange, opAgentDelegationExchange, AgentSubRouteSuffix{Param: "g-1"}),
 		byID(get, "/delegations/g-1/exchange", AgentRouteDelegationExchange, "", AgentSubRouteSuffix{Param: "g-1"}),
-		byID(post, "/status", AgentRouteActionStatus, "", none),
+		byID(post, "/status", AgentRouteActionStatus, opAgentStatusUpdate, none),
 		byID(post, "/start", AgentRouteActionStart, opAgentLifecycleControl, none),
 		byID(get, "/start", AgentRouteActionStart, "", none),
 		byID(post, "/stop", AgentRouteActionStop, opAgentLifecycleControl, none),
 		byID(post, "/suspend", AgentRouteActionSuspend, opAgentLifecycleControl, none),
 		byID(post, "/restart", AgentRouteActionRestart, opAgentLifecycleControl, none),
-		byID(post, "/message", AgentRouteActionMessage, "", none),
+		byID(post, "/message", AgentRouteActionMessage, opAgentActionMessage, none),
 		byID(post, "/exec", AgentRouteActionExec, opAgentExec, none),
 		byID(post, "/restore", AgentRouteActionRestore, opAgentLifecycleRestore, none),
 		byID(post, "/env", AgentRouteActionEnv, opAgentEnv, none),
@@ -103,24 +109,24 @@ func agentRouteCases() []agentRouteCase {
 		byID(http.MethodPut, "/set_message_mode", AgentRouteActionMessageMode, "", none),
 		byID(post, "/reincarnate", AgentRouteActionReincarnate, opAgentReincarnate, none),
 		byID(post, "/reset-auth", AgentRouteActionResetAuth, opAgentResetAuth, none),
-		byID(post, "/keys", AgentRouteActionKeys, "", none),
+		byID(post, "/keys", AgentRouteActionKeys, opAgentKeys, none),
 
 		{get, "/api/v1/projects/" + p + "/agents", AgentSubRoute{RouteID: ProjectAgentRouteCollection, Method: get, ProjectID: p}},
 		{post, "/api/v1/projects/" + p + "/agents/", AgentSubRoute{RouteID: ProjectAgentRouteCollection, Method: post, ProjectID: p}},
-		{post, "/api/v1/projects/" + p + "/agents/stop-all", AgentSubRoute{RouteID: ProjectAgentRouteStopAll, Method: post, ProjectID: p}},
-		proj(get, "", ProjectAgentRouteRoot, ""),
-		proj(http.MethodDelete, "/", ProjectAgentRouteRoot, ""),
-		proj(get, "/logs", ProjectAgentRouteLogs, ""),
-		proj(get, "/cloud-logs", ProjectAgentRouteCloudLogs, ""),
+		{post, "/api/v1/projects/" + p + "/agents/stop-all", AgentSubRoute{RouteID: ProjectAgentRouteStopAll, OperationID: opAgentStopAllProject, Method: post, ProjectID: p}},
+		proj(get, "", ProjectAgentRouteRoot, opAgentRead),
+		proj(http.MethodDelete, "/", ProjectAgentRouteRoot, opAgentDelete),
+		proj(get, "/logs", ProjectAgentRouteLogs, opAgentLogsRead),
+		proj(get, "/cloud-logs", ProjectAgentRouteCloudLogs, opAgentLogsRead),
 		proj(get, "/cloud-logs/stream", ProjectAgentRouteCloudLogsStream, ""),
-		proj(get, "/message-logs", ProjectAgentRouteMessageLogs, ""),
+		proj(get, "/message-logs", ProjectAgentRouteMessageLogs, opAgentMessagesRead),
 		proj(get, "/message-logs/stream", ProjectAgentRouteMessageLogsStream, ""),
-		proj(post, "/status", ProjectAgentRouteActionStatus, ""),
+		proj(post, "/status", ProjectAgentRouteActionStatus, opAgentStatusUpdate),
 		proj(post, "/start", ProjectAgentRouteActionStart, opAgentLifecycleControl),
 		proj(post, "/stop", ProjectAgentRouteActionStop, opAgentLifecycleControl),
 		proj(post, "/suspend", ProjectAgentRouteActionSuspend, opAgentLifecycleControl),
 		proj(post, "/restart", ProjectAgentRouteActionRestart, opAgentLifecycleControl),
-		proj(post, "/message", ProjectAgentRouteActionMessage, ""),
+		proj(post, "/message", ProjectAgentRouteActionMessage, opAgentActionMessage),
 		proj(post, "/exec", ProjectAgentRouteActionExec, opAgentExec),
 		proj(post, "/restore", ProjectAgentRouteActionRestore, opAgentLifecycleRestore),
 		proj(post, "/env", ProjectAgentRouteActionEnv, opAgentEnv),
@@ -130,7 +136,7 @@ func agentRouteCases() []agentRouteCase {
 		proj(http.MethodPut, "/set_message_mode", ProjectAgentRouteActionMessageMode, ""),
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
-		proj(post, "/keys", ProjectAgentRouteActionKeys, ""),
+		proj(post, "/keys", ProjectAgentRouteActionKeys, opAgentKeys),
 	}
 }
 
@@ -382,8 +388,29 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentLifecycleControl, opAgentLifecycleRestore, opAgentExec, opAgentEnv,
 		opAgentResetAuth, opAgentReincarnate, opAgentSetMessageMode,
 		opAgentTokenRefresh, opAgentOutboundMessage, opAgentMetricsReport,
+		opAgentStatusUpdate, opAgentLogsRead, opAgentMessagesRead, opAgentMetricsRead,
+		opAgentKeys, opAgentActionMessage, opAgentPortList, opAgentPortRegister,
+		opAgentPortTunnel, opAgentStopAllProject,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
+	}
+	// An operation may also declare HTTP entry points outside the agent
+	// sub-route namespace (agent.delegation.list also serves
+	// /api/v1/users/me/delegations). The resolver does not own those;
+	// TestCatalogHTTPEntryPoints_LiveMethodCheck checks them against the
+	// live mux. They are carried over so the drift check judges only the
+	// resolver's own namespace.
+	for _, spec := range authzop.Catalog {
+		if _, resolved := discovered[spec.ID]; !resolved {
+			continue
+		}
+		for _, ep := range spec.EntryPoints {
+			if ep.Kind != authzop.EntryPointHTTPRoute || strings.HasPrefix(ep.Pattern, "/api/v1/agents") ||
+				strings.HasPrefix(ep.Pattern, "/api/v1/projects/{projectId}/agents") {
+				continue
+			}
+			discovered[spec.ID] = append(discovered[spec.ID], authzop.DiscoveredEntryPoint{Kind: ep.Kind, Pattern: ep.Pattern, Method: ep.Method})
+		}
 	}
 	assert.Empty(t, authzop.CheckDrift(discovered))
 }

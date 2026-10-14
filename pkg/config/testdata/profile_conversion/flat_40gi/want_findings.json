@@ -1,0 +1,19 @@
+{
+  "profile_map": {
+    "batch": "k8s-agents"
+  },
+  "findings": [
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "active_profile",
+      "profiles": [
+        "batch"
+      ],
+      "message_contains": [
+        "active_profile selects profile batch",
+        "never reads it"
+      ]
+    }
+  ]
+}

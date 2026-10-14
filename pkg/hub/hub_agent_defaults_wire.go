@@ -17,12 +17,14 @@ package hub
 import (
 	"slices"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
 // remoteHubAgentDefaults converts the hub's operational agent_defaults section
-// into the wire form sent to a runtime broker, or nil when the hub has no
-// limit/resource or auto-expose defaults to send.
+// into the wire form sent to a runtime broker. It returns nil only when none
+// of its inputs is set: no limit/resource default, no auto-expose default, no
+// enabled dispatch experiment and no telemetry default.
 //
 // Only the four limit/resource fields cross here. default_template and
 // default_harness_config are resolved hub-side (they need ID/hash stamping) and
@@ -38,7 +40,8 @@ import (
 // snapshot is empty in file mode, the four limit/resource fields are zero
 // there, so the broker-side limit rung never fires — no file-mode branch
 // needed anywhere. That is rejected alternative A7. With no auto-expose
-// default either, this returns nil and the wire field is omitted.
+// default, experiment or telemetry default either, this returns nil and the
+// wire field is omitted.
 //
 // autoExposePorts is the hub's auto-expose-ports default. Unlike the four
 // limit/resource fields it is sent in file mode too: no broker reads it from
@@ -48,9 +51,15 @@ import (
 // experiments lists the enabled dispatch experiments (see
 // HTTPAgentDispatcher.dispatchExperiments); like the auto-expose default it is
 // sent in every mode, since the hub is the only place it is decided.
-func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
+//
+// telemetry is the hub telemetry default for a broker that reports
+// templateTiers (telemetryDispatch.wireTelemetry), nil otherwise; a legacy
+// broker gets it inline instead (ptone/scion#4222). It is not a file-mode
+// limit, so it is sent whenever it is set, even when nothing else is.
+func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
 	if d.DefaultMaxTurns == 0 && d.DefaultMaxModelCalls == 0 &&
-		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil && len(experiments) == 0 {
+		d.DefaultMaxDuration == "" && d.DefaultResources == nil && autoExposePorts == nil && len(experiments) == 0 &&
+		telemetry == nil {
 		return nil
 	}
 	out := &RemoteHubAgentDefaults{
@@ -59,6 +68,10 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 		MaxDuration:     d.DefaultMaxDuration,
 		AutoExposePorts: copyBoolPtr(autoExposePorts),
 		Experiments:     slices.Clone(experiments),
+	}
+	if telemetry != nil {
+		c := *telemetry
+		out.Telemetry = &c
 	}
 	if d.DefaultResources != nil {
 		// Copy the pointee: hubAgentDefaults() already returns a deep copy, but
@@ -71,14 +84,28 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 }
 
 // startHubAgentDefaults is the hub-defaults wire value for a start or restart
-// dispatch: the auto-expose default and the enabled dispatch experiments
-// only, or nil when there are neither. The limit/resource fields stay
-// create/provision-only, so a start never changes which tier supplies them.
-func startHubAgentDefaults(autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
-	if autoExposePorts == nil && len(experiments) == 0 {
-		return nil
+// dispatch, built by remoteHubAgentDefaults like the create wire so the two
+// cannot drift: start and restart carry the same hub defaults as create (the
+// limits, resources, the auto-expose default, the dispatch experiments, and
+// the hub telemetry default for a templateTiers broker).
+//
+// The broker applies the limits and resources per start, below the agent's
+// own (template or explicit) values, and does not persist them into the agent
+// config (ptone/scion#4561, ptone/scion#623), so a change to the hub
+// agent_defaults reaches an agent at its next start or restart.
+//
+// It returns nil when there is nothing to send.
+func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string, telemetry *api.TelemetryConfig) *RemoteHubAgentDefaults {
+	return remoteHubAgentDefaults(d, autoExposePorts, experiments, telemetry)
+}
+
+// hubAgentDefaults returns the hub's operational agent_defaults, or the zero
+// value when no provider is wired.
+func (d *HTTPAgentDispatcher) hubAgentDefaults() opsettings.AgentDefaultsSettings {
+	if d.hubAgentDefaultsProvider == nil {
+		return opsettings.AgentDefaultsSettings{}
 	}
-	return &RemoteHubAgentDefaults{AutoExposePorts: copyBoolPtr(autoExposePorts), Experiments: slices.Clone(experiments)}
+	return d.hubAgentDefaultsProvider()
 }
 
 func copyBoolPtr(b *bool) *bool {

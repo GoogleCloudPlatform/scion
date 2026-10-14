@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/knadh/koanf/v2"
@@ -76,13 +77,24 @@ type ServerConfigDBResponse struct {
 	// DeprecatedEnvKeys lists SCION_SERVER_* env vars that target Layer-1
 	// keys and should be migrated to SCION_SEED_* equivalents.
 	DeprecatedEnvKeys []DeprecatedEnvKeyInfo `json:"deprecated_env_keys,omitempty"`
+
+	// PublicURLStatus reports the hub endpoint in effect, where it came
+	// from, and the operator setting that pins it, if any (ptone/scion#3905).
+	// Read-only.
+	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
+
+	// ObservabilityExport reports whether the hub's own metrics and trace
+	// exporters run, why, and the export project with its source (env,
+	// file or metadata), as decided at startup. Read-only: the export
+	// project is not a settings key (ptone/scion#4914).
+	ObservabilityExport *hubexport.Status `json:"observability_export,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
 // bootstrap merge differs from the admin-set DB value in a managed section.
 type SupersededKey struct {
 	Key    string `json:"key"`
-	Source string `json:"source"` // "seed_env", "yaml", or "server_env"
+	Source string `json:"source"` // "seed_env", "yaml", "server_env", or "default"
 }
 
 // DeprecatedEnvKeyInfo represents a SCION_SERVER_* env var that targets a
@@ -213,6 +225,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
 	resp.Server.Hub.TestIdentities = nil
+	// Likewise the proxy driver settings (WS2).
+	hideNeverAPIWritableProxyKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -221,6 +235,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	overrides := ops.EnvOverriddenKeys()
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
+	// How the hub endpoint was resolved at startup (ptone/scion#3905).
+	resp.PublicURLStatus = s.publicURLStatus()
+	// The hub observability exporters as started (ptone/scion#4914).
+	resp.ObservabilityExport = s.ObservabilityExportStatus()
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
@@ -293,6 +311,17 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
 	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
+
+	// Hub observability export switches: the saved (or bootstrap) value;
+	// nil when unset. They apply at the next start, so the exporters in
+	// effect are reported separately (ObservabilityExport).
+	resp.Server.Hub.Observability = nil
+	if snap.HubMetricsEnabled != nil || snap.HubTracingEnabled != nil {
+		resp.Server.Hub.Observability = &config.V1ServerHubObservabilityConfig{
+			MetricsEnabled: snap.HubMetricsEnabled,
+			TracingEnabled: snap.HubTracingEnabled,
+		}
+	}
 
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
@@ -409,18 +438,33 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 
 // computeSupersededKeys returns, for each managed section, the bootstrap-material
 // keys whose merged value differs from the DB value. This tells the admin which
-// deployment-config values their explicit DB writes are overriding.
+// deployment-config values their explicit DB writes are overriding. When the
+// unseeded bootstrap is set (SetUnseededBootstrap, as startup does), the
+// endpoints public_url is compared with its value from that merge instead,
+// since startup never applies a seed value for the hub endpoint
+// (ptone/scion#4865), and a key is attributed to the seed layer only when
+// that layer gave it its value: a key the unseeded merge gives the same
+// value comes from a layer above the seed, which wins over it
+// (ptone/scion#4904). When the above-seed bootstrap is set too
+// (SetAboveSeedBootstrap, as startup does), such a key that no layer above
+// the seed sets is attributed to the seed layer when it has the key, else to
+// the coded defaults ("default", ptone/scion#4983).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
 	for name, ss := range ops.cache {
 		cacheSnap[name] = ss
 	}
+	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
+	unseededK := ops.unseededKoanf
+	aboveSeedK := ops.aboveSeedKoanf
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
 		return nil
 	}
+
+	publicURLPinned := s.HubEndpoints().Pin != ""
 
 	// Load individual layers for source attribution.
 	seedEnvK := config.LoadSeedEnvKoanf()
@@ -445,9 +489,45 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 		if err := json.Unmarshal(bootstrapDoc, &bootstrapMap); err != nil {
 			continue
 		}
+		unseededMap := unseededSectionMap(unseededK, sec.Name)
+		aboveSeedMap := unseededSectionMap(aboveSeedK, sec.Name)
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
+				// An operator setting pins the endpoint on this node, so
+				// the database value does not supersede it; the field's
+				// pinned badge says so (ptone/scion#3905).
+				continue
+			}
+			if sec.Name == "endpoints" && key == "public_url" && hasUnseededPublicURL {
+				// Startup's endpoint resolution ignores a seed value, so
+				// compare with the value from the layers it reads
+				// (ptone/scion#4826, ptone/scion#4865). Without such a
+				// value, the saved one supersedes nothing.
+				if unseededPublicURL == "" {
+					continue
+				}
+				bootstrapVal = unseededPublicURL
+			}
+			keySeedEnvK := seedEnvK
+			unsetAboveSeed := false
+			if unseededVal, ok := unseededMap[key]; ok && reflect.DeepEqual(unseededVal, bootstrapVal) {
+				_, above := aboveSeedMap[key]
+				if aboveSeedK == nil || above {
+					// A layer above the seed (settings.yaml, the --config
+					// location or SCION_SERVER_*) gives the key this value
+					// and wins over a seed value, so the key is not
+					// attributed to the seed layer (ptone/scion#4904).
+					keySeedEnvK = nil
+				} else {
+					// No layer above the seed sets the key, so its value
+					// comes from the seed layer, when it has the key (a
+					// seed value equal to the default), else from the coded
+					// defaults (ptone/scion#4983).
+					unsetAboveSeed = true
+				}
+			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
 				// The DB row does not override this key; the bootstrap
@@ -459,9 +539,13 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				if koanfPath == "" {
 					koanfPath = key
 				}
+				source := detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key)
+				if unsetAboveSeed && source == "yaml" {
+					source = "default"
+				}
 				superseded = append(superseded, SupersededKey{
 					Key:    koanfPath,
-					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
+					Source: source,
 				})
 			}
 		}
@@ -477,12 +561,32 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	return result
 }
 
+// unseededSectionMap returns a section's keys from the bootstrap merge
+// without the SCION_SEED_* layer, or nil when that merge is not set or does
+// not have the section.
+func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]interface{} {
+	if unseededK == nil {
+		return nil
+	}
+	doc, err := opsettings.ExtractSectionFromKoanf(unseededK, sectionName)
+	if err != nil || doc == nil {
+		return nil
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(doc, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
 // bootstrap value when a managed DB row omits it. That is the case for
-// endpoints hub_name: a managed endpoints row carries hub_name only after
-// an admin changes it, and Snapshot falls back to the bootstrap value.
+// endpoints hub_name and public_url: a managed endpoints row carries them
+// only after an admin sets them, and Snapshot falls back to the bootstrap
+// value (for public_url, so does the hub's endpoint resolution at startup,
+// ptone/scion#3905).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
-	return section == "endpoints" && key == "hub_name"
+	return section == "endpoints" && (key == "hub_name" || key == "public_url")
 }
 
 // applyRunningValuesForUnsetKeys sets, in a GET response, the running value
@@ -686,24 +790,29 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective public_url, image_registry and monitoring_dashboard_url.
-// hub_name is left out: the bootstrap value applies without being written
-// (bootstrapAppliesWhenAbsent).
+// the effective image_registry and monitoring_dashboard_url. hub_name is left
+// out: the bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent). public_url is left out too: a public URL is
+// stored only when an admin sets it, so a bootstrap value never becomes a
+// saved value that would override a later settings.yaml change
+// (ptone/scion#3905).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
-		PublicURL:              snap.PublicURL,
 		ImageRegistry:          snap.ImageRegistry,
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 	})
 }
 
-// endpointsSeededBase drops hub_name from a non-managed endpoints base: a
-// seeded row holds the bootstrap hub_name, which applies without being
-// written (Snapshot falls back to it) and may not match the schema
-// pattern, so it is not carried into the managed row.
+// endpointsSeededBase drops hub_name and public_url from a non-managed
+// endpoints base. A seeded row holds the bootstrap hub_name, which applies
+// without being written (Snapshot falls back to it) and may not match the
+// schema pattern, so it is not carried into the managed row. Its public_url
+// is bootstrap material as well; carrying it would turn it into a saved
+// value that overrides a later settings.yaml change (ptone/scion#3905).
 func endpointsSeededBase(base map[string]json.RawMessage) {
 	delete(base, "hub_name")
+	delete(base, "public_url")
 }
 
 // bodyMergeOptions returns the base rules of a section in
@@ -719,8 +828,10 @@ func bodyMergeOptions(section string) sectionMergeOptions {
 }
 
 // detectKeySource determines which bootstrap layer provides a given section key.
-// It checks the individual layers in reverse precedence order (server_env first,
-// then seed_env, then yaml) and returns the first match.
+// It checks server_env first, then seed_env, then falls back to yaml.
+// settings.yaml wins over the seed layer, so a caller that can tell a layer
+// above the seed gives the key its value passes a nil seedEnvK
+// (computeSupersededKeys, ptone/scion#4904).
 func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string) string {
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
@@ -730,7 +841,14 @@ func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string)
 	// Map the section-level key (e.g. "admin_emails") to koanf paths and check
 	// which layer provides the value.
 	for _, kp := range sec.KoanfPaths {
-		if opsettings.SectionKeyFromKoanfPath(kp) != key {
+		sectionKey := opsettings.SectionKeyFromKoanfPath(kp)
+		if sectionKey == "" {
+			// Sections without a JSON field mapping (agent_defaults) use
+			// the koanf path as the key, as computeSupersededKeys does
+			// (ptone/scion#4983).
+			sectionKey = kp
+		}
+		if sectionKey != key {
 			continue
 		}
 		if serverEnvK != nil && serverEnvK.Exists(kp) {
@@ -793,6 +911,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
+	// Test identities with admin roles write no settings (test-admin
+	// policy), in DB and workstation mode alike.
+	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
+		return
+	}
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -807,6 +930,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
+	// Likewise the retired server.hub.async_agent_launch (ptone/scion#4991).
+	if rejectRetiredAsyncAgentLaunch(w, rawBody) {
+		return
+	}
 	// A user access token writes configuration keys only.
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
@@ -817,6 +944,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	}
 	// The monitoring dashboard link must be an absolute http(s) URL.
 	if !validateMonitoringDashboardURLRequest(w, &req.ServerConfigUpdateRequest) {
+		return
+	}
+	// A public URL saved in the database must pass the stricter rule the
+	// hub applies to it at startup (ptone/scion#3905).
+	if !validatePublicURLRequest(w, &req.ServerConfigUpdateRequest, ops.Snapshot().PublicURL) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -846,6 +978,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
+	// An echo of the public URL GET shows is not stored either, so a
+	// bootstrap value never becomes a saved value (ptone/scion#3905).
+	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
+		echoedRunning[config.PublicURLKey] = true
+	}
 	koanfKeys = dropKoanfKeys(koanfKeys, echoedRunning)
 
 	// Classify keys.
@@ -1137,7 +1274,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if gcpIAMNext == gcpIAMCur {
 			delete(sectionDocs, gcpIAMSection)
 		} else {
-			if !requireGCPIAMHubAdmin(w, r.Context()) {
+			if !s.requireGCPIAMHubAdmin(w, r.Context()) {
 				return
 			}
 			pendingAssign := false
@@ -1287,9 +1424,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
 	// Collect errors from every section so the client sees all invalid
 	// sections in one response, not just the first one (N6).
+	// The telemetry.cloud.tls unit rule applies only when the save touches
+	// tls; a stored invalid tls is otherwise kept and logged
+	// (telemetryTLSSaveErrors).
 	allValidationErrors := make(map[string][]config.ValidationError)
+	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
-		if errs := opsettings.Validate(secName, doc); len(errs) > 0 {
+		errs := opsettings.Validate(secName, doc)
+		if secName == "telemetry" {
+			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
+		}
+		if len(errs) > 0 {
 			allValidationErrors[secName] = errs
 		}
 	}
@@ -1368,6 +1513,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			beforeDocs[secName] = doc
 		}
 	}
+	// The saved public URL before the write, for the report below.
+	publicURLSavedBefore := storedManagedPublicURL(ops)
 
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
@@ -1416,7 +1563,28 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			s.approveGCPIAMTransition(gcpIAMTransition{From: gcpIAMCur, To: gcpIAMNext})
 		}
 
+		// A change to the stored public URL is recorded before it is
+		// written, like a GCP permission-check change; if the record cannot
+		// be written, the change is not made (ptone/scion#3905).
+		publicURLBefore, publicURLAfter := "", ""
+		publicURLChange := false
+		if secName == "endpoints" {
+			publicURLBefore, publicURLAfter = storedManagedPublicURL(ops), publicURLFromSectionDoc(doc)
+			if publicURLChange = publicURLBefore != publicURLAfter; publicURLChange {
+				if err := s.auditPublicURLChange(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter); err != nil {
+					slog.Error("PUT server-config: failed to record public URL change", "error", err)
+					fileTxn.abort()
+					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+						fmt.Sprintf("Failed to update section %q", secName), map[string]interface{}{"applied": applied})
+					return
+				}
+			}
+		}
+
 		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		if publicURLChange && err != nil {
+			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
+		}
 		if secName == gcpIAMSection {
 			// The approval covers only this write's own self-apply.
 			s.clearGCPIAMApproval()
@@ -1461,7 +1629,19 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	for sec := range written {
 		writtenDocs[sec] = sectionDocs[sec]
 	}
-	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
+	// Without a saved public URL the operator endpoint is in effect, so the
+	// report compares that value, not the absence of a saved one; a seeded
+	// row's public_url is not a saved value (ptone/scion#3905,
+	// ptone/scion#4826). Written endpoints docs are managed rows.
+	operatorEndpoint := s.HubEndpoints().Operator
+	if doc, ok := writtenDocs["endpoints"]; ok {
+		before := beforeDocs["endpoints"]
+		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
+		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
+	}
+	// The keys the write's self-apply skipped are reported as skipped, not
+	// applied (ptone/scion#4466).
+	keyReport := reportSavedKeys(beforeDocs, writtenDocs).withSkipped(s.layer1ApplySkips())
 
 	if len(conflicted) > 0 {
 		fileTxn.abort()
@@ -1480,6 +1660,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"conflicted":          conflicted,
 			"applied_keys":        keyReport.Applied,
 			"pending_restart":     keyReport.PendingRestart,
+			"skipped":             keyReport.Skipped,
 		})
 		return
 	}
@@ -1523,9 +1704,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// applied_keys and pending_restart list the changed Layer-1
 			// keys (koanf paths) by whether they took effect on save.
 			// file_applied lists the settings.yaml changes applied live
-			// on a workstation hub (also included in applied).
+			// on a workstation hub (also included in applied). skipped
+			// lists the changed keys saved but not in use, each with a
+			// reason (ptone/scion#4466).
 			"applied_keys":    keyReport.Applied,
 			"pending_restart": keyReport.PendingRestart,
+			"skipped":         keyReport.Skipped,
 			"file_applied":    fileApplied,
 		},
 	}
@@ -1771,6 +1955,14 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.MonitoringDashboardURL != "" {
 				keys = append(keys, config.MonitoringDashboardURLKey)
 			}
+			if o := hub.Observability; o != nil {
+				if o.MetricsEnabled != nil {
+					keys = append(keys, config.HubMetricsEnabledKey)
+				}
+				if o.TracingEnabled != nil {
+					keys = append(keys, config.HubTracingEnabledKey)
+				}
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -1821,9 +2013,6 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
-			}
-			if hub.AsyncAgentLaunch != nil {
-				keys = append(keys, "server.hub.async_agent_launch")
 			}
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
@@ -2262,6 +2451,17 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		} else {
 			return nil, nil
 		}
+
+	case hubObservabilitySection:
+		// handlePutServerConfigDB merges this doc on the current row
+		// (bodyMergedSections): an omitted switch keeps its value, null
+		// clears it.
+		d := &opsettings.HubObservabilitySettings{}
+		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Observability != nil {
+			d.MetricsEnabled = req.Server.Hub.Observability.MetricsEnabled
+			d.TracingEnabled = req.Server.Hub.Observability.TracingEnabled
+		}
+		doc = d
 
 	case "agent_secrets":
 		if req.AgentSecrets != nil {
@@ -2757,6 +2957,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
 	"telemetry":         settingsTokenConfiguration, // telemetry export
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys

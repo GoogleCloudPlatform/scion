@@ -139,21 +139,33 @@ func (p kubernetesProfileMappings) label() string {
 // order. Errors reading providers or brokers are logged and skipped: the
 // result feeds warnings and a read-only view only.
 func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID string) []kubernetesProfileMappings {
+	brokers, _ := s.projectProviderBrokers(ctx, projectID)
+	return s.brokerKubernetesProfileMappings(brokers)
+}
+
+// projectProviderBrokers returns the provider brokers of projectID that
+// could be read, in provider order. complete is false when the provider
+// list or any provider's broker could not be read, so the result may miss
+// a broker. Errors are logged and skipped: callers use the result for
+// warnings and read-only views only.
+func (s *Server) projectProviderBrokers(ctx context.Context, projectID string) (brokers []*store.RuntimeBroker, complete bool) {
 	providers, err := s.store.GetProjectProviders(ctx, projectID)
 	if err != nil {
 		slog.Debug("SA mapping warning: listing project providers failed", "project_id", projectID, "error", err)
-		return nil
+		return nil, false
 	}
-	brokers := make([]*store.RuntimeBroker, 0, len(providers))
+	complete = true
+	brokers = make([]*store.RuntimeBroker, 0, len(providers))
 	for _, provider := range providers {
 		broker, err := s.store.GetRuntimeBroker(ctx, provider.BrokerID)
 		if err != nil || broker == nil {
 			slog.Debug("SA mapping warning: provider broker unavailable", "project_id", projectID, "broker", provider.BrokerID, "error", err)
+			complete = false
 			continue
 		}
 		brokers = append(brokers, broker)
 	}
-	return s.brokerKubernetesProfileMappings(brokers)
+	return brokers, complete
 }
 
 // brokerKubernetesProfileMappings collects the Kubernetes profiles of brokers
@@ -165,9 +177,9 @@ func (s *Server) projectKubernetesProfileMappings(ctx context.Context, projectID
 // Brokers contract), so they are never read as "nothing mapped".
 func (s *Server) brokerKubernetesProfileMappings(brokers []*store.RuntimeBroker) []kubernetesProfileMappings {
 	var out []kubernetesProfileMappings
-	embeddedID := s.embeddedBrokerSnapshot().id
+	embeddedState := s.embeddedBrokerSnapshot()
 	for _, broker := range brokers {
-		embedded := embeddedID != "" && broker.ID == embeddedID
+		embedded := embeddedState.has(broker.ID)
 		// The embedded broker's live settings, loaded at most once and only
 		// when a profile that could be Kubernetes is reached.
 		var live *config.VersionedSettings

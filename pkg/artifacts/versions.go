@@ -86,14 +86,18 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	permitted := s.host.Permits(ctx, scope, PermissionCreate)
-	if !permitted && s.writeMissingScope(w, r) {
-		return
-	}
-	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !canCreateIn(ctx, s.host, scope) {
+		// A credential that does not permit artifact.create may be
+		// explained; the decision itself is canCreateIn's.
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}
+	// canCreateIn passed, so the credential permits artifact.create in
+	// scope: appending to an existing artifact there reuses that answer.
+	permitted := true
 	key := req.Key
 	if err := validKey(key); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -812,7 +816,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if errors.Is(err, ErrPendingNewer) {
-		s.discardReview(w, r, b, a.ID, seq, claim,
+		s.discardReview(w, r, b, a.ID, seq, claim, FailReasonNewerPublishPending,
 			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
 		return
 	}
@@ -927,7 +931,9 @@ const (
 )
 
 // handleListVersions implements GET /{id}/versions[?limit=][&before=]: the ready versions,
-// newest first, without their files.
+// newest first, without their files, and in Discarded the failed versions
+// of the same page (ptone/scion#4577). A page walks ready and failed
+// versions together by seq.
 func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
@@ -952,14 +958,18 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		}
 		before = n
 	}
-	versions, err := b.store.ListVersions(r.Context(), a.ID, before, limit)
+	versions, err := b.store.ListVersionHistory(r.Context(), a.ID, before, limit)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list versions failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the versions")
 		return
 	}
-	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions))}
+	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions)), Discarded: []DiscardedVersionInfo{}}
 	for i := range versions {
+		if versions[i].State == VersionStateFailed {
+			resp.Discarded = append(resp.Discarded, discardedVersionInfo(&versions[i]))
+			continue
+		}
 		vi := versionInfo(&versions[i], nil)
 		vi.Files = nil
 		resp.Versions = append(resp.Versions, *vi)
@@ -968,6 +978,16 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		resp.NextBefore = versions[len(versions)-1].Seq
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// discardedVersionInfo is the list entry of a failed version: its number,
+// state, reason and creation time, and nothing else.
+func discardedVersionInfo(v *Version) DiscardedVersionInfo {
+	reason := v.FailReason
+	if reason == "" {
+		reason = FailReasonDiscarded
+	}
+	return DiscardedVersionInfo{Seq: v.Seq, State: v.State, Reason: reason, CreatedAt: v.CreatedAt}
 }
 
 // handleGetVersion implements GET /{id}/versions/{seq}: one ready version
@@ -987,7 +1007,7 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}

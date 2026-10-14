@@ -10,6 +10,10 @@ Conduit, still behind its experiment flag, now carries agent terminals, Runtime 
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
 
+## `scion project list` lists projects across hubs
+
+`scion project list` (and `scion projects list`) now lists the projects on all your registered hubs, each with its hub, merged with the project directories on this machine. Use `--hub <hub>` to show one hub and `--refresh` to fetch each logged-in hub's project list. The earlier output, the project directories on this machine with their type, agent count, status and workspace, moved to `scion project list --local`, which keeps that format byte for byte, JSON included. **Scripts that parse `scion project list` should switch to `scion project list --local`.**
+
 ## Timezone handling changes
 
 During the week of September 28 ([release notes](/scion/release-notes/2026-09-28/)), timezone handling changed: the Hub sends every timestamp in UTC with `Z`, the web dashboard has a per-user display timezone and a 24-hour clock, and cron schedules are UTC only. The runtime-profile `timezone` setting introduced the week before ([release notes](/scion/release-notes/2026-09-21/)) has been removed: an agent's `TZ` now comes from its pin, `TZ` environment variables on the Hub, or the Hub default timezone. See [Times and Timezones](/scion/reference/times-and-timezones/) for the full behaviour and the operator steps after upgrading.

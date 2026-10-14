@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -58,7 +59,7 @@ import (
 // The scan runs only when filter carries scion.project_path, or when filter
 // is empty or only {scion.agent: true} (the current and global projects).
 func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
-	agents, err := m.Runtime.List(ctx, filter)
+	agents, err := m.listRuntime(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -136,10 +137,32 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				agents[i].Activity = ""
 				// Best-effort convergence: only persist if on-disk state
 				// differs from the terminal phase we want to record.
-				if parsedInfo != nil && (parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "") {
+				// An owned manager writes only under a trusted project path.
+				if parsedInfo != nil && (parsedInfo.Phase != terminalPhase || parsedInfo.Activity != "") && m.mayWriteEntryPath(agents[i]) {
 					if err := persistAgentInfoState(agentInfoJSON, terminalPhase, ""); err != nil {
 						slog.Debug("failed to persist terminal agent state", "path", agentInfoJSON, "err", err)
 					}
+				}
+			}
+
+			// A failed start recorded in the host state file
+			// (ptone/scion#4815) shows as error, for the run this container
+			// belongs to only, and not once the runtime reports the
+			// container running or starting. Display-only and fail-quiet:
+			// HubProjectID is the container's project-id label (set at
+			// create; a local CLI start fills it from project settings), so
+			// this must never feed a delete, cleanup or ownership decision.
+			// Any refusal, error or invalid record means no overlay.
+			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) && rp != string(state.PhaseStarting) &&
+				agents[i].RunID != "" && agents[i].Phase != "deleted" {
+				t := RunOwnerTarget{
+					ProjectPath:  agents[i].ProjectPath,
+					AgentName:    agents[i].Name,
+					HubProjectID: projectkeys.ProjectIDFromLabels(agents[i].Labels),
+				}
+				if startFailedForDisplay(t, agentDir) == agents[i].RunID {
+					agents[i].Phase = string(state.PhaseError)
+					agents[i].Activity = ""
 				}
 			}
 
@@ -209,6 +232,17 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			case state.PhaseError, state.PhaseStopped:
 				// Already terminal — preserve as-is
 			}
+		}
+		// A runtime that reports "starting" is authoritative: its start
+		// has not been confirmed (for example, one interrupted by a
+		// crash), so agent-info.json's phase — "created" from
+		// provisioning, or a previous run's "stopped", "error" or
+		// "running" — must not replace it. Otherwise list and the
+		// broker heartbeat would report a live start as stopped or as
+		// running (ptone/scion#4756).
+		if runtimePhase == string(state.PhaseStarting) {
+			agents[i].Phase = string(state.PhaseStarting)
+			agents[i].Activity = ""
 		}
 	}
 
@@ -283,6 +317,11 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				if !scionruntime.LabelsMatchFilter(createdAgentLabels(e.Name(), projectName, gp, info, filter, projectIDLabel), filter) {
 					continue
 				}
+				// An owned manager sees only the file-only agents its
+				// instance's durable ownership record claims.
+				if m.owner != nil && !m.ownsFileAgent(projectIDLabel(), e.Name()) {
+					continue
+				}
 
 				agentEntry := api.AgentInfo{
 					Name:            e.Name(),
@@ -299,6 +338,28 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					// No container and phase "created": provisioned by a
 					// local scion create but never started (ptone/scion#2875).
 					ProvisionedOnly: info.Phase == string(state.PhaseCreated) && info.DeletedAt.IsZero(),
+				}
+
+				// A failed start recorded in the host state file
+				// (ptone/scion#4815) shows as error. Display-only and
+				// fail-quiet: it must never feed a delete, cleanup or
+				// ownership decision. With no container there is no
+				// broker-held hub identity here, so the record is read
+				// only where the host state contract allows it without
+				// one: HubProjectID "" and SharedWorkspace false (the
+				// resolver then refuses a .scion marker or a symlinked or
+				// missing .scion), and only when the resolver places the
+				// file in this agent dir (a shared-workspace agent's
+				// external dir never matches). Nothing from the project
+				// tree feeds the identity. Any refusal, error or invalid
+				// record means no overlay.
+				if info.DeletedAt.IsZero() && info.Phase != "deleted" {
+					t := RunOwnerTarget{ProjectPath: gp, AgentName: e.Name()}
+					if startFailedForDisplay(t, agentDir) != "" {
+						agentEntry.Phase = string(state.PhaseError)
+						agentEntry.Activity = ""
+						agentEntry.ProvisionedOnly = false
+					}
 				}
 
 				// Use agent-info.json mtime as LastSeen for local agents
@@ -389,31 +450,34 @@ func terminalRuntimePhase(agent api.AgentInfo) string {
 }
 
 func persistAgentInfoState(path, phase, activity string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
+	// Locked read-modify-write; see updateSavedAgentInfo (#4681).
+	return agentinfolock.Update(path, agentinfolock.Options{}, func() error {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fi, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
 
-	var info api.AgentInfo
-	if err := json.Unmarshal(data, &info); err != nil {
-		return err
-	}
+		var info api.AgentInfo
+		if err := json.Unmarshal(data, &info); err != nil {
+			return err
+		}
 
-	if info.Phase == phase && info.Activity == activity {
-		return nil
-	}
+		if info.Phase == phase && info.Activity == activity {
+			return nil
+		}
 
-	info.Phase = phase
-	info.Activity = activity
+		info.Phase = phase
+		info.Activity = activity
 
-	updated, err := marshalAgentInfoKeepUnknown(data, &info)
-	if err != nil {
-		return err
-	}
+		updated, err := marshalAgentInfoKeepUnknown(data, &info)
+		if err != nil {
+			return err
+		}
 
-	return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+		return writeAgentInfoFile(path, updated, fi.Mode().Perm())
+	})
 }
