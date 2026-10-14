@@ -17,9 +17,12 @@
 package hub
 
 import (
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The principal check on federation credentials (ptone/scion#5080): a
@@ -126,4 +129,39 @@ func TestFederationPrincipalRefusal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A user access credential from a peer hub naming a Google service account
+// is refused, for every service account email shape; a normal domain email
+// is accepted. issuer_type user issuers are not affected.
+func TestFederationPrincipalCheck_ServiceAccountUserTokenRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	for name, email := range map[string]string{
+		"iam":        "driver@proj.iam.gserviceaccount.com",
+		"appspot":    "proj@appspot.gserviceaccount.com",
+		"developer":  "123-compute@developer.gserviceaccount.com",
+		"system":     "svc@system.gserviceaccount.com",
+		"mixed case": "Driver@Proj.IAM.GServiceAccount.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-"+name, email)))
+		})
+	}
+
+	t.Run("issuer_type user unchanged", func(t *testing.T) {
+		now := time.Now()
+		identity, _, rec := f.through(t, f.signUser(t, map[string]interface{}{
+			"iss":   peerTokUserIssuerURL,
+			"sub":   "idp-sa",
+			"aud":   []string{federationTokenAudience},
+			"iat":   now.Add(-time.Minute).Unix(),
+			"exp":   now.Add(10 * time.Minute).Unix(),
+			"email": "worker@proj.iam.gserviceaccount.com",
+		}))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+	})
 }

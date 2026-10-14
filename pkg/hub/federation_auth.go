@@ -503,10 +503,11 @@ func hasHubAgentClaims(claims *federationClaims) bool {
 // extractHubUserClaims builds the FederatedUserIdentity for a user access
 // credential (scion_token_kind "user") from a hub issuer that accepts them.
 // The credential must carry a subject, an email with email_verified true,
-// and no agent claim; the email must pass the issuer's allowed_emails and
-// allowed_domains (exact, case-insensitive domain match). The identity gets
-// no scopes: the issuer's default_scopes are agent scopes. Its role is
-// "viewer", as for a user issuer without a default_role.
+// and no agent claim; the email must not be a Google service account, and
+// must pass the issuer's allowed_emails and allowed_domains (exact,
+// case-insensitive domain match). The identity gets no scopes: the issuer's
+// default_scopes are agent scopes. Its role is "viewer", as for a user
+// issuer without a default_role.
 func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssuerConfig) (FederatedIdentity, error) {
 	if hasHubAgentClaims(claims) {
 		return nil, fmt.Errorf("federation: user access credential carries agent claims")
@@ -519,6 +520,11 @@ func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssu
 	}
 	if claims.EmailVerified == nil || !*claims.EmailVerified {
 		return nil, fmt.Errorf("federation: user access credential email is not verified")
+	}
+	// A user access credential is for a person: a Google service account
+	// email (isGoogleServiceAccount) is refused, whatever hub issued it.
+	if isGoogleServiceAccount(claims.Email) {
+		return nil, fmt.Errorf("federation: user access credential names a service account")
 	}
 	if len(issuerCfg.AllowedEmails) > 0 && !matchesAllowedEmails(issuerCfg.AllowedEmails, claims.Email) {
 		return nil, fmt.Errorf("federation: email %q not in allowed_emails", claims.Email)
