@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -43,9 +42,13 @@ import (
 // one rule: a key absent from config.yaml clears its field.
 //
 // Narrow writers that are not commits: archive-obsolete (status) and storage
-// migration (path) write through the same compare-and-swap
-// (UpdateHarnessConfigContent) with the row as read; the image status and
-// the build executor's BuiltImage have their own column writers.
+// migration (path, legacy rows only) write through the same compare-and-swap
+// (UpdateHarnessConfigContent) with the row as read
+// (harnessConfigCommitPrecondition); the image status and the build
+// executor's BuiltImage have their own column writers.
+//
+// Files are stored in the blob layout (harness_config_blobs.go,
+// ptone/scion#4219 part 2).
 
 // harnessConfigYAMLPath is the manifest path of a harness-config's own
 // config file.
@@ -181,7 +184,8 @@ func (e *unusableHarnessConfigError) Unwrap() error { return e.perr }
 type harnessConfigCommitOpts struct {
 	// dir, when set, is a local directory holding the same files as the new
 	// manifest (bootstrap, import, reimport). config.yaml is read from it
-	// instead of storage.
+	// instead of storage, and a blob the commit is missing is written from
+	// it.
 	dir string
 	// content holds file contents the caller already has (the file write
 	// and upload handlers), keyed by manifest path; config.yaml is read
@@ -190,13 +194,34 @@ type harnessConfigCommitOpts struct {
 	// create persists the harness-config with CreateHarnessConfig instead
 	// of UpdateHarnessConfigContent (clone, project clone).
 	create bool
-	// verifyAll verifies that every manifest object exists (finalize: an
-	// old CLI re-uploads everything on "file not found"). Otherwise only
-	// entries that are new or changed against the row as read are verified.
-	verifyAll bool
-	// written lists manifest paths whose objects the caller has just
-	// written for this commit, so they are not verified again.
+	// copyFrom, when set, is the harness-config a clone copies missing
+	// blobs from (its blobs, or its path objects for a legacy source).
+	copyFrom *store.HarnessConfig
+	// fromStaging makes the commit move staged uploads into blobs
+	// (finalize). uploadID, when set, names the upload whose staging
+	// directory holds them; without it (older clients) any staged object
+	// for the path whose hash matches is used.
+	fromStaging bool
+	uploadID    string
+	// written lists blob object paths the caller has just written for this
+	// commit (the file APIs and the bootstrap upload), so they are not
+	// checked again.
 	written map[string]bool
+}
+
+// blobOpts is the part of o the shared blob resolver reads.
+func (o harnessConfigCommitOpts) blobOpts() commitOpts {
+	return commitOpts{dir: o.dir, fromStaging: o.fromStaging, uploadID: o.uploadID, written: o.written}
+}
+
+// harnessConfigCommitPrecondition is the stored state a commit of hc
+// requires: the content hash, layout and storage path the caller read
+// (ptone/scion#4219). The storage path is in the predicate so that a commit
+// computed before a storage migration moved the row cannot write the old
+// path back after the migration removed the old tree, and the layout so that
+// a commit that read the legacy row cannot overwrite its migration.
+func harnessConfigCommitPrecondition(hc *store.HarnessConfig) store.HarnessConfigContentPrecondition {
+	return store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash, Layout: hc.Layout, StoragePath: hc.StoragePath}
 }
 
 // errHarnessConfigStorageNotConfigured is returned when a commit has no
@@ -206,59 +231,69 @@ var errHarnessConfigStorageNotConfigured = errors.New("storage not configured")
 // commitHarnessConfigFiles is the single commit path for a harness-config's
 // files. It:
 //
-//  1. verifies that the manifest's objects exist under hc.StoragePath;
+//  1. makes every blob the new manifest introduces exist under the row's
+//     content base (ensureBlobs): staged uploads are hashed and moved, a
+//     legacy row's files are copied in, a clone's are copied from its
+//     source, and a directory's files are written from it. Blobs the row as
+//     read already references are not touched, so a single-file edit costs
+//     a constant number of storage calls whatever the manifest's size;
 //  2. refuses a config.yaml whose provisioner could never provision an
 //     agent (unusableProvisionerInYAML, the one content check);
 //  3. computes ContentHash;
 //  4. derives Harness and Config from config.yaml (deriveHarnessConfigIndex);
-//  5. writes the row once: CreateHarnessConfig with opts.create, otherwise
-//     UpdateHarnessConfigContent, a compare-and-swap against the content
-//     hash the caller read. A row changed by another commit since then
+//  5. writes the row once, in the blob layout: CreateHarnessConfig with
+//     opts.create, otherwise UpdateHarnessConfigContent, a compare-and-swap
+//     against the content hash, layout and storage path the caller read. A
+//     row changed by another commit (or moved by a migration) since then
 //     fails with store.ErrHarnessConfigConflict, which the HTTP handlers
 //     map to 409 harness_config_conflict;
-//  6. after the row write, deletes the objects of files the row as read
-//     listed and the new manifest drops (exact paths, never a prefix).
+//  6. when the commit migrated a legacy row, removes the legacy tree unless
+//     another harness-config shares or nests under that path.
 //
-// BuiltImage is never written. On any error before the write, hc is left
-// unchanged. Other fields the caller set on hc (Status, SourceURL, ...) are
-// persisted as they are.
+// Blobs are never deleted by a commit: files dropped from the manifest stay
+// for in-flight hydrations until the blob garbage collector removes them
+// after its grace period (this replaces the prefix reconcile and the
+// removed-file deletes of the legacy layout, ptone/scion#3170). BuiltImage
+// is never written. On any error before the write, hc is left unchanged.
+// Other fields the caller set on hc (Status, SourceURL, ...) are persisted
+// as they are.
 func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.HarnessConfig, next []store.TemplateFile, opts harnessConfigCommitOpts) error {
 	stor := s.GetStorage()
 	if stor == nil {
 		return errHarnessConfigStorageNotConfigured
 	}
 	next = append([]store.TemplateFile(nil), next...)
-	expected := store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash}
+	expected := harnessConfigCommitPrecondition(hc)
 
 	if err := validateManifestFilePaths(next); err != nil {
 		return err
 	}
-	if hc.StoragePath == "" {
-		return fmt.Errorf("harness-config commit: %q has no storage path", hc.Name)
-	}
 
-	// 1. Verify the objects exist.
-	previous := make(map[string]string, len(hc.Files))
-	for _, f := range hc.Files {
-		previous[f.Path] = f.Hash
+	// 1. Make the introduced blobs exist under the content base. A legacy
+	// row is its own copy source (its migration), read from its legacy
+	// path.
+	base := s.harnessConfigContentBase(hc)
+	row := harnessConfigBlobRow(hc)
+	if !row.isBlobs() {
+		row.StoragePath = ""
+		if len(hc.Files) > 0 || hc.StoragePath != "" {
+			row.StoragePath = s.harnessConfigLegacyPath(hc)
+		}
 	}
-	for _, f := range next {
-		if opts.written[f.Path] {
-			continue
+	var copyFrom *blobRow
+	if opts.copyFrom != nil {
+		copyFrom = harnessConfigBlobRow(opts.copyFrom)
+		if !copyFrom.isBlobs() {
+			copyFrom.StoragePath = s.harnessConfigLegacyPath(opts.copyFrom)
 		}
-		if !opts.verifyAll && !opts.create {
-			if h, ok := previous[f.Path]; ok && h == f.Hash && h != "" {
-				continue
-			}
-		}
-		exists, err := stor.Exists(ctx, hc.StoragePath+"/"+f.Path)
-		if err != nil || !exists {
-			return &fileNotFoundError{path: f.Path}
-		}
+	}
+	next, _, err := s.ensureBlobs(ctx, stor, row, copyFrom, base, next, opts.blobOpts(), s.resourceLog, "harness-config commit")
+	if err != nil {
+		return err
 	}
 
 	// 2. The content check.
-	configYAML, present, err := s.readHarnessConfigYAML(ctx, stor, hc, next, opts)
+	configYAML, present, err := s.readHarnessConfigYAML(ctx, stor, base, next, opts)
 	if err != nil {
 		return fmt.Errorf("harness-config commit: %w", err)
 	}
@@ -272,9 +307,12 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	contentHash := computeContentHash(next)
 	idx := deriveHarnessConfigIndex(configYAML, present, hc.Name)
 
-	// 5. One row write.
+	// 5. One row write, in the blob layout.
 	prevState := *hc
-	previousFiles := hc.Files
+	migratedFrom := ""
+	if !isHarnessConfigBlobLayout(hc) && !opts.create {
+		migratedFrom = s.harnessConfigLegacyPath(hc)
+	}
 	hc.Files = next
 	hc.ContentHash = contentHash
 	hc.Config = idx.Config
@@ -283,6 +321,16 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	} else {
 		s.resourceLog.Warn("harness-config commit: config.yaml sets no harness and none can be inferred from the name; keeping the stored harness",
 			"harness_config", hc.Name, "id", hc.ID, "harness", hc.Harness)
+	}
+	hc.Layout = store.HarnessConfigLayoutBlobs
+	if hc.StoragePath != base {
+		hc.StoragePath = base
+		bucket := hc.StorageBucket
+		if bucket == "" {
+			bucket = stor.Bucket()
+		}
+		hc.StorageBucket = bucket
+		hc.StorageURI = storage.StorageURIForPath(bucket, base)
 	}
 	if opts.create {
 		err = s.store.CreateHarnessConfig(ctx, hc)
@@ -294,19 +342,18 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 		return err
 	}
 
-	// 6. Objects dropped from the manifest, after the row no longer lists
-	// them.
-	if !opts.create {
-		s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
+	// 6. A migrated legacy row's old tree.
+	if migratedFrom != "" {
+		s.removeLegacyHarnessConfigTree(ctx, stor, hc, migratedFrom)
 	}
 	return nil
 }
 
 // readHarnessConfigYAML returns the bytes of the config.yaml the manifest
-// next lists, from opts.content, opts.dir or storage, in that order. present
-// is false when next has no config.yaml. A file too large to parse is
-// returned as present with no content.
-func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, next []store.TemplateFile, opts harnessConfigCommitOpts) ([]byte, bool, error) {
+// next lists, from opts.content, opts.dir or its blob under base, in that
+// order. present is false when next has no config.yaml. A file too large to
+// parse is returned as present with no content.
+func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage, base string, next []store.TemplateFile, opts harnessConfigCommitOpts) ([]byte, bool, error) {
 	if _, ok := templateFileByPath(next, harnessConfigYAMLPath); !ok {
 		return nil, false, nil
 	}
@@ -323,20 +370,14 @@ func (s *Server) readHarnessConfigYAML(ctx context.Context, stor storage.Storage
 		}
 		// The directory lacks a file the manifest lists: read storage.
 	}
-	reader, _, err := stor.Download(ctx, hc.StoragePath+"/"+harnessConfigYAMLPath)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil, false, &fileNotFoundError{path: harnessConfigYAMLPath}
-		}
-		return nil, false, fmt.Errorf("read %s: %w", harnessConfigYAMLPath, err)
-	}
-	defer func() { _ = reader.Close() }()
-	data, err := io.ReadAll(io.LimitReader(reader, maxHarnessConfigFileSize+1))
-	if err != nil {
-		return nil, false, fmt.Errorf("read %s: %w", harnessConfigYAMLPath, err)
-	}
-	if int64(len(data)) > maxHarnessConfigFileSize {
+	data, err := readHarnessConfigBlob(ctx, stor, base, next, harnessConfigYAMLPath, maxHarnessConfigFileSize)
+	switch {
+	case errors.Is(err, errTemplateObjectTooLarge):
 		return nil, true, nil
+	case errors.Is(err, storage.ErrNotFound):
+		return nil, false, &fileNotFoundError{path: harnessConfigYAMLPath}
+	case err != nil:
+		return nil, false, err
 	}
 	return data, true, nil
 }
@@ -350,6 +391,16 @@ func writeHarnessConfigCommitError(w http.ResponseWriter, err error) {
 	var notFound *fileNotFoundError
 	if errors.As(err, &notFound) {
 		ValidationError(w, err.Error(), nil)
+		return
+	}
+	var mismatch *hashMismatchError
+	if errors.As(err, &mismatch) {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	var badHash *invalidFileHashError
+	if errors.As(err, &badHash) {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "manifest.files[].hash"})
 		return
 	}
 	var unusable *unusableHarnessConfigError
