@@ -4027,7 +4027,12 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
 	// exists, so it comes from the settings file and startup never sees an
 	// overlay-only active_profile error.
-	installColocatedSettingsOverlay(cfg, hubSrv)
+	if installColocatedSettingsOverlay(cfg, hubSrv) {
+		// Built-in profile retention (ptone/scion#5113): enabled only for the
+		// legacy co-located broker, whose ID is known here (registered above).
+		// A failed registration leaves it disabled: the overlay is unchanged.
+		enableColocatedProfileReferences(ctx, hubSrv)
+	}
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)

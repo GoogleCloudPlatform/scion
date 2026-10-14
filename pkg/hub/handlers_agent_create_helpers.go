@@ -2079,6 +2079,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			}
 			slog.Info("Auto-linked broker as project provider",
 				"broker", broker.Name, "brokerID", broker.ID, "project_id", project.ID)
+			// The project's activeProfile is retained before this
+			// request dispatches (ptone/scion#5113).
+			s.onColocatedPlacement(ctx, project.ID, broker.ID, "")
 			LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, "",
 				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "agent_create"))
 

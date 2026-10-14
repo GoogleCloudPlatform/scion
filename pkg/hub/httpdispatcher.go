@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -1388,6 +1389,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.telemetryPolicy = projectTelemetryPolicy(project)
 
 	// First check if the broker has a registered local path for this project.
+	localPath := ""
 	if agent.RuntimeBrokerID != "" {
 		provider, provErr := d.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
 		if provErr != nil {
@@ -1395,9 +1397,9 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 				d.log.Warn("Failed to get project provider for path lookup", "error", provErr)
 			}
 		} else if provider.LocalPath != "" {
-			info.projectPath = provider.LocalPath
+			localPath = provider.LocalPath
 			if d.debug {
-				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", info.projectPath)
+				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", localPath)
 			}
 		}
 	}
@@ -1405,16 +1407,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug. This applies to both hub-native projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
-	// back to the global project.
-	if info.projectPath == "" {
-		info.projectSlug = project.Slug
-	} else if isGlobalHubProject(project.Slug) {
-		// The global project's slug travels with its provider path so the
-		// broker can tell the global project apart from another project
-		// whose path points at the broker's global directory. The broker
-		// keeps resolving the project from the path.
-		info.projectSlug = globalProjectSlug
-	}
+	// back to the global project. The global project's slug travels with its
+	// provider path so the broker can tell the global project apart from
+	// another project whose path points at the broker's global directory.
+	// The same helper decides the path the built-in profile reference count
+	// reads agent-info.json from (ptone/scion#5113).
+	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
 }
 

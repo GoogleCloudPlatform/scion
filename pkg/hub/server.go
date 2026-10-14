@@ -1712,6 +1712,9 @@ type Server struct {
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
 	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	// profileRefs counts built-in profile references for the co-located
+	// broker's settings overlay (ptone/scion#5113; profile_references.go).
+	profileRefs profileReferences
 	// embeddedBrokerPending is non-nil while a co-located broker is expected
 	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
 	// registration succeeds or fails. embeddedBrokerRegErr records a failed

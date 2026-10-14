@@ -1980,6 +1980,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "project_register"))
+		s.onColocatedPlacement(ctx, project.ID, broker.ID, "")
 
 		// For linked projects (local directory) on the embedded broker,
 		// initialize the .scion directory structure so agents and templates
@@ -2095,6 +2096,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		LogLinkEvent(ctx, s.auditLogger, broker.ID, broker.Name, project.ID, provider.LinkedBy, getClientIP(r),
 			mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), "path", "embedded"))
+		s.onColocatedPlacement(ctx, project.ID, broker.ID, "")
 
 		// Set as default runtime broker if project doesn't have one
 		// (first broker to register becomes the default)
