@@ -703,7 +703,15 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         self.index_ok = desired is not None
         self.desired = {p.name: p.digest for p in desired or []}
         self.conflicts = {p.name for p in desired or [] if p.skills_dir_conflict}
-        self.owned = set(self._recorded_plugins())
+        recorded = self._recorded_plugins()
+        self.owned = set(recorded)
+        # What Scion had recorded at the start of this provision, per plugin.
+        # install judges an owned target against it: reconcile may already
+        # have dropped the record (after an uninstall) by the time install runs.
+        self.refs: dict[str, dict[str, Any]] = {
+            n: rec["native_ref"] for n, rec in recorded.items()
+            if isinstance(rec, dict) and isinstance(rec.get("native_ref"), dict)
+        }
 
     # --- state and paths -------------------------------------------------
 
@@ -845,6 +853,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 continue
             recorded.pop(name)
             self.owned.discard(name)
+            self.refs.pop(name, None)
             changed = True
         if changed:
             scion_harness.atomic_write_json(self._state_path(), {
@@ -881,6 +890,8 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         return scion_harness.parse_semver(self._claude_version)
 
     def _current_ref(self, name: str) -> dict[str, Any]:
+        if name in self.refs:
+            return self.refs[name]
         rec = self._recorded_plugins().get(name)
         ref = rec.get("native_ref") if isinstance(rec, dict) else None
         return ref if isinstance(ref, dict) else {}
@@ -906,6 +917,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             if foreign:
                 self._hand_back(name, ref, f"{target} now also holds content Scion did not install")
                 self.owned.discard(name)
+                self.refs.pop(name, None)
                 raise scion_harness.PluginInstallError(
                     f"plugin {name} not installed for claude: {target} holds content Scion did not install")
 
@@ -972,7 +984,9 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         except OSError as exc:
             self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
         self.owned.add(name)
-        return {"path": target, "files": recorded, "dirs": dirs}
+        ref = {"path": target, "files": recorded, "dirs": dirs}
+        self.refs[name] = ref
+        return ref
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
         """Remove only what Scion wrote (recorded files whose content still
@@ -996,6 +1010,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                     f"agent plugin {name}: removed; {target} also holds content Scion did not install "
                     f"({shown or 'unknown'}), which was left in place")
         self.owned.discard(name)
+        self.refs.pop(name, None)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """Claude registers a skills-dir plugin by its generated manifest:
