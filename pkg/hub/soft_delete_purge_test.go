@@ -33,11 +33,13 @@ type purgeCountingStore struct {
 	eventCalls   int
 }
 
-func (p *purgeCountingStore) PurgeDeletedAgents(_ context.Context, cutoff time.Time) (int, error) {
+// ListSoftDeletedAgentsBefore is the agent purge's first store call
+// (purgeExpiredAgents); it finds nothing to purge here.
+func (p *purgeCountingStore) ListSoftDeletedAgentsBefore(_ context.Context, cutoff time.Time, _ string, _ int) ([]*store.Agent, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.agentCutoffs = append(p.agentCutoffs, cutoff)
-	return 0, nil
+	return nil, nil
 }
 
 func (p *purgeCountingStore) PurgeOldScheduledEvents(_ context.Context, _ time.Time) (int, error) {

@@ -184,7 +184,7 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 				SetStateVersion(current.StateVersion + 1)
-			applySucceededAgentInfo(upd, r)
+			applySucceededAgentInfo(upd, current, r)
 			updated, err := upd.Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, false, mapError(err)
@@ -207,7 +207,9 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {
-				upd.SetLaunchError(r.ErrorCode)
+				// The cause qualifies this code, so it is written with
+				// it; otherwise the reaper's code stands, with no cause.
+				upd.SetLaunchError(r.ErrorCode).SetLaunchCause(r.Cause)
 			}
 			msg := formatFailureMessage(r.Step, r.Message)
 			if msg != "" {
@@ -242,7 +244,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			upd.SetLaunchOwner(ownerToSet)
 		}
 		if r.State == store.LaunchReportStateSucceeded {
-			applySucceededAgentInfo(upd, r)
+			applySucceededAgentInfo(upd, current, r)
 			upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonSucceeded)
 			updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 			if err != nil {
@@ -281,10 +283,12 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// a phase=running write ends a launch automatically, so this row can
 		// carry phase=error while its launch is still active).
 		newLaunchError := current.LaunchError
+		newLaunchCause := current.LaunchCause
 		newMessage := current.Message
 		if r.State == store.LaunchReportStateFailed {
 			if r.ErrorCode != "" {
 				newLaunchError = r.ErrorCode
+				newLaunchCause = r.Cause
 			} else if newLaunchError == "" {
 				// Design §3.3: launch_error must not stay empty on this
 				// launch-ending write. current.LaunchError may already be
@@ -303,6 +307,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchError(newLaunchError).
+			SetLaunchCause(newLaunchCause).
 			SetMessage(newMessage).
 			SetStateVersion(current.StateVersion + 1)
 		if ownerToSet != "" {
@@ -336,11 +341,12 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		upd := ltx.client.Agent.UpdateOneID(current.ID).
 			SetPhase(string(state.PhaseRunning)).
 			SetLaunchError("").
+			SetLaunchCause("").
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonSucceeded).
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
-		applySucceededAgentInfo(upd, r)
+		applySucceededAgentInfo(upd, current, r)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -365,6 +371,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetPhase(string(state.PhaseError)).
 			SetMessage(msg).
 			SetLaunchError(errorCode).
+			SetLaunchCause(r.Cause).
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchLastReportAt(now).
@@ -436,14 +443,39 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 	}
 }
 
-// applySucceededAgentInfo applies the subset of a succeeded broker report's
-// agent info that P1a supports (design §3.7 steps 5/6: "apply Agent as
-// applyBrokerResponse does" / "apply agent info without changing the
-// phase"). Fuller broker-response application (the complete RemoteAgentInfo
-// echo) is P1b-1 wire-plumbing territory.
-func applySucceededAgentInfo(upd *ent.AgentUpdateOne, r store.LaunchReport) {
-	if r.Runtime != "" {
-		upd.SetRuntime(r.Runtime)
+// applySucceededAgentInfo applies a succeeded broker report's agent info
+// (design §3.7 steps 5/6: "apply Agent as applyBrokerResponse does" / "apply
+// agent info without changing the phase"). The broker-resolved config goes
+// through store.ApplyBrokerAgentConfig, the helper a synchronous dispatch
+// uses, so both paths record the same template, harness config and auth,
+// image, profile and runtime (ptone/scion#4818). current is the row read in
+// the launch transaction. Its applied_config is read as entAgentToStore reads
+// it (a sanitised config is used), and a row whose applied_config is empty
+// (no AppliedConfig, as on the sync path) or not valid JSON keeps it
+// untouched.
+func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
+	a := store.Agent{
+		Template:              current.Template,
+		Runtime:               current.Runtime,
+		PinnedRuntimeTargetID: derefString(current.PinnedRuntimeTargetID),
+	}
+	if current.AppliedConfig != "" {
+		// A non-nil config with an error is the sanitised config, which
+		// entAgentToStore also uses; nil means not valid JSON.
+		a.AppliedConfig, _ = parseAppliedConfig(current.AppliedConfig)
+	}
+	store.ApplyBrokerAgentConfig(&a, r.AgentConfig)
+	if a.Template != current.Template {
+		upd.SetTemplate(a.Template)
+	}
+	if a.Runtime != current.Runtime {
+		upd.SetRuntime(a.Runtime)
+	}
+	if a.AppliedConfig != nil {
+		if raw := marshalAppliedConfig(a.AppliedConfig); raw != "" && raw != current.AppliedConfig {
+			upd.SetAppliedConfig(raw)
+			upd.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
+		}
 	}
 	if r.RuntimeState != "" {
 		upd.SetRuntimeState(r.RuntimeState)

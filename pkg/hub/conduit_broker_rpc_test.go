@@ -271,6 +271,12 @@ func TestConduitBrokerTunnel_LostResponseIsOutcomeUnknown(t *testing.T) {
 	if isConfirmedStartNotActedOnError(err) {
 		t.Fatalf("a lost response must not be confirmed not acted on: %v", err)
 	}
+	if !errors.Is(err, errBrokerConnectionLost) || !isUnknownDispatchOutcome(err) {
+		t.Fatalf("a session lost after the send must be an unknown outcome (errBrokerConnectionLost): %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "conduit request failed: ") {
+		t.Fatalf("the error keeps its text: %v", err)
+	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("broker handled %d requests, want 1", n)
 	}

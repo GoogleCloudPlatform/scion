@@ -214,7 +214,8 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchOwner("").
 		SetLaunchSeq(0).
 		SetLaunchStep("").
-		SetLaunchError("")
+		SetLaunchError("").
+		SetLaunchCause("")
 	// Link a create start claim to this launch, so only this launch's end
 	// settles it.
 	if _, err := linkLaunchClaim(upd, current, newID, now).Save(ctx); err != nil {

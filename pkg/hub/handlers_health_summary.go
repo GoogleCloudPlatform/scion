@@ -124,8 +124,8 @@ type HealthSummaryHub struct {
 	// Read-only, like TestIdentitiesEnabled.
 	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
 	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
-	// kind is on (--test-mode=super-admin). This binary refuses that level
-	// at startup, so it is always false here.
+	// kind is on (--test-mode=super-admin, which starts only when the
+	// test-admin policy classification is complete). Read-only.
 	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
 	// TestMode is the resolved --test-mode level: off, member, admin or
 	// super-admin. The three booleans above are derived from it.
@@ -141,6 +141,12 @@ type HealthSummaryHub struct {
 	// same value as testIdentityWebSessions in GET
 	// /api/v1/test-infra/status). Read-only.
 	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
+	// TestIdentityWebSessionsUnavailableReason names why test identity web
+	// sessions are unavailable while the member tier is on (WS2; the same
+	// value as testIdentityWebSessionsUnavailableReason in GET
+	// /api/v1/test-infra/status), or "" when they are available or the
+	// member tier is off. Read-only.
+	TestIdentityWebSessionsUnavailableReason string `json:"test_identity_web_sessions_unavailable_reason"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -360,6 +366,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	hubSummary.TestMode = string(s.TestModeLevel())
 	hubSummary.TestModePreconditions = s.testModePreconditions()
 	hubSummary.TestIdentityWebSessionsEnabled, _ = s.testIdentityWebSessionGate()
+	hubSummary.TestIdentityWebSessionsUnavailableReason = s.testIdentityWebSessionsUnavailableReason()
 	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
 		slog.Error("health summary: failed to count live test admin identities", "error", err)
 	} else {

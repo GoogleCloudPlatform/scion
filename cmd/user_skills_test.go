@@ -101,6 +101,9 @@ func setupUserSkillsProject(t *testing.T, endpoint string) (tmpHome, projectDir 
 	data, err := json.Marshal(settings)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return tmpHome, projectDir
 }
 

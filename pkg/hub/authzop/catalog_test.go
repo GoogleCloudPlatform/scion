@@ -275,12 +275,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
-		"project.manage_visitors":      "Held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 
 		// Admin test identities: the super-admin kind's capability is
-		// checked by testAdminIssuer, whose issuance answers 404 until the
-		// admin tier's policy phase (A2) adds its operation.
-		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
+		// checked by testAdminIssuer inside testidentity.admin.create (whose
+		// base permission is test_identity.issue_admin; the route guard also
+		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
+		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
 
 		// Global catalog permissions — handler-enforced, not a standalone route.
 		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
@@ -294,12 +294,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service: read and create are cataloged (P1). update and
-		// delete are Reserved registry rows (nothing checks them yet);
-		// manage is checked inline by the artifact service.
+		// Artifact service: read, create and manage are cataloged. update
+		// and delete are Reserved registry rows (nothing checks them yet;
+		// PATCH and DELETE are gated by artifact.manage).
 		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
 		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
-		"artifact.manage": "Inline check in pkg/artifacts canAdminister (grants, share links, PATCH), no catalog operation",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -1238,6 +1237,7 @@ var domainResourceCompatibility = map[string][]string{
 	"group":               {"ResourceGroup"},
 	"access.constraint":   {"ResourceAccessConstraint"},
 	"credential":          {"ResourceUser"},
+	"federation":          {"ResourceFederationToken"},
 	"gcp.identity":        {"ResourceGCPServiceAccount"},
 	"agent":               {"ResourceAgent"},
 	"project":             {"ResourceProject"},
@@ -1253,7 +1253,7 @@ var domainResourceCompatibility = map[string][]string{
 	"broker":              {"ResourceBroker"},
 	"quota":               {"ResourceQuota"},
 	"schedule":            {"ResourceScheduledEvent"},
-	"chat":                {"ResourceProject"},
+	"chat":                {"ResourceProject", "ResourceInbox", "ResourceAgent"},
 	"env":                 {"ResourceProject", "ResourceHub"},
 	"artifact":            {"ResourceArtifact"},
 	"inbox":               {"ResourceInbox"},

@@ -1826,6 +1826,282 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 	}
 }
 
+// TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence checks the
+// source reported for superseded keys when the unseeded bootstrap is set,
+// as startup does: a key with both a SCION_SEED_* value and a settings.yaml
+// value is attributed to settings.yaml, which wins over the seed layer; a
+// key with only a seed value or only a settings.yaml value keeps its source;
+// and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
+// ptone/scion#4904).
+func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_MONITORINGDASHBOARDURL",
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE", "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
+	} {
+		t.Setenv(name, "")
+	}
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL", "https://seed-dash.example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+	// Only a seed value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `schema_version: "1"
+server:
+  hub:
+    admin_emails: ["file@example.com"]
+    monitoring_dashboard_url: https://file-dash.example.com
+    public_url: https://file.example.com
+  auth:
+    authorized_domains: ["file.example.com"]
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bootK := config.LoadBootstrapKoanf()
+	if got := bootK.Strings("server.hub.admin_emails"); len(got) != 1 || got[0] != "file@example.com" {
+		t.Fatalf("bootstrap admin_emails = %v, want the settings.yaml value over the seed value", got)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, bootK, emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"monitoring_dashboard_url":"https://db-dash.example.com","public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	for key, want := range map[string]string{
+		"server.hub.admin_emails":             "yaml",     // seed and settings.yaml
+		"server.hub.monitoring_dashboard_url": "yaml",     // seed and settings.yaml
+		"server.hub.public_url":               "yaml",     // seed and settings.yaml
+		"server.auth.default_user_role":       "seed_env", // seed only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault checks, with the
+// unseeded bootstrap set, that a key whose only value besides a coded
+// default comes from SCION_SEED_* is still attributed to the seed layer:
+// the merge without the seed layer has the key (the coded default), but
+// with a different value. It also checks that a key with both a seed value
+// and a SCION_SERVER_* value is attributed to the server environment
+// (ptone/scion#4904).
+func TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	// Only a seed value over the coded default ([]).
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	// Both a seed value and a SCION_SERVER_* value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_USERACCESSMODE", "invite")
+	t.Setenv("SCION_SERVER_AUTH_USERACCESSMODE", "closed")
+
+	unseededK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	if !unseededK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the merge without the seed layer should carry the coded admin_emails default")
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(unseededK)
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"user_access_mode":"open"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, sk := range getServerConfigDB(t, srv, ops).SupersededKeys["access"] {
+		got[sk.Key] = sk.Source
+	}
+	if got["server.hub.admin_emails"] != "seed_env" {
+		t.Errorf("superseded server.hub.admin_emails source = %q, want seed_env (all: %v)", got["server.hub.admin_emails"], got)
+	}
+	if got["server.auth.user_access_mode"] != "server_env" {
+		t.Errorf("superseded server.auth.user_access_mode source = %q, want server_env (all: %v)", got["server.auth.user_access_mode"], got)
+	}
+}
+
+// TestGetServerConfigDB_SupersededKeyDefaultSource checks the source
+// reported for superseded keys with the unseeded and above-seed bootstraps
+// set, as startup does: a seed value equal to the coded default is
+// attributed to the seed layer, a settings.yaml value equal to the coded
+// default to settings.yaml, a key only the coded defaults set to the
+// defaults, and a public URL with both a seed and a settings.yaml value to
+// settings.yaml (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededKeyDefaultSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTTEMPLATE", "SCION_SERVER_DEFAULTHARNESSCONFIG",
+		"SCION_SEED_DEFAULTHARNESSCONFIG", "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SEED_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultsK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	defaultTemplate := defaultsK.String("default_template")
+	defaultHarnessConfig := defaultsK.String("default_harness_config")
+	if defaultTemplate == "" || defaultHarnessConfig == "" {
+		t.Fatalf("precondition: coded defaults should set default_template and default_harness_config, got %q and %q", defaultTemplate, defaultHarnessConfig)
+	}
+	if !defaultsK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the coded defaults should set server.hub.admin_emails")
+	}
+
+	// A seed value equal to the coded default.
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A settings.yaml value equal to the coded default.
+	settings := `schema_version: "1"
+default_harness_config: ` + defaultHarnessConfig + `
+server:
+  hub:
+    public_url: https://file.example.com
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := supersededSourcesWithAboveSeed(t)
+	for key, want := range map[string]string{
+		"default_template":        "seed_env", // seed value equal to the default
+		"default_harness_config":  "yaml",     // settings.yaml value equal to the default
+		"server.hub.admin_emails": "default",  // only the coded default
+		"server.hub.public_url":   "yaml",     // seed and settings.yaml
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestGetServerConfigDB_SupersededServerEnvEqualToDefault checks, with the
+// unseeded and above-seed bootstraps set, that a SCION_SERVER_* value equal
+// to the coded default is attributed to the server environment, also when a
+// seed value sets the key to the same value (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededServerEnvEqualToDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTHARNESSCONFIG", "SCION_SEED_DEFAULTHARNESSCONFIG",
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SEED_SERVER_HUB_ADMINEMAILS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultTemplate := config.LoadUnseededBootstrapKoanfWithConfigPath("").String("default_template")
+	if defaultTemplate == "" {
+		t.Fatal("precondition: the coded defaults should set default_template")
+	}
+	t.Setenv("SCION_SERVER_DEFAULTTEMPLATE", defaultTemplate)
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+
+	got := supersededSourcesWithAboveSeed(t)
+	if got["default_template"] != "server_env" {
+		t.Errorf("superseded default_template source = %q, want server_env (all: %v)", got["default_template"], got)
+	}
+}
+
+// TestDetectKeySource_UnmappedSectionKey checks detectKeySource for a key of
+// a section without a JSON field mapping (agent_defaults, whose keys are
+// their koanf paths): the server environment wins over the seed layer,
+// which wins over the yaml fallback, as for a mapped key (ptone/scion#4983).
+func TestDetectKeySource_UnmappedSectionKey(t *testing.T) {
+	seed := map[string]interface{}{"default_template": "seed-template"}
+	server := map[string]interface{}{"default_template": "server-template"}
+	none := map[string]interface{}{}
+	for _, tc := range []struct {
+		name, section, key string
+		seed, server       map[string]interface{}
+		want               string
+	}{
+		{"server env", "agent_defaults", "default_template", seed, server, "server_env"},
+		{"seed env", "agent_defaults", "default_template", seed, none, "seed_env"},
+		{"neither", "agent_defaults", "default_template", none, none, "yaml"},
+		{"other key", "agent_defaults", "default_harness_config", seed, server, "yaml"},
+		{"mapped key", "access", "admin_emails", map[string]interface{}{"server.hub.admin_emails": "a@example.com"}, none, "seed_env"},
+	} {
+		got := detectKeySource(newEnvKoanf(t, tc.seed), newEnvKoanf(t, tc.server), tc.section, tc.key)
+		if got != tc.want {
+			t.Errorf("%s: detectKeySource(%s, %s) = %q, want %q", tc.name, tc.section, tc.key, got, tc.want)
+		}
+	}
+}
+
+// supersededSourcesWithAboveSeed builds the bootstrap merges from HOME and
+// the environment as startup does, with the unseeded and above-seed merges
+// set, saves managed agent_defaults, access and endpoints rows that differ
+// from them, and returns the source of each superseded key.
+func supersededSourcesWithAboveSeed(t *testing.T) map[string]string {
+	t.Helper()
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	ops.SetAboveSeedBootstrap(config.LoadAboveSeedBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_template":"db-template","default_harness_config":"db-harness"}`), "managed")
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	return got
+}
+
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := emptyKoanf()
@@ -1981,16 +2257,15 @@ func TestPutServerConfigDB_ServerEnv_422(t *testing.T) {
 	}
 }
 
-func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
-	// The three async-launch settings are documented as Layer 0 (restart
+func TestExtractKoanfKeys_AsyncLaunchSettings_AreLayer0(t *testing.T) {
+	// The two async-launch settings are documented as Layer 0 (restart
 	// required, not writable via the admin API) in server-config.md's
 	// Layer-0 table. They must be extracted so ClassifyKeys sees them.
-	asyncLaunch := true
+	// Async create itself is the hub.async_agent_launch experiment.
 	keepalive := 20
 	req := &ServerConfigUpdateRequest{
 		Server: &config.V1ServerConfig{
 			Hub: &config.V1ServerHubConfig{
-				AsyncAgentLaunch:       &asyncLaunch,
 				LaunchTimeout:          "10m",
 				LaunchKeepaliveSeconds: &keepalive,
 			},
@@ -2003,7 +2278,6 @@ func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
 		keySet[k] = true
 	}
 	for _, want := range []string{
-		"server.hub.async_agent_launch",
 		"server.hub.launch_timeout",
 		"server.hub.launch_keepalive_seconds",
 	} {
@@ -2013,18 +2287,14 @@ func TestExtractKoanfKeys_AsyncAgentLaunchSettings_AreLayer0(t *testing.T) {
 	}
 }
 
-func TestPutServerConfigDB_AsyncAgentLaunchSettings_422(t *testing.T) {
-	// A PUT carrying any of the three async-launch settings must be rejected
+func TestPutServerConfigDB_AsyncLaunchSettings_422(t *testing.T) {
+	// A PUT carrying either async-launch setting must be rejected
 	// with 422 layer0_rejected, matching server-config.md's Layer-0 table,
 	// rather than silently dropping them.
 	tests := []struct {
 		name string
 		body string
 	}{
-		{
-			name: "async_agent_launch",
-			body: `{"server": {"hub": {"async_agent_launch": true}}}`,
-		},
 		{
 			name: "launch_timeout",
 			body: `{"server": {"hub": {"launch_timeout": "10m"}}}`,

@@ -263,7 +263,7 @@ func runDoctor() error {
 		settings = &config.Settings{}
 	}
 
-	hubEP := GetHubEndpoint(settings)
+	hubEP := invocationHubEndpoint()
 
 	// Create the authenticated client for the Hub checks if a Hub endpoint
 	// is configured.
@@ -1189,43 +1189,4 @@ func defaultServerWebPort() int {
 		}
 	}
 	return webPort
-}
-
-// checkDoctorServerHubEndpoint performs D11: it reports the server hub
-// endpoint deprecation with serverHubEndpointDeprecated, the check server
-// startup logs. Doctor does not see the server's flags, so unless the host
-// is known to run a standalone broker it evaluates every mode the server
-// could run in (workstation, hosted with and without the web frontend,
-// broker only, with default ports) and warns only when the server would be
-// affected in all of them: it never warns on a guess. For the same reason a
-// loopback legacy value is indeterminate unless the host runs a standalone
-// broker: a workstation on a port doctor cannot see may have written it as
-// its own endpoint. The bool is false when there is nothing to report.
-func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings, host doctorServerHost, defaultWebPort int) (scionruntime.CheckResult, bool) {
-	if !host.configured {
-		return scionruntime.CheckResult{}, false
-	}
-	brokerOnly := serverEndpointMode{brokerEnabled: true}
-	modes := []serverEndpointMode{brokerOnly}
-	if !host.brokerOnly {
-		modes = append(modes,
-			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort},
-			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort, hosted: true},
-			serverEndpointMode{hubEnabled: true, hosted: true},
-		)
-	}
-	legacy := settings.GetHubEndpoint()
-	if !host.brokerOnly && isLoopbackURL(legacy) {
-		return scionruntime.CheckResult{}, false
-	}
-	for _, m := range modes {
-		if !serverHubEndpointDeprecated(cfg, m, legacy) {
-			return scionruntime.CheckResult{}, false
-		}
-	}
-	return scionruntime.CheckResult{
-		Name:    "server-hub-endpoint",
-		Status:  "warn",
-		Message: serverHubEndpointDeprecationWarning,
-	}, true
 }

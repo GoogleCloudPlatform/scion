@@ -59,7 +59,7 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 		// broker-connect hook handles the latency-sensitive path. If
 		// sequential processing becomes a bottleneck under sustained load,
 		// consider bounded concurrency.
-		s.notificationDispatcher.retryBatch(ctx, notifs)
+		s.notificationDispatcher.retryBatch(ctx, notifs, nil)
 	}
 }
 
@@ -109,7 +109,7 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 	s.agentLifecycleLog.Info("broker-connect notification drain: delivering",
 		"brokerID", brokerID, "count", len(notifs))
 
-	s.notificationDispatcher.retryBatch(ctx, notifs)
+	s.notificationDispatcher.retryBatch(ctx, notifs, s.brokerWork.closing)
 }
 
 // notificationRetryPassTimeout is the budget of one sweep or broker-connect
@@ -132,11 +132,12 @@ var retryDispatchAttemptTimeout = 2 * time.Second
 const revertClaimTimeout = 5 * time.Second
 
 // notificationRetryMaxAge is how old a notification may be and still have a
-// failed delivery reverted for another retry. Past it, RetryDispatch gives up
-// and leaves the notification claimed. There is no per-notification attempt
-// counter: the 5-minute sweep cadence is the backoff, so this bounds a
-// notification to about notificationRetryMaxAge / 5m sweep attempts, plus one
-// per broker-connect drain.
+// failed delivery reverted for another retry. Past it, RetryDispatch gives up:
+// the notification stays claimed and is stored with the failed outcome. The
+// budget is by age, not by attempt count: the 5-minute sweep cadence is the
+// backoff, so this bounds a notification to about notificationRetryMaxAge / 5m
+// sweep attempts, plus one per broker-connect drain. Each attempt is counted
+// in the notification's DispatchAttempts.
 const notificationRetryMaxAge = 24 * time.Hour
 
 // retryOutcome is the result of one retryDispatch call.
@@ -167,10 +168,20 @@ const (
 // on that broker are skipped (without being claimed) for the rest of the
 // pass, so a dead broker costs at most one attempt per pass instead of
 // blocking newer, deliverable notifications behind it.
-func (nd *NotificationDispatcher) retryBatch(ctx context.Context, notifs []store.Notification) {
+//
+// stop, if non-nil, is checked before each notification; once it returns
+// true no further notification is claimed. The broker-connect drain passes
+// the broker work tracker's closing check so it stops claiming once hub
+// shutdown begins (ptone/scion#4869).
+func (nd *NotificationDispatcher) retryBatch(ctx context.Context, notifs []store.Notification, stop func() bool) {
 	skipBrokers := map[string]bool{}
 	for i := range notifs {
 		if ctx.Err() != nil {
+			return
+		}
+		// Once hub shutdown has begun, claim nothing more; undispatched
+		// notifications drain on the next connect (ptone/scion#4869).
+		if stop != nil && stop() {
 			return
 		}
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < retryDispatchAttemptTimeout {
@@ -203,11 +214,50 @@ func (nd *NotificationDispatcher) subscriberBrokerID(ctx context.Context, notif 
 // deadline cannot cancel: a delivery attempt can end because that deadline
 // passed, and a revert on the expired context would fail and leave the
 // notification claimed, undelivered and invisible to the sweep.
+//
+// The store refuses the revert when another caller has already recorded an
+// outcome (a primary dispatch that delivered while this retry's attempt was
+// failing, ptone/scion#5030); the row then stays dispatched with that
+// outcome, which is the intended result and not an error.
 func (nd *NotificationDispatcher) revertClaim(ctx context.Context, notificationID string) {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()
-	if err := nd.store.UnmarkNotificationDispatched(rctx, notificationID); err != nil {
+	reverted, err := nd.store.UnmarkNotificationDispatched(rctx, notificationID)
+	if err != nil {
 		nd.log.Error("retry: failed to revert claim", "notificationID", notificationID, "error", err)
+		return
+	}
+	if !reverted {
+		nd.log.Debug("retry: claim kept, an outcome is already recorded", "notificationID", notificationID)
+	}
+}
+
+// recordAttempt counts one delivery attempt on the notification. A failed
+// write is logged and does not stop the delivery.
+func (nd *NotificationDispatcher) recordAttempt(ctx context.Context, notificationID string) {
+	if err := nd.store.RecordNotificationDispatchAttempt(ctx, notificationID); err != nil {
+		nd.log.Error("failed to record notification dispatch attempt", "notificationID", notificationID, "error", err)
+	}
+}
+
+// setOutcome stores the notification's terminal dispatch outcome. Like
+// revertClaim it runs on a context the caller's deadline cannot cancel, so an
+// attempt that ended at that deadline still records its outcome. The store
+// keeps the most informative outcome (ptone/scion#5030): delivered replaces
+// failed, and a refused write (failed over any outcome, delivered over
+// delivered) is dropped quietly.
+func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID, outcome string) {
+	octx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
+	defer cancel()
+	applied, err := nd.store.SetNotificationDispatchOutcome(octx, notificationID, outcome)
+	if err != nil {
+		nd.log.Error("failed to record notification dispatch outcome",
+			"notificationID", notificationID, "outcome", outcome, "error", err)
+		return
+	}
+	if !applied {
+		nd.log.Debug("notification dispatch outcome already recorded, keeping it",
+			"notificationID", notificationID, "outcome", outcome)
 	}
 }
 
@@ -221,8 +271,11 @@ func (nd *NotificationDispatcher) revertClaim(ctx context.Context, notificationI
 // race on the same notification. If the claim fails (another caller already
 // claimed it), this is a no-op. If delivery cannot proceed (no dispatcher, no
 // broker) or the delivery attempt fails, the claim is reverted so a future
-// sweep can retry; a failed delivery older than notificationRetryMaxAge stays
-// claimed instead.
+// sweep can retry. When it gives up instead (a failed delivery older than
+// notificationRetryMaxAge, or a subscription, subscriber or watched agent
+// that is gone), the notification stays claimed with the failed outcome. A
+// delivered notification gets the delivered outcome, and every delivery
+// attempt is counted in DispatchAttempts.
 //
 // Delivery is at-least-once: any delivery error is retried, including an
 // ambiguous one (a transport error after the request was sent, or the attempt
@@ -272,6 +325,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// does not retry this notification every 5 minutes forever.
 			nd.log.Warn("retry: subscription deleted, leaving claimed",
 				"subscriptionID", notif.SubscriptionID, "notificationID", notif.ID)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
 		} else {
 			// Transient error (DB timeout, connection issue) — revert claim
 			// so a future sweep can retry once the store is reachable again.
@@ -295,6 +349,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// does not retry this notification every 5 minutes forever.
 			nd.log.Warn("retry: subscriber agent deleted, leaving claimed",
 				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
 		} else {
 			// Transient error (DB timeout, connection issue) — revert claim
 			// so a future sweep can retry once the store is reachable again.
@@ -333,6 +388,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 			// Watched agent permanently deleted — leave claimed (no point retrying).
 			nd.log.Warn("retry: watched agent deleted, leaving claimed",
 				"agentID", notif.AgentID, "notificationID", notif.ID)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
 		} else {
 			// Transient error — revert claim so a future sweep can retry.
 			nd.log.Warn("retry: watched agent lookup failed, reverting claim",
@@ -366,6 +422,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	attemptCtx, cancel := context.WithTimeout(ctx, retryDispatchAttemptTimeout)
 	defer cancel()
 	brokerID = subscriber.RuntimeBrokerID
+	nd.recordAttempt(ctx, notif.ID)
 	if err := dispatchWithBrokerRetry(attemptCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
 		outcome = retryFailed
 		// ErrBrokerTimeout: deferred (unroutable) until the attempt timed out.
@@ -377,10 +434,12 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 		}
 		// The store always sets CreatedAt; a zero value never gives up.
 		if !notif.CreatedAt.IsZero() && time.Since(notif.CreatedAt) > notificationRetryMaxAge {
-			// Give up: leave claimed so the sweep stops retrying it.
+			// Give up: leave claimed so the sweep stops retrying it, and
+			// store it as failed so it is not mistaken for delivered.
 			nd.log.Error("retry: delivery failed past max retry age, giving up",
 				"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
 				"createdAt", notif.CreatedAt, "error", err)
+			nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeFailed)
 			return outcome, brokerID
 		}
 		nd.log.Warn("retry: delivery failed, reverting claim",
@@ -392,6 +451,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	nd.log.Info("retry: notification delivered",
 		"notificationID", notif.ID, "subscriberID", sub.SubscriberID,
 		"brokerID", subscriber.RuntimeBrokerID)
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
 	// Log to dedicated message audit log if available.
 	if nd.messageLog != nil {
 		logAttrs := []any{

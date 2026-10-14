@@ -33,6 +33,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1263,8 +1264,9 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"agent.token_refresh", "agent.port_forward", "agent.identity_token",
 	},
 
-	// An agent reads the status of an agent it directly launched, in the
-	// same project, on the single-agent GET routes only
+	// An agent reads the status of an agent it launched, directly or
+	// through its descendants, in the same project, on the single-agent
+	// GET routes only
 	// (TestLauncherRead_OnlySingleAgentReadWidened).
 	{"launcher", "agent", "agent"}: {"agent.read"},
 
@@ -2202,10 +2204,10 @@ func (s *federatedBindingStore) ListRoleBindingsForPrincipals(ctx context.Contex
 		if !wanted[b.PrincipalType+":"+b.PrincipalID] {
 			continue
 		}
-		if len(scopeTypes) > 0 && !containsString(scopeTypes, b.ScopeType) {
+		if len(scopeTypes) > 0 && !slices.Contains(scopeTypes, b.ScopeType) {
 			continue
 		}
-		if len(scopeIDs) > 0 && !containsString(scopeIDs, b.ScopeID) && b.ScopeType != store.RoleScopeSystem {
+		if len(scopeIDs) > 0 && !slices.Contains(scopeIDs, b.ScopeID) && b.ScopeType != store.RoleScopeSystem {
 			continue
 		}
 		cp := *b

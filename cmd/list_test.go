@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,25 +32,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// captureListStdout redirects os.Stdout to a pipe for the duration of fn and
-// discards everything written to it, draining concurrently so fn can never
-// block on a full pipe buffer.
-func captureListStdout(fn func()) {
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(io.Discard, r)
-		close(done)
-	}()
-	fn()
-	_ = w.Close()
-	os.Stdout = oldStdout
-	<-done
-	_ = r.Close()
-}
 
 func TestFormatLastActivity(t *testing.T) {
 	now := time.Now()
@@ -1051,46 +1031,6 @@ func TestValidateListFlagsNegativeCount(t *testing.T) {
 	}
 }
 
-// TestRejectHubOnlyFiltersInLocalMode covers: a Hub-only filter set while
-// listing locally must error rather
-// than silently listing everything (a narrowing filter that narrows nothing
-// makes the output wider than asked for, with no indication anything was
-// ignored).
-func TestRejectHubOnlyFiltersInLocalMode(t *testing.T) {
-	reset := func() {
-		filterOwner, filterBroker, filterHarness = "", "", ""
-		filterDescendants, filterAncestors, filterLineage = "", "", ""
-	}
-	defer reset()
-
-	t.Run("no Hub-only filters set: no error", func(t *testing.T) {
-		reset()
-		assert.NoError(t, rejectHubOnlyFiltersInLocalMode())
-	})
-
-	tests := []struct {
-		flagName string
-		set      func()
-	}{
-		{"owner", func() { filterOwner = "alice" }},
-		{"broker", func() { filterBroker = "my-broker" }},
-		{"harness", func() { filterHarness = "claude" }},
-		{"descendants", func() { filterDescendants = "agent-a" }},
-		{"ancestors", func() { filterAncestors = "agent-a" }},
-		{"lineage", func() { filterLineage = "agent-a" }},
-	}
-	for _, tt := range tests {
-		t.Run(tt.flagName, func(t *testing.T) {
-			reset()
-			tt.set()
-			err := rejectHubOnlyFiltersInLocalMode()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "--"+tt.flagName)
-			assert.Contains(t, err.Error(), "Hub mode")
-		})
-	}
-}
-
 // TestListCmd_Args_RejectsPositionalArguments covers: `scion list
 // --descendants foo` (space, not "=") must not silently drop "foo" as an
 // ignored positional argument. Because
@@ -1914,7 +1854,7 @@ func TestListAgentsViaHub_AttributeFilterQueryParams(t *testing.T) {
 			oldListAll, oldOwner, oldBroker, oldHarness, oldPhase, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -1964,7 +1904,7 @@ func TestListAgentsViaHub_DescendantsFlag(t *testing.T) {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -2017,7 +1957,7 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		filterAncestors = refID
 
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 
@@ -2031,7 +1971,7 @@ func TestListAgentsViaHub_AncestorsFlag(t *testing.T) {
 		filterAncestors = emptyRefID
 
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 
@@ -2104,7 +2044,7 @@ func TestListAgentsViaHub_LineageFlag(t *testing.T) {
 	run := func() {
 		t.Helper()
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(hubCtx)
 		})
 		require.NoError(t, err)
@@ -2260,7 +2200,7 @@ func TestListAgentsViaHub_AllMode_AgentModeWithOAuthCredential_NotBlocked(t *tes
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -2303,7 +2243,7 @@ func TestListAgentsViaHub_AllMode_AgentModeWithDevAuthCredential_NotBlocked(t *t
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -2350,7 +2290,7 @@ func TestListAgentsViaHub_AllMode_NoAgentTokenWithRelationshipFlag_NotBlocked(t 
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -2405,7 +2345,7 @@ func TestListAgentsViaHub_AllMode_HumanCrossProjectReference(t *testing.T) {
 		listAll, filterDescendants, outputFormat = oldListAll, oldDescendants, oldOutputFormat
 	}()
 
-	captureListStdout(func() {
+	_ = captureStdout(t, func() {
 		err = listAgentsViaHub(hubCtx)
 	})
 
@@ -2469,7 +2409,7 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 	run := func(ctx *HubContext) error {
 		t.Helper()
 		var err error
-		captureListStdout(func() {
+		_ = captureStdout(t, func() {
 			err = listAgentsViaHub(ctx)
 		})
 		return err

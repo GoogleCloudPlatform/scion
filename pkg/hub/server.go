@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -161,6 +162,15 @@ type ServerConfig struct {
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
+	// ProxyDriverPrincipals is auth.proxy.driverPrincipals (ptone/scion#4240,
+	// phase WS2): the exact emails of the browser drivers that may carry
+	// test identity web sessions through the proxy. A verified proxy
+	// assertion for one of them never provisions or authenticates a user
+	// (403). New validates the list (config.ValidateProxyDriverConfig): a
+	// non-empty list when AuthMode is not "proxy" refuses startup. An empty
+	// list in proxy mode leaves test identity web sessions unavailable.
+	// Startup config only; never API-writable.
+	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -225,10 +235,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -387,8 +393,8 @@ type ServerConfig struct {
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.
-	// It is accepted only while EnableTestIdentities is true; it is never
-	// writable through the API.
+	// It is accepted only while EnableTestIdentities is true
+	// (--test-mode=member or above); it is never writable through the API.
 	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
@@ -962,6 +968,10 @@ type DeleteAgentOptions struct {
 	// its files on the NFS export or its branch (runtimebroker deleteAgent,
 	// ?localOnly). Send it only to a broker advertising AgentMove.
 	LocalOnly bool
+	// PurgeRetained sends the delete as a removal of a soft-deleted agent's
+	// retained files after the retention window (api.PurgeRetainedQueryParam,
+	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
+	PurgeRetained bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -985,6 +995,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.LocalOnly {
 		query += "&localOnly=true"
+	}
+	if opts.PurgeRetained {
+		query += "&" + api.PurgeRetainedQueryParam + "=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1451,7 +1464,7 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// (projectSettingTelemetryEnabled), sent only to a broker that reports
 	// TemplateTiers. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
@@ -1607,6 +1620,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1732,6 +1748,11 @@ type Server struct {
 	cleanupOnce sync.Once          // Ensures CleanupResources runs only once
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
+
+	// brokerWork admits and joins broker connection work (connect,
+	// disconnect, reconcile and notification drains), so shutdown stops
+	// it before the store closes (broker_work.go, ptone/scion#4869).
+	brokerWork brokerWorkTracker
 
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
@@ -1861,6 +1882,9 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// proxyDrivers is the normalized auth.proxy.driverPrincipals set (WS2),
+	// fixed in New. Empty unless the hub is in proxy auth mode.
+	proxyDrivers driverPrincipalSet
 	// workloadIssuer is the workload-bound issuer delegation state
 	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
 	// workload issuer is configured.
@@ -1915,6 +1939,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -2250,6 +2278,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
+	// Proxy driver principals (WS2): exact emails only, and only in proxy
+	// auth mode. The normalized list is what the server keeps.
+	drivers, err := config.ValidateProxyDriverConfig(cfg.AuthMode, cfg.ProxyDriverPrincipals)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ProxyDriverPrincipals = drivers
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2533,6 +2568,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
@@ -2548,6 +2584,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
+	}
+
+	// Settings for user access credentials for peer hubs are read at
+	// startup only; an invalid value fails startup rather than being
+	// ignored.
+	if err := cfg.OIDCConfig.ValidateUserTokens(); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	if len(cfg.OIDCConfig.UserTokenAudiences) > 0 && !cfg.OIDCConfig.Enabled {
+		slog.Warn("oidc.user_token_audiences is set but oidc.enabled is false; no federation tokens are issued")
 	}
 
 	// Initialize OIDC Identity Provider key manager if enabled
@@ -2645,8 +2691,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
 	// See handleBrokerDisconnect for the CAS/race rationale (issue #131).
+	// The callback is tracked work, so shutdown joins it before the store
+	// closes; once shutdown has started it is skipped (ptone/scion#4869).
 	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
-		srv.handleBrokerDisconnect(context.Background(), brokerID, sessionID)
+		ctx, done, ok := srv.brokerWork.begin()
+		if !ok {
+			return
+		}
+		defer done()
+		srv.handleBrokerDisconnect(ctx, brokerID, sessionID)
 	})
 	slog.Info("Control channel manager initialized")
 
@@ -2667,6 +2720,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	setAuthzTestAdminTier(srv.authzService,
 		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 		func() time.Time { return srv.testIdentities.clock() })
+	// The test-admin policy refusals decide makes are written to the test
+	// admin audit sink.
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, class, subject string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, class, subject)
+	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -2940,6 +2998,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
+
+		// Proxy driver principals (test identities phase WS2): a
+		// verified assertion for one of them is refused at Step 3a.
+		DriverPrincipals: srv.proxyDrivers,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -3016,6 +3078,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	googleResolver.SetDriverPrincipals(srv.proxyDrivers)
 	// Same policy as isUserAuthorized above, in its code-returning form,
 	// so a refusal's audit entry records the code the decision returned.
 	googleResolver.SetSignInDenial(srv.signInDenial)
@@ -3969,6 +4032,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if ops != nil {
+		// Every section write and delete asks the test-admin policy first.
+		ops.setWriteGuard(s.testAdminSettingsWriteGuard)
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -4670,8 +4737,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -4965,9 +5033,14 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		// and agents soft-deleted earlier stay until a retention is set
 		// again. That is what a hub started with retention 0 does, and a
 		// save never deletes those agents at once.
+		//
+		// Each expired agent's broker is first asked to remove the files a
+		// soft delete retained there (retained_files_purge.go,
+		// ptone/scion#4744); a record whose broker cannot be reached yet
+		// is kept for a later run.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
-			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			purged, err := s.purgeExpiredAgents(ctx, cutoff)
 			if err != nil {
 				slog.Error("Scheduler: agent purge failed", "error", err)
 			} else if purged > 0 {
@@ -5317,7 +5390,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.
-	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, agent.RuntimeBrokerID, project); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
@@ -5741,8 +5814,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records
@@ -6472,9 +6545,22 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// already stops new ones from starting.
 		s.stopAutoSuspendWorker(ctx)
 
+		// Stop broker connection work (connect, disconnect, reconcile and
+		// notification drains) before the control channel closes: new
+		// work is refused, and running drains claim no more rows, so rows
+		// they have not claimed stay pending for the next connect instead
+		// of failing on a closed tunnel. The work is joined below, after
+		// the control channel closes, while the store is still open
+		// (ptone/scion#4869).
+		s.brokerWork.closeAdmission()
+
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
+		}
+		if n := s.brokerWork.wait(ctx, brokerWorkStopGrace); n > 0 {
+			slog.Warn("Broker connection work still running after the shutdown grace; cancelled it",
+				"running", n, "grace", brokerWorkStopGrace)
 		}
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
@@ -6677,6 +6763,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
+	// User access credentials for peer hubs: 404 while
+	// federation.project_visitors is off or the OIDC provider is not
+	// enabled (handlers_federation_token.go).
+	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)
@@ -6907,21 +6997,23 @@ func (s *Server) registerRoutes() {
 	// leaving a live API behind a hidden UI. This is a startup-time gate:
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
+		// chatRoute refuses every credential the chat routes do not accept
+		// (chatCredentialAllowed) before the handler runs.
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.chatRoute(s.handleChatPrefs)))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
-		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
-		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
-		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
-		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.chatRoute(s.handleChatSpaces)))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.chatRoute(s.handleChatSpaceRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.chatRoute(s.handleChatConversationRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.chatRoute(s.handleChatTopicRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.chatRoute(s.handleChatDMs)))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.chatRoute(s.handleChatUnreadCount)))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
@@ -7060,6 +7152,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Test admin audit (ptone/scion#4240): runs right after authentication,
+	// so every request an admin-kind test identity makes is written to the
+	// test admin audit sink before anything else handles it.
+	h = s.testAdminRequestAuditMiddleware(h)
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
@@ -7346,6 +7443,12 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
+	if errors.Is(err, errControlChannelClosed) {
+		// The hub is shutting down; the broker reconnects to a live
+		// instance (ptone/scion#4869).
+		slog.Info("Refused broker control channel: hub is shutting down", "brokerID", brokerID)
+		return
+	}
 	if err != nil {
 		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
@@ -7381,8 +7484,18 @@ func (s *Server) stampProvidersOnline(ctx context.Context, brokerID string) ([]s
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
 // It claims broker affinity for this hub instance + the connection's sessionID,
 // which also bumps status->online and refreshes the heartbeat in one CAS write.
+//
+// It runs as tracked broker work (brokerWorkTracker): shutdown waits for it
+// before the store closes, and once shutdown has started it does nothing,
+// because the control channel it would mark online is being torn down
+// (ptone/scion#4869).
 func (s *Server) markBrokerOnline(brokerID, sessionID string) {
-	ctx := context.Background()
+	ctx, done, ok := s.brokerWork.begin()
+	if !ok {
+		slog.Info("Hub is shutting down; not marking broker online", "brokerID", brokerID, "sessionID", sessionID)
+		return
+	}
+	defer done()
 	slog.Info("Broker connected, marking online", "brokerID", brokerID, "sessionID", sessionID, "instanceID", s.instanceID)
 
 	if err := s.store.ClaimRuntimeBrokerConnection(ctx, brokerID, s.instanceID, sessionID); err != nil {
@@ -7411,13 +7524,19 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// drain any durable dispatch intent that accumulated while the broker was
 	// offline or owned elsewhere. Async so it never blocks the connect path;
 	// idempotent + CAS-gated so concurrent drains execute each item once.
-	go s.reconcileBroker(context.Background(), brokerID)
+	// Tracked, so shutdown joins it; skipped once shutdown has started (the
+	// rows are durable and drain on the next connect).
+	s.brokerWork.goTracked(func(ctx context.Context) {
+		s.reconcileBroker(ctx, brokerID)
+	})
 
 	// Notification redeliver (ptone/scion#495): drain undispatched agent
 	// notifications for agents on this broker. Async + CAS-gated, same
 	// pattern as reconcileBroker above.
 	if s.notificationDispatcher != nil {
-		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+		s.brokerWork.goTracked(func(ctx context.Context) {
+			s.drainUndispatchedNotifications(ctx, brokerID)
+		})
 	}
 }
 

@@ -286,7 +286,7 @@ func TestCreateAgent_RunConflictIs409(t *testing.T) {
 }
 
 func TestClassifyStartError_RunConflict(t *testing.T) {
-	code, msg := classifyStartError(context.Background(), errIdentityRunConflict, "")
+	code, _, msg := classifyStartError(context.Background(), errIdentityRunConflict, "", "")
 	if code != "name_in_use" {
 		t.Fatalf("code = %q, want name_in_use", code)
 	}
@@ -479,7 +479,7 @@ func TestStartPaths_PreCleanRunMismatchIs409NoLeak(t *testing.T) {
 		})
 	}
 	t.Run("async launch", func(t *testing.T) {
-		code, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "")
+		code, _, msg := classifyStartError(context.Background(), errIdentityPreCleanMismatch, "", "")
 		if code != "name_in_use" {
 			t.Fatalf("code = %q, want name_in_use", code)
 		}

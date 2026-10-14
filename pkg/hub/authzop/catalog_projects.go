@@ -44,7 +44,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.add",
+			EventType:     "project_member_add",
 			ContextFields: []string{"actor_id", "project_id"},
 			AfterFields:   []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -77,7 +77,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot demote the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.update",
+			EventType:     "project_member_role_change",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "old_role"},
 			AfterFields:   []string{"new_role"},
@@ -109,7 +109,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot remove the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.remove",
+			EventType:     "project_member_remove",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -161,7 +161,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project; atomic replacement for both actor and target", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.transfer",
+			EventType:     "project_ownership_transfer",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"old_owner_id"},
 			AfterFields:   []string{"new_owner_id", "old_owner_role", "new_owner_role"},
@@ -170,6 +170,131 @@ var projectOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialPrincipalIneligible, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 		Bearer:      SessionOnly(ReasonGovernancePending),
+	},
+
+	// =====================================================================
+	// Domain: project.visitors — visitor grants for federated accounts
+	// (ptone/scion#4603). Every entry point answers 404 while the
+	// federation.project_visitors experiment is off.
+	// =====================================================================
+	{
+		ID:          "project.visitors.list",
+		Domain:      "project.visitors",
+		Description: "List a project's visitor grants (federated accounts holding the project-visitor role)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialCredentialInsufficient},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.add",
+		Domain:      "project.visitors",
+		Description: "Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; granting also needs every permission of the project-visitor role on the project. A visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "visitor-role-only", Description: "The grant binds only the project-visitor role, at project scope, to a federated account (CreateVisitorRoleBinding)", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_grant",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"visitor_id", "issuer", "email", "not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialPrincipalIneligible, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AuditFailureLeavesNoChange"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.update",
+		Domain:      "project.visitors",
+		Description: "Replace the window (not before, expires at) of a project visitor grant",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "PATCH"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectChangeAuthority},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "Only a window change that extends the grant (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project, as for a grant; shortening never does",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor grant of the project; extending one also needs every permission of the project-visitor role on the project.",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_update",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "not_before", "expires_at"},
+			AfterFields:   []string{"not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WindowHonoured"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WhoMayGrant"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.remove",
+		Domain:      "project.visitors",
+		Description: "Revoke a project visitor grant; the visitor's next request is refused",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_revoke",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "issuer", "email", "subject"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_RevokeRefusesNextRequest"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WhoMayGrant"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 
 	// =====================================================================
@@ -227,6 +352,7 @@ var projectOperations = []OperationSpec{
 		AuthorityEval: AuthorityEvalNone,
 		Invariants: []Invariant{
 			{ID: "target-exists", Description: "Project must exist and not be already deleted", Kind: InvariantBusiness, FailClosed: true},
+			{ID: "agents-runtime-deleted", Description: "Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization", Kind: InvariantBusiness, FailClosed: true},
 		},
 		ExternalPolicy: &ExternalEffectPolicy{
 			DeliveryMode:   DeliveryFireAndForget,
@@ -242,9 +368,11 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"cascade_summary"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialCredentialInsufficient, DenialResourceNotFound},
+		DenialCodes: []DenialCode{DenialForbidden, DenialUserSuspended, DenialCredentialInsufficient, DenialResourceNotFound, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteOwnerPositiveControl"},
+			{Package: "pkg/hub", Function: "TestProjectDelete_LiveAgentRefused"},
+			{Package: "pkg/hub", Function: "TestProjectDelete_GuardRunsAfterAuthorization"},
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteGovernanceMatrix"},
 			{Package: "pkg/hub", Function: "TestRS3_ProjectDeleteAtomicAudit"},
 		},
@@ -571,7 +699,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.create",
 		Domain:      "artifact",
-		Description: "Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)",
+		Description: "Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts", Method: "POST"},
 		},
@@ -588,6 +716,360 @@ var projectOperations = []OperationSpec{
 		// artifact.create among its selectors.
 		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetProjectQuery,
 			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub}, Pin: "TestArtifactsUserAccessTokensAreBounded"},
+	},
+
+	// Manage-gated operations (ptone/scion#4574). Every one first runs the
+	// read check (an artifact the caller cannot read answers 404 as for a
+	// missing one), then requires a user principal whose credential permits
+	// artifact.manage in the artifact's home project and who owns the
+	// artifact or holds an unexpired admin grant on it (adminAuthorityWith,
+	// pkg/artifacts/links.go); a reader that may not manage gets 403.
+	// Agents never pass: they are not users, and artifact.manage has no
+	// agent scope.
+	{
+		ID:          "artifact.update",
+		Domain:      "artifact",
+		Description: "Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "PATCH"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		// expiry_set, expiry_cleared and moved are written in the same
+		// transaction as the change (pkg/artifacts/store_grants.go).
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (expiry_set, expiry_cleared, moved)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			BeforeFields:  []string{"oldExpiresAt", "fromScope", "droppedGrantId"},
+			AfterFields:   []string{"newExpiresAt", "toScope"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestPatchExpiry"},
+			{Package: "pkg/artifacts", Function: "TestPatchRehome"},
+		},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.grant.list",
+		Domain:      "artifact",
+		Description: "List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
+		},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.grant.put",
+		Domain:      "artifact",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver:      "artifact-home-project",
+		BasePermission:        "artifact.manage",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		AuthorityEval:         AuthorityEvalNone,
+		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
+			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},
+			{Package: "pkg/hub", Function: "TestArtifactHostMayGrantReview_ScopedToken"},
+			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
+			{Package: "pkg/artifacts", Function: "TestReviewGrantAllowed"},
+			{Package: "pkg/artifacts", Function: "TestReviewGrantDenied"},
+		},
+		// No exemption kind names a known audit gap; route_guarded is the
+		// closest (the route is reached only through the manage check), and
+		// the gap itself is tracked in ptone/scion#4882.
+		Exemptions: []Exemption{{
+			Kind:   ExemptionRouteGuarded,
+			Reason: "The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed)",
+			Scope:  "artifact grant creation and change",
+			Waives: []WaivedObligation{WaiveAuditObligation},
+		}},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.grant.delete",
+		Domain:      "artifact",
+		Description: "Remove one grant from an artifact; the home project's grant cannot be removed",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants/{grantId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:           GovernanceDomainSpecific,
+			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)",
+			DomainCallback: "pkg/artifacts.(*Service).adminAuthorityWith",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (grant_removed)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			BeforeFields:  []string{"grantId", "subjectKind", "subjectRef", "permission"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "home_grant"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded"},
+			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
+			{Package: "pkg/artifacts", Function: "TestOwnerPathsRecordEvents"},
+		},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.link.list",
+		Domain:      "artifact",
+		Description: "List an artifact's unexpired share links (ids, creator, expiry; never the tokens)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsShareLinkOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestLinkListAndRevoke"},
+		},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.link.create",
+		Domain:      "artifact",
+		Description: "Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver:      "artifact-home-project",
+		BasePermission:        "artifact.manage",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin",
+		AuthorityEval:         AuthorityEvalNone,
+		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsShareLinkOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestLinkManagePermissions"},
+		},
+		// See artifact.grant.put for the exemption kind.
+		Exemptions: []Exemption{{
+			Kind:   ExemptionRouteGuarded,
+			Reason: "The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked)",
+			Scope:  "artifact share link creation",
+			Waives: []WaivedObligation{WaiveAuditObligation},
+		}},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.link.revoke",
+		Domain:      "artifact",
+		Description: "Revoke one share link of an artifact",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links/{linkId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:           GovernanceDomainSpecific,
+			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links",
+			DomainCallback: "pkg/artifacts.(*Service).adminAuthorityWith",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (link_revoked)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			BeforeFields:  []string{"linkId"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsShareLinkOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestLinkListAndRevoke"},
+		},
+		Bearer: artifactManageBearer,
+	},
+	{
+		ID:          "artifact.delete",
+		Domain:      "artifact",
+		Description: "Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.manage",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (deleted)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			BeforeFields:  []string{"grantsRemoved", "linksRevoked"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactDeleteOfOrphanOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestDeleteArtifactAllowed"},
+			{Package: "pkg/artifacts", Function: "TestDeleteArtifactRefused"},
+			{Package: "pkg/artifacts", Function: "TestStoreChangeAndEventCommitTogether"},
+		},
+		Bearer: artifactManageBearer,
+	},
+
+	// Version operations. They go beyond the manage-gated set of
+	// ptone/scion#4574 and describe current behaviour only. Writes run the
+	// read check (404 when unreadable), then require artifact.create in the
+	// home project and ownership or a write, admin or review grant
+	// (canWriteErr, pkg/artifacts/versions.go); a reader that may not write
+	// gets 403. Agents with the project artifact scopes may write too.
+	{
+		ID:          "artifact.version.create",
+		Domain:      "artifact",
+		Description: "Start a pending version of an artifact from a manifest; a review grantee may start review versions only",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden, "review_only"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestTwoStepWriteAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.version.upload",
+		Domain:      "artifact",
+		Description: "Upload one manifest file of a pending version; only the principal that started the version may upload to it",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}", Method: "PUT"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden, "review_only"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestTwoStepWriteAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.version.finalize",
+		Domain:      "artifact",
+		Description: "Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/finalize", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.create",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound, DenialForbidden, "review_only"},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
+			{Package: "pkg/hub", Function: "TestArtifactsReviewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestTwoStepWriteAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.version.view",
+		Domain:      "artifact",
+		Description: "Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsHTMLViewOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestViewMintAuthorization"},
+		},
+		Bearer: artifactVersionBearer,
+	},
+	{
+		ID:          "artifact.version.read",
+		Domain:      "artifact",
+		Description: "List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "artifact-home-project",
+		BasePermission:   "artifact.read",
+		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestArtifactsTwoStepBundleOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestListVersionsDiscarded"},
+		},
+		Bearer: artifactVersionBearer,
 	},
 
 	// =====================================================================
@@ -1184,3 +1666,21 @@ var projectOperations = []OperationSpec{
 		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 }
+
+// artifactManageBearer is the bearer disposition of the manage-gated
+// artifact operations: a user access token passes only when its boundary
+// covers the artifact's home project and its selectors carry artifact.read
+// and artifact.manage (a move also needs artifact.create on the target);
+// ownership, admin grants and the review-grant authority apply only after
+// that check.
+var artifactManageBearer = BearerDisposition{Kind: BearerAdmit, Target: BearerTargetArtifactRecord,
+	Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+	Pin:        "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded"}
+
+// artifactVersionBearer is the bearer disposition of the artifact version
+// operations: a user access token passes only when its boundary covers the
+// artifact's home project and its selectors carry artifact.read (and
+// artifact.create for writes).
+var artifactVersionBearer = BearerDisposition{Kind: BearerAdmit, Target: BearerTargetArtifactRecord,
+	Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+	Pin:        "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded"}

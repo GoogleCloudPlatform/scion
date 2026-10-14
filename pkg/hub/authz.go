@@ -69,6 +69,9 @@ const (
 	// ActionSetMessagingPolicy covers changing a project's cross-project
 	// inbound messaging policy (project.set_messaging_policy).
 	ActionSetMessagingPolicy Action = "set_messaging_policy"
+	// ActionManageVisitors covers granting, changing and revoking project
+	// visitor access for federated accounts (project.manage_visitors).
+	ActionManageVisitors Action = "manage_visitors"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
@@ -392,6 +395,16 @@ const (
 	// delegated credential. The fine-grained code is in
 	// Decision.AgentDelegation.
 	DeniedByAgentDelegation DeniedBy = "agent_delegation"
+
+	// DeniedByTestAdminPolicy: the test-admin policy refuses the
+	// permission to an admin-kind test identity (decide step 0c).
+	DeniedByTestAdminPolicy DeniedBy = "test_admin_policy"
+)
+
+// Deny reasons of decide step 0c.
+const (
+	testAdminPolicyDenyReason      = "test-admin policy: not available to test identities with admin roles"
+	testAdminPolicyKindErrorReason = "test-admin policy: principal kind could not be read (fail-closed)"
 )
 
 // DenyCause is a structural tag for a subset of deny reasons that callers
@@ -840,6 +853,40 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
+	// ── Step 0c: Test-admin policy (ptone/scion#4240, admin tier A2) ───
+	// An admin-kind test identity (test_hub_admin, test_super_admin) holds
+	// real hub-admin or super-admin bindings. A permission the test-admin
+	// policy classifies deny (or does not classify) is refused to it here,
+	// before any binding is evaluated, so no role, group or relationship
+	// grant can admit it. The kind is read through kindForPrincipal; a read
+	// error denies. Only user principals are checked, and only while an
+	// admin kind is enabled on this hub (otherwise no admin-kind identity
+	// holds authority: the clamp drops its bindings and the row block
+	// refuses its tokens); a service whose store has no kind cache reads
+	// the kind uncached and cages every admin kind
+	// (principalIsCagedTestAdmin).
+	if principal.Kind == PrincipalKindUser && testAdminPermissionDenied(permissionID) {
+		if caged, kerr := a.principalIsCagedTestAdmin(ctx, principal.ID); caged {
+			reason := testAdminPolicyDenyReason
+			if kerr != nil {
+				reason = testAdminPolicyKindErrorReason
+			}
+			a.reportTestAdminPolicyDenial(ctx, principal.ID, "permission", permissionID)
+			d := Decision{Allowed: false, Reason: reason, DeniedBy: DeniedByTestAdminPolicy, AlwaysAudit: true}
+			if request.Explain {
+				d.Provenance = &DecisionProvenance{
+					Permission:      permissionID,
+					DenyReasons:     []string{reason},
+					Grants:          []GrantDetail{},
+					InactiveGrants:  []GrantDetail{},
+					Restrictions:    []RestrictionProvenance{},
+					MembershipPaths: []MembershipPathDetail{},
+				}
+			}
+			return decorateDecision(d, request, principal, credential, auditPermissionID(request))
+		}
+	}
+
 	// ── Step 1: Bearer credential gate (pre-kernel) ───────────────────
 	// A UAT-kind credential is confined to its boundary and permission
 	// ceiling, and a project target additionally requires the holder's
@@ -1216,6 +1263,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 				decision.adoptionRemediable = ceilingCause == DenyCauseCeilingUnrecorded && hopNote.adoptable
+			} else if strings.HasSuffix(ceilingReason, "("+descendantReadReasonMarker+")") {
+				// Record in the decision that the ceiling admitted a
+				// descendant status read (authz_launcher_read.go).
+				decision.Reason += " (" + descendantReadReasonMarker + ")"
 			}
 		}
 	}
@@ -1813,7 +1864,7 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			}
 			// agent.read has no agent scope. The launcher status read
 			// (authz_launcher_read.go) admits it for one stored target.
-			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+			if permissionID == permissionAgentRead && descendantStatusReadHolds(agent, resource, ActionRead, permissionID) {
 				return true
 			}
 			_, ok := allowed[permissionID]

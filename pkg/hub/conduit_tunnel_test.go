@@ -610,6 +610,50 @@ func TestConduitTunnel_TrackedStreamMarked(t *testing.T) {
 	assert.True(t, tracked[0].ViaTunnel)
 }
 
+// TestConduitTunnel_CrossNodeHasNoRenewalSender: a tunnel whose agent
+// session is held by another relay is tracked without a renewal sender
+// (the notice is not forwarded across nodes, so its renewals are logged
+// notice=not_delivered); a tunnel to a local session has one.
+func TestConduitTunnel_CrossNodeHasNoRenewalSender(t *testing.T) {
+	tf := newTunnelFixture(t)
+	hubB := tf.startPeerRelay(t, "hub-b")
+	tf.startAgent(t, hubB, tf.launched)
+	recs := tf.agentSessions(t)
+	require.Len(t, recs, 1)
+	require.Equal(t, "hub-b", recs[0].RelayInstanceID)
+	c := tf.ownerClient(t)
+
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	agentConn := <-tf.dials
+	defer func() { _ = agentConn.Close() }()
+	roundTrip(t, st, "across nodes")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	tracked := soleTrackedStream(t, a)
+	assert.True(t, tracked.ViaTunnel)
+	assert.Nil(t, tracked.Renew, "the target's session is held by hub-b: no notice sender")
+}
+
+// TestConduitTunnel_LocalSessionHasRenewalSender: the tunnel open path
+// attaches the shared renewal sender when this node holds the agent's
+// session, for every tunnel kind it tracks (tcp shown; ssh is covered by
+// TestConduitTunnelAuthz_IntervalRenewalNoticeDelivered).
+func TestConduitTunnel_LocalSessionHasRenewalSender(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	roundTrip(t, st, "local")
+
+	a := tf.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	tracked := soleTrackedStream(t, a)
+	require.NotNil(t, tracked.Renew, "the agent's session is local: a notice sender is set")
+	assert.NoError(t, tracked.Renew(), "the notice is sent on the agent's session")
+	roundTrip(t, st, "after notice")
+}
+
 // TestConduitTunnel_SharedSession: two tunnels to two agents share one
 // user session; revoking one leaves the other open and the session up.
 func TestConduitTunnel_SharedSession(t *testing.T) {
@@ -815,20 +859,23 @@ func TestConduitTunnel_CredentialExpiry(t *testing.T) {
 // design §3.8 rule 7, and 404 goes only with agent_not_found.
 func TestConduitTunnel_ErrorTable(t *testing.T) {
 	want := map[conduitTunnelFailure][3]any{
-		tunnelInvalidRequest:         {http.StatusBadRequest, "invalid_request", ""},
-		tunnelUnauthorized:           {http.StatusUnauthorized, "unauthorized", ""},
-		tunnelForbidden:              {http.StatusForbidden, "forbidden", ""},
-		tunnelPrincipalInactive:      {http.StatusForbidden, "forbidden", ""},
-		tunnelAgentNotFound:          {http.StatusNotFound, "agent_not_found", ""},
-		tunnelAgentNotRunning:        {http.StatusConflict, "agent_not_running", ""},
-		tunnelRateLimited:            {http.StatusTooManyRequests, "rate_limited", ""},
-		tunnelBrokerUnavailable:      {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
-		tunnelSessionUnavailable:     {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
-		tunnelStreamAuthzUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
-		tunnelRegistryUnavailable:    {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
-		tunnelGrantKeysUnavailable:   {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
-		tunnelConduitNotServing:      {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
-		tunnelInternal:               {http.StatusInternalServerError, "internal_error", ""},
+		tunnelInvalidRequest:          {http.StatusBadRequest, "invalid_request", ""},
+		tunnelUnauthorized:            {http.StatusUnauthorized, "unauthorized", ""},
+		tunnelForbidden:               {http.StatusForbidden, "forbidden", ""},
+		tunnelPrincipalInactive:       {http.StatusForbidden, "forbidden", ""},
+		tunnelAgentNotFound:           {http.StatusNotFound, "agent_not_found", ""},
+		tunnelAgentNotRunning:         {http.StatusConflict, "agent_not_running", ""},
+		tunnelRateLimited:             {http.StatusTooManyRequests, "rate_limited", ""},
+		tunnelBrokerUnavailable:       {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
+		tunnelSessionUnavailable:      {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
+		tunnelStreamAuthzUnavailable:  {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
+		tunnelRegistryUnavailable:     {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
+		tunnelGrantKeysUnavailable:    {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
+		tunnelConduitNotServing:       {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
+		tunnelInternal:                {http.StatusInternalServerError, "internal_error", ""},
+		tunnelPlacementPinStale:       {http.StatusConflict, "runtime_target_pin_stale", ""},
+		tunnelPlacementBrokerMissing:  {http.StatusConflict, "runtime_broker_missing", ""},
+		tunnelPlacementTargetMismatch: {http.StatusConflict, "runtime_target_mismatch", ""},
 	}
 	require.Len(t, conduitTunnelFailures, len(want))
 	for f, m := range conduitTunnelFailures {

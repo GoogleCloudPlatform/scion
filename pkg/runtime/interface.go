@@ -198,6 +198,14 @@ type RunConfig struct {
 	// reported handles (the async launch's CleanupLaunch). When it is nil,
 	// the runtime cleans up as on the synchronous path, whether or not
 	// Checkpoint is set. Callers set both hooks together.
+	//
+	// A runtime whose identity is known before the create may report the
+	// handle before issuing it, provided its DeleteResource never treats a
+	// not-yet-materialised create as gone (see the runtime's notes; the
+	// cloudrun-sandbox runtime reports after its Starting state entry is
+	// written and before `sandbox run`; the Cloud Run Instances runtime
+	// reports before CreateInstance and keeps the create "in doubt" until
+	// it is observed).
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
 	// Progress is an async launch's non-blocking step hook (design wave 3
@@ -215,8 +223,9 @@ type RunConfig struct {
 	// the start (a flat instance latches it for its Checkpoint). It also
 	// fires for resources created before a later failure. Honoured by the
 	// runtimes that create resources through launchHooks: Docker, Podman,
-	// Apple container and Kubernetes; other runtimes (Cloud Run,
-	// substrate) do not report created resources.
+	// Apple container, Kubernetes, cloudrun-sandbox and Cloud Run
+	// Instances; other runtimes (substrate) do not report created
+	// resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
 	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
@@ -249,9 +258,18 @@ const (
 	CheckpointStepSecrets   = api.LaunchStepSecrets
 	CheckpointStepPodCreate = api.LaunchStepPodCreate
 	CheckpointStepLaunching = api.LaunchStepLaunching
+	// CheckpointStepSandboxLayout precedes the cloudrun-sandbox runtime's
+	// host directory layout (prepareScionLayout).
+	CheckpointStepSandboxLayout = api.LaunchStepSandboxLayout
 	// CheckpointStepPreClean precedes a name-based delete of a stale
 	// resource left by an earlier agent of the same name.
 	CheckpointStepPreClean = api.LaunchStepPreClean
+	// CheckpointStepWorkspaceProvision, CheckpointStepInstanceStart and
+	// CheckpointStepInstanceCreate precede the Cloud Run Instances
+	// runtime's NFS provisioning, StartInstance and CreateInstance.
+	CheckpointStepWorkspaceProvision = api.LaunchStepWorkspaceProvision
+	CheckpointStepInstanceStart      = api.LaunchStepInstanceStart
+	CheckpointStepInstanceCreate     = api.LaunchStepInstanceCreate
 )
 
 // launchStepMessage returns the fixed text a runtime sends with each
