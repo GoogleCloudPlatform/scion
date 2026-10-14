@@ -185,16 +185,26 @@ class MuseInstaller(scion_harness.PluginInstaller):
         return scion_harness.parse_semver(proc.stdout or proc.stderr or "")
 
     def _registry(self) -> dict[str, Any]:
-        """The plugins object of installed.json, or {} when absent/unreadable."""
+        """The plugins object of installed.json; {} when the file is absent.
+
+        Raises PluginInstallError when it exists but cannot be read or
+        parsed: callers must not mistake an unreadable registry for "not
+        registered" when deciding whether Scion still owns an install."""
         path = os.path.join(self.muse_data, "plugins", "installed.json")
+        if not os.path.lexists(path):
+            return {}
         try:
             doc = scion_harness.load_json(path)
-        except (OSError, ValueError):
-            return {}
+        except (OSError, ValueError) as exc:
+            raise scion_harness.PluginInstallError(f"cannot read muse registry {path}: {exc}") from None
         plugins = doc.get("plugins") if isinstance(doc, dict) else None
-        return plugins if isinstance(plugins, dict) else {}
+        if not isinstance(plugins, dict):
+            raise scion_harness.PluginInstallError(f"muse registry {path} has no plugins object")
+        return plugins
 
     def _record(self, name: str) -> dict[str, Any] | None:
+        """The registry record for name, None when not registered. Raises
+        PluginInstallError when the registry is unreadable."""
         rec = self._registry().get(name)
         return rec if isinstance(rec, dict) else None
 
@@ -223,11 +233,28 @@ class MuseInstaller(scion_harness.PluginInstaller):
         warning = doc.get("warning")
         return isinstance(warning, str) and "approve" in warning.lower()
 
+    def _ref(self, name: str, rec: dict[str, Any] | None) -> dict[str, Any]:
+        rec = rec or {}
+        return {
+            "id": name,
+            "cache_path": self._cache_dir(rec),
+            "package_sha256": str(rec.get("package_sha256") or ""),
+        }
+
     def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
         proc = self._run("plugins", "install", os.path.abspath(bundle_dir), "--scope", "user", "--json")
         if proc.returncode != 0:
             raise scion_harness.cli_failure("muse plugins install", proc)
-        doc = self._parse(proc)
+        # muse has now registered the plugin. From here on a failure must not
+        # leave a muse install Scion does not own (it would never be removed,
+        # not even when the experiment is turned off): _abandon removes it,
+        # or keeps ownership when the removal cannot be confirmed.
+        try:
+            return self._finish_install(plugin, self._parse(proc))
+        except scion_harness.PluginInstallError as exc:
+            return self._abandon(plugin, exc)
+
+    def _finish_install(self, plugin: scion_harness.AgentPlugin, doc: dict[str, Any]) -> dict[str, Any]:
         installed = doc.get("installed") if isinstance(doc.get("installed"), dict) else {}
         for d in doc.get("diagnostics") or []:
             if isinstance(d, dict) and d.get("severity") == "warning" and d.get("message"):
@@ -248,19 +275,44 @@ class MuseInstaller(scion_harness.PluginInstaller):
         if rec.get("enabled") is not True:
             raise scion_harness.PluginInstallError(
                 f"muse plugins install exit 0 but {plugin.name} is not enabled in installed.json")
-        return {
-            "id": plugin.name,
-            "cache_path": self._cache_dir(rec),
-            "package_sha256": str(rec.get("package_sha256") or ""),
-        }
+        return self._ref(plugin.name, rec)
+
+    def _abandon(self, plugin: scion_harness.AgentPlugin, err: Exception) -> dict[str, Any]:
+        """A step after a successful `plugins install` failed. Remove the
+        install (best effort) and re-raise, so the plugin is not recorded and
+        is retried next start. If the removal cannot be confirmed, keep
+        ownership instead: return the ref so Scion records it. is_present
+        then reports it missing (not enabled, or registry unreadable), so it
+        is retried next start, and it is removed if the template drops it."""
+        self._run("plugins", "remove", plugin.name, "--json")
+        try:
+            gone = self._record(plugin.name) is None
+        except scion_harness.PluginInstallError:
+            gone = False
+        if gone:
+            raise err
+        self.ctx.warn(
+            f"agent plugin {plugin.name}: {err}; the muse install could not be removed, "
+            "so Scion keeps ownership and retries next start")
+        try:
+            rec = self._record(plugin.name)
+        except scion_harness.PluginInstallError:
+            rec = None
+        return self._ref(plugin.name, rec)
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
         """muse plugins remove. Success is judged by installed.json: the
         plugin must no longer be registered. An already-removed plugin
-        (exit 1, "unknown-plugin") therefore counts as removed."""
+        (exit 1, "unknown-plugin") therefore counts as removed. An unreadable
+        registry is a failure, so Scion keeps ownership and retries."""
         plugin_id = str(native_ref.get("id") or name)
         proc = self._run("plugins", "remove", plugin_id, "--json")
-        if self._record(plugin_id) is not None:
+        try:
+            still = self._record(plugin_id) is not None
+        except scion_harness.PluginInstallError as exc:
+            detail = f"; muse plugins remove exit {proc.returncode}" if proc.returncode != 0 else ""
+            raise scion_harness.PluginInstallError(f"{exc}{detail}") from None
+        if still:
             if proc.returncode != 0:
                 raise scion_harness.cli_failure("muse plugins remove", proc)
             raise scion_harness.PluginInstallError(
@@ -269,12 +321,20 @@ class MuseInstaller(scion_harness.PluginInstaller):
             self.ctx.info(f"agent plugin {name}: muse plugins remove exit {proc.returncode}, plugin no longer registered")
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
-        """muse still has the plugin registered and enabled in installed.json
-        and its cache dir exists. Checking the cache dir alone would miss a
-        reset or edited registry (a disable, a removal, or a home/ re-provision
-        that covers $XDG_DATA_HOME). Reads files only; no CLI call."""
-        rec = self._record(str(native_ref.get("id") or name))
+        """muse still has the plugin registered and enabled in installed.json,
+        with the package Scion installed, and its cache dir exists. Checking
+        the cache dir alone would miss a reset or edited registry (a disable,
+        a removal, a reinstall of the same id from another source, or a home/
+        re-provision that covers $XDG_DATA_HOME). An unreadable registry
+        counts as missing. Reads files only; no CLI call."""
+        try:
+            rec = self._record(str(native_ref.get("id") or name))
+        except scion_harness.PluginInstallError:
+            return False
         if rec is None or rec.get("enabled") is not True:
+            return False
+        want = native_ref.get("package_sha256")
+        if isinstance(want, str) and want and rec.get("package_sha256") != want:
             return False
         cache = self._cache_dir(rec)
         return bool(cache) and os.path.isdir(cache)

@@ -624,16 +624,21 @@ class _FakeMuseCLI:
         self.install_registers = True
         self.remove_keeps_record = False
         self.remove_rc: int | None = None
+        self.enable_rc = 0
+        self.enable_noop = False
 
     def _lockfile(self, env) -> str:
         return os.path.join(env["XDG_DATA_HOME"], "muse", "plugins", "installed.json")
 
-    def _load(self, env) -> dict:
+    def _load(self, env) -> dict | None:
+        """The lockfile, an empty one when absent, None when unparsable."""
         try:
             with open(self._lockfile(env)) as f:
                 return json.load(f)
         except OSError:
             return {"version": 1, "plugins": {}}
+        except json.JSONDecodeError:
+            return None
 
     def _save(self, env, doc: dict) -> None:
         path = self._lockfile(env)
@@ -677,6 +682,8 @@ class _FakeMuseCLI:
         if verb in ("approve", "enable", "remove") and "--scope" in rest:
             return done(2, err=f"unknown plugins {verb} option `--scope`")
         doc = self._load(env)
+        if doc is None:
+            return done(1, err="error: cannot parse plugin lockfile installed.json")
         if verb == "install":
             src = rest[0]
             if rest[1:] != ["--scope", "user", "--json"] or not os.path.isabs(src):
@@ -720,6 +727,10 @@ class _FakeMuseCLI:
             if rec is None:
                 return done(1, {"error": {"code": "unknown-plugin", "message": f"plugin `{pid}` is not installed"}},
                             f"plugin `{pid}` is not installed")
+            if self.enable_rc != 0:
+                return done(self.enable_rc, err="error: plugin lock busy")
+            if self.enable_noop:
+                return done(0, {"enable": rec})
             rec["enabled"] = True
             self._save(env, doc)
             return done(0, {"enable": rec})
@@ -890,7 +901,7 @@ class TestMuseAgentPlugins(unittest.TestCase):
         self.assertTrue(f({}, {"trust": "pending"}))
         self.assertTrue(f({"warning": "run `muse plugins approve a` to trust it"}, {}))
 
-    def test_install_not_registered_or_disabled_is_a_failure(self) -> None:
+    def test_install_not_registered_is_a_failure(self) -> None:
         self.cli.install_registers = False
         self.stage({"a": "d1"})
         warnings: list[str] = []
@@ -900,6 +911,95 @@ class TestMuseAgentPlugins(unittest.TestCase):
         state_path = os.path.join(self.home, ".scion", "agent-plugins", "state-muse-code.json")
         if os.path.exists(state_path):
             self.assertNotIn("a", self.state())
+
+    def test_install_left_disabled_is_removed_not_orphaned(self) -> None:
+        # enable exits 0 but the record stays disabled: the install fails,
+        # and the muse install is removed so Scion never orphans it.
+        self.cli.install_enabled = False
+        self.cli.enable_noop = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("muse plugins install exit 0 but a is not enabled in installed.json", warnings[0])
+        self.assertIn("will retry next start", warnings[0])
+        self.assertEqual(self.cli.calls[1:], [
+            self.install_argv("a"),
+            ["muse", "plugins", "enable", "a", "--json"],
+            ["muse", "plugins", "remove", "a", "--json"],
+        ])
+        self.assertNotIn("a", self.registry())
+        self.assertNotIn("a", self.state() if os.path.exists(
+            os.path.join(self.home, ".scion", "agent-plugins", "state-muse-code.json")) else {})
+
+    def test_enable_failure_removes_install(self) -> None:
+        self.cli.install_enabled = False
+        self.cli.enable_rc = 1
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            "agent plugin a: install failed (muse plugins enable exit 1: error: plugin lock busy); will retry next start",
+        ])
+        self.assertEqual(self.cli.calls[-1], ["muse", "plugins", "remove", "a", "--json"])
+        self.assertNotIn("a", self.registry())
+
+    def test_enable_and_cleanup_failure_keeps_ownership(self) -> None:
+        # The cleanup removal does not take effect either: Scion records the
+        # install (it owns it), is_present reports it missing (disabled), so
+        # the next start retries, and dropping it from the template removes it.
+        self.cli.install_enabled = False
+        self.cli.enable_rc = 1
+        self.cli.remove_keeps_record = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Scion keeps ownership and retries next start", warnings[0])
+        self.assertIn("a", self.state())
+        self.assertFalse(self.registry()["a"]["enabled"])
+
+        self.cli.enable_rc = 0
+        self.cli.remove_keeps_record = False
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls[:2], [["muse", "--version"], self.install_argv("a")])
+        self.assertTrue(self.registry()["a"]["enabled"])
+
+        self.stage({})
+        self.reconcile()
+        self.assertNotIn("a", self.registry())
+        self.assertEqual(self.state(), {})
+
+    def test_uninstall_unreadable_registry_keeps_state(self) -> None:
+        self.stage({"a": "d1"})
+        self.reconcile()
+        path = os.path.join(self.data, "muse", "plugins", "installed.json")
+        with open(path, "w") as f:
+            f.write("{not json")
+        inst = provision.MuseInstaller(self.ctx())
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "cannot read muse registry"):
+            inst.uninstall("a", {"id": "a"})
+        # Through reconcile: the removal fails, ownership is kept and retried.
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("agent plugin a: removal failed", warnings[0])
+        self.assertIn("muse plugins remove exit 1", warnings[0])
+        self.assertIn("a", self.state())
+        self.assertTrue(os.path.isdir(self.bundle_dir("a")))
+
+    def test_is_present_requires_installed_package(self) -> None:
+        # The same id reinstalled from another source (a different package)
+        # is not Scion's install: reinstall from Scion's bundle.
+        self.stage({"a": "d1"})
+        self.reconcile()
+        inst = provision.MuseInstaller(self.ctx())
+        ref = self.state()["a"]["native_ref"]
+        self.assertTrue(inst.is_present("a", ref))
+        self.assertFalse(inst.is_present("a", {**ref, "package_sha256": "sha256:other"}))
+        self.assertTrue(inst.is_present("a", {**ref, "package_sha256": ""}))
 
     def test_mcp_diagnostics_surface_as_warnings(self) -> None:
         # muse <= 1.4.7 keeps Agent Plugins MCP servers inactive (M3).
@@ -1054,7 +1154,8 @@ class TestMuseAgentPlugins(unittest.TestCase):
         self.stage({"a": "d1"})
         ticks = iter([0.0] + [17.0] * 50)
         self.reconcile(budget_s=20.0, clock=lambda: next(ticks))
-        # --version 10s, then install and enable each with 20 - 17 = 3s left.
+        # --version, install and enable are each capped to the 20 - 17 = 3s
+        # left (the 10s/15s defaults would overrun the budget).
         self.assertEqual(self.cli.timeouts, [3.0, 3.0, 3.0])
 
     def test_provision_reconciles_last(self) -> None:
