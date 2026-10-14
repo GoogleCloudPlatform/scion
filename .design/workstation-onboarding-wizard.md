@@ -88,6 +88,13 @@ The authoritative computation lives server-side in a new
 | `identitySet` | new identity fields on `V1AuthConfig` (W2) are non-default (not `dev@localhost`) | user has named themselves |
 | `hasWorkspace` | `store.ListProjects` returns ≥1 project | at least one project exists |
 
+> **Implementation note (ptone/scion#4640):** `imagesPresent` was never implemented
+> (the handler hard-coded it to `false`) and has been removed from the shipped
+> `OnboardingStatus`. Image readiness is reported per harness-config instead, through
+> `imageStatus` and the `check-image` / `image-status` harness-config endpoints, which is
+> what the onboarding page renders. References to `imagesPresent` below describe the
+> original proposal.
+
 `needsOnboarding = !initialized || !harnessesSeeded || !hasWorkspace` (the hard
 minimum). Soft-incomplete fields (no images, default identity) don't *force* the wizard
 but pre-select the resume step.
@@ -525,7 +532,8 @@ step, §5.2, must be complete; the button is disabled otherwise).
   (`local-docker` / `local-podman`).
 - **Progress (D4):** builds are long-running, so unlike per-image pull pills, the build
   step **streams raw build log lines** into a **collapsible log panel**, over the same
-  `/events` SSE stream under a `system.images.<jobId>` subject (event payloads carry a
+  `/events` SSE stream under the requesting user's `user.<requesterId>.images.<jobId>`
+  subject, which only that user's sessions may subscribe to (event payloads carry a
   `line` field; terminal event carries `status:"done"|"error"`). One build job at a time
   (`409` if already running), mirroring the pull job (§7.3).
 - **Endpoint:** `POST /system/images/build { "target": "common", "force": false }` →
@@ -599,8 +607,9 @@ step, §5.2, must be complete; the button is disabled otherwise).
 2. **Pull progress → per-image (D4).** v1 ships per-image status pills; parsed
    layer-level progress (`PullImageStream`) is a later enhancement. Local builds stream
    raw log lines (§7.6).
-3. **SSE channel → shared `/events` stream** with a `system.images.<jobId>` subject (no
-   dedicated endpoint), reusing `SSEClient` reconnection/backoff.
+3. **SSE channel → shared `/events` stream** (no dedicated endpoint), reusing `SSEClient`
+   reconnection/backoff. Pull progress uses a `system.images.<jobId>` subject; build log
+   lines use the requesting user's `user.<requesterId>.images.<jobId>` subject.
 4. **Status caching → `sessionStorage`.** Cache the "setup complete" result in
    `sessionStorage` and clear it on wizard completion; re-fetch `/system/status` on a
    fresh session. (Cross-tab invalidation is unnecessary for a single-user workstation.)

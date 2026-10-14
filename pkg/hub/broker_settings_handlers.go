@@ -171,6 +171,9 @@ func (s *Server) handleGetBrokerSettings(w http.ResponseWriter, r *http.Request,
 // by sending an empty or partial body without ever touching quota.update
 // (ptone/scion#2061 P2 review round 1, F1). Optimistic concurrency (409 on a
 // stale expectedRevision, with the current record in the body).
+//
+// Every PUT, including one that changes no key, also requires quota.update
+// on the hub-scoped quota target.
 func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request, pathBrokerID string) {
 	ctx := r.Context()
 
@@ -180,8 +183,8 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// GET-level read access is a precondition for writing at all; the
-	// per-key, diff-based permission check below is the real write gate
-	// (design.md §5.3).
+	// quota.update check and the per-key, diff-based permission check below
+	// are the real write gate (design.md §5.3).
 	if !s.authorize(w, r, brokerResource(broker), ActionRead) {
 		return
 	}
@@ -252,14 +255,14 @@ func (s *Server) handlePutBrokerSettings(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Authorize every key whose value actually changes (set, cleared, or
-	// changed to a different value) — a key a caller left untouched, or
-	// re-sent identical to its current value, needs no permission.
+	// Every write needs brokerSettingsWritePermission, including one that
+	// changes no key; each key whose value actually changes (set, cleared,
+	// or changed to a different value) also needs its own declared
+	// permission. A key a caller left untouched, or re-sent identical to
+	// its current value, adds no check.
 	changed := changedBrokerSettingsKeys(oldSettings, newSettings)
-	for _, def := range changed {
-		if !s.authorizeBrokerSettingWrite(w, r, def) {
-			return
-		}
+	if !s.authorizeBrokerSettingsWrite(w, r, changed) {
+		return
 	}
 
 	// C1 (review round 2): nothing changed, so skip the write entirely —
@@ -325,38 +328,64 @@ func int64PtrEqual(a, b *int64) bool {
 	return *a == *b
 }
 
-// canWriteBrokerSettingKey reports whether identity holds def's declared
-// write permission (design.md §5.3), without writing an HTTP response. Used
-// both to gate the PUT handler and to compute _capabilities.update on GET.
-func (s *Server) canWriteBrokerSettingKey(ctx context.Context, identity Identity, def brokersettings.KeyDef) bool {
-	if identity == nil || s.authzService == nil {
+// brokerSettingsWritePermission is required for every broker settings PUT,
+// including one that changes no key, in addition to the declared permission
+// of each changed key.
+const brokerSettingsWritePermission = "quota.update"
+
+// brokerSettingsTarget is the target every broker settings write permission
+// is checked on: the hub-scoped quota target, the same one the quota admin
+// routes check. A user access token is admitted only with the permission's
+// selector on a hub boundary.
+func brokerSettingsTarget() Resource {
+	return hubScopedResource("quota", "hub")
+}
+
+// canWriteBrokerSettings reports whether identity holds permission on
+// brokerSettingsTarget, without writing an HTTP response.
+func (s *Server) canWriteBrokerSettings(ctx context.Context, identity Identity, permission string) bool {
+	if identity == nil || s.authzService == nil || permission == "" {
 		return false
 	}
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
 		Credential: credentialContextForIdentity(identity),
-		Resource:   Resource{Type: "quota", ID: "hub"},
+		Resource:   brokerSettingsTarget(),
 		Action:     ActionUpdate,
-		Permission: def.Permission,
+		Permission: permission,
 	})
 	return decision.Allowed
 }
 
-// authorizeBrokerSettingWrite is canWriteBrokerSettingKey plus writing a
-// 401/403 response on denial, mirroring s.authorize's shape (design.md
-// §5.3: writing a key requires that key's declared permission — quota.update
-// for maxAgents, checked against Resource{quota, hub} exactly as the
-// existing quota handlers do).
-func (s *Server) authorizeBrokerSettingWrite(w http.ResponseWriter, r *http.Request, def brokersettings.KeyDef) bool {
+// canWriteBrokerSettingKey reports whether identity holds def's declared
+// write permission (design.md §5.3), without writing an HTTP response. Used
+// to compute _capabilities.update on GET and PUT responses.
+func (s *Server) canWriteBrokerSettingKey(ctx context.Context, identity Identity, def brokersettings.KeyDef) bool {
+	return s.canWriteBrokerSettings(ctx, identity, def.Permission)
+}
+
+// authorizeBrokerSettingsWrite authorizes a broker settings PUT whose
+// changed keys are changed: brokerSettingsWritePermission first, whatever
+// changes, then each changed key's declared permission (design.md §5.3:
+// maxAgents declares quota.update). It writes a 401/403 response on the
+// first denial, mirroring s.authorize's shape.
+func (s *Server) authorizeBrokerSettingsWrite(w http.ResponseWriter, r *http.Request, changed []brokersettings.KeyDef) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return false
 	}
-	if !s.canWriteBrokerSettingKey(r.Context(), identity, def) {
-		logAuthzDenial(r, identity, Resource{Type: "quota", ID: "hub"}, ActionUpdate, "missing "+def.Permission)
-		Forbidden(w)
-		return false
+	required := make([]string, 0, len(changed)+1)
+	required = append(required, brokerSettingsWritePermission)
+	for _, def := range changed {
+		required = append(required, def.Permission)
+	}
+	for _, permission := range required {
+		if !s.canWriteBrokerSettings(r.Context(), identity, permission) {
+			logAuthzDenial(r, identity, brokerSettingsTarget(), ActionUpdate, "missing "+permission)
+			Forbidden(w)
+			return false
+		}
 	}
 	return true
 }

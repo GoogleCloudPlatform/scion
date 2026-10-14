@@ -107,7 +107,7 @@ func revokeAgentCredentials(ctx context.Context, credStore store.AgentCredential
 // case: the prior credential may still be in active use by a container the
 // Hub has simply lost contact with (e.g. a k8s pod partitioned from the Hub),
 // and the start/resume retry path's existing container-name-conflict handling
-// (handlers_agent_create_helpers.go isContainerNameConflict) exists precisely
+// (the broker's 409 conflict, relayed by relayBrokerRefusal) exists precisely
 // because that container can still be there.
 //
 // Every other LaunchError value — including a broker-confirmed crash (exit

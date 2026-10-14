@@ -35,6 +35,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -52,7 +53,23 @@ import (
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
 // If profileName is empty, ActiveProfile is used. If the config name is not found in the
 // settings map, an empty HarnessConfigEntry is used as the base (profile overrides still apply).
+//
+// On a flat instance view (ForFlatInstance) the instance's agent_defaults
+// take the profile's place: its volumes and its harness_overrides.<hc> are
+// applied over the same harness_configs.<hc> base, and profileName is not
+// used.
 func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName string) (HarnessConfigEntry, error) {
+	if vs != nil && vs.flat != nil {
+		result := vs.HarnessConfigs[harnessConfigName]
+		d := vs.flat.Defaults
+		if d.Volumes != nil {
+			result.Volumes = append(result.Volumes, d.Volumes...)
+		}
+		if override, ok := d.HarnessOverrides[harnessConfigName]; ok {
+			result = applyHarnessOverride(result, override)
+		}
+		return result, nil
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
@@ -97,53 +114,76 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 	// Apply harness overrides from the profile
 	if profile.HarnessOverrides != nil {
 		if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
-			if override.Image != "" {
-				result.Image = override.Image
-			}
-			if override.ImagePullPolicy != "" {
-				result.ImagePullPolicy = override.ImagePullPolicy
-			}
-			if override.User != "" {
-				result.User = override.User
-			}
-			if override.AuthSelectedType != "" {
-				result.AuthSelectedType = override.AuthSelectedType
-			}
-			// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
-			// removed profiles.<name>.env above but deliberately stopped here.
-			//
-			// This is now the only profiles-scoped env injection point left, and it
-			// is the TOP-RANKED env source in this function — merged after the base,
-			// so it outranks harness_configs.<hc>.env. Removing it too was ruled
-			// against on reversibility: retiring this rank later is additive, while
-			// restoring it after shipping would be a revert of a documented breaking
-			// change.
-			//
-			// It is NOT the migration path for the removed profiles.<name>.env.
-			// That is harness_configs.<hc>.env, a different, top-level key, which
-			// survives independently of this one.
-			if override.Env != nil {
-				result.Env = mergeMaps(result.Env, override.Env)
-			}
-			if override.Volumes != nil {
-				result.Volumes = append(result.Volumes, override.Volumes...)
-			}
+			result = applyHarnessOverride(result, override)
 		}
 	}
 
 	return result, nil
 }
 
+// applyHarnessOverride returns result with one harness override applied:
+// a profile's harness_overrides.<hc>, or on a flat instance its
+// agent_defaults.harness_overrides.<hc>. override is only read.
+func applyHarnessOverride(result HarnessConfigEntry, override V1HarnessOverride) HarnessConfigEntry {
+	if override.Image != "" {
+		result.Image = override.Image
+	}
+	if override.ImagePullPolicy != "" {
+		result.ImagePullPolicy = override.ImagePullPolicy
+	}
+	if override.User != "" {
+		result.User = override.User
+	}
+	if override.AuthSelectedType != "" {
+		result.AuthSelectedType = override.AuthSelectedType
+	}
+	// profiles.<name>.harness_overrides.<hc>.env SURVIVES G3-full, which
+	// removed profiles.<name>.env (see ResolveHarnessConfig) but deliberately
+	// stopped here.
+	//
+	// This is now the only profiles-scoped env injection point left, and it
+	// is the TOP-RANKED env source in ResolveHarnessConfig — merged after the
+	// base, so it outranks harness_configs.<hc>.env. Removing it too was ruled
+	// against on reversibility: retiring this rank later is additive, while
+	// restoring it after shipping would be a revert of a documented breaking
+	// change. A flat instance's agent_defaults.harness_overrides.<hc>.env
+	// takes the same rank.
+	//
+	// It is NOT the migration path for the removed profiles.<name>.env.
+	// That is harness_configs.<hc>.env, a different, top-level key, which
+	// survives independently of this one.
+	if override.Env != nil {
+		result.Env = mergeMaps(result.Env, override.Env)
+	}
+	if override.Volumes != nil {
+		result.Volumes = append(result.Volumes, override.Volumes...)
+	}
+	return result
+}
+
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -992,8 +1032,19 @@ func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (v
 // This is a default only: a template's or agent's clone_depth wins over
 // it. The value is returned as written; callers validate it with
 // api.CloneDepth.GitDepth so the error can name its source.
+//
+// On a flat instance view (ForFlatInstance) the value is the instance's
+// agent_defaults.clone_depth, with source
+// "server.broker.instances[KEY].agent_defaults.clone_depth". There is no
+// lower settings rung, so unset means the default shallow clone.
 func (vs *VersionedSettings) ResolveCloneDepthWithSource(profileName string) (value api.CloneDepth, source string) {
 	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if d := vs.flat.Defaults.CloneDepth; d != "" {
+			return d, vs.flat.path("agent_defaults.clone_depth")
+		}
 		return "", ""
 	}
 	if profileName == "" {
@@ -1091,11 +1142,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-func (vs *VersionedSettings) IsHubLocalOnly() bool {
-	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
-}
-
 // IsImageRegistryConfigured returns true if image_registry is set at any level
 // (top-level or in any profile).
 func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
@@ -1104,7 +1150,16 @@ func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool 
 
 // ResolveImageRegistry returns the effective image_registry for the given profile.
 // Profile-level image_registry takes precedence over the top-level setting.
+// On a flat instance view (ForFlatInstance) the instance's
+// agent_defaults.image_registry takes the profile's place, over the same
+// top-level setting.
 func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
+	if vs != nil && vs.flat != nil {
+		if r := vs.flat.Defaults.ImageRegistry; r != "" {
+			return r
+		}
+		return vs.ImageRegistry
+	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
 	}
@@ -1112,6 +1167,177 @@ func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
 		return profile.ImageRegistry
 	}
 	return vs.ImageRegistry
+}
+
+// The Tier* accessors read the Runtime Broker Profile tier for the callers
+// that used to index Profiles directly. In legacy resolution each runs the
+// former call site's profile lookup, including its guard (an empty name,
+// after the active profile fallback, finds nothing). On a flat instance
+// view (ForFlatInstance) each reads the instance's agent_defaults instead,
+// whatever the name, so a flat request (whose profile name is always
+// empty) gets the instance's value at the profile's rung
+// (.design/flat-runtime-brokers/contract-appendix-p3.md FC5). The returned
+// values may share memory with the settings or the policy and must not be
+// modified. source names where the values are set ("" when none are).
+
+// TierResources returns the tier's resources and its
+// harness_overrides.<harnessConfigName>.resources (either may be nil), and
+// the settings path of the block holding them. An empty profileName means
+// the active profile. The legacy lookup has no empty-name guard, as the
+// former resolveEnvironmentResources lookup had none.
+func (vs *VersionedSettings) TierResources(profileName, harnessConfigName string) (resources, harnessOverrideResources *api.ResourceSpec, source string) {
+	if vs == nil {
+		return nil, nil, ""
+	}
+	if vs.flat != nil {
+		d := vs.flat.Defaults
+		resources, harnessOverrideResources = d.Resources, d.HarnessOverrides[harnessConfigName].Resources
+		if resources == nil && harnessOverrideResources == nil {
+			return nil, nil, ""
+		}
+		return resources, harnessOverrideResources, vs.flat.path("agent_defaults")
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, nil, ""
+	}
+	return p.Resources, p.HarnessOverrides[harnessConfigName].Resources, "profiles." + profileName
+}
+
+// TierSecrets returns the tier's secret declarations (required-env step
+// 3c, between the settings harness_configs secrets and the template's) and
+// their settings path. An empty profileName means the active profile.
+func (vs *VersionedSettings) TierSecrets(profileName string) ([]api.RequiredSecret, string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		if s := vs.flat.Defaults.Secrets; len(s) > 0 {
+			return s, vs.flat.path("agent_defaults.secrets")
+		}
+		return nil, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok || len(p.Secrets) == 0 {
+		return nil, ""
+	}
+	return p.Secrets, "profiles." + profileName + ".secrets"
+}
+
+// TierHarnessOverride returns the tier's harness_overrides.<harnessConfigName>,
+// whether it is set, and its settings path. An empty profileName means the
+// active profile.
+func (vs *VersionedSettings) TierHarnessOverride(profileName, harnessConfigName string) (V1HarnessOverride, bool, string) {
+	if vs == nil {
+		return V1HarnessOverride{}, false, ""
+	}
+	if vs.flat != nil {
+		o, ok := vs.flat.Defaults.HarnessOverrides[harnessConfigName]
+		if !ok {
+			return V1HarnessOverride{}, false, ""
+		}
+		return o, true, vs.flat.path("agent_defaults.harness_overrides." + harnessConfigName)
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return V1HarnessOverride{}, false, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	o, ok := p.HarnessOverrides[harnessConfigName]
+	if !ok {
+		return V1HarnessOverride{}, false, ""
+	}
+	return o, true, "profiles." + profileName + ".harness_overrides." + harnessConfigName
+}
+
+// TierAllHarnessOverrideEnvKeys returns the env keys that any of the tier's
+// harness overrides (not only the active harness config's) sets to an
+// empty value, which required-env extraction asks the user to supply, and
+// the settings path of those overrides. An empty profileName means the
+// active profile. The returned set is never shared.
+func (vs *VersionedSettings) TierAllHarnessOverrideEnvKeys(profileName string) (map[string]struct{}, string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		keys := emptyHarnessOverrideEnvKeys(vs.flat.Defaults.HarnessOverrides)
+		if len(keys) == 0 {
+			return nil, ""
+		}
+		return keys, vs.flat.path("agent_defaults.harness_overrides")
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" || vs.Profiles == nil {
+		return nil, ""
+	}
+	p, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	keys := emptyHarnessOverrideEnvKeys(p.HarnessOverrides)
+	if len(keys) == 0 {
+		return nil, ""
+	}
+	return keys, "profiles." + profileName + ".harness_overrides"
+}
+
+// emptyHarnessOverrideEnvKeys returns the env keys any of overrides sets to
+// an empty value.
+func emptyHarnessOverrideEnvKeys(overrides map[string]V1HarnessOverride) map[string]struct{} {
+	keys := map[string]struct{}{}
+	for _, override := range overrides {
+		for k, v := range override.Env {
+			if v == "" {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	return keys
+}
+
+// TierDefaultHarnessConfig returns the tier's default_harness_config (rung
+// 6 of ResolveHarnessConfigName, above the top-level
+// default_harness_config) and a label naming where it is set: in legacy
+// resolution "profile-NAME", the label rung 6 has always logged; on a flat
+// instance "server.broker.instances[KEY].agent_defaults.default_harness_config".
+// An empty profileName means the active profile. Unset returns "", so the
+// top-level default still applies.
+func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (string, string) {
+	if vs == nil {
+		return "", ""
+	}
+	if vs.flat != nil {
+		if hc := vs.flat.Defaults.DefaultHarnessConfig; hc != "" {
+			return hc, vs.flat.path("agent_defaults.default_harness_config")
+		}
+		return "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	if profileName == "" {
+		return "", ""
+	}
+	if p, ok := vs.Profiles[profileName]; ok && p.DefaultHarnessConfig != "" {
+		return p.DefaultHarnessConfig, "profile-" + profileName
+	}
+	return "", ""
 }
 
 // RequireImageRegistry checks that image_registry is configured and returns an
@@ -1195,6 +1421,21 @@ type VersionedSettings struct {
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
+
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -1605,8 +1846,6 @@ type V1ServerHubConfig struct {
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
-	// AsyncAgentLaunch is the non-blocking agent create kill switch.
-	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
@@ -1625,6 +1864,20 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+}
+
+// V1ServerHubObservabilityConfig holds the switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset: the hub then keeps the rule that applied before the switch existed
+// (see HubObservabilityConfig).
+type V1ServerHubObservabilityConfig struct {
+	// MetricsEnabled turns the hub metrics exporter on or off.
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
+	// TracingEnabled turns the hub trace exporter on or off.
+	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1746,6 +1999,27 @@ type V1RuntimeBrokerInstanceConfig struct {
 	Name string `json:"name" yaml:"name" koanf:"name"`
 	// RuntimeTarget declares the instance's single runtime target.
 	RuntimeTarget *V1RuntimeTargetConfig `json:"runtime_target,omitempty" yaml:"runtime_target,omitempty" koanf:"runtime_target"`
+	// AgentDefaults are the workload defaults of the agents this instance
+	// runs. Local operator policy, read from the global settings file only.
+	AgentDefaults *V1InstanceAgentDefaults `json:"agent_defaults,omitempty" yaml:"agent_defaults,omitempty" koanf:"agent_defaults"`
+}
+
+// V1InstanceAgentDefaults are a flat Runtime Broker instance's workload
+// defaults (.design/flat-runtime-brokers/contract-appendix-p3.md FC1, FC5).
+// Field names and types are exactly those of the V1ProfileConfig fields
+// they replace, so a profile's workload block converts by copy. Each value
+// takes the rung the profile's value took in that field's own precedence
+// chain: a template, the agent's own config or a request still wins
+// wherever it won over the profile, and an unset value falls through to the
+// same lower settings rungs.
+type V1InstanceAgentDefaults struct {
+	DefaultHarnessConfig string                       `json:"default_harness_config,omitempty" yaml:"default_harness_config,omitempty" koanf:"default_harness_config"`
+	ImageRegistry        string                       `json:"image_registry,omitempty" yaml:"image_registry,omitempty" koanf:"image_registry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
@@ -2793,28 +3067,26 @@ func (t *HarnessThinkingConfig) Validate() error {
 	return nil
 }
 
-// Ready strategies for HarnessReadyConfig.Strategy.
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
 const (
 	// ReadyStrategyHook means the harness is ready once the ready marker for
 	// the current run is written (by a session-start hook) plus the settle.
-	ReadyStrategyHook = "hook"
+	ReadyStrategyHook = state.ReadyStrategyHook
 	// ReadyStrategyDelay means the harness is ready once its tmux session has
 	// existed for the settle period.
-	ReadyStrategyDelay = "delay"
+	ReadyStrategyDelay = state.ReadyStrategyDelay
 )
 
-// Ready and delivery defaults and limits. The ready defaults equal the
-// runtime's current readiness constants (state.ReadySettleSession,
-// state.ReadyDeadline and the host's post-marker settle); a test in
-// pkg/agent pins them together. The delivery defaults reproduce the
-// historical hard-coded delivery: Enter, then two more Enters 300ms apart.
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
 const (
-	defaultReadySettleDelay   = 8 * time.Second
-	defaultReadySettleHook    = 1500 * time.Millisecond
-	defaultReadyTimeout       = 90 * time.Second
-	maxReadySettle            = 60 * time.Second
-	minReadyTimeout           = 10 * time.Second
-	maxReadyTimeout           = 10 * time.Minute
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
 	defaultDeliverySubmitKey  = "Enter"
 	defaultDeliveryExtras     = 2
 	defaultDeliveryExtraDelay = 300 * time.Millisecond
@@ -2862,12 +3134,10 @@ type HarnessDeliveryConfig struct {
 }
 
 // DefaultReadySpec returns the ready spec used for strategy when no value is
-// configured. An unknown strategy gets the delay defaults.
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
 func DefaultReadySpec(strategy string) ReadySpec {
-	if strategy == ReadyStrategyHook {
-		return ReadySpec{Strategy: ReadyStrategyHook, Settle: defaultReadySettleHook, Timeout: defaultReadyTimeout}
-	}
-	return ReadySpec{Strategy: ReadyStrategyDelay, Settle: defaultReadySettleDelay}
+	return state.DefaultReadySpec(strategy)
 }
 
 // DefaultDeliverySpec returns the delivery spec used when no value is
@@ -3285,6 +3555,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {
@@ -3369,18 +3640,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
-// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
-// plaintext together with verification or client certificate options, and
-// a client certificate without its key (or the reverse).
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings;
+// see ValidateTelemetryTLS.
 func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
-	clientCert := tls.CertFile != "" || tls.KeyFile != ""
-	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
-		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
-	}
-	if (tls.CertFile == "") != (tls.KeyFile == "") {
-		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
-	}
-	return nil
+	return ValidateTelemetryTLS(&api.TelemetryTLS{
+		Enabled:            tls.Enabled,
+		InsecureSkipVerify: tls.InsecureSkipVerify,
+		CAFile:             tls.CAFile,
+		CertFile:           tls.CertFile,
+		KeyFile:            tls.KeyFile,
+	})
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3658,6 +3927,8 @@ var knownCompoundFields = []string{
 	"platform_auth_sa",
 	"interval_seconds",
 	"public_key_file",
+	"metrics_enabled",
+	"tracing_enabled",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
@@ -3690,6 +3961,16 @@ var knownCompoundFields = []string{
 	"max_age",
 }
 
+// collapsedCompoundFields maps the canonical env spelling of a compound
+// field, which drops the field's underscores (METRICSENABLED), to the field
+// name. Only fields listed here accept that spelling in this mapper; the
+// underscored spelling (METRICS_ENABLED) is accepted through
+// knownCompoundFields.
+var collapsedCompoundFields = map[string]string{
+	"metricsenabled": "metrics_enabled",
+	"tracingenabled": "tracing_enabled",
+}
+
 // mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
 // known multi-word snake_case fields so they are not incorrectly split.
 // For example: "hub_read_timeout" -> "hub.read_timeout"
@@ -3712,6 +3993,9 @@ func mapEnvKeyRecursive(key string) string {
 		if key == compound {
 			return key
 		}
+	}
+	if field, ok := collapsedCompoundFields[key]; ok {
+		return field
 	}
 
 	// Try to match the longest known compound field at the end,
@@ -3965,9 +4249,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
-		if v1.Hub.AsyncAgentLaunch != nil {
-			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
-		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -4028,6 +4309,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		}
+		if o := v1.Hub.Observability; o != nil {
+			gc.Hub.Observability = HubObservabilityConfig{
+				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+				TracingEnabled: copyBoolPtr(o.TracingEnabled),
+			}
 		}
 	}
 
@@ -4386,6 +4673,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
+	if o := gc.Hub.Observability; !o.IsZero() {
+		v1Hub.Observability = &V1ServerHubObservabilityConfig{
+			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+			TracingEnabled: copyBoolPtr(o.TracingEnabled),
+		}
+	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}
@@ -4405,10 +4698,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
-	}
-	if gc.Hub.AsyncAgentLaunch {
-		asyncLaunch := true
-		v1Hub.AsyncAgentLaunch = &asyncLaunch
 	}
 	if gc.Hub.PerfTrace {
 		perfTrace := true
@@ -4581,7 +4870,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}

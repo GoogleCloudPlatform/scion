@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -225,10 +226,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -1607,6 +1604,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1919,6 +1919,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -2552,6 +2556,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
+	}
+
+	// Settings for user access credentials for peer hubs are read at
+	// startup only; an invalid value fails startup rather than being
+	// ignored.
+	if err := cfg.OIDCConfig.ValidateUserTokens(); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	if len(cfg.OIDCConfig.UserTokenAudiences) > 0 && !cfg.OIDCConfig.Enabled {
+		slog.Warn("oidc.user_token_audiences is set but oidc.enabled is false; no federation tokens are issued")
 	}
 
 	// Initialize OIDC Identity Provider key manager if enabled
@@ -4681,8 +4695,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -5752,8 +5767,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records
@@ -6701,6 +6716,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
+	// User access credentials for peer hubs: 404 while
+	// federation.project_visitors is off or the OIDC provider is not
+	// enabled (handlers_federation_token.go).
+	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)
@@ -6931,21 +6950,23 @@ func (s *Server) registerRoutes() {
 	// leaving a live API behind a hidden UI. This is a startup-time gate:
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
+		// chatRoute refuses every credential the chat routes do not accept
+		// (chatCredentialAllowed) before the handler runs.
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.chatRoute(s.handleChatPrefs)))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
-		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
-		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
-		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
-		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.chatRoute(s.handleChatSpaces)))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.chatRoute(s.handleChatSpaceRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.chatRoute(s.handleChatConversationRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.chatRoute(s.handleChatTopicRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.chatRoute(s.handleChatDMs)))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.chatRoute(s.handleChatUnreadCount)))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers

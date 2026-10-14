@@ -23,6 +23,13 @@
     "agent_count": 2
   },
   {
+    "name": "idle",
+    "type": "git",
+    "config_path": "$HOME/.scion/project-configs/idle__4321/.scion",
+    "status": "unverified",
+    "agent_count": 0
+  },
+  {
     "name": "legacy",
     "type": "git",
     "config_path": "$HOME/.scion/project-configs/legacy__5678/.scion",
