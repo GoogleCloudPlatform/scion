@@ -626,10 +626,10 @@ func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) 
 	require.Empty(t, hist.MessageAttachments[resp.ID], "the token's history lists no attachment stored as an artifact")
 }
 
-// streamEventAs opens the agent messages stream of agentID as identity,
-// publishes evt on agent.<agentID>.message until its text arrives, and
-// returns the stream body.
-func streamEventAs(t *testing.T, srv *Server, events *ChannelEventPublisher, identity UserIdentity, agentID string, evt UserMessageEvent) string {
+// streamPublishedAs opens the agent messages stream of agentID as identity,
+// calls publish until text arrives on the stream, and returns the stream
+// body.
+func streamPublishedAs(t *testing.T, srv *Server, events *ChannelEventPublisher, identity UserIdentity, agentID string, publish func(), text string) string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -642,43 +642,66 @@ func streamEventAs(t *testing.T, srv *Server, events *ChannelEventPublisher, ide
 		srv.mux.ServeHTTP(rec, req.WithContext(rctx))
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !strings.Contains(rec.String(), evt.Msg) {
-		events.PublishRaw("agent."+agentID+".message", evt)
+	for time.Now().Before(deadline) && !strings.Contains(rec.String(), text) {
+		publish()
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
 	<-done
 	body := rec.String()
-	require.Contains(t, body, evt.Msg, "stream never delivered the event")
+	require.Contains(t, body, text, "stream never delivered the event")
 	return body
 }
 
-// The agent messages stream lists attachments stored as artifacts only to a
-// session: a user access token's stream gets each event with only the
-// attachments of the AttachmentStore, while the session's stream lists both.
+// Attachments stored as artifacts are published only on the chat subjects
+// (which reach sessions only): agent.<id>.message, user.<id>.message and
+// project.<id>.user.message carry the AttachmentStore's attachments only, so
+// the hub's agent messages stream, which a user access token may open, never
+// lists an attachment stored as an artifact.
 func TestAttachmentArtifacts_AgentStreamOmitsArtifactAttachmentsForTokens(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	f.srv.events = events
+	ctx := context.Background()
 	legacy := f.attach(t, f.projA.ID, f.ua.ID, "legacy.txt")
 	artifact := f.uploadAs(t, f.ua, f.projA.ID, "artifact-file.txt", "stored as an artifact")
-	evt := UserMessageEvent{
-		ID: uuid.NewString(), SenderID: f.ua.ID, RecipientID: f.aa.ID, AgentID: f.aa.ID, Msg: "message-with-files",
-		Attachments: []AttachmentRef{{ID: legacy, Name: "legacy.txt"}, {ID: artifact, Name: "artifact-file.txt"}},
+	refs := []AttachmentRef{{ID: legacy, Name: "legacy.txt"}, {ID: artifact, Name: "artifact-file.txt", artifact: true}}
+	msg := &store.Message{
+		ID: uuid.NewString(), ProjectID: f.projA.ID, Sender: "user:alice", SenderID: f.ua.ID,
+		Recipient: "user:carol", RecipientID: f.uc.ID, AgentID: f.aa.ID, Msg: "message-with-files",
+		Channel: "web", ThreadID: f.topicA, CreatedAt: time.Now().UTC(),
 	}
 
+	// Every subject the publish reaches, once.
+	ch, unsubscribe := events.Subscribe("agent."+f.aa.ID+".message", "user."+f.uc.ID+".message",
+		"project."+f.projA.ID+".user.message", "project."+f.projA.ID+".chat.message")
+	events.PublishUserMessage(ctx, msg, refs, nil)
+	seen := map[string]string{}
+	for len(seen) < 4 {
+		select {
+		case evt := <-ch:
+			seen[evt.Subject] = string(evt.Data)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("published subjects: %d of 4", len(seen))
+		}
+	}
+	unsubscribe()
+	for _, subject := range []string{"agent." + f.aa.ID + ".message", "user." + f.uc.ID + ".message", "project." + f.projA.ID + ".user.message"} {
+		require.Contains(t, seen[subject], legacy, subject)
+		require.NotContains(t, seen[subject], artifact, "%s carries no attachment stored as an artifact", subject)
+	}
+	chat := seen["project."+f.projA.ID+".chat.message"]
+	require.Contains(t, chat, legacy)
+	require.Contains(t, chat, artifact, "the chat subject carries the attachment stored as an artifact")
+
+	// End to end: the token's agent messages stream lists the legacy file only.
 	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "agent:read")
-	body := streamEventAs(t, f.srv, events, token, f.aa.ID, evt)
+	body := streamPublishedAs(t, f.srv, events, token, f.aa.ID, func() { events.PublishUserMessage(ctx, msg, refs, nil) }, msg.Msg)
 	assert.Contains(t, body, legacy, "the AttachmentStore attachment is listed to the token")
 	require.NotContains(t, body, artifact, "the attachment stored as an artifact is not listed to the token")
 	require.NotContains(t, body, "artifact-file.txt")
-
-	session := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
-	body = streamEventAs(t, f.srv, events, session, f.aa.ID, evt)
-	assert.Contains(t, body, legacy)
-	assert.Contains(t, body, artifact, "the session's stream lists the attachment stored as an artifact")
 }
 
 // With the experiment on, a user access token's upload is stored in the
