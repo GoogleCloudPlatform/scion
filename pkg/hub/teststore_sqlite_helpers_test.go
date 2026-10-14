@@ -95,7 +95,7 @@ func newTestStoreAt(t testing.TB, dsn string) (store.Store, error) {
 		return nil, err
 	}
 	s := entadapter.NewCompositeStore(client)
-	if err := migrateTestStore(context.Background(), s); err != nil {
+	if err := s.Migrate(context.Background()); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
@@ -176,8 +176,8 @@ type sqliteRestorer interface {
 
 // testStoreTemplate builds the migrate-once template the first time it is
 // called: it runs one full CompositeStore.Migrate (schema, backfills and
-// seeds) on the template database, under testMigrateMu like every other
-// test migration. Later calls return the first call's error.
+// seeds) on the template database. Later calls return the first call's
+// error.
 func testStoreTemplate(ctx context.Context) error {
 	testStoreTemplateOnce.Do(func() {
 		holder, err := (&sqlite.Driver{}).Open(testStoreTemplateURI)
@@ -192,7 +192,7 @@ func testStoreTemplate(ctx context.Context) error {
 			return
 		}
 		s := entadapter.NewCompositeStore(client)
-		err = migrateTestStore(ctx, s)
+		err = s.Migrate(ctx)
 		_ = s.Close()
 		if err != nil {
 			_ = holder.Close()

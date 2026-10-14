@@ -1,10 +1,11 @@
 # The flat instance that replaces profile batch: the folded shared-dir size
-# (profile beats runtime entry) on the instance's runtime_target.
+# (profile beats runtime entry) on the instance's runtime_target. The key is
+# the one the conversion proposes for the target scope.
 server:
   broker:
     instances:
-      - key: k8s
-        name: k8s
+      - key: k8s-agents
+        name: k8s-agents
         runtime_target:
           type: kubernetes
           namespace: agents

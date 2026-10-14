@@ -2119,7 +2119,7 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
-	} else if profileName, profileSAID := s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	} else if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, runtimeBrokerID, project); profileSAID != "" {
 		// No explicit GCP identity, and the project sets a default service
 		// account for the profile this agent runs under. It is more specific
 		// than the project-wide default below and wins over it, including an
@@ -5404,6 +5404,11 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if isBrokerAgentNotFound(err) {
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
@@ -5686,6 +5691,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}

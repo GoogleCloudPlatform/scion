@@ -50,7 +50,6 @@ Every row that makes a claim about behaviour carries a status marker, defined on
 | **`Changed in this release`** | Behaviour changed by the settings-precedence release, with a one-line before → after. See the [release notes](/scion/release-notes/). |
 | **`Unchanged`** | Explicitly *not* changed. Present because a neighbouring row would otherwise imply it was. |
 | **`Known gap`** | Documented as broken or incomplete. Not fixed here. |
-| **`Pending`** | The intended model is stated; the current behaviour does not match it and the resolution is not yet decided. |
 
 ### How the citations on this page are pinned
 
@@ -672,7 +671,7 @@ only what is still unset:
 | Highest | the agent-create request / inline config |
 | | the project's `scion.io/default-*` annotation (e.g., `scion.io/default-harness-config`, `scion.io/default-model`, `scion.io/default-thinking-level`) |
 | | the template's `scion-agent.yaml` (for `harness_config`: only a declared `harness_config` / `default_harness_config`, never the template's `harness` type) |
-| | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
+| | hub `agent_defaults`: for `max_turns`, `max_model_calls` and `max_duration`, applied on every start at this rank in Postgres mode (in file mode the hub sends nothing, so the broker's `settings.yaml` defaults apply alone); for `harness_config`, `model` and `thinking_level`, resolved at create. See [Where hub `agent_defaults` rank](#where-hub-agent_defaults-rank) |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
 
 For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
@@ -713,8 +712,8 @@ harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest, beats ev
         >  BuiltinDefaultResources()                        <- floor
 
    hub agent_defaults.resources  --  DELIBERATELY NOT A RUNG IN THIS CHAIN. Its position
-   moves with the hub's storage mode, and issue #623 leaves even that reading unsettled.
-   See "The rank of hub agent_defaults depends on the hub's storage mode" below.
+   moves with the hub's storage mode. See "The rank of hub agent_defaults depends on the
+   hub's storage mode" below.
 ```
 
 The `template resources` rung now holds only the agent's own `resources` (for example from `scion create --config`); a template's `resources` is ignored with a warning (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
@@ -727,9 +726,8 @@ This is not a rule you can repair by flipping an inequality — there is no sing
 
 #### Why the hub tier is missing from that chain, and why that is the same rule twice
 
-A chain has one rung per participant, so writing the hub tier into it would **publish a settled
-precedence position** — the one thing this page says twice, below, that it is not publishing. It
-would also be false half the time: in Postgres mode the hub tier sits just above
+A chain has one rung per participant, and any single rung for the hub tier would be false half
+the time: in Postgres mode the hub tier sits just above
 `default_resources`, and in **file mode it sits at the bottom of the broker chain, *below*
 `default_resources`**. A chain cannot express "this rung moves with deployment mode" any more than
 it can express an interleave.
@@ -741,7 +739,7 @@ contributes at different ranks in different deployments. Same defect, same remed
 positions, do not manufacture a rung.
 
 Stated against the scalar table above: **"hub `agent_defaults` sit above the broker's own
-`settings.yaml`" is true of the three scalars, and for `resources` it reaches at most
+`settings.yaml`" is true of the three scalars in Postgres mode, and for `resources` it reaches at most
 `default_resources` — and in file mode not even that.** The same broker file also supplies profile
 and harness-override resources, merged *above* the template, so those beat the hub tier per field
 in either mode, while broker `default_max_turns` **loses** to hub `default_max_turns`. The hub tier
@@ -792,7 +790,7 @@ through their own chain, defined in `ProvisionAgent`'s harness-config merge
 
 | Priority | `image` | `kubernetes.imagePullPolicy` |
 | --- | --- | --- |
-| Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; in hub mode, the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the create-time inline value recorded at provision (there is no per-request pull-policy flag) |
+| Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the create-time inline value recorded at provision (there is no per-request pull-policy flag) |
 | | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image`, re-resolved from current settings on every `Start` | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image_pull_policy`, **only when that same override also sets an image**, re-resolved likewise |
 | | the current request's inline config image, **else** the create-time inline image (for an agent provisioned at this version or later; older agents rank it at the top tier, see below) | — (covered by the top row) |
 | | the template chain's own `image` — re-read from disk on every `Start`, or, if the template can no longer be resolved, the template's own value recorded at provision | the template chain's own `kubernetes.imagePullPolicy`, same rule |
@@ -904,7 +902,7 @@ profile happens to be active on the machine at restart time. For the image and p
 broker-side image provenance, the recorded provisioned profile is used instead, as described
 above.
 
-In hub mode, the top tier carries **only the user's explicit image**. The Hub sends it as
+The top tier carries **only the user's explicit image**. The Hub sends it as
 `Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and
 reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
@@ -970,9 +968,9 @@ until it is reincarnated. The broker cannot tell that image apart from a genuine
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
 the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
-`--image` (or `--config` image) now persists across plain restarts; a later local `scion start
---image` applies to that one start only (in Hub mode, `--image` is not applied to an existing
-agent). Re-create the agent to drop a create-time image.
+`--image` (or `--config` image) now persists across plain restarts. A later `scion start --image`
+is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
+change or drop a create-time image.
 
 #### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
 
@@ -1043,25 +1041,30 @@ The practical consequence: if an admin later changes a hub default, projects tha
 unset pick up the new value, and projects that explicitly set it do not. Treating null as
 equivalent to "set to the hub default value" gets this backwards.
 
-### `Pending` — the precedence position of hub `agent_defaults` is not settled
+### Where hub `agent_defaults` rank
 
-:::caution[Intended model, and a contradiction that is not yet resolved]
-**Intended:** hub `agent_defaults` are a **low-priority fallback** — near the bottom of the chain,
-supplying a value only when nothing else did.
+Hub `agent_defaults` are a **low-priority fallback**: they supply a value only when nothing
+above them did.
 
-**Current implementation:** they are applied at **agent-create time**, which in practice makes
-them behave as though they were at or near the top.
+- **Limits and `resources`** (`default_max_turns`, `default_max_model_calls`,
+  `default_max_duration`, `resources`) follow this model. The Runtime Broker applies them on
+  every start, below the template and the agent's own config (for `resources`, also below the
+  broker's profile resources and harness overrides; see
+  [Resources interleaves](#resources-interleaves-and-cannot-be-given-one-rank)). In Postgres mode they rank above
+  the broker's own `settings.yaml` defaults, and in file mode at the bottom (see the next
+  section). A change to them reaches an agent at its next start or restart (see
+  [the change below](#changed-in-this-release--hub-agent_defaults-limits-and-resources-apply-on-every-start)).
+- **The other `agent_defaults`** (default template, harness config, harness auth, model,
+  thinking level) are resolved by the hub at agent create and stored with the agent. A later
+  change to them does not reach agents that already exist.
 
-**These do not agree, and the resolution is not decided.** It is deferred to a follow-up
-workstream. This page therefore documents the *intended* model and flags the current behaviour;
-**it does not publish a settled precedence position for hub `agent_defaults`.** Do not build on
-either reading. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
-:::
+Project-level default limits (project settings) are also written into the agent's config at
+create. They count as the agent's own values, outrank the template, and are not refreshed on
+start.
 
 ### The rank of hub `agent_defaults` depends on the hub's storage mode
 
-Independently of the question above, the rank differs by hub mode, and this has not previously
-been stated anywhere user-facing:
+The rank of the limits and `resources` differs by hub mode:
 
 | Hub mode | Rank of hub `agent_defaults` |
 | --- | --- |
@@ -1081,20 +1084,26 @@ harness overrides live in the same file and are merged *above* the hub tier.
 **This is why the hub tier does not appear as a rung in the `resources` chain.** The two rows of
 the table above are two *different* positions in that chain — above `default_resources` in
 Postgres mode, below it in file mode — so no single rung is correct. Read the chain for the five
-ranks that do not move, and read this table for where the hub tier lands in your deployment. And
-read both under the `Pending` box above: **issue #623 leaves even the Postgres-mode reading
-unsettled**, so neither position is something to build on yet.
+ranks that do not move, and read this table for where the hub tier lands in your deployment.
 
-### `Known gap` — hub `agent_defaults` are provision-time-only
+### `Changed in this release` — hub `agent_defaults` limits and resources apply on every start
 
-Hub `agent_defaults` **bind once, at agent create.** Editing them and restarting an agent has no
-effect, and every already-running agent keeps the values it was created with. A restart refreshes
-inline config but not hub `agent_defaults`.
+**Before:** the hub `agent_defaults` limits (`default_max_turns`, `default_max_model_calls`,
+`default_max_duration`) took effect only once, when the agent was created. If you edited them
+and then restarted an agent, nothing changed.
 
-This is [issue #623](https://github.com/ptone/scion/issues/623) and it is the motivation for the
-follow-up workstream referenced above. It is the **same symptom** as the mode-dependent-rank
-problem, and any fix for the rank must not land without a fix for this one — otherwise the
-corrected rank simply becomes a value that is correct at create time and stale forever after.
+**After:** the hub sends its current limits and `resources` defaults with every start and
+restart. The Runtime Broker applies them on each start and does not save them in the agent's
+`scion-agent.json`. The same holds for the broker's own `settings.yaml` limit defaults. A limit
+the agent sets itself (from its template or its own config) still wins over both. A limit
+cleared on the hub falls back to the template's value, or to the current defaults when the
+template sets none. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
+
+Agents created before this change keep the limits they have stored. Their saved values look
+the same as values set on the agent itself, so a changed default does not reach them.
+
+The hub's other `agent_defaults` (default template, harness config, harness auth, model,
+thinking level) are still applied only at agent create.
 
 ### `Known gap` — file mode with a *remote* broker cannot reach hub `agent_defaults`
 

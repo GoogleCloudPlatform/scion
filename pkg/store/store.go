@@ -194,6 +194,17 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents
+	// in ids: only those still soft-deleted before cutoff when the purge
+	// runs are removed (a restore in between wins), with the same cascade.
+	// Unknown or malformed IDs are skipped. Returns the number purged.
+	PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error)
+
+	// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents
+	// with deleted_at before cutoff and an ID after afterID ("" for the
+	// first page), in ascending ID order.
+	ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*Agent, error)
+
 	// CreateTestAdminUser creates an admin-kind test identity and its one
 	// system role binding, in one transaction (the caller's, when called
 	// inside WithTx). It is the only store path that writes
@@ -2457,8 +2468,35 @@ type NotificationStore interface {
 
 	// UnmarkNotificationDispatched reverts a claimed notification back to
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
-	// proceed (no dispatcher, no broker) after an optimistic claim.
-	UnmarkNotificationDispatched(ctx context.Context, id string) error
+	// proceed (no dispatcher, no broker) after an optimistic claim. It reverts
+	// only a row with no recorded DispatchOutcome: once another caller (for
+	// example a primary dispatch racing a broker-connect drain) has recorded
+	// an outcome, the row stays dispatched, so an empty outcome keeps meaning
+	// pending or in flight and the notification is not delivered again.
+	// reverted reports whether the row was released; (false, nil) means it
+	// has an outcome or does not exist.
+	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
+
+	// RecordNotificationDispatchAttempt atomically increments a
+	// notification's DispatchAttempts by one. Callers record an attempt just
+	// before each delivery attempt to a subscriber agent; one attempt is one
+	// dispatchWithBrokerRetry call in pkg/hub, whose internal deferred-retry
+	// loop is not counted separately.
+	// Returns ErrNotFound if the notification doesn't exist.
+	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
+
+	// SetNotificationDispatchOutcome records a notification's terminal
+	// dispatch outcome (NotificationOutcomeDelivered or
+	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
+	// not pick it up again. Concurrent writers keep the most informative
+	// outcome: a delivered write applies unless the outcome is already
+	// delivered (it replaces failed, since the message did reach the
+	// subscriber), and a failed write applies only while no outcome is
+	// recorded. applied reports whether this call recorded it; (false, nil)
+	// means the write was refused and the recorded outcome is kept.
+	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	// notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.

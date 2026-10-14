@@ -96,8 +96,9 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 		if err != nil {
 			return nil, err // a configuration error: the file, its parse or its context
 		}
-		rt, err := runtime.NewKubernetesRuntimeFromClient(client, config.V1RuntimeConfig{
-			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
+		// The instance's own GKE mode and default priority class apply;
+		// cross-namespace listing never does (one cluster and namespace).
+		rt, err := runtime.NewKubernetesRuntimeFromClient(client, t.KubernetesRuntimeConfig())
 		if err != nil {
 			// The connection check failed: the cluster cannot be identified.
 			return nil, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the API server is unreachable or the request failed; "+

@@ -971,12 +971,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Shared workspace mode (git-workspace hybrid) ---
-	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
-	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
-	// Removal is tracked in https://github.com/ptone/scion/issues/575.
+	// The agent learns its workspace mode from SCION_WORKSPACE_MODE and
+	// SCION_WORKSPACE_GIT; the legacy SCION_SHARED_WORKSPACE var is no longer
+	// emitted (ptone/scion#575).
 	if in.Config != nil && in.Config.SharedWorkspace {
-		env["SCION_SHARED_WORKSPACE"] = "true"
-		classifyBrokerEnv("SCION_SHARED_WORKSPACE", api.EnvKindPlain)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
 		}
@@ -2170,7 +2168,9 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 
 // withStartHubAgentDefaults attaches hub defaults decoded from a start or
 // restart request body (or a create request's config) to ctx, so
-// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Manager.Start applies them at their low-precedence tiers: the limits and
+// resources below the agent's own values, and the env entries at
+// buildAgentEnv's lowest tier.
 // Returns ctx unchanged for a nil or empty value.
 func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
 	if ctx == nil {

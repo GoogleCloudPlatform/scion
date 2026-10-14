@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,27 +29,17 @@ import (
 // read from a project's .scion entry are checked against the path computed
 // from those inputs, never used to build it.
 
-// hubProjectSlugPattern is the grammar api.Slugify produces: lowercase
-// letters, digits and inner dashes, at most api.MaxSlugLength characters.
-// Only a slug matching it is used as a path component. A project whose slug
-// is outside it is not handled: its marker-project agents are not found and
-// its shared-dir storage is not removed.
-var hubProjectSlugPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
-// projectShortIDPattern is the grammar of config.ProjectMarker.ShortUUID for
-// a project ID: up to eight letters or digits.
-var projectShortIDPattern = regexp.MustCompile(`^[A-Za-z0-9]{1,8}$`)
-
 // expectedProjectConfigDir returns
 // <globalDir>/project-configs/<slug>__<short project ID>, the directory that
 // config.ProjectMarker.DirName names for this project, or "" when slug or
-// the short project ID does not match its grammar.
+// the short project ID does not match its grammar
+// (config.ProjectMarker.HasCanonicalDirName). Only a slug in the
+// api.Slugify grammar is used as a path component: a project whose slug is
+// outside it is not handled (its marker-project agents are not found and
+// its shared-dir storage is not removed).
 func expectedProjectConfigDir(globalDir, slug, projectID string) string {
-	if !hubProjectSlugPattern.MatchString(slug) {
-		return ""
-	}
 	marker := config.ProjectMarker{ProjectID: projectID, ProjectSlug: slug}
-	if !projectShortIDPattern.MatchString(marker.ShortUUID()) {
+	if !marker.HasCanonicalDirName() {
 		return ""
 	}
 	return filepath.Join(globalDir, config.ProjectConfigsDir, marker.DirName())

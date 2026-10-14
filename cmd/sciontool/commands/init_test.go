@@ -1468,9 +1468,9 @@ func mustWriteFileT(t *testing.T, path, contents string) {
 	}
 }
 
-// TestResolveIsSharedGitWorkspace verifies the compat shim logic for detecting
-// a shared-plain git workspace. It covers both the new canonical vars and the
-// legacy SCION_SHARED_WORKSPACE fallback path.
+// TestResolveIsSharedGitWorkspace verifies detection of a shared-plain git
+// workspace from SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT, and that the
+// removed SCION_SHARED_WORKSPACE var is ignored when set (ptone/scion#575).
 func TestResolveIsSharedGitWorkspace(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -1504,21 +1504,27 @@ func TestResolveIsSharedGitWorkspace(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:         "legacy: SCION_SHARED_WORKSPACE=true → true (fallback)",
-			sharedLegacy: "true",
-			want:         true,
+			name: "no vars → false",
+			want: false,
 		},
 		{
-			name:         "legacy: SCION_SHARED_WORKSPACE absent → false",
-			sharedLegacy: "",
+			name:         "legacy SCION_SHARED_WORKSPACE=true alone is ignored → false",
+			sharedLegacy: "true",
 			want:         false,
 		},
 		{
-			name:          "new vars take precedence: mode set + legacy true → follows mode",
+			name:          "legacy SCION_SHARED_WORKSPACE=true is ignored: mode set → follows mode",
 			workspaceMode: "clone-per-agent",
 			workspaceGit:  "true",
 			sharedLegacy:  "true",
-			want:          false, // mode=clone-per-agent means not shared-plain
+			want:          false,
+		},
+		{
+			name:          "legacy SCION_SHARED_WORKSPACE=false is ignored: shared-plain + git → true",
+			workspaceMode: "shared-plain",
+			workspaceGit:  "true",
+			sharedLegacy:  "false",
+			want:          true,
 		},
 	}
 
