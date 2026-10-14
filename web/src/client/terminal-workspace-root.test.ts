@@ -2015,11 +2015,18 @@ describe('show() frame-mode ref counting', () => {
 
 describe('an open on-screen keyboard collapses the chrome around the terminal (ptone/scion#5059)', () => {
   let root: TerminalWorkspaceRoot;
+  let savedInnerWidth: number;
 
-  beforeEach(() => {
+  /** Creates and shows the root; `width` is the viewport width CSS media queries see. */
+  function showRoot(width?: number): void {
+    if (width !== undefined) (window as { innerWidth: number }).innerWidth = width;
     root = new WorkspaceRoot();
     document.body.append(root.element);
     root.show(true);
+  }
+
+  beforeEach(() => {
+    savedInnerWidth = window.innerWidth;
   });
 
   afterEach(() => {
@@ -2027,6 +2034,7 @@ describe('an open on-screen keyboard collapses the chrome around the terminal (p
     root.show(false);
     root.dispose();
     root.element.remove();
+    (window as { innerWidth: number }).innerWidth = savedInnerWidth;
   });
 
   function part(selector: string): HTMLElement {
@@ -2049,11 +2057,20 @@ describe('an open on-screen keyboard collapses the chrome around the terminal (p
     return getComputedStyle(el).display;
   }
 
+  function shellGrid(): { columns: string; rows: string } {
+    const style = getComputedStyle(part('.terminal-workspace-shell'));
+    return { columns: style.gridTemplateColumns, rows: style.gridTemplateRows };
+  }
+
+  const ONE_CELL = 'minmax(0, 1fr)';
+
   it('shows the chrome while no keyboard is up', () => {
+    showRoot();
     for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
   });
 
   it('hides the header, banner, Open terminals rail and Layout bar while the keyboard is up', () => {
+    showRoot();
     document.documentElement.dataset['keyboard'] = 'open';
 
     for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
@@ -2063,10 +2080,36 @@ describe('an open on-screen keyboard collapses the chrome around the terminal (p
   });
 
   it('brings the chrome back when the keyboard closes', () => {
+    showRoot();
     document.documentElement.dataset['keyboard'] = 'open';
-    delete document.documentElement.dataset['keyboard'];
+    for (const el of Object.values(chrome())) expect(display(el)).toBe('none');
 
+    delete document.documentElement.dataset['keyboard'];
     for (const el of Object.values(chrome())) expect(display(el)).not.toBe('none');
+  });
+
+  it('collapses the wide shell to one cell, so the pane area does not drop into the rail column', () => {
+    showRoot();
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+
+    document.documentElement.dataset['keyboard'] = 'open';
+    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+
+    delete document.documentElement.dataset['keyboard'];
+    expect(shellGrid().columns).not.toBe(ONE_CELL);
+  });
+
+  it('collapses the narrow shell to one cell, so the pane area is not held to the 35vh rail row', () => {
+    showRoot(375);
+    // The narrow layout: the rail row above the pane row.
+    expect(shellGrid().rows).not.toBe(ONE_CELL);
+    expect(shellGrid().rows).toContain('35vh');
+
+    document.documentElement.dataset['keyboard'] = 'open';
+    expect(shellGrid()).toEqual({ columns: ONE_CELL, rows: ONE_CELL });
+
+    delete document.documentElement.dataset['keyboard'];
+    expect(shellGrid().rows).toContain('35vh');
   });
 });
 // ────────────────────────────────────────────────────────────────────────────

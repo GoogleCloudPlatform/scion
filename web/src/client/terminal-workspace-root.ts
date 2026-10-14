@@ -2698,9 +2698,10 @@ export class TerminalWorkspaceRoot {
       }
       /* While an on-screen keyboard is up (ptone/scion#5059) the screen is
          the terminal and the keyboard. client/viewport.ts detects the
-         keyboard, sets html[data-keyboard='open'] and shrinks the frame to
-         the visible height; the panes refit to what is left through their
-         own ResizeObserver. Nothing hidden here holds a text field, so
+         keyboard and sets html[data-keyboard='open'] (iOS Safari, where it
+         also shrinks the frame to the visible height, and Android Chrome,
+         where resizes-content shrinks the frame itself); the panes refit to
+         what is left through their own ResizeObserver. Nothing hidden here holds a text field, so
          hiding it cannot blur the field that raised the keyboard. */
       html[data-keyboard='open'] #terminal-workspace > .terminal-test-hub-banner,
       html[data-keyboard='open'] #terminal-workspace > scion-header,
