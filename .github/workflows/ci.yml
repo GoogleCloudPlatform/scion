@@ -436,6 +436,31 @@ jobs:
           esac
           exit "$rc"
 
+      # Every package with a `//go:build !no_sqlite` test file must be in
+      # SQLITE_CI_PKGS (Makefile), i.e. tested untagged by a blocking job;
+      # Run Tests below uses -tags no_sqlite and never compiles those files
+      # (ptone/scion#1088). Invoked directly for the same reason as Check
+      # Debug Defaults above.
+      - name: Check SQLite Test Coverage
+        run: |
+          set +e
+          ./hack/check-sqlite-coverage.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=SQLite test coverage NOT checked::check-sqlite-coverage --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-sqlite-coverage.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=SQLite test coverage::A package has //go:build !no_sqlite test files that no blocking CI job runs with SQLite. Add it to SQLITE_NONHUB_PKGS in the Makefile; the package list is in the step log above." ;;
+            *) echo "::error title=SQLite test coverage NOT checked::check-sqlite-coverage.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast-ci's own exit code. If the tests are still
@@ -664,10 +689,15 @@ jobs:
       # somewhere that can fail a PR: the pkg/hub subpackages,
       # perf/bench/seed (ptone/scion#2393), pkg/store/entadapter
       # (ptone/scion#2851), pkg/conduit (relay/router tests on the
-      # SQLite-backed registry store) and pkg/artifacts. The pkg/hub package
-      # itself runs in the pkg/hub shard jobs below. The 60m go test timeout
-      # is kept from when pkg/hub ran here; the 70m job timeout stays above
-      # it so a real hang still produces go's goroutine dump.
+      # SQLite-backed registry store), pkg/artifacts, and pkg/brokerownership,
+      # pkg/brokerregistration, pkg/ent/entc, pkg/secret, pkg/store/storetest
+      # and pkg/testinfra (ptone/scion#1088); the list is SQLITE_NONHUB_PKGS
+      # in the Makefile, and Build & Test's Check SQLite Test Coverage step
+      # fails if a package with !no_sqlite tests is missing from it. The
+      # pkg/hub package itself runs in the pkg/hub shard jobs below. The 60m
+      # go test timeout is kept from when pkg/hub ran here; the 70m job
+      # timeout stays above it so a real hang still produces go's goroutine
+      # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
         run: make test-sqlite-nonhub
 
