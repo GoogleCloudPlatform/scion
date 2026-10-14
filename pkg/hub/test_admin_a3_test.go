@@ -20,8 +20,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -949,28 +951,41 @@ func TestTestAdminA3_StampedRoleBoundByPersonKept(t *testing.T) {
 }
 
 // Review N1, at the place the refusal happens: the route guard
-// (enforceRoutePermission) answers every refusal on the test identity
-// routes with the generic structured 403, whatever the decision's cause.
-// When a person's kind cannot be read (the authorization service's user
-// reads fail; authentication reads the real store), the person gets exactly
-// that neutral body: no test-identity wording, no reason, no denied_by.
+// (enforceRoutePermission) answers every refusal with the generic
+// structured 403 for the route's permission, whatever the decision's
+// cause. Driven deterministically: an authorization service whose user
+// reads fail and whose admin tier is on (as Server.New wires it), and a
+// request that has not passed the JWT row block (which would otherwise
+// warm the kind cache from the real store). The decision is the test-admin
+// policy's fail-closed kind-error refusal, and the person still sees only
+// the neutral body: no test-identity wording, no reason, no denied_by.
+// (The earlier end-to-end version never reached the failing read: the row
+// block cached the kind through the real store first, and the swapped
+// service had no tier switch; see the AC map.)
 func TestTestAdminA3_UnverifiedKindGuardAnswerIsNeutral(t *testing.T) {
 	srv, s, _ := tsaServer(t)
-	issuerRole, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{ID: generateID(), Name: "a3-uk-issuer-" + generateID()[:8],
-		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssue}})
-	require.NoError(t, err)
+	ctx := context.Background()
 	human := taUser(t, s, "a3-uk-human", store.SystemRoleHubMember)
-	_, err = s.CreateRoleBinding(context.Background(), &store.RoleBinding{RoleDefinitionID: issuerRole.ID, PrincipalType: store.RoleBindingPrincipalUser,
-		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
-	require.NoError(t, err)
-	// Control: with readable kinds the person passes the guard.
-	rec := doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
-	require.Equal(t, http.StatusOK, rec.Code, "control: the guard admits the person: %s", rec.Body.String())
+	ident := tsaIdentityFromRow(t, s, human.ID)
+	meta, ok := routeMetadataTable["DELETE /api/v1/test-identities/{id}"]
+	require.True(t, ok)
 
 	saved := srv.authzService
-	srv.authzService = NewAuthzService(kindErrStore{Store: s}, saved.logger)
+	svc := NewAuthzService(kindErrStore{Store: s}, saved.logger)
+	setAuthzTestAdminTier(svc, func(string) bool { return true }, time.Now)
+	srv.authzService = svc
 	t.Cleanup(func() { srv.authzService = saved })
-	rec = doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
+
+	d := svc.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(ident), Credential: credentialContextForIdentity(ident),
+		Resource: Resource{Type: meta.Resource}, Action: Action(meta.Action), Permission: meta.Permission, TargetEvidence: hubCollectionEvidence(meta.Permission)})
+	require.False(t, d.Allowed)
+	require.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
+	require.Equal(t, testAdminPolicyKindErrorReason, d.Reason, "the cause is the unreadable kind")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
+	req = req.WithContext(contextWithIdentityAndUser(ident))
+	rec := httptest.NewRecorder()
+	require.False(t, srv.enforceRoutePermission(rec, req, meta), "the guard refuses")
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	var body struct {
 		Error struct {
@@ -983,4 +998,160 @@ func TestTestAdminA3_UnverifiedKindGuardAnswerIsNeutral(t *testing.T) {
 	assert.Equal(t, ErrCodeForbidden, body.Error.Code)
 	assert.Equal(t, "Insufficient permissions", body.Error.Message, "the generic message")
 	assert.Equal(t, map[string]string{"resource_type": "test_identity", "denied_action": "issue"}, body.Error.Details, "no reason, no denied_by")
+}
+
+// Kind-read fail-closed diagnostic (ti-adm-em, after the shard-2 run at
+// df5e33dea): with the authorization service's user reads failing and no
+// kind cached, a person holding test_identity.issue through a system-scope
+// binding is refused, both (i) with the admin tier on (decide step 0c
+// refuses on the unreadable kind) and (ii) with it off (step 0c is skipped;
+// the grant clamp's kind read in step 3 refuses). (iii) No principal-inputs
+// memo is in the context, so the bindings come from the store, through the
+// clamp. (iv) The setup artefact of the earlier end-to-end test: a kind
+// read through the server's real store first (what the JWT row block does)
+// warms the same cache, and the clamp then never reaches the failing read.
+func TestTestAdminA3_KindReadFailClosedDiagnostic(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuerRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "a3-kd-issuer-" + generateID()[:8],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssue}})
+	require.NoError(t, err)
+	human := taUser(t, s, "a3-kd-human", store.SystemRoleHubMember)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: issuerRole.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	ident := tsaIdentityFromRow(t, s, human.ID)
+	req := AuthzRequest{Principal: principalContextForIdentity(ident), Credential: credentialContextForIdentity(ident),
+		Resource: Resource{Type: "test_identity"}, Action: ActionIssue, Permission: permissionTestIdentityIssue,
+		TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue), Explain: true}
+	require.Nil(t, authzInputMemoFromContext(ctx), "(iii) no principal-inputs memo: bindings are read from the store")
+
+	// Control: the real store admits the person.
+	d := srv.authzService.Decide(ctx, req)
+	require.True(t, d.Allowed, "control: %s", d.Reason)
+
+	// (i) admin tier on, user reads failing, cold cache.
+	on := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	setAuthzTestAdminTier(on, func(string) bool { return true }, time.Now)
+	d = on.Decide(ctx, req)
+	t.Logf("(i) tier on: allowed=%v denied_by=%q reason=%q", d.Allowed, d.DeniedBy, d.Reason)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
+	assert.Equal(t, testAdminPolicyKindErrorReason, d.Reason)
+
+	// (ii) admin tier off (step 0c skipped), user reads failing, cold cache:
+	// only the clamp's kind read can refuse.
+	off := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	d = off.Decide(ctx, req)
+	t.Logf("(ii) tier off: allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
+	if d.Provenance != nil {
+		t.Logf("(ii) provenance errors=%v deny_reasons=%v", d.Provenance.Errors, d.Provenance.DenyReasons)
+	}
+	assert.False(t, d.Allowed, "(ii) an unreadable kind must refuse at the clamp (fail-closed)")
+	assert.Equal(t, DenyCauseResolutionError, d.DenyCause, "(ii) refused as a binding resolution error")
+
+	// (iv) the artefact: a successful kind read through the real store into
+	// the same cache (as the row block does) turns the clamp's read into a
+	// cache hit; the failing store is never consulted.
+	warm := NewAuthzService(kindErrStore{Store: s}, srv.authzService.logger)
+	k, err := kindForPrincipalVia(ctx, s, warm.kindCache(), human.ID)
+	require.NoError(t, err)
+	require.True(t, k.isHuman())
+	d = warm.Decide(ctx, req)
+	t.Logf("(iv) warmed cache, tier off: allowed=%v denied_by=%q reason=%q", d.Allowed, d.DeniedBy, d.Reason)
+	assert.True(t, d.Allowed, "(iv) a kind cached from a successful read of the real store admits: the earlier test's setup, not a fail-open")
+}
+
+// a3KindFaultStore is the server's own store with GetUser failing for one
+// user ID while armed. It is passed to New, so the JWT row block, the
+// authorization service and its kind cache all read through it (the real
+// wiring); DB and Dialect are forwarded for the code that needs them.
+type a3KindFaultStore struct {
+	store.Store
+	mu   sync.Mutex
+	fail string
+}
+
+func (f *a3KindFaultStore) arm(userID string) { f.mu.Lock(); f.fail = userID; f.mu.Unlock() }
+
+func (f *a3KindFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	f.mu.Lock()
+	fail := f.fail
+	f.mu.Unlock()
+	if fail != "" && id == fail {
+		return nil, errors.New("injected user read failure")
+	}
+	return f.Store.GetUser(ctx, id)
+}
+
+func (f *a3KindFaultStore) DB() *sql.DB {
+	if d, ok := f.Store.(interface{ DB() *sql.DB }); ok {
+		return d.DB()
+	}
+	return nil
+}
+
+func (f *a3KindFaultStore) Dialect() string {
+	if d, ok := f.Store.(interface{ Dialect() string }); ok {
+		return d.Dialect()
+	}
+	return ""
+}
+
+// Kind-read fail-closed under the REAL wiring (ti-adm-em; A2's DEC-3
+// promise): one store (the server's own, with an injected GetUser failure
+// for one person), one kind cache, admin tier on. A person holding
+// test_identity.issue through a system-scope binding:
+//   - on the purge route over HTTP is refused (the JWT row block fails
+//     closed on the unreadable kind before any handler);
+//   - in decide with the tier on is refused by step 0c (test-admin policy,
+//     kind-error reason);
+//   - in decide with the tier off (step 0c skipped) is refused by the grant
+//     clamp's kind read in step 3 (binding resolution error).
+//
+// With the fault cleared the same person is admitted (control).
+func TestTestAdminA3_KindReadFailClosedRealWiring(t *testing.T) {
+	inner, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	f := &a3KindFaultStore{Store: inner}
+	srv, _ := testServerOnMigratedStore(t, f)
+	enableTestIdentitiesForTest(srv)
+	taEnableGate(srv)
+	ctx := context.Background()
+	issuerRole, err := inner.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "a3-rw-issuer-" + generateID()[:8],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssue}})
+	require.NoError(t, err)
+	human := taUser(t, inner, "a3-rw-human", store.SystemRoleHubMember)
+	_, err = inner.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: issuerRole.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	ident := tsaIdentityFromRow(t, inner, human.ID)
+	req := AuthzRequest{Principal: principalContextForIdentity(ident), Credential: credentialContextForIdentity(ident),
+		Resource: Resource{Type: "test_identity"}, Action: ActionIssue, Permission: permissionTestIdentityIssue,
+		TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue)}
+	require.True(t, srv.testAdminTierOn(), "the admin tier is on")
+	require.NotNil(t, srv.authzService.kindCache(), "the server's authorization service has the shared kind cache")
+
+	f.arm(human.ID)
+	rec := doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+generateID()+"?purge=true", nil)
+	t.Logf("HTTP purge route, kind unreadable: status=%d body=%s", rec.Code, rec.Body.String())
+	assert.GreaterOrEqual(t, rec.Code, 400, "refused over HTTP")
+	assert.NotContains(t, rec.Body.String(), `"identityId"`, "no purge report: the request never reached the handler")
+
+	d := srv.authzService.Decide(ctx, req)
+	t.Logf("decide, tier on: allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
+	assert.False(t, d.Allowed, "tier on: refused")
+	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
+	assert.Equal(t, testAdminPolicyKindErrorReason, d.Reason)
+
+	srv.testAdminGate = testAdminGate{}
+	require.False(t, srv.testAdminTierOn())
+	d = srv.authzService.Decide(ctx, req)
+	t.Logf("decide, tier off (step 3 clamp only): allowed=%v denied_by=%q reason=%q deny_cause=%q", d.Allowed, d.DeniedBy, d.Reason, d.DenyCause)
+	assert.False(t, d.Allowed, "tier off: the clamp's kind read refuses")
+	assert.Equal(t, DenyCauseResolutionError, d.DenyCause)
+
+	f.arm("")
+	d = srv.authzService.Decide(ctx, req)
+	assert.True(t, d.Allowed, "control: a readable kind admits: %s", d.Reason)
 }
