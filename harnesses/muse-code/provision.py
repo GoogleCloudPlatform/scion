@@ -281,9 +281,13 @@ class MuseInstaller(scion_harness.PluginInstaller):
         """A step after a successful `plugins install` failed. Remove the
         install (best effort) and re-raise, so the plugin is not recorded and
         is retried next start. If the removal cannot be confirmed, keep
-        ownership instead: return the ref so Scion records it. is_present
-        then reports it missing (not enabled, or registry unreadable), so it
-        is retried next start, and it is removed if the template drops it."""
+        ownership instead: return the ref so Scion records it, and it is
+        removed if the template drops it. When enable or the registry check
+        failed, is_present then reports it missing (not enabled, or registry
+        unreadable), so it is retried next start. When only approve failed,
+        the record stays enabled and is_present is true, so the approval is
+        not retried until the digest changes; real muse 1.4.6/1.4.7 never
+        asks for approval (smoke M2), so that case is not reachable today."""
         self._run("plugins", "remove", plugin.name, "--json")
         try:
             gone = self._record(plugin.name) is None
