@@ -60,7 +60,7 @@ Examples:
   scion artifact grants scion://artifact/5f1c2d3e-... --remove <grant-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}

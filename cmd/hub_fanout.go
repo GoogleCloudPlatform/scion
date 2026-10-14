@@ -64,11 +64,11 @@ func fanOutCredential(endpoint string) string {
 // hubGetsFullChain reports whether the hub at endpoint may be sent every
 // credential getHubClient would use: when the user chose it (explicit), or
 // when it is the effective hub of this invocation.
-func hubGetsFullChain(settings *config.Settings, endpoint string, explicit bool) bool {
+func hubGetsFullChain(endpoint string, explicit bool) bool {
 	if explicit {
 		return true
 	}
-	effective := GetHubEndpoint(settings)
+	effective := invocationHubEndpoint()
 	return effective != "" && sameHubURL(endpoint, effective)
 }
 

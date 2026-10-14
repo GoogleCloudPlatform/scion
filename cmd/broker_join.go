@@ -236,9 +236,9 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured; configure via SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or --hub flag")
+		return errHubNotConfigured
 	}
 
 	// The broker server does not have to be running yet: a provisioning

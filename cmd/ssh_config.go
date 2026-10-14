@@ -121,10 +121,9 @@ func defaultSSHCommandEnv() (*sshCommandEnv, error) {
 	if err != nil {
 		return nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path: %v", err)
 	}
-	// As for scion tunnel: --project names a hub project, and the settings
-	// come from the current directory's project or the global layer.
-	settings := tunnelSettings()
-	endpoint := tunnelEndpoint(settings)
+	// As for scion tunnel: --project names a hub project, and the hub is
+	// the one selected for this invocation.
+	endpoint := invocationHubEndpoint()
 	env := &sshCommandEnv{
 		home:     home,
 		exe:      exe,

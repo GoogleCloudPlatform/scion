@@ -466,19 +466,10 @@ func hubCheckHint(endpoint string) string {
 }
 
 // hintHubEndpoint returns the hub endpoint hubCheckHint describes: the
-// endpoint of the current invocation (the --hub flag, the active project's
-// settings, or the environment). It is only called on an error path, and
-// returns what it can without failing. Tests replace it.
+// endpoint of the current invocation (see invocationHub). It is only called
+// on an error path. Tests replace it.
 var hintHubEndpoint = func() string {
-	resolved, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	settings, err := config.LoadSettings(resolved)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	return GetHubEndpoint(settings)
+	return invocationHubEndpoint()
 }
 
 // emptyResponseNote replaces the hub-check hint when the hub answered a call
@@ -934,12 +925,13 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	opts.Env = localAgentStartEnv()
 
 	// Thread CLI-resolved hub endpoint so locally-started agents get
-	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
-	// var are resolved here; the agent's scion-agent.yaml can override
-	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
+	// hub connectivity. The hub selected for this invocation (--hub, the
+	// environment, a link entry or the current context) is resolved here;
+	// the agent's scion-agent.yaml can override inside Start() via
+	// hub.endpoint or env.SCION_HUB_ENDPOINT.
 	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
 		if !cliSettings.IsHubExplicitlyDisabled() {
-			if ep := GetHubEndpoint(cliSettings); ep != "" {
+			if ep := invocationHubEndpoint(); ep != "" {
 				if opts.Env == nil {
 					opts.Env = make(map[string]string)
 				}

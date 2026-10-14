@@ -148,14 +148,12 @@ func loadUseContext(stderr io.Writer) *config.CLIContext {
 // Source codes of the effective hub and project (JSON "source"), and their
 // display labels.
 const (
-	useSourceFlag            = "flag"
-	useSourceEnv             = "env"
-	useSourceProjectSettings = "project_settings"
-	useSourceDirectory       = "directory"
-	useSourceContext         = targetSourceContext
-	useSourceGlobalSettings  = "global_settings"
-	useSourceGlobal          = "global"
-	useSourceNone            = "none"
+	useSourceFlag      = "flag"
+	useSourceEnv       = "env"
+	useSourceDirectory = targetSourceDirectory
+	useSourceContext   = targetSourceContext
+	useSourceGlobal    = "global"
+	useSourceNone      = "none"
 )
 
 // useTarget is the effective hub and project of the invocation, computed
@@ -193,19 +191,6 @@ func describeUseTarget(c *config.CLIContext) useTarget {
 		t.HubEndpoint, t.HubSource, t.HubLabel = hubEndpoint, useSourceFlag, "--hub flag"
 	case envHub != "":
 		t.HubEndpoint, t.HubSource, t.HubLabel = envHub, useSourceEnv, envName
-	case inDir:
-		if ep, scope := fileHubEndpoint(dir, dirIsGlobal); ep != "" {
-			t.HubEndpoint = ep
-			if scope == "project" {
-				t.HubSource, t.HubLabel = useSourceProjectSettings, "project settings: "+displayProjectDir(dir)
-			} else {
-				t.HubSource, t.HubLabel = useSourceGlobalSettings, "global settings"
-			}
-		}
-	default:
-		if ep, _ := fileHubEndpoint("", true); ep != "" {
-			t.HubEndpoint, t.HubSource, t.HubLabel = ep, useSourceGlobalSettings, "global settings"
-		}
 	}
 	if t.HubEndpoint == "" {
 		t.HubSource, t.HubLabel = useSourceNone, "none"

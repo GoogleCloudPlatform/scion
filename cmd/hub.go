@@ -599,9 +599,9 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	if hubProfileSelected() {
 		return openHubProfileClient()
 	}
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
+		return nil, errHubNotConfigured
 	}
 	return hubClientForEndpoint(settings, endpoint)
 }
@@ -675,13 +675,13 @@ type hubEndpointScope struct {
 	// Endpoint is the resolved value.
 	Endpoint string
 	// Source is the JSON source value shared with 'scion use': "flag",
-	// "env", "directory", "project_settings", "context",
-	// "global_settings" or "none".
+	// "env", "directory", "context" or "none".
 	Source string
 	// Label is the display label of Source, as 'scion use' shows it.
 	Label string
-	// Inherited is true when a project-scoped invocation uses the global
-	// settings or the environment.
+	// Inherited is true when a project-scoped invocation uses a hub that
+	// does not come from the project: the environment's or the current
+	// hub (as the global settings' endpoint was before the hub list).
 	Inherited bool
 }
 
@@ -689,7 +689,7 @@ type hubEndpointScope struct {
 // the same sources and labels as bare 'scion use' (describeUseTarget).
 func getHubEndpointScope(isGlobal bool, t useTarget) hubEndpointScope {
 	s := hubEndpointScope{Endpoint: t.HubEndpoint, Source: t.HubSource, Label: t.HubLabel}
-	if !isGlobal && (t.HubSource == useSourceGlobalSettings || t.HubSource == useSourceEnv) {
+	if !isGlobal && (t.HubSource == useSourceContext || t.HubSource == useSourceEnv) {
 		s.Inherited = true
 	}
 	return s
@@ -737,7 +737,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	localWorkstation := endpoint != "" && isLocalWorkstationEndpoint(endpoint)
 	deprecated := deprecatedHubModeKeys(settings)
 
@@ -766,7 +766,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			"endpoint":          endpoint,
 			"endpointSource":    endpointScope.Source,
 			"endpointInherited": endpointScope.Inherited,
-			"configured":        hubConfigured(settings),
+			"configured":        hubConfigured(),
 			"localWorkstation":  localWorkstation,
 			"projectId":         settings.ProjectID,
 			"scionVersionLocal": version.Short(),
@@ -776,8 +776,6 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		}
 		if settings.Hub != nil {
 			status["brokerId"] = settings.Hub.BrokerID
-			status["hasToken"] = settings.Hub.Token != ""
-			status["hasApiKey"] = settings.Hub.APIKey != ""
 			status["hasBrokerToken"] = settings.Hub.BrokerToken != ""
 		}
 
@@ -854,7 +852,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	if note := endpointSourceNote(endpointScope); note != "" {
 		fmt.Println(note)
 	}
-	if !hubConfigured(settings) {
+	if !hubConfigured() {
 		fmt.Println("            " + errHubNotConfigured.Error())
 	} else {
 		fmt.Printf("Local workstation: %s\n", yesNo(localWorkstation))
@@ -2354,7 +2352,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
 		return errHubLinkNoEndpoint
 	}
@@ -2862,7 +2860,7 @@ func unlinkGateOpen(ownLinked *bool) bool {
 // with this directory's project ID, used only to word the unlink output. Any
 // failure (no endpoint, unreachable hub, not found) returns false.
 func hubHasProjectForUnlink(settings *config.Settings) bool {
-	if settings == nil || settings.ProjectID == "" || !hubConfigured(settings) {
+	if settings == nil || settings.ProjectID == "" || !hubConfigured() {
 		return false
 	}
 	client, err := getHubClient(settings)
