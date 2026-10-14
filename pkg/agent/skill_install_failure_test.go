@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -267,10 +268,10 @@ func TestProvisionAgent_RequiredSkillInstallFailure_YieldsSkillResolutionError(t
 		t.Fatalf("provision required install failure: expected a *SkillResolutionError, got %T: %v", err, err)
 	}
 	if skillErr.URI != installFailMissingURI {
-		t.Errorf("error URI = %q, want %q", skillErr.URI, installFailMissingURI)
+		t.Errorf("provision error URI = %q, want %q", skillErr.URI, installFailMissingURI)
 	}
 	if skillErr.Code != SkillErrCodeInstallFailed {
-		t.Errorf("error code = %q, want %q", skillErr.Code, SkillErrCodeInstallFailed)
+		t.Errorf("provision error code = %q, want %q", skillErr.Code, SkillErrCodeInstallFailed)
 	}
 }
 
@@ -351,5 +352,154 @@ func TestProvisionAgent_OptionalSkillMissingFromResponse_Warns(t *testing.T) {
 	}
 	if !hasSkipWarning(*records, "optional skill missing from resolver response; skipped", installFailMissingURI, "missing from resolver response") {
 		t.Errorf("missing skip: expected a Warn naming %s, got %d records", installFailMissingURI, len(*records))
+	}
+}
+
+// TestInstallResolvedSkills_OptionalCacheFallthroughLeavesNoPartialDir checks
+// that an optional skill whose cache copy fails partway and whose download
+// then fails is skipped without leaving a half-copied file in skills/<name>,
+// and without removing what was already there.
+func TestInstallResolvedSkills_OptionalCacheFallthroughLeavesNoPartialDir(t *testing.T) {
+	content := []byte("# Cached Skill")
+	srv := newInstallFailServer(t, content)
+	fileHash := transfer.HashBytes(content)
+	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "SKILL.md", Hash: fileHash}})
+
+	// A cache entry whose copy fails after SKILL.md: copyDir copies entries
+	// in name order, and "zz-broken" is a dangling symlink that cannot be
+	// opened (independent of permissions, so it also fails as root).
+	cacheDir := t.TempDir()
+	cache, err := templatecache.New(cacheDir, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachedPath, err := cache.Put(bundleHash, map[string][]byte{"SKILL.md": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cacheDir, "does-not-exist"), filepath.Join(cachedPath, "zz-broken")); err != nil {
+		t.Fatal(err)
+	}
+	ctx := ContextWithSkillCache(context.Background(), cache)
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+	// A skill already at the destination (e.g. from the template).
+	existing := filepath.Join(skillsDest, "cached-skill")
+	if err := os.MkdirAll(existing, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "LOCAL.md"), []byte("local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	skills := []ResolvedSkill{{
+		Name:     "cached-skill",
+		URI:      "skill://scion/core/cached-skill@1.0",
+		Version:  "1.0.0",
+		Hash:     bundleHash,
+		Optional: true,
+		Files:    []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/missing/SKILL.md", Hash: fileHash}},
+	}}
+	_, skipped, err := installResolvedSkills(ctx, skills, skillsDest, agentHome)
+	if err != nil {
+		t.Fatalf("cache fallthrough: optional skill failure must not fail the install, got: %v", err)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("cache fallthrough: expected 1 skipped skill, got %+v", skipped)
+	}
+	if _, err := os.Stat(filepath.Join(existing, "SKILL.md")); !os.IsNotExist(err) {
+		t.Errorf("cache fallthrough: half-copied SKILL.md left in skills/cached-skill (stat err = %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(existing, "LOCAL.md")); err != nil {
+		t.Errorf("cache fallthrough: pre-existing skill content was removed: %v", err)
+	}
+}
+
+// TestInstallResolvedSkills_OptionalCollisionWinnerKeepsRequiredLoserRequired
+// checks that when an optional skill wins a dest-name collision against a
+// required one and then fails to install, the install fails as required
+// rather than silently dropping the required declaration.
+func TestInstallResolvedSkills_OptionalCollisionWinnerKeepsRequiredLoserRequired(t *testing.T) {
+	content := []byte("# Foo")
+	srv := newInstallFailServer(t, content)
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	const requiredURI = "gh://a/repo/foo@main"
+	const optionalURI = "gh://b/repo/foo@main"
+	skills := []ResolvedSkill{
+		{
+			Name: "foo", URI: requiredURI, Version: "main", Scope: "hub",
+			Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/good/SKILL.md", Hash: transfer.HashBytes(content)}},
+		},
+		{
+			Name: "foo", URI: optionalURI, Version: "main", Scope: "project", Optional: true,
+			Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/missing/SKILL.md"}},
+		},
+	}
+	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("collision: expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if skillErr.URI != optionalURI || skillErr.Code != SkillErrCodeInstallFailed {
+		t.Errorf("collision: got URI %q code %q, want %q %q", skillErr.URI, skillErr.Code, optionalURI, SkillErrCodeInstallFailed)
+	}
+}
+
+// TestInstallResolvedSkills_TransportErrorScrubsURL checks that a download
+// transport failure names neither the URL's path nor its query (a signed
+// URL's token) in the user-facing text or in the logged error.
+func TestInstallResolvedSkills_TransportErrorScrubsURL(t *testing.T) {
+	const secret = "SECRETSIG"
+	// Port 1 on loopback: the connection is refused.
+	fileURL := "https://127.0.0.1:1/private/path/SKILL.md?sig=" + secret
+	newSkills := func(optional bool) []ResolvedSkill {
+		return []ResolvedSkill{{
+			Name: "scrub-skill", URI: "skill://scion/core/scrub-skill@1.0", Version: "1.0.0", Optional: optional,
+			Files: []ResolvedFile{{Path: "SKILL.md", URL: fileURL}},
+		}}
+	}
+	leaks := func(s string) bool { return strings.Contains(s, secret) || strings.Contains(s, "/private/path") }
+
+	agentHome := t.TempDir()
+	skillsDest := filepath.Join(agentHome, ".claude", "skills")
+
+	// Required: the user-facing error.
+	_, _, err := installResolvedSkills(context.Background(), newSkills(false), skillsDest, agentHome)
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("transport scrub: expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if !strings.HasPrefix(skillErr.Message, "failed to download SKILL.md: download failed: ") {
+		t.Errorf("transport scrub: message %q should give the transport cause", skillErr.Message)
+	}
+	if leaks(skillErr.Message) || leaks(err.Error()) {
+		t.Errorf("transport scrub: user-facing error leaks the URL: %q", err.Error())
+	}
+
+	// Optional: the logged error.
+	records := captureSlog(t)
+	if _, _, err := installResolvedSkills(context.Background(), newSkills(true), skillsDest, agentHome); err != nil {
+		t.Fatalf("transport scrub: optional skill must be skipped, got: %v", err)
+	}
+	var logged string
+	for _, r := range *records {
+		if r.Level != slog.LevelWarn || r.Message != "optional skill could not be installed; skipped" {
+			continue
+		}
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "error" {
+				logged = a.Value.String()
+			}
+			return true
+		})
+	}
+	if logged == "" {
+		t.Fatal("transport scrub: no skip Warn with an error attr")
+	}
+	if leaks(logged) {
+		t.Errorf("transport scrub: logged error leaks the URL: %q", logged)
 	}
 }
