@@ -99,7 +99,7 @@ func TestCloudRunSandboxStarting_ProbeOutputHolder(t *testing.T) {
 // Fault checks D1 and D2: the cleanup delete captures its output through a
 // pipe again, D1 in runDeleteWithTimeout (workaround on: the wait then
 // ends only at the 10 s workaround timeout) and D2 in runDeletePlain
-// (workaround off: it ends when the 20 s holder exits). Every probe fails
+// (workaround off: it ends when the 15 s holder exits). Every probe fails
 // at once; `delete` exits 0 leaving the holder. The start returns its
 // dead-on-arrival error after the 3.5 s probe ladder, well within the
 // 10 s cleanup budget on top, with one delete and no entry left.
@@ -109,7 +109,7 @@ func TestCloudRunSandboxStarting_DeadOnArrivalCleanupHolder(t *testing.T) {
 			withDeleteWorkaround(t, workaround)
 			rt, env := newStartingRuntime(t, startScripts{
 				exec: `echo "sandbox not running"; exit 1`,
-				del:  `sleep 20 & echo $! > "$PIDFILE"; exit 0`,
+				del:  `sleep 15 & echo $! > "$PIDFILE"; exit 0`,
 			})
 			begin := time.Now()
 			err := recvErr(t, runSandboxAsync(context.Background(), rt, startingCfg(t, "run-a")), "Run")
