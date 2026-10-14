@@ -110,7 +110,7 @@ var identityOperations = []OperationSpec{
 		DelegationDescription: "Actor must hold all permissions in the bound role (CanDelegate)",
 		AuthorityEval:         AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "role.binding.create",
+			EventType:     "role_binding_create",
 			ContextFields: []string{"actor_id"},
 			AfterFields:   []string{"principal_id", "role_name", "scope"},
 			Atomic:        true,
@@ -137,7 +137,7 @@ var identityOperations = []OperationSpec{
 		},
 		AuthorityEval: AuthorityEvalProposedPost,
 		AuditObligation: &AuditObligation{
-			EventType:     "role.binding.delete",
+			EventType:     "role_binding_delete",
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"principal_id", "role_name", "scope"},
 			Atomic:        true,
@@ -165,7 +165,7 @@ var identityOperations = []OperationSpec{
 		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions",
 		AuthorityEval:         AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "group.member.add",
+			EventType:     "group_member_add",
 			ContextFields: []string{"actor_id", "group_id"},
 			AfterFields:   []string{"member_principal_id"},
 			Atomic:        true,
@@ -195,7 +195,7 @@ var identityOperations = []OperationSpec{
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "group.member.remove",
+			EventType:     "group_member_remove",
 			ContextFields: []string{"actor_id", "group_id"},
 			BeforeFields:  []string{"member_principal_id"},
 			Atomic:        true,
@@ -218,7 +218,7 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:     "group.delete",
+			EventType:     "group_delete",
 			ContextFields: []string{"actor_id"},
 			BeforeFields:  []string{"group_id", "group_name"},
 			Atomic:        true,

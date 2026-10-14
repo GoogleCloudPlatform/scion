@@ -158,6 +158,9 @@ func TestEnsureHubReady_NoEndpoint(t *testing.T) {
 		{name: "stale hub.enabled=true does not need an endpoint any less", settings: "project_id: p1\nhub:\n  enabled: true\n", want: plain},
 		{name: "local-mode project with agents gets the migration text", settings: "project_id: p1\n", agents: []string{"a1"}, want: MigrationNotice},
 		{name: "a linked project with agents gets the plain text", settings: "project_id: p1\nhub:\n  linked: true\n", agents: []string{"a1"}, want: plain},
+		// The CLI's hub comes from the hub list (passed as EndpointOverride)
+		// or the environment; a hub.endpoint in settings is not read.
+		{name: "a hub.endpoint in settings is not read", settings: "project_id: p1\nhub:\n  endpoint: http://127.0.0.1:1\n  linked: true\n", want: plain},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,6 +180,18 @@ func TestEnsureHubReady_NoEndpoint(t *testing.T) {
 				t.Errorf("error text = %q, want %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// A hub project reference is resolved on the endpoint the caller passes or
+// the environment names; a hub.endpoint in the settings is not read.
+func TestEnsureHubReady_HubRefIgnoresSettingsEndpoint(t *testing.T) {
+	home := clearHubCredentialEnv(t)
+	// A closed loopback port: reading it would fail fast with another error.
+	writeGlobalSettings(t, home, "project_id: p1\nhub:\n  endpoint: http://127.0.0.1:1\n")
+	hubCtx, err := EnsureHubReady("some-hub-project", EnsureHubReadyOptions{AutoConfirm: true})
+	if hubCtx != nil || !errors.Is(err, ErrHubNotConfigured) {
+		t.Fatalf("= %+v, %v; want ErrHubNotConfigured", hubCtx, err)
 	}
 }
 

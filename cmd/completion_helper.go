@@ -114,25 +114,40 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 	}
 
 	// 3. Fetch Hub agents (when a hub endpoint is configured)
-	addNames(fetchHubAgentsForCompletion(resolvedPath))
+	addNames(fetchHubAgentsForCompletion(cmd, resolvedPath))
 
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completionTargetResolver resolves the hub of a shell completion
+// (resolveCompletionTarget). It is assigned in init(), not called
+// directly: the resolver reads command variables (commandRequiresProject
+// reads reincarnateCmd), and the completion functions are themselves set on
+// command variables (ValidArgsFunction), so a direct call would be a
+// package initialization cycle.
+var completionTargetResolver func(cmd *cobra.Command) error
+
+func init() { completionTargetResolver = resolveCompletionTarget }
+
 // fetchHubAgentsForCompletion fetches agent names from the Hub for shell completion.
 // It uses a short timeout and falls back to cache if the Hub is slow or unavailable.
 // This function is designed to be silent - it never returns errors to avoid breaking completion.
-func fetchHubAgentsForCompletion(projectPath string) []string {
+// Completion skips PersistentPreRunE, so it resolves the hub itself (from
+// the hub list, without imports or output; see completionTargetResolver).
+func fetchHubAgentsForCompletion(cmd *cobra.Command, projectPath string) []string {
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return nil
 	}
-
-	// Without a hub there is nothing to ask
-	if !hubConfigured(settings) {
+	if err := completionTargetResolver(cmd); err != nil {
 		return nil
 	}
-	endpoint := GetHubEndpoint(settings)
+
+	// Without a hub there is nothing to ask
+	if !hubConfigured() {
+		return nil
+	}
+	endpoint := invocationHubEndpoint()
 
 	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)
@@ -162,13 +177,12 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 	}
 
 	// Add authentication - non-interactive only
-	// Check settings for explicit auth first
+	// An explicit token from the environment first (tokens in settings
+	// files are not read).
 	authConfigured := false
-	if settings.Hub != nil {
-		if settings.Hub.Token != "" {
-			opts = append(opts, hubclient.WithBearerToken(settings.Hub.Token))
-			authConfigured = true
-		}
+	if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+		opts = append(opts, hubclient.WithBearerToken(token))
+		authConfigured = true
 	}
 
 	// Check for OAuth credentials (non-interactive)
