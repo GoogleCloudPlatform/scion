@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
+	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -140,10 +142,14 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 		_ = w.relay.Shutdown(sctx, true, time.Second)
 	})
 
+	// The target's hub URL is hub A: grant keys always come from the hub.
+	publicA := httptest.NewServer(cf.srv.Handler())
+	t.Cleanup(publicA.Close)
+
 	w.conduitProxyFixture = &conduitProxyFixture{
 		relayFixture: &relayFixture{conduitFixture: cf, regStore: regStore, launched: launched},
 		app:          app,
-		base:         "http://" + addr,
+		base:         publicA.URL,
 		agentSession: conduit.Config{Interceptor: func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
 			if open := f.GetStreamOpen(); dir == conduit.Inbound && open != nil {
 				w.mu.Lock()
@@ -153,7 +159,7 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 			return []*conduitv1.Frame{f}
 		}},
 	}
-	w.startAgent(t)
+	w.startAgentDialingRelay(t, addr)
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)
@@ -161,6 +167,66 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 		launched.OwnerID, "owner@conduit.test", "Owner", store.UserRoleMember, ClientTypeWeb)
 	require.NoError(t, err)
 	return w
+}
+
+// startAgentDialingRelay starts the sciontool agent with hub A (w.base) as
+// its hub URL and waits until the separate relay admits its session.
+// Targets reach a separate relay through the hub conduit ingress (proxy or
+// redirect). Until that ingress exists, this test dials the relay directly
+// for the conduit endpoint only, while grant keys always come from the hub.
+func (w *separateRelayWorld) startAgentDialingRelay(t *testing.T, relayAddr string) {
+	t.Helper()
+	guardSciontoolLog()
+	tok := w.agentToken(t, w.launched)
+	w.agentClock = clock.NewFake(w.clock.Now())
+	admitted := make(chan *conduitv1.Welcome, 4)
+	// The conduit dial goes to the relay; every other request (grant keys
+	// among them) goes to the hub URL.
+	toRelay := &websocket.Dialer{
+		HandshakeTimeout: 45 * time.Second,
+		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, relayAddr)
+		},
+	}
+	a, err := sconduit.New(sconduit.Options{
+		HubURL:    w.base,
+		AgentID:   w.launched.ID,
+		ProjectID: w.launched.ProjectID,
+		LaunchID:  w.launched.RunID,
+		Token:     func() string { return tok },
+		OnSession: func(wel *conduitv1.Welcome) {
+			w.sessions.Add(1)
+			admitted <- wel
+		},
+		OnEnd:   w.onEnd,
+		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
+		Clock:   fixtureClock{Fake: w.agentClock, now: w.clock.Now},
+		Session: w.agentSession,
+		WS:      toRelay,
+	})
+	require.NoError(t, err)
+	w.sciontool = a
+	ctx, cancel := context.WithCancel(context.Background())
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		_ = a.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("conduit agent did not stop")
+		}
+	})
+	select {
+	case wel := <-admitted:
+		require.Equal(t, w.launched.RunID, wel.GetEndpointIncarnation())
+	case <-time.After(10 * time.Second):
+		t.Fatal("conduit session not admitted")
+	}
 }
 
 // getB sends a request through hub B's port proxy route.
