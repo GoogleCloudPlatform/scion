@@ -443,6 +443,12 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 //     (store.IsFederatedSyntheticEmail);
 //   - this hub's platform service account (isReservedPlatformIdentity with
 //     opts.PlatformAuthSA).
+//
+// When the hub gains a configured list of test driver principals
+// (GoogleCloudPlatform/scion#3535), its emails belong in this check too,
+// passed in FederationAuthOptions like PlatformAuthSA. A peer hub's own
+// list is not known here; extractHubUserClaims refuses any Google service
+// account email on a peer hub user access credential.
 func federationPrincipalRefusal(identity FederatedIdentity, opts FederationAuthOptions) string {
 	var email string
 	switch id := identity.(type) {
