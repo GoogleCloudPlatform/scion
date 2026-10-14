@@ -403,28 +403,116 @@ func TestResolveInvocationTarget_HubURLIsOneOff(t *testing.T) {
 	assert.Equal(t, string(before), string(after), "the URL is not added to the hub list")
 }
 
-// The server subtree never reads context.yaml, so a nickname is left as it
-// is there, even with an unreadable file. The runtime-broker commands
-// resolve the hub like every hub command.
+// Under the server commands and 'runtime-broker start' (the processes) a
+// --hub nickname resolves to its entry's endpoint, as for other commands,
+// without contacting any hub. Nothing else is taken from the context: no
+// project, and no current hub when --hub is not given. The runtime-broker
+// administration commands resolve like every hub command: a nickname, or
+// else the current hub.
 func TestResolveInvocationTarget_NicknameScope(t *testing.T) {
 	setupContextTest(t)
-	saveTestContext(t, ctxTestHub, "")
+	var requests int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+	}))
+	t.Cleanup(srv.Close)
+	saveTestContext(t, srv.URL, ctxTestProjectID)
 
+	processes := [][]string{{"server", "start"}, {"runtime-broker", "start"}, {"broker", "start"}}
+	admin := [][]string{{"runtime-broker", "register"}, {"broker", "join"}}
+	for _, args := range append(append([][]string{}, processes...), admin...) {
+		resetContextTargets()
+		hubEndpoint = "prod"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		assert.Equal(t, srv.URL, hubEndpoint, "%v: the nickname resolves to its endpoint", args)
+		assert.Equal(t, "prod", hubFlagName, "%v", args)
+		assert.Empty(t, hubSource, "%v: a nickname is a --hub flag, not the context", args)
+
+		resetContextTargets()
+		hubEndpoint = "staging"
+		err := resolveInvocationTarget(findCommand(t, args...), ModeHuman)
+		require.Error(t, err, "%v", args)
+		assert.Equal(t, "unknown hub 'staging'; registered hubs: prod", err.Error(), "%v", args)
+	}
+	for _, args := range processes {
+		resetContextTargets()
+		hubEndpoint = "prod"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		assert.Empty(t, projectPath, "%v: no context project", args)
+		assert.Empty(t, projectSource, "%v", args)
+
+		resetContextTargets()
+		require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		assert.Empty(t, hubEndpoint, "%v: the current hub does not apply without --hub", args)
+		assert.Empty(t, projectPath, "%v", args)
+	}
+	for _, args := range admin {
+		resetContextTargets()
+		require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		assert.Equal(t, srv.URL, hubEndpoint, "%v: the current hub applies without --hub", args)
+		assert.Equal(t, targetSourceContext, hubSource, "%v", args)
+	}
+	mu.Lock()
+	assert.Zero(t, requests, "resolving a nickname contacts no hub")
+	mu.Unlock()
+
+	// With an unreadable context.yaml, under the processes a URL is used as
+	// it is and the file is not read. A nickname cannot be looked up there
+	// or elsewhere.
 	require.NoError(t, os.WriteFile(contextFilePath(), []byte("version: [1\n"), 0o600))
-	hubEndpoint = "prod"
-	stderr := captureStderr(t, func() {
-		require.NoError(t, resolveInvocationTarget(findCommand(t, "server", "start"), ModeHuman))
-	})
-	assert.Equal(t, "prod", hubEndpoint)
-	assert.Empty(t, stderr, "server start reads no context.yaml")
-
-	// Elsewhere an unreadable file makes a nickname an error.
-	for _, args := range [][]string{{"list"}, {"runtime-broker", "register"}} {
+	for _, args := range processes {
+		resetContextTargets()
+		hubEndpoint = "https://other.example.com"
+		stderr := captureStderr(t, func() {
+			require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		})
+		assert.Equal(t, "https://other.example.com", hubEndpoint, "%v", args)
+		assert.Empty(t, hubFlagName, "%v", args)
+		assert.Empty(t, stderr, "%v reads no context.yaml for a URL", args)
+		assert.False(t, contextWarned, "%v reads no context.yaml for a URL", args)
+	}
+	for _, args := range append(append([][]string{{"list"}}, processes...), admin...) {
+		resetContextTargets()
 		hubEndpoint = "prod"
 		err := resolveInvocationTarget(findCommand(t, args...), ModeHuman)
 		require.ErrorIs(t, err, config.ErrCLIContextCorrupt, "%v", args)
 		assert.Contains(t, err.Error(), "cannot look up hub 'prod'", "%v", args)
 	}
+}
+
+// Under the processes a --hub nickname is looked up in the hub list as it
+// is: the pending one-time import of the global settings does not run, so
+// context.yaml is not written.
+func TestResolveInvocationTarget_NicknameUnderProcessesWritesNothing(t *testing.T) {
+	setupContextTest(t)
+	saveTestContext(t, ctxTestHub, "")
+	enableGlobalHubImport(t)
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://imported.example.com\n")
+	before, err := os.ReadFile(contextFilePath())
+	require.NoError(t, err)
+
+	for _, args := range [][]string{{"server", "start"}, {"runtime-broker", "start"}} {
+		resetContextTargets()
+		hubEndpoint = "prod"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, args...), ModeHuman), "%v", args)
+		assert.Equal(t, ctxTestHub, hubEndpoint, "%v", args)
+		after, err := os.ReadFile(contextFilePath())
+		require.NoError(t, err)
+		require.Equal(t, string(before), string(after), "%v: context.yaml is not written", args)
+	}
+}
+
+// Through the root command, an unknown nickname stops 'runtime-broker
+// register' before it runs, with the error other commands give.
+func TestRuntimeBrokerRegister_UnknownHubNickname(t *testing.T) {
+	setupRegistryTest(t)
+	saveTestContext(t, ctxTestHub, "")
+	_, _, err := runScion(t, "runtime-broker", "register", "--hub", "staging")
+	require.Error(t, err)
+	assert.Equal(t, "unknown hub 'staging'; registered hubs: prod", err.Error())
 }
 
 // The first run that reads the context imports the global hub.endpoint as

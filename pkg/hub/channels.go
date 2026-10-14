@@ -63,25 +63,35 @@ type channelEntry struct {
 // Each config is used to instantiate the appropriate channel implementation.
 // Invalid or unknown channel types are logged and skipped.
 func NewChannelRegistry(configs []ChannelConfig, log *slog.Logger) *ChannelRegistry {
+	r, _ := newChannelRegistry(configs, log)
+	return r
+}
+
+// newChannelRegistry is NewChannelRegistry that also returns the indexes
+// of the configs it skipped, in order (ptone/scion#4466).
+func newChannelRegistry(configs []ChannelConfig, log *slog.Logger) (*ChannelRegistry, []int) {
 	r := &ChannelRegistry{log: log}
+	var skipped []int
 
 	for i, cfg := range configs {
 		ch, err := newChannelFromConfig(cfg)
 		if err != nil {
 			log.Warn("Skipping invalid notification channel",
 				"index", i, "type", cfg.Type, "error", err)
+			skipped = append(skipped, i)
 			continue
 		}
 		if err := ch.Validate(); err != nil {
 			log.Warn("Skipping notification channel with invalid config",
 				"index", i, "type", cfg.Type, "error", err)
+			skipped = append(skipped, i)
 			continue
 		}
 		r.entries = append(r.entries, channelEntry{channel: ch, config: cfg})
 		log.Info("Notification channel registered", "type", cfg.Type)
 	}
 
-	return r
+	return r, skipped
 }
 
 // Dispatch sends a structured message to all registered channels whose

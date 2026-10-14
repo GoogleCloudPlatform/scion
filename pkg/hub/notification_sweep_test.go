@@ -112,6 +112,11 @@ func TestRetryDispatch_AlreadyClaimed(t *testing.T) {
 
 	// No dispatch call should have been made
 	assert.Empty(t, env.dispatcher.getCalls())
+	// The lost claim attempted nothing, so nothing is counted, and the other
+	// caller's claim is left alone (ptone/scion#4800).
+	n := getNotification(t, env, notifs[0].ID)
+	assert.Zero(t, n.DispatchAttempts, "a retry that loses the claim must not count an attempt")
+	assert.Empty(t, n.DispatchOutcome)
 }
 
 func TestRetryDispatch_NoBroker_Reverts(t *testing.T) {
@@ -201,6 +206,8 @@ func TestRetryDispatch_SubscriberDeleted(t *testing.T) {
 	for _, n := range allNotifs {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when subscriber is permanently deleted")
+			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
 }
@@ -230,6 +237,8 @@ func TestRetryDispatch_WatchedAgentDeleted(t *testing.T) {
 	for _, n := range allNotifs {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when watched agent is deleted")
+			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
 }
@@ -425,6 +434,14 @@ func TestNotificationOrphanGCHandler(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetNotification(ctx, unacked)
 	assert.NoError(t, err)
+}
+
+// getNotification reads the notification with the given ID.
+func getNotification(t *testing.T, env *notificationTestEnv, id string) *store.Notification {
+	t.Helper()
+	n, err := env.store.GetNotification(context.Background(), id)
+	require.NoError(t, err)
+	return n
 }
 
 // notificationDispatched returns the dispatched flag of the notification
@@ -817,4 +834,146 @@ func TestDrainUndispatchedNotifications_StopsAfterBrokerUnreachable(t *testing.T
 	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "the drain must stop attempting an unreachable broker")
 	assert.False(t, notificationDispatched(t, env, a1))
 	assert.False(t, notificationDispatched(t, env, a2))
+}
+
+// A delivered retry stores the delivered outcome and counts its attempt
+// (ptone/scion#4800).
+func TestRetryDispatch_Delivered_RecordsOutcomeAndAttempts(t *testing.T) {
+	env := setupRetryTest(t)
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	n := getNotification(t, env, notifs[0].ID)
+	assert.True(t, n.Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome)
+	assert.Equal(t, 1, n.DispatchAttempts)
+}
+
+// A notification whose retries are exhausted (delivery fails past
+// notificationRetryMaxAge) is stored as failed, not as delivered, with every
+// attempt counted (ptone/scion#4800).
+func TestRetryDispatch_Exhausted_RecordsFailedOutcomeAndAttempts(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
+	ctx := context.Background()
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: env.sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   env.subscriber.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		CreatedAt:      time.Now().Add(-notificationRetryMaxAge - time.Hour),
+	}
+	require.NoError(t, env.store.CreateNotification(ctx, notif))
+	// Two earlier failed attempts (the primary dispatch and one sweep).
+	require.NoError(t, env.store.RecordNotificationDispatchAttempt(ctx, notif.ID))
+	require.NoError(t, env.store.RecordNotificationDispatchAttempt(ctx, notif.ID))
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	n := getNotification(t, env, notif.ID)
+	assert.True(t, n.Dispatched, "a given-up notification stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Equal(t, 3, n.DispatchAttempts)
+}
+
+// Through the sweep handler: a failed sweep attempt is counted and leaves no
+// outcome, and the sweep that delivers stores delivered with both attempts
+// (ptone/scion#4800).
+func TestSweepHandler_CountsAttemptsUntilDelivered(t *testing.T) {
+	env := setupRetryTest(t)
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
+	ctx := context.Background()
+
+	srv := &Server{
+		store:                  env.store,
+		agentLifecycleLog:      slog.Default(),
+		notificationDispatcher: env.nd,
+	}
+	handler := srv.notificationDispatchSweepHandler()
+
+	pending, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	id := pending[0].ID
+
+	handler(ctx)
+	n := getNotification(t, env, id)
+	assert.False(t, n.Dispatched)
+	assert.Empty(t, n.DispatchOutcome, "a failed attempt that will be retried has no outcome")
+	assert.Equal(t, 1, n.DispatchAttempts)
+
+	env.dispatcher.setReturnErr(nil)
+
+	handler(ctx)
+	n = getNotification(t, env, id)
+	assert.True(t, n.Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome)
+	assert.Equal(t, 2, n.DispatchAttempts)
+}
+
+// A notification whose subscription is gone is given up and stored as failed,
+// with no attempt counted (ptone/scion#4800).
+func TestRetryDispatch_SubscriptionDeleted_RecordsFailedOutcome(t *testing.T) {
+	env := setupRetryTest(t)
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	require.NoError(t, env.store.DeleteNotificationSubscription(ctx, env.sub.ID))
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	assert.Empty(t, env.dispatcher.getCalls())
+	n := getNotification(t, env, notifs[0].ID)
+	assert.True(t, n.Dispatched, "a notification whose subscription is gone stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
+}
+
+// The failed outcome of an exhausted notification is still recorded when the
+// caller's deadline ends the attempt: the outcome write does not run on the
+// expired caller context (ptone/scion#4800).
+func TestRetryDispatch_ExhaustedOutcomeSurvivesExpiredParentContext(t *testing.T) {
+	setRetryAttemptTimeout(t, 5*time.Second)
+
+	env := setupNotificationTest(t)
+	env.dispatcher.setReturnErr(ErrMessageDeferred)
+	notifID := createUndispatchedNotification(t, env, env.sub, notificationRetryMaxAge+time.Hour)
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(context.Background(), "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	require.Equal(t, notifID, notifs[0].ID)
+
+	// The parent deadline (well before the 5s attempt timeout) ends the
+	// attempt, so the outcome write runs after the parent context expired.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	env.nd.RetryDispatch(ctx, &notifs[0])
+	require.Error(t, ctx.Err(), "the parent context must have expired during the attempt")
+
+	require.NotEmpty(t, env.dispatcher.getCalls())
+	n := getNotification(t, env, notifID)
+	assert.True(t, n.Dispatched, "a given-up notification stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome,
+		"the failed outcome must be recorded even after the caller's deadline")
+	assert.Equal(t, 1, n.DispatchAttempts)
 }

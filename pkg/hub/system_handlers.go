@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -814,6 +815,63 @@ type imageBuildLogEvent struct {
 	Line string `json:"line"`
 }
 
+// imageBuildLogMaxLine caps how many bytes of a single build-log line are
+// published. Longer lines are truncated, not fatal: the rest of the line is
+// read and discarded so the build keeps running.
+const imageBuildLogMaxLine = 1 << 20
+
+// imageBuildLogTruncatedFmt is appended (with imageBuildLogMaxLine) to a
+// build-log line that was cut at imageBuildLogMaxLine bytes.
+const imageBuildLogTruncatedFmt = " ... [line truncated at %d bytes]"
+
+// imageBuildLogReadBuf is the bufio.Reader size streamBuildLog reads with;
+// lines longer than this arrive from ReadLine in several fragments.
+const imageBuildLogReadBuf = 4096
+
+// streamBuildLog reads r line by line and calls emit for each line, without
+// the "\n" or "\r\n" terminator (a lone trailing "\r" on a final line with
+// no "\n" is kept). A line longer than imageBuildLogMaxLine is cut at that
+// length and marked as truncated. streamBuildLog reads r until EOF so that a
+// child process writing to r never blocks on a full pipe. On any other read
+// error it emits the pending partial line, makes a best-effort attempt to
+// discard what is left (a reader that keeps failing ends this at once; for a
+// pipe the realistic case is os.ErrClosed) and returns the error.
+func streamBuildLog(r io.Reader, emit func(string)) error {
+	br := bufio.NewReaderSize(r, imageBuildLogReadBuf)
+	var line []byte
+	truncated := false
+	flush := func() {
+		text := string(line)
+		if truncated {
+			text += fmt.Sprintf(imageBuildLogTruncatedFmt, imageBuildLogMaxLine)
+		}
+		emit(text)
+		line = line[:0]
+		truncated = false
+	}
+	for {
+		frag, isPrefix, err := br.ReadLine()
+		if err != nil {
+			if len(line) > 0 || truncated {
+				flush()
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			_, _ = io.Copy(io.Discard, br)
+			return err
+		}
+		if room := imageBuildLogMaxLine - len(line); len(frag) > room {
+			frag = frag[:room]
+			truncated = true
+		}
+		line = append(line, frag...)
+		if !isPrefix {
+			flush()
+		}
+	}
+}
+
 // imageBuildSubject returns the event subject for an image build's output.
 // Build output is delivered on the requesting user's own subject
 // (user.<userID>.images.<jobID>) rather than a shared system.* subject, so
@@ -934,11 +992,10 @@ func (s *Server) runImageBuild(ctx context.Context, subject, buildScript string,
 		return
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
-	}
-	if err := scanner.Err(); err != nil {
+	if err := streamBuildLog(stdout, func(line string) {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: line})
+	}); err != nil {
+		slog.Error("build: reading build log failed", "error", err)
 		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
 	}
 
@@ -1240,7 +1297,6 @@ type workstationSettingsRequest struct {
 }
 
 // handleWorkstationSettings handles PATCH /api/v1/system/workstation-settings.
-// It allows toggling workstation-level settings without requiring admin role.
 func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		MethodNotAllowed(w, http.MethodPatch)

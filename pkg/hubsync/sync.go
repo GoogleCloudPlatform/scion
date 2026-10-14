@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -36,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -1857,17 +1860,46 @@ func resolveEndpoint(opts EnsureHubReadyOptions) string {
 	return os.Getenv("SCION_HUB_URL")
 }
 
-// readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
-func readAgentTokenFile() string {
+// agentTokenFileRel is the agent token file's path relative to $HOME.
+var agentTokenFileRel = filepath.Join(".scion", sciontoolhub.TokenFile)
+
+// ReadAgentTokenFile reads the canonical agent token from
+// $HOME/.scion/scion-token through the shared agent token file reader, the
+// same implementation the agent-side hub client uses. The home directory
+// itself is trusted (it may be reached through a linked prefix); below it,
+// a symbolic link, special file, multi-link file or oversized file is
+// refused. It returns "" when HOME is unset, the file is absent, or the
+// file is refused. A refusal prints a warning (warnf) only when something
+// exists at the token path, so a credential file that is present but
+// unusable is not silently ignored, while a host with no token file (even
+// one whose ~/.scion is a link) stays silent.
+func ReadAgentTokenFile() string {
 	home := os.Getenv("HOME")
 	if home == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".scion", "scion-token"))
+	// Trusts HOME as set by the launching environment (the user on a host,
+	// the launcher in an agent). The directories above HOME must not be
+	// writable by this user or any less-trusted user, so HOME itself cannot be
+	// replaced; HOME may be writable. Entries below HOME are opened without
+	// following links.
+	token, err := sciontoolhub.ReadTokenFileUnder(home, agentTokenFileRel)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		// A refusal on the way to the file (for example ~/.scion being a
+		// link) reports ELOOP or ENOTDIR rather than ErrNotExist. Only warn
+		// when something actually exists at the token path; Lstat reads
+		// metadata only and cannot block on a special file. ENOTDIR from
+		// Lstat means ~/.scion is not a directory, so no token can exist.
+		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) || errors.Is(serr, syscall.ENOTDIR) {
+			return ""
+		}
+		warnf("ignoring agent token file: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return token
 }
 
 // createHubClient creates a new Hub client with proper authentication, and
@@ -1911,7 +1943,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
-	if token := readAgentTokenFile(); token != "" {
+	if token := ReadAgentTokenFile(); token != "" {
 		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto

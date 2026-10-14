@@ -460,18 +460,11 @@ func isLocalhostEndpoint(endpoint string) bool {
 }
 
 // readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
-// Returns empty string if the file doesn't exist (e.g. not running in a container).
+// Returns empty string if the file doesn't exist (e.g. not running in a
+// container) or is refused. It is the shared reader in pkg/hubsync, so the
+// CLI and hubsync read the file the same way.
 func readAgentTokenFile() string {
-	home := os.Getenv("HOME")
-	if home == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".scion", "scion-token"))
-	if err != nil {
-		return ""
-	}
-	token := strings.TrimSpace(string(data))
-	return token
+	return hubsync.ReadAgentTokenFile()
 }
 
 // getAuthInfo determines what authentication method will be used for a given endpoint.

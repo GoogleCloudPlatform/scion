@@ -155,20 +155,21 @@ func hubConfigured() bool {
 // contextSkippedSubtrees are top-level commands for which the current
 // context is never applied. The server takes its own endpoints from its
 // server settings (the endpoint it advertises to its agents), so 'scion
-// use' must never retarget it. The runtime-broker commands are not here:
-// register, join and the other broker administration commands talk to the
-// hub the CLI selected; the command that runs the broker process is in
-// contextSkippedCommands.
+// use' must never retarget it. A --hub nickname is still resolved for it,
+// as for every command: it is an explicit choice, not the context. The
+// runtime-broker commands are not here: register, join and the other
+// broker administration commands talk to the hub the CLI selected; the
+// command that runs the broker process is in contextSkippedCommands.
 var contextSkippedSubtrees = map[string]bool{
 	"server": true,
 }
 
 // contextSkippedCommands are the commands, by command path, that start a
-// server or broker process in this process: they never read the hub list,
-// so the process neither sees the current hub nor writes context.yaml
-// through the one-time imports. 'runtime-broker start --foreground' runs
-// 'server start' in-process. (Every 'server' command is skipped by
-// contextSkippedSubtrees.)
+// server or broker process in this process: the process never sees the
+// current hub, and no one-time import writes context.yaml. Only a --hub
+// nickname is looked up in the hub list, read as it is. 'runtime-broker
+// start --foreground' runs 'server start' in-process. (Every 'server'
+// command is skipped by contextSkippedSubtrees.)
 var contextSkippedCommands = map[string]bool{
 	"scion runtime-broker start": true,
 }
@@ -312,6 +313,11 @@ func hubWithoutEndpointError(name string) error {
 // It records hubSource and projectSource. A context file that cannot be
 // read is a warning, and the invocation proceeds without it, unless --hub
 // is a nickname, which then cannot be resolved.
+//
+// For the server commands and 'runtime-broker start' (contextSkippedSubtrees
+// and contextSkippedCommands) only a --hub nickname is resolved, from the
+// hub list as it is, without the one-time imports; nothing else is filled,
+// and without a nickname context.yaml is not read.
 func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	return resolveInvocationTargetWith(cmd, mode, invocationResolution(cmd.ErrOrStderr()))
 }
@@ -333,8 +339,17 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
-	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] || contextSkippedCommands[cmd.CommandPath()] {
+	if contextDisabled(mode) {
 		return nil
+	}
+	nicknameOnly := contextSkippedSubtrees[topLevelName(cmd)] || contextSkippedCommands[cmd.CommandPath()]
+	if nicknameOnly && !isHubNickname(hubEndpoint) {
+		return nil
+	}
+	if nicknameOnly {
+		// Read the hub list as it is: no one-time import, so nothing is
+		// written, and stderr gets no import warning.
+		r = targetResolution{stderr: stderr}
 	}
 	ctx, err := r.loadContext()
 	if err != nil {
@@ -347,6 +362,9 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	}
 	if err := resolveHubNickname(ctx); err != nil {
 		return err
+	}
+	if nicknameOnly {
+		return nil
 	}
 	// config subcommands act on local settings files, never on a hub
 	// project, so they never get an injected project (they still see the
