@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -364,6 +365,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+	}
+	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
 	}
 
 	var activator brokerhost.Activator

@@ -237,6 +237,27 @@ Related rules:
 - **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted. A withdrawn standalone Runtime Broker keeps its project directory when the project is later deleted (see [What remains after a project delete](/scion/hosted/ha/kubernetes/#what-remains-after-a-project-delete)).
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
 
+## Scaling a Broker Host: inotify Limits
+
+On a Linux host whose Runtime Broker runs agents with Docker or Podman, every agent runs as the broker's own host user, so the file watchers of all agents' harness processes count against that one user's inotify limits. Scion itself creates no inotify watchers. The kernel default of `fs.inotify.max_user_instances=128` can run out at around 150 agents; after that, watchers fail with "Too many open files", and the first errors often come from the host's own per-user services rather than from Scion.
+
+At startup, a Runtime Broker in hosted mode with a Docker or Podman runtime (or a flat Runtime Broker host in hosted mode with a `docker` instance) reads `/proc/sys/fs/inotify/max_user_instances` and `max_user_watches`. If either is below what about 100 agents need, it logs one `WARNING` line with the values and the fix. 100 agents is the Hub's default `max_agents_per_broker`; the broker does not see a different per-broker limit at startup, so the warning assumes the default. The thresholds are 1 instance and 1024 watches per agent, plus 128 instances and 8192 watches for the user's other processes: at least 228 instances and 110592 watches. They are estimates: one running Claude Code harness was measured holding 1 instance and about 1000 watches, and recursive watchers on very large workspaces can need more watches. A workstation server does not log the warning. The check only reads the limits; it never changes them, and it never stops the broker.
+
+`scion doctor` shows the same limits on any Linux host as the `inotify-limits` check, together with the approximate number of inotify instances and watches held by processes running as your user. It judges them (pass or warn) only on a host configured as a server whose Runtime Broker runs agents with Docker or Podman; elsewhere the line is shown as skipped. On other operating systems, or when `/proc/sys/fs/inotify` cannot be read, the check is reported as not applicable.
+
+To raise the limits, as root:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288
+```
+
+To keep them across reboots, put them in a file under `/etc/sysctl.d/`, for example `/etc/sysctl.d/99-scion-inotify.conf`:
+
+```text
+fs.inotify.max_user_instances=8192
+fs.inotify.max_user_watches=524288
+```
+
 ## Broker Health Monitoring
 
 A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with the Hub), an agent whose saved profile is not one of them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, and otherwise gets the same `503`.

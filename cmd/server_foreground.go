@@ -52,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -3973,6 +3974,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+	}
+	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
 	}
 
 	// Create Runtime Broker server configuration
