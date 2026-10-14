@@ -1417,9 +1417,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Validate ALL sections before writing ANY (atomic: all-or-nothing).
 	// Collect errors from every section so the client sees all invalid
 	// sections in one response, not just the first one (N6).
+	// The telemetry.cloud.tls unit rule applies only when the save touches
+	// tls; a stored invalid tls is otherwise kept and logged
+	// (telemetryTLSSaveErrors).
 	allValidationErrors := make(map[string][]config.ValidationError)
+	tlsTouched := telemetryTLSTouched(rawBody)
 	for secName, doc := range sectionDocs {
-		if errs := opsettings.Validate(secName, doc); len(errs) > 0 {
+		errs := opsettings.Validate(secName, doc)
+		if secName == "telemetry" {
+			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
+		}
+		if len(errs) > 0 {
 			allValidationErrors[secName] = errs
 		}
 	}
