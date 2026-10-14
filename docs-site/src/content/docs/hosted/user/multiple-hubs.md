@@ -206,6 +206,8 @@ The hub and the project are resolved separately. The first source that gives a v
 5. The current hub.
 6. Outside a project directory, when no hub is current: `hub.endpoint` in the global settings.
 
+A command that needs a Hub and finds none fails with `No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.` In a project that was never linked and still has agents from the removed local-only mode, the error explains that local-only mode was removed instead.
+
 **Project:**
 
 1. `--project` or `--global`.
@@ -221,7 +223,7 @@ Inside an agent container, the agent's own project (`SCION_PROJECT_ID`) also app
 Note: in this directory, project 'bar' (~/src/bar, hub 'local') takes precedence; 'web' applies outside scion project directories.
 ```
 
-**The context project is used only by commands that need a project.** Commands that act on a login, the hub list, the server or the Runtime Broker never get one, and neither do `scion config` commands. `scion tunnel`, `scion ssh` and `scion ssh-config` do use it. To make a script independent of the current context, pass `--project` or `--global`.
+**The context project is used only by commands that need a project.** Commands that act on a login, the hub list, the server or the Runtime Broker never get one, and neither do `scion config` commands. `scion tunnel`, `scion ssh`, `scion ssh-config` and `scion vscode` do use it. To make a script independent of the current context, pass `--project` or `--global`.
 
 :::note[`--hub` in a linked directory]
 For commands that act on a project, `--hub` given in a directory linked to a different hub prints a warning, because the directory's project probably does not exist on the other hub:
