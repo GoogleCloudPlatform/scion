@@ -2931,51 +2931,13 @@ func getLinkedProject(ctx context.Context, client hubclient.Client, projectID st
 
 	project, err := client.Projects().Get(ctx, projectID)
 	if err != nil {
-		errStr := err.Error()
-		if containsIgnoreCase(errStr, "404") || containsIgnoreCase(errStr, "not found") {
+		if apiclient.IsNotFoundError(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
 
 	return project, nil
-}
-
-// containsIgnoreCase checks if s contains substr (case-insensitive).
-func containsIgnoreCase(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-			len(s) > len(substr) &&
-				(s[:len(substr)] == substr ||
-					containsIgnoreCaseSlow(s, substr)))
-}
-
-func containsIgnoreCaseSlow(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if equalFoldSlice(s[i:i+len(substr)], substr) {
-			return true
-		}
-	}
-	return false
-}
-
-func equalFoldSlice(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := 0; i < len(a); i++ {
-		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' {
-			ca += 'a' - 'A'
-		}
-		if cb >= 'A' && cb <= 'Z' {
-			cb += 'a' - 'A'
-		}
-		if ca != cb {
-			return false
-		}
-	}
-	return true
 }
 
 // noBrokerHint says how to get a runtime broker for a project that has

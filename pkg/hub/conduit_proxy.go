@@ -453,7 +453,13 @@ func (t *wsFrameTracker) atBoundary() bool { return t.hdrLen == 0 && t.remaining
 // session") to a response.
 func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID string, err error) {
 	var ce *conduit.CloseError
+	var placement *PlacementConflictError
 	switch {
+	case errors.As(err, &placement):
+		// The grant was refused for the agent's saved placement
+		// (mintConduitGrant): its own 409 and code, not an authorization
+		// result.
+		writeError(w, placement.Refusal.Status, placement.Refusal.Code, placement.Refusal.Message, placement.Refusal.Details)
 	case errors.Is(err, errConduitForbidden):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):

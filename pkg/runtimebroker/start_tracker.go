@@ -163,6 +163,17 @@ func (t *startTracker) cancelAndWaitRun(ctx context.Context, key launchKey, runI
 	return cancelAndWaitAll(ctx, waits), len(waits)
 }
 
+// anyFor reports whether any start is tracked for key, whatever its run (a
+// purge of retained files refuses then, ptone/scion#4744).
+func (t *startTracker) anyFor(key launchKey) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.entries[key]) > 0
+}
+
 // hasRun reports whether a start of run runID exactly is tracked for key.
 // A start with no run recorded does not count, so it never suppresses the
 // refusal of a stale stop. False for an empty runID.

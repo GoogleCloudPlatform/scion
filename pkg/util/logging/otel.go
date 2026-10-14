@@ -81,8 +81,18 @@ type OTelConfig struct {
 	Endpoint string
 	// Protocol is the transport protocol ("grpc" or "http").
 	Protocol string
-	// Insecure skips TLS verification.
+	// Insecure selects plaintext transport (no TLS).
 	Insecure bool
+	// SkipTLSVerify keeps TLS but does not verify the endpoint certificate.
+	SkipTLSVerify bool
+	// CAFile is a PEM CA bundle for verifying the endpoint.
+	CAFile string
+	// CertFile and KeyFile are a PEM client certificate and key for mTLS.
+	// Set both or neither.
+	CertFile string
+	KeyFile  string
+	// Headers are sent with every export request.
+	Headers map[string]string
 	// ProjectID is the GCP project ID.
 	ProjectID string
 }

@@ -72,15 +72,8 @@ func TestRuntimeBrokerInstances_SharedDirFieldsRoundTrip(t *testing.T) {
 // Every frozen key that this release does not apply yet is refused with an
 // explicit error naming its settings path, never dropped.
 func TestRuntimeBrokerInstances_StrictLoaderRefusesReservedKeys(t *testing.T) {
-	cases := map[string]string{
-		"runtime_target.gke":                         "gke: true",
-		"runtime_target.priority_class_name":         "priority_class_name: high",
-		"runtime_target.safe_to_evict":               "safe_to_evict: false",
-		"runtime_target.shared_dir_storage_backend":  "shared_dir_storage_backend: nfs",
-		"runtime_target.shared_dir_storage_backends": "shared_dir_storage_backends: {scratch: nfs}",
-		"runtime_target.home_storage_backend":        "home_storage_backend: nfs",
-		"runtime_target.home_storage_leaf":           "home_storage_leaf: x",
-	}
+	// Every frozen runtime_target key is wired, so none is reserved.
+	cases := map[string]string{}
 	if len(cases) != len(reservedRuntimeTargetKeys) {
 		t.Fatalf("the test covers %d runtime_target keys, the reserved list has %d", len(cases), len(reservedRuntimeTargetKeys))
 	}
@@ -96,16 +89,6 @@ func TestRuntimeBrokerInstances_StrictLoaderRefusesReservedKeys(t *testing.T) {
 			}
 		})
 	}
-	t.Run("agent_defaults", func(t *testing.T) {
-		global := flatTestHome(t)
-		writeFlatTestFile(t, filepath.Join(global, "settings.yaml"),
-			k8sSharedDirInstanceYAML+"        agent_defaults:\n          image_registry: registry.example\n")
-		_, err := LoadRuntimeBrokerInstances("")
-		want := "server.broker.instances[0].agent_defaults: this key is reserved"
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("got %v, want an error containing %q", err, want)
-		}
-	})
 }
 
 // An unknown key on an entry or under runtime_target fails the strict load

@@ -388,7 +388,9 @@ func TestCreateGroup_ParentID_AllowedForParentAdmin(t *testing.T) {
 //
 // It models the reservation methods of entadapter.QuotaStore for any number
 // of limits: an active reservation is identified by its limit definition ID
-// and resource ID, HasActiveReservation and ReleaseReservation match on both,
+// and resource ID, HasActiveReservation, GetActiveReservation and
+// ReleaseReservation match on both, CreateUsageReservation refuses a second
+// active one with store.ErrActiveReservationExists,
 // and CountActiveReservations filters on limit definition ID, subject ID,
 // scope type and scope ID. Every other store method goes to the wrapped store.
 type inMemoryReservationStore struct {
@@ -415,7 +417,11 @@ func (m *inMemoryReservationStore) TryAdvisoryLockObject(ctx context.Context, cl
 func (m *inMemoryReservationStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.active[reservationKey(r.LimitDefinitionID, r.ResourceID)] = *r
+	key := reservationKey(r.LimitDefinitionID, r.ResourceID)
+	if _, ok := m.active[key]; ok {
+		return nil, store.ErrActiveReservationExists
+	}
+	m.active[key] = *r
 	m.created = append(m.created, r.ResourceID)
 	return r, nil
 }
@@ -438,6 +444,16 @@ func (m *inMemoryReservationStore) HasActiveReservation(ctx context.Context, lim
 	defer m.mu.Unlock()
 	_, ok := m.active[reservationKey(limitDefinitionID, resourceID)]
 	return ok, nil
+}
+
+func (m *inMemoryReservationStore) GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*store.UsageReservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	r, ok := m.active[reservationKey(limitDefinitionID, resourceID)]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return &r, nil
 }
 
 func (m *inMemoryReservationStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {

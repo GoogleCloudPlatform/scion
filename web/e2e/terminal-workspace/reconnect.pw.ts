@@ -43,9 +43,6 @@ async function setup(
   const sockets = new Set<{ close: (options?: { code?: number; reason?: string }) => void }>();
   // Simulate the connected handshake so SSEClient marks the connection open.
   await installEventSourceStub(page, { serverConnectedEvent: true });
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
   );

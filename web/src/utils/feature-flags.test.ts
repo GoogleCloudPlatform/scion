@@ -28,7 +28,6 @@ import {
   setFeatureFlag,
   setServerFlags,
   resetServerFlagStateForTests,
-  TERMINAL_WORKSPACE_FLAG,
 } from './feature-flags.js';
 
 // Verify removed exports at the type level — these should not exist.
@@ -40,6 +39,8 @@ import { ACCESS_BOUNDARIES_AUTHORING_FLAG } from './feature-flags.js';
 import { NATIVE_CHAT_PALETTE_FLAG } from './feature-flags.js';
 // @ts-expect-error NATIVE_CHAT_V2_FLAG was removed (v2 is always on)
 import { NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
+// @ts-expect-error TERMINAL_WORKSPACE_FLAG was removed (the terminal workspace is always on)
+import { TERMINAL_WORKSPACE_FLAG } from './feature-flags.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -53,7 +54,7 @@ beforeEach(() => {
     localStorage.removeItem('scion:feature:web.native_chat');
     localStorage.removeItem('scion:feature:web.access_boundaries_read');
     localStorage.removeItem('scion:feature:web.access_boundaries_authoring');
-    localStorage.removeItem('scion:feature:web.terminal_workspace');
+    localStorage.removeItem('scion:feature:web.fixture_flag');
     localStorage.removeItem('scion:feature:test.flag');
   } catch {
     // ignore in environments without localStorage
@@ -114,26 +115,18 @@ describe('feature-flags: native_chat flags retained', () => {
 });
 
 // ---------------------------------------------------------------------------
-// terminal_workspace default-on
+// Removed terminal workspace flag (graduated, ptone/scion#4917)
 // ---------------------------------------------------------------------------
 
-describe('feature-flags: terminal_workspace default-on', () => {
-  it('web.terminal_workspace defaults to ON (absent override → enabled)', () => {
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+describe('feature-flags: terminal workspace flag removed', () => {
+  it('does not export TERMINAL_WORKSPACE_FLAG', () => {
+    expect(TERMINAL_WORKSPACE_FLAG).toBeUndefined();
   });
 
-  it('server-injected false overrides default-on for terminal_workspace', () => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': false };
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
     expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
-  });
-
-  it('localStorage false overrides default-on for terminal_workspace', () => {
-    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
-  });
-
-  it('other default-on flags are unaffected', () => {
-    expect(isFeatureEnabled('web.native_chat')).toBe(true);
   });
 
   it('unrelated flags not in DEFAULT_ON_FLAGS still default to false', () => {
@@ -200,37 +193,27 @@ describe('setFeatureFlag', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TERMINAL_WORKSPACE_FLAG (ptone/scion#2217)
-// ---------------------------------------------------------------------------
-
-describe('TERMINAL_WORKSPACE_FLAG', () => {
-  it('exports the expected name', () => {
-    expect(TERMINAL_WORKSPACE_FLAG).toBe('web.terminal_workspace');
-  });
-});
-
-// ---------------------------------------------------------------------------
 // setServerFlags / resetServerFlagStateForTests — precedence matrix
 // (ptone/scion#2217)
 // ---------------------------------------------------------------------------
 
 describe('setServerFlags: precedence', () => {
   it('a server value beats localStorage for a registered experiment', () => {
-    localStorage.setItem('scion:feature:web.terminal_workspace', 'true');
-    setServerFlags({ 'web.terminal_workspace': false });
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+    localStorage.setItem('scion:feature:web.fixture_flag', 'true');
+    setServerFlags({ 'web.fixture_flag': false });
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(false);
   });
 
   it('localStorage applies to names the server did not send', () => {
     localStorage.setItem('scion:feature:test.flag', 'true');
-    setServerFlags({ 'web.terminal_workspace': false });
+    setServerFlags({ 'web.fixture_flag': false });
     expect(isFeatureEnabled('test.flag')).toBe(true);
   });
 
   it('values in the bag before the first setServerFlags() call beat server values ("pinned")', () => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    setServerFlags({ 'web.terminal_workspace': false });
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+    window.__SCION_FEATURES__ = { 'web.fixture_flag': true };
+    setServerFlags({ 'web.fixture_flag': false });
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(true);
   });
 
   it('pinning only protects keys present at the first call, not later ones', () => {
@@ -245,14 +228,14 @@ describe('setServerFlags: precedence', () => {
   });
 
   it('resetServerFlagStateForTests() clears the pin so the next call re-pins from the current bag', () => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    setServerFlags({ 'web.terminal_workspace': false });
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(true);
+    window.__SCION_FEATURES__ = { 'web.fixture_flag': true };
+    setServerFlags({ 'web.fixture_flag': false });
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(true);
 
     resetServerFlagStateForTests();
     delete window.__SCION_FEATURES__;
-    setServerFlags({ 'web.terminal_workspace': false });
-    expect(isFeatureEnabled('web.terminal_workspace')).toBe(false);
+    setServerFlags({ 'web.fixture_flag': false });
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(false);
   });
 
   it('a server value applies to an unregistered/dev name the same way', () => {
@@ -283,7 +266,7 @@ describe('setServerFlags: precedence', () => {
   it('ignores an array flags argument instead of writing its indices into the bag', () => {
     // typeof [] === 'object', so this needs its own Array.isArray check.
     // @ts-expect-error exercising a malformed runtime value
-    setServerFlags(['web.terminal_workspace']);
+    setServerFlags(['web.fixture_flag']);
     expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
   });
 });
@@ -295,12 +278,12 @@ describe('setServerFlags: precedence', () => {
 describe('isFeatureEnabled: shadowed-override logging', () => {
   it('logs once when a localStorage override is shadowed by a server value, not once per call', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
-    setServerFlags({ 'web.terminal_workspace': true });
+    localStorage.setItem('scion:feature:web.fixture_flag', 'false');
+    setServerFlags({ 'web.fixture_flag': true });
 
-    isFeatureEnabled('web.terminal_workspace');
-    isFeatureEnabled('web.terminal_workspace');
-    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.fixture_flag');
+    isFeatureEnabled('web.fixture_flag');
+    isFeatureEnabled('web.fixture_flag');
 
     expect(infoSpy).toHaveBeenCalledTimes(1);
     infoSpy.mockRestore();
@@ -308,9 +291,9 @@ describe('isFeatureEnabled: shadowed-override logging', () => {
 
   it('does not log when there is no localStorage override to shadow', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-    setServerFlags({ 'web.terminal_workspace': true });
+    setServerFlags({ 'web.fixture_flag': true });
 
-    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.fixture_flag');
 
     expect(infoSpy).not.toHaveBeenCalled();
     infoSpy.mockRestore();
@@ -318,11 +301,11 @@ describe('isFeatureEnabled: shadowed-override logging', () => {
 
   it('logs independently per flag name', () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
-    localStorage.setItem('scion:feature:web.terminal_workspace', 'false');
+    localStorage.setItem('scion:feature:web.fixture_flag', 'false');
     localStorage.setItem('scion:feature:web.native_chat', 'false');
-    setServerFlags({ 'web.terminal_workspace': true, 'web.native_chat': true });
+    setServerFlags({ 'web.fixture_flag': true, 'web.native_chat': true });
 
-    isFeatureEnabled('web.terminal_workspace');
+    isFeatureEnabled('web.fixture_flag');
     isFeatureEnabled('web.native_chat');
 
     expect(infoSpy).toHaveBeenCalledTimes(2);

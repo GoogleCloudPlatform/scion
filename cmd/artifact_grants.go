@@ -16,10 +16,10 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -143,7 +143,7 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 			return err
 		}
 		perm := strings.ToLower(strings.TrimSpace(opts.Permission))
-		if !containsString(grantPermissions, perm) {
+		if !slices.Contains(grantPermissions, perm) {
 			return fmt.Errorf("--permission must be one of %s", strings.Join(grantPermissions, ", "))
 		}
 		g, err := svc.PutGrant(ctx, id, &hubclient.ArtifactGrantRequest{SubjectKind: kind, SubjectRef: subject, Permission: perm})
@@ -199,21 +199,4 @@ func grantsErrorHint(err error) string {
 		return h + "\nOnly the artifact's owner, or a user it granted admin, can see or change its grants."
 	}
 	return ""
-}
-
-// writeJSONTo writes v to out as indented JSON.
-func writeJSONTo(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
-}
-
-// containsString reports whether list holds s.
-func containsString(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

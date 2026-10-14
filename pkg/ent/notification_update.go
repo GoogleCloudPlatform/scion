@@ -154,6 +154,41 @@ func (_u *NotificationUpdate) SetNillableAcknowledged(v *bool) *NotificationUpda
 	return _u
 }
 
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (_u *NotificationUpdate) SetDispatchAttempts(v int) *NotificationUpdate {
+	_u.mutation.ResetDispatchAttempts()
+	_u.mutation.SetDispatchAttempts(v)
+	return _u
+}
+
+// SetNillableDispatchAttempts sets the "dispatch_attempts" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableDispatchAttempts(v *int) *NotificationUpdate {
+	if v != nil {
+		_u.SetDispatchAttempts(*v)
+	}
+	return _u
+}
+
+// AddDispatchAttempts adds value to the "dispatch_attempts" field.
+func (_u *NotificationUpdate) AddDispatchAttempts(v int) *NotificationUpdate {
+	_u.mutation.AddDispatchAttempts(v)
+	return _u
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (_u *NotificationUpdate) SetDispatchOutcome(v string) *NotificationUpdate {
+	_u.mutation.SetDispatchOutcome(v)
+	return _u
+}
+
+// SetNillableDispatchOutcome sets the "dispatch_outcome" field if the given value is not nil.
+func (_u *NotificationUpdate) SetNillableDispatchOutcome(v *string) *NotificationUpdate {
+	if v != nil {
+		_u.SetDispatchOutcome(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdate) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -208,6 +243,11 @@ func (_u *NotificationUpdate) check() error {
 			return &ValidationError{Name: "message", err: fmt.Errorf(`ent: validator failed for field "Notification.message": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DispatchAttempts(); ok {
+		if err := notification.DispatchAttemptsValidator(v); err != nil {
+			return &ValidationError{Name: "dispatch_attempts", err: fmt.Errorf(`ent: validator failed for field "Notification.dispatch_attempts": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -249,6 +289,15 @@ func (_u *NotificationUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.Acknowledged(); ok {
 		_spec.SetField(notification.FieldAcknowledged, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.DispatchAttempts(); ok {
+		_spec.SetField(notification.FieldDispatchAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedDispatchAttempts(); ok {
+		_spec.AddField(notification.FieldDispatchAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.DispatchOutcome(); ok {
+		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -396,6 +445,41 @@ func (_u *NotificationUpdateOne) SetNillableAcknowledged(v *bool) *NotificationU
 	return _u
 }
 
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (_u *NotificationUpdateOne) SetDispatchAttempts(v int) *NotificationUpdateOne {
+	_u.mutation.ResetDispatchAttempts()
+	_u.mutation.SetDispatchAttempts(v)
+	return _u
+}
+
+// SetNillableDispatchAttempts sets the "dispatch_attempts" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableDispatchAttempts(v *int) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetDispatchAttempts(*v)
+	}
+	return _u
+}
+
+// AddDispatchAttempts adds value to the "dispatch_attempts" field.
+func (_u *NotificationUpdateOne) AddDispatchAttempts(v int) *NotificationUpdateOne {
+	_u.mutation.AddDispatchAttempts(v)
+	return _u
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (_u *NotificationUpdateOne) SetDispatchOutcome(v string) *NotificationUpdateOne {
+	_u.mutation.SetDispatchOutcome(v)
+	return _u
+}
+
+// SetNillableDispatchOutcome sets the "dispatch_outcome" field if the given value is not nil.
+func (_u *NotificationUpdateOne) SetNillableDispatchOutcome(v *string) *NotificationUpdateOne {
+	if v != nil {
+		_u.SetDispatchOutcome(*v)
+	}
+	return _u
+}
+
 // Mutation returns the NotificationMutation object of the builder.
 func (_u *NotificationUpdateOne) Mutation() *NotificationMutation {
 	return _u.mutation
@@ -463,6 +547,11 @@ func (_u *NotificationUpdateOne) check() error {
 			return &ValidationError{Name: "message", err: fmt.Errorf(`ent: validator failed for field "Notification.message": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DispatchAttempts(); ok {
+		if err := notification.DispatchAttemptsValidator(v); err != nil {
+			return &ValidationError{Name: "dispatch_attempts", err: fmt.Errorf(`ent: validator failed for field "Notification.dispatch_attempts": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -521,6 +610,15 @@ func (_u *NotificationUpdateOne) sqlSave(ctx context.Context) (_node *Notificati
 	}
 	if value, ok := _u.mutation.Acknowledged(); ok {
 		_spec.SetField(notification.FieldAcknowledged, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.DispatchAttempts(); ok {
+		_spec.SetField(notification.FieldDispatchAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedDispatchAttempts(); ok {
+		_spec.AddField(notification.FieldDispatchAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.DispatchOutcome(); ok {
+		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
 	}
 	_node = &Notification{config: _u.config}
 	_spec.Assign = _node.assignValues
