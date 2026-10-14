@@ -1343,6 +1343,14 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the harness-config's files
+	// (ptone/scion#4219): "" (legacy) stores each file at
+	// <StoragePath>/<path>; HarnessConfigLayoutBlobs stores each file once,
+	// by content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's
+	// harness-config commit path changes it; CreateHarnessConfig and
+	// UpdateHarnessConfigContent write it and UpdateHarnessConfig never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
@@ -1370,6 +1378,13 @@ type HarnessConfig struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// HarnessConfigLayoutBlobs is the content-addressed harness-config storage
+// layout (HarnessConfig.Layout). It is the same layout as
+// TemplateLayoutBlobs: every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4219).
+const HarnessConfigLayoutBlobs = TemplateLayoutBlobs
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {

@@ -1502,6 +1502,7 @@ var (
 		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "layout", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "image_status", Type: field.TypeEnum, Enums: []string{"unknown", "valid", "invalid", "error"}, Default: "unknown"},
@@ -1533,7 +1534,7 @@ var (
 			{
 				Name:    "harnessconfig_status",
 				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[14]},
+				Columns: []*schema.Column{HarnessConfigsColumns[15]},
 			},
 			{
 				Name:    "harnessconfig_content_hash",

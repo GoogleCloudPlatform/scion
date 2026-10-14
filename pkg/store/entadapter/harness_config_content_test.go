@@ -164,3 +164,137 @@ func TestHarnessConfigBuiltImage_RoundTrip(t *testing.T) {
 
 	assert.ErrorIs(t, ts.UpdateHarnessConfigBuiltImage(ctx, uuid.New().String(), "x"), store.ErrNotFound)
 }
+
+// TestHarnessConfigLayout_RoundTrip: Layout and the storage columns are
+// written by CreateHarnessConfig and UpdateHarnessConfigContent and read
+// back, a metadata UpdateHarnessConfig from a stale read leaves them alone,
+// and the StoragePath / StoragePathPrefix filters find the rows on (or
+// nested under) a path (ptone/scion#4219).
+func TestHarnessConfigLayout_RoundTrip(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	hc := &store.HarnessConfig{
+		ID: uuid.New().String(), Name: "layout", Slug: "layout", Harness: "claude", Scope: store.HarnessConfigScopeGlobal,
+		Status: store.HarnessConfigStatusActive, ContentHash: "sha256:h0", StoragePath: "harness-configs/global/layout",
+	}
+	require.NoError(t, ts.CreateHarnessConfig(ctx, hc))
+	got, err := ts.GetHarnessConfig(ctx, hc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Layout, "a row created without a layout is legacy")
+
+	stale := *got
+
+	migrated := *got
+	migrated.Layout = store.HarnessConfigLayoutBlobs
+	migrated.StoragePath = "harness-configs/global/layout." + hc.ID
+	migrated.StorageURI = "gs://b/harness-configs/global/layout." + hc.ID + "/"
+	require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &migrated, store.HarnessConfigContentPrecondition{
+		ContentHash: "sha256:h0", StoragePath: "harness-configs/global/layout",
+	}))
+
+	got, err = ts.GetHarnessConfig(ctx, hc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.HarnessConfigLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Equal(t, migrated.StorageURI, got.StorageURI)
+
+	// A metadata PUT/PATCH written from the pre-migration read keeps the
+	// migrated layout and storage path.
+	stale.Name = "layout-renamed"
+	require.NoError(t, ts.UpdateHarnessConfig(ctx, &stale))
+	got, err = ts.GetHarnessConfig(ctx, hc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "layout-renamed", got.Name)
+	assert.Equal(t, store.HarnessConfigLayoutBlobs, got.Layout)
+	assert.Equal(t, migrated.StoragePath, got.StoragePath)
+	assert.Equal(t, migrated.StorageURI, got.StorageURI)
+
+	blob := &store.HarnessConfig{
+		ID: uuid.New().String(), Name: "born-blob", Slug: "born-blob", Harness: "claude", Scope: store.HarnessConfigScopeGlobal,
+		Status: store.HarnessConfigStatusPending, Layout: store.HarnessConfigLayoutBlobs, StoragePath: "harness-configs/global/born-blob.x",
+	}
+	require.NoError(t, ts.CreateHarnessConfig(ctx, blob))
+	got, err = ts.GetHarnessConfig(ctx, blob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.HarnessConfigLayoutBlobs, got.Layout)
+
+	list, err := ts.ListHarnessConfigs(ctx, store.HarnessConfigFilter{StoragePath: migrated.StoragePath}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, hc.ID, list.Items[0].ID)
+
+	list, err = ts.ListHarnessConfigs(ctx, store.HarnessConfigFilter{StoragePathPrefix: "harness-configs/global/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, 2)
+	list, err = ts.ListHarnessConfigs(ctx, store.HarnessConfigFilter{StoragePathPrefix: "harness-configs/global/layout/"}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items)
+}
+
+// TestUpdateHarnessConfigContent_LayoutAndPathInPredicate: the ABA case
+// across layouts and storage paths at the store (ptone/scion#4219). A commit
+// that read the legacy row loses to a concurrent migration that kept the
+// same content hash, whether the migration changed the layout (a commit
+// moving the row to blobs) or only the storage path (the storage
+// migration), and a commit that read the current row wins.
+func TestUpdateHarnessConfigContent_LayoutAndPathInPredicate(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	newLegacy := func(slug string) *store.HarnessConfig {
+		hc := &store.HarnessConfig{
+			ID: uuid.New().String(), Name: slug, Slug: slug, Harness: "claude", Scope: store.HarnessConfigScopeGlobal,
+			Status: store.HarnessConfigStatusActive, ContentHash: "sha256:h1", StoragePath: "harness-configs/global/" + slug,
+			Files: []store.TemplateFile{{Path: "config.yaml", Size: 1, Hash: "sha256:a"}},
+		}
+		require.NoError(t, ts.CreateHarnessConfig(ctx, hc))
+		got, err := ts.GetHarnessConfig(ctx, hc.ID)
+		require.NoError(t, err)
+		return got
+	}
+	readPre := func(hc *store.HarnessConfig) store.HarnessConfigContentPrecondition {
+		return store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash, Layout: hc.Layout, StoragePath: hc.StoragePath}
+	}
+
+	t.Run("layout", func(t *testing.T) {
+		legacyRead := newLegacy("aba-layout")
+		migrated := *legacyRead
+		migrated.Layout = store.HarnessConfigLayoutBlobs
+		migrated.StoragePath = legacyRead.StoragePath + "." + legacyRead.ID
+		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &migrated, readPre(legacyRead)))
+
+		stale := *legacyRead
+		stale.SourceURL = "stale writer"
+		assert.ErrorIs(t, ts.UpdateHarnessConfigContent(ctx, &stale, readPre(legacyRead)), store.ErrHarnessConfigConflict)
+
+		got, err := ts.GetHarnessConfig(ctx, legacyRead.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.HarnessConfigLayoutBlobs, got.Layout, "the losing write changed nothing")
+		assert.Equal(t, migrated.StoragePath, got.StoragePath)
+		assert.Empty(t, got.SourceURL)
+
+		fresh := *got
+		fresh.SourceURL = "fresh writer"
+		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &fresh, readPre(got)))
+	})
+
+	t.Run("storage path only", func(t *testing.T) {
+		legacyRead := newLegacy("aba-path")
+		moved := *legacyRead
+		moved.StoragePath = "hubs/h1/" + legacyRead.StoragePath
+		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &moved, readPre(legacyRead)))
+
+		// Same hash, same (legacy) layout: only the storage path differs.
+		stale := *legacyRead
+		stale.SourceURL = "stale writer"
+		assert.ErrorIs(t, ts.UpdateHarnessConfigContent(ctx, &stale, readPre(legacyRead)), store.ErrHarnessConfigConflict)
+
+		got, err := ts.GetHarnessConfig(ctx, legacyRead.ID)
+		require.NoError(t, err)
+		assert.Equal(t, moved.StoragePath, got.StoragePath, "the old path was not written back")
+		assert.Empty(t, got.SourceURL)
+
+		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, got, readPre(got)))
+	})
+}

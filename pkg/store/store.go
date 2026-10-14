@@ -1722,8 +1722,19 @@ type TemplateContentPrecondition struct {
 // ContentHash is the content hash the caller read before computing its new
 // manifest. An empty ContentHash matches a row that has never been
 // committed (no content hash yet).
+//
+// Layout and StoragePath are the storage layout and storage path the caller
+// read (ptone/scion#4219). A row can change either without changing its
+// content hash: a commit migrates a legacy row to the blob layout and a new
+// row-unique path, and the storage migration moves a legacy row to a
+// hub-namespaced path (and may then delete the old tree). A commit that read
+// the old location must not write it back, so both are part of the
+// predicate. An empty Layout matches a legacy row, and an empty StoragePath
+// matches a row without one.
 type HarnessConfigContentPrecondition struct {
 	ContentHash string
+	Layout      string
+	StoragePath string
 }
 
 // TemplateFilter defines criteria for filtering templates.
@@ -1762,8 +1773,8 @@ type HarnessConfigStore interface {
 	// UpdateHarnessConfig updates an existing harness config's metadata
 	// (name, slug, display name, description, scope, owner, source URL,
 	// image status and the audit fields). It does not write the content
-	// columns (Files, ContentHash, Harness, Config, Status, StorageURI,
-	// StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
+	// columns (Files, ContentHash, Harness, Config, Status, Layout,
+	// StorageURI, StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
 	// change only through UpdateHarnessConfigContent and
 	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
 	// cannot revert a commit.
@@ -1771,7 +1782,7 @@ type HarnessConfigStore interface {
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
 
 	// UpdateHarnessConfigContent writes the content columns of hc (Files,
-	// ContentHash, Harness, Config, Status, StorageURI, StorageBucket,
+	// ContentHash, Harness, Config, Status, Layout, StorageURI, StorageBucket,
 	// StoragePath, SourceURL, UpdatedBy) in one conditional update, only if
 	// the stored row still matches expected. It never writes the metadata
 	// columns or BuiltImage. Returns ErrHarnessConfigConflict when the row
@@ -1811,6 +1822,13 @@ type HarnessConfigFilter struct {
 	Status      string
 	ImageStatus string
 	Search      string // Full-text search on name/description
+	// StoragePath, when set, matches harness-configs whose storage path is
+	// exactly this value (used to find rows sharing a legacy path).
+	StoragePath string
+	// StoragePathPrefix, when set, matches harness-configs whose storage
+	// path starts with this value (used to find legacy rows nested under a
+	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
+	StoragePathPrefix string
 }
 
 // UserStore defines user persistence operations.
