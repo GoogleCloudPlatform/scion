@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -396,7 +397,8 @@ func pathResolvedUnderBase(base, candidate string) (ok bool, resolvedCandidate s
 //  1. Gathers git metadata (branch name, repo root) while the worktree exists.
 //  2. Removes the worktree directory using RemoveAllSafe (which uses unlinkat
 //     to avoid autofs triggers).
-//  3. Runs "git worktree prune" to clean up the now-stale worktree record.
+//  3. Removes the now-stale record of this worktree only
+//     (RemoveWorktreeEntryIn), never a repository-wide prune.
 func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 	// Every failure from here through the containment check is a pre-removal
 	// validation failure, not a removal-mechanics failure — none of them have
@@ -470,13 +472,16 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 	}
 	Debugf("RemoveWorktree: directory removal completed in %v", time.Since(removeStart))
 
-	// Prune stale worktree records — git still has a reference to the
-	// directory we just deleted; pruning cleans that up.
+	// Drop git's record of the directory we just deleted. Only this
+	// worktree's own entry is removed: a repository-wide prune would also
+	// drop the entries of other worktrees whose directories happen to be
+	// missing or unreadable from this process (ptone/scion#5060). Without a
+	// repository root there is no entry to target, so nothing is done.
 	if repoRoot != "" {
-		Debugf("RemoveWorktree: pruning stale worktree records in %s", repoRoot)
-		_ = PruneWorktreesIn(repoRoot)
-	} else {
-		_ = PruneWorktrees()
+		Debugf("RemoveWorktree: removing the worktree entry for %s in %s", resolvedPath, repoRoot)
+		if err := RemoveWorktreeEntryIn(repoRoot, resolvedPath); err != nil {
+			slog.Warn("remove worktree: could not remove the worktree entry", "path", resolvedPath, "repo_root", repoRoot, "error", err)
+		}
 	}
 
 	if deleteBranch && branchName != "" && repoRoot != "" {
@@ -516,6 +521,44 @@ func PruneWorktreesIn(repoRoot string) error {
 	}
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "prune")
 	return cmd.Run()
+}
+
+// RemoveWorktreeEntryIn removes git's record of the single worktree at path
+// from the repository at repoRoot, using "git worktree remove --force".
+// Unlike PruneWorktreesIn, it never touches the entries of other worktrees.
+//
+// It only acts once the worktree directory is gone: when path still exists
+// it does nothing, so it can never delete a worktree's files. It also does
+// nothing when git has no entry for path (already removed or never
+// registered), and inside agent containers (see PruneWorktrees). path must
+// be absolute, so the existence check and git see the same location. Any
+// other failure is returned; callers must not fall back to a
+// repository-wide prune.
+func RemoveWorktreeEntryIn(repoRoot, path string) error {
+	if os.Getenv("SCION_HOST_UID") != "" {
+		return nil
+	}
+	if repoRoot == "" || path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("worktree entry %q: path must be absolute", path)
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("worktree entry %s: %w", path, err)
+	}
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", path)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "is not a working tree") {
+			return nil
+		}
+		return fmt.Errorf("git worktree remove %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // DeleteBranchIn deletes a git branch from the specified repository root.
