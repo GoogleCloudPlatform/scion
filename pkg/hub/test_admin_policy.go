@@ -541,7 +541,6 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AsyncAgentLaunch:             testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
-	"web.terminal_workspace":                 testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
@@ -550,6 +549,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.ChatThreadGroups:             testAdminPolicyDeny,
+	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
