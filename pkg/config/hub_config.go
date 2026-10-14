@@ -37,6 +37,8 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubServerConfig holds configuration for the Hub API server.
@@ -572,6 +574,20 @@ type RuntimeBrokerInstanceConfig struct {
 	Key           string               `json:"key" yaml:"key" koanf:"key"`
 	Name          string               `json:"name" yaml:"name" koanf:"name"`
 	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+	// AgentDefaults mirrors V1RuntimeBrokerInstanceConfig.AgentDefaults.
+	AgentDefaults *InstanceAgentDefaultsConfig `json:"agentDefaults,omitempty" yaml:"agentDefaults,omitempty" koanf:"agentDefaults"`
+}
+
+// InstanceAgentDefaultsConfig is the server-config form of
+// V1InstanceAgentDefaults.
+type InstanceAgentDefaultsConfig struct {
+	DefaultHarnessConfig string                       `json:"defaultHarnessConfig,omitempty" yaml:"defaultHarnessConfig,omitempty" koanf:"defaultHarnessConfig"`
+	ImageRegistry        string                       `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" koanf:"imageRegistry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harnessOverrides,omitempty" yaml:"harnessOverrides,omitempty" koanf:"harnessOverrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"cloneDepth,omitempty" yaml:"cloneDepth,omitempty" koanf:"cloneDepth"`
 }
 
 // RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
@@ -586,6 +602,13 @@ type RuntimeTargetConfig struct {
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
 	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
 	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1989,7 +2012,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, true)
+	return loadBootstrapKoanf(configPath, true, true)
 }
 
 // LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
@@ -1999,43 +2022,26 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 // view takes the public URL it shows when none is saved from this merge
 // (ptone/scion#4826).
 func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
-	return loadBootstrapKoanf(configPath, false)
+	return loadBootstrapKoanf(configPath, false, true)
+}
+
+// LoadAboveSeedBootstrapKoanfWithConfigPath is the bootstrap merge with only
+// the layers above SCION_SEED_*: settings.yaml (and the --config location)
+// and SCION_SERVER_*, without the coded defaults. A key it has gets its
+// bootstrap value from one of these layers, so the admin view can tell a
+// value from them apart from a coded default or a seed value equal to the
+// default (ptone/scion#4983).
+func LoadAboveSeedBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false, false)
 }
 
 // loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
-// layer when withSeed is true.
-func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
+// layer when withSeed is true and the coded defaults when withDefaults is
+// true.
+func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.Koanf {
 	k := koanf.New(".")
-
-	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
-	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
-	// If new defaulted keys are added to GlobalConfig (or its nested structs),
-	// they must be added here too, otherwise bootstrap material will be
-	// incomplete for sections that rely on them during initial seeding.
-	defaults := DefaultGlobalConfig()
-	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.port":         defaults.Hub.Port,
-		"server.hub.host":         defaults.Hub.Host,
-		"server.hub.admin_emails": defaults.Hub.AdminEmails,
-		"server.database.driver":  defaults.Database.Driver,
-		"server.database.url":     defaults.Database.URL,
-		"server.auth.dev_mode":    defaults.Auth.Enabled,
-		"server.auth.dev_token":   defaults.Auth.Token,
-		"server.storage.provider": defaults.Storage.Provider,
-		"server.secrets.backend":  defaults.Secrets.Backend,
-		"server.log_level":        defaults.LogLevel,
-	}, "."), nil)
-
-	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
-	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
-	// "coded defaults" layer for default_template/default_harness_config:
-	// without it, an un-seeded instance (no settings.yaml on disk, no
-	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
-	// from bootstrap material, so agent-create requests that omit
-	// harnessConfig resolve to an empty name instead of the product default
-	// (ptone/scion#1306).
-	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
-		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	if withDefaults {
+		loadBootstrapDefaults(k)
 	}
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
@@ -2078,6 +2084,40 @@ func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadBootstrapDefaults loads the coded defaults of the bootstrap merge into k.
+func loadBootstrapDefaults(k *koanf.Koanf) {
+	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
+	// If new defaulted keys are added to GlobalConfig (or its nested structs),
+	// they must be added here too, otherwise bootstrap material will be
+	// incomplete for sections that rely on them during initial seeding.
+	defaults := DefaultGlobalConfig()
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.port":         defaults.Hub.Port,
+		"server.hub.host":         defaults.Hub.Host,
+		"server.hub.admin_emails": defaults.Hub.AdminEmails,
+		"server.database.driver":  defaults.Database.Driver,
+		"server.database.url":     defaults.Database.URL,
+		"server.auth.dev_mode":    defaults.Auth.Enabled,
+		"server.auth.dev_token":   defaults.Auth.Token,
+		"server.storage.provider": defaults.Storage.Provider,
+		"server.secrets.backend":  defaults.Secrets.Backend,
+		"server.log_level":        defaults.LogLevel,
+	}, "."), nil)
+
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
 }
 
 // loadConfigPathFiles layers the --config location over k using the same

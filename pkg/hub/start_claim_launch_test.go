@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -44,22 +46,26 @@ func newClaimedAsyncCreate(t *testing.T, name string) (*Server, store.Store, *as
 	return srv, s, client, mustAgent(t, s, a.ID)
 }
 
-// A create send that times out after BeginLaunch ends the launch
+// A create send that fails after BeginLaunch with an error that is not
+// known to be undelivered (startOutcomeOf: unconfirmed) but is not an
+// unknown outcome either (isUnknownDispatchOutcome) ends the launch
 // not_launched, but the broker may still have admitted the create: the
 // holder keeps its create claim unconfirmed, so a second start is refused
-// (ptone/scion#4709).
-func TestCreateUnderClaim_SendTimeoutAfterBeginLaunchKeepsClaimUnconfirmed(t *testing.T) {
-	srv, s, client, a := newClaimedAsyncCreate(t, "send-timeout")
+// (ptone/scion#4709). A timeout is an unknown outcome instead and keeps the
+// launch (TestCreateUnderClaim_SendTimeoutAfterBeginLaunchHandsClaimToLaunch).
+func TestCreateUnderClaim_SendFailureAfterBeginLaunchKeepsClaimUnconfirmed(t *testing.T) {
+	srv, s, client, a := newClaimedAsyncCreate(t, "send-failure")
+	sendErr := errors.New("broker unreachable")
 	client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 		require.True(t, req.AsyncLaunch, "the send is an async launch")
 		require.NotEmpty(t, req.LaunchID)
-		return nil, nil, context.DeadlineExceeded
+		return nil, nil, sendErr
 	}
 
 	_, err := srv.createUnderClaim(context.Background(), a, func(ctx context.Context) (*CreateDispatchResult, error) {
 		return srv.GetDispatcher().DispatchAgentCreate(ctx, a)
 	})
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, sendErr)
 	require.NotErrorIs(t, err, errStartClaimLost)
 	require.Len(t, client.sends, 1)
 
@@ -76,6 +82,40 @@ func TestCreateUnderClaim_SendTimeoutAfterBeginLaunchKeepsClaimUnconfirmed(t *te
 	_, err = s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
 	var held *store.ClaimHeldError
 	require.ErrorAs(t, err, &held, "a second start is refused while the create may be running")
+	assert.Equal(t, store.StartClaimCreate, held.Kind)
+}
+
+// A create send that times out after BeginLaunch is an unknown outcome
+// (ptone/scion#4866): the launch is kept and accepted with no owner, so the
+// create claim passes to the launch (linked to it, still live; the launch's
+// end settles it) and a second start is still refused.
+func TestCreateUnderClaim_SendTimeoutAfterBeginLaunchHandsClaimToLaunch(t *testing.T) {
+	srv, s, client, a := newClaimedAsyncCreate(t, "send-timeout-kept")
+	client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		require.True(t, req.AsyncLaunch, "the send is an async launch")
+		return nil, nil, fmt.Errorf("failed to send request: %w", context.DeadlineExceeded)
+	}
+
+	created, err := srv.createUnderClaim(context.Background(), a, func(ctx context.Context) (*CreateDispatchResult, error) {
+		return srv.GetDispatcher().DispatchAgentCreate(ctx, a)
+	})
+	require.NoError(t, err)
+	require.Len(t, client.sends, 1)
+	accepted := created.AcceptedLaunch()
+	require.NotNil(t, accepted, "the timed-out launch is kept as accepted")
+	assert.Equal(t, client.sends[0].LaunchID, accepted.ID)
+
+	got := mustAgent(t, s, a.ID)
+	assert.Equal(t, store.LaunchStateActive, got.LaunchState)
+	assert.Equal(t, string(state.PhaseProvisioning), got.Phase)
+	require.NotEmpty(t, got.StartClaimID, "the agent still holds its create claim")
+	assert.Equal(t, store.StartClaimCreate, got.StartClaimKind)
+	assert.Equal(t, store.StartClaimLive, got.StartClaimState, "the claim passed to the launch, not settled by the holder")
+	assert.Equal(t, accepted.ID, got.StartClaimLaunchID, "the claim is linked to the kept launch, whose end settles it")
+
+	_, err = s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	var held *store.ClaimHeldError
+	require.ErrorAs(t, err, &held, "a second start is refused while the launch may be running")
 	assert.Equal(t, store.StartClaimCreate, held.Kind)
 }
 

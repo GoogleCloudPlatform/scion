@@ -347,6 +347,7 @@ func TestNotification_JSON_CanonicalKeysOnly(t *testing.T) {
 	assertExactKeySet(t, "Notification", data, []string{
 		"id", "subscriptionId", "agentId", "projectId", "subscriberType",
 		"subscriberId", "status", "message", "dispatched", "acknowledged", "createdAt",
+		"dispatchAttempts", "dispatchOutcome",
 	})
 
 	var rt Notification

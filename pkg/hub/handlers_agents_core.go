@@ -940,9 +940,16 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 }
 
 // writeQuotaReserveError writes the response for a failed quota reservation
-// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+// of limitName: 409 broker_reservation_scope_conflict when the resource
+// holds an active reservation on another Runtime Broker, 429 at the limit or
+// on lock contention, 500 otherwise.
 func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
+	var conflict *ReservationScopeConflictError
 	switch {
+	case errors.As(err, &conflict):
+		writeError(w, http.StatusConflict, ErrCodeBrokerReservationScopeConflict,
+			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			quotaExceededMessage(limitName), nil)
@@ -2112,7 +2119,7 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
-	} else if profileName, profileSAID := s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	} else if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, runtimeBrokerID, project); profileSAID != "" {
 		// No explicit GCP identity, and the project sets a default service
 		// account for the profile this agent runs under. It is more specific
 		// than the project-wide default below and wins over it, including an
@@ -5425,6 +5432,11 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if isBrokerAgentNotFound(err) {
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
@@ -5707,6 +5719,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}

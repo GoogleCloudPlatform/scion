@@ -716,3 +716,24 @@ func TestGetProjectName_ExternalDir(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectMarker_HasCanonicalDirName(t *testing.T) {
+	for _, tc := range []struct {
+		slug, id string
+		want     bool
+	}{
+		{"my-project", "0a1b2c3d-1111-2222-3333-444455556666", true},
+		{"a", "x", true},
+		{"", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"My-Project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project-", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my/project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project", "", false},
+		{"my-project", "bad id!", false},
+	} {
+		m := ProjectMarker{ProjectID: tc.id, ProjectSlug: tc.slug}
+		if got := m.HasCanonicalDirName(); got != tc.want {
+			t.Errorf("HasCanonicalDirName(slug %q, id %q) = %v, want %v", tc.slug, tc.id, got, tc.want)
+		}
+	}
+}
