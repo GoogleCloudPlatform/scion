@@ -28,7 +28,8 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 ### 0. Prerequisites
 
 - Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
-- Configure the Hub endpoint in your global settings **before** starting the broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. A broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- Configure the Hub endpoint in your global settings **before** starting the Runtime Broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. The `scion runtime-broker` commands take their Hub from `--hub` (a URL, or a nickname from the hub list), `SCION_HUB_ENDPOINT` or `hub.endpoint`; they do not use the current Hub selected with `scion use`. A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset. While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
 - Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - `scion runtime-broker start`, `register` and `join` work outside a project directory; no `--global` is needed.
 
@@ -156,7 +157,7 @@ Configure it with a runtime entry of `type: substrate` and a `substrate:` block 
 ## Security & Isolation
 
 When you register your machine as a broker:
-*   **Isolation**: Every agent runs in its own isolated container. In local mode each agent gets a dedicated git worktree (`.scion_worktrees/`); in hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
+*   **Isolation**: Every agent runs in its own isolated container. In worktree-per-agent projects each agent gets a dedicated git worktree; in other hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
 *   **No Source Code Sharing**: The Hub does not store your source code. The broker simply creates local branches and commits.
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.

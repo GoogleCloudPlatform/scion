@@ -38,7 +38,7 @@ import (
 
 // Grant keys from the hub and stream authorization deadlines at the
 // target (design v2.21.17 §3.5, "Target-side deadlines"; criterion 29).
-// The agent runs on a fake clock; keepalive timers are set far out so
+// The agent runs on a fake clock; keepalive and write timers are set far out so
 // moving the clock only fires the timers under test.
 
 // fakeStart is where every test's fake clock starts.
@@ -66,6 +66,8 @@ func startFakeAgent(t *testing.T, h *fakeHub, mod func(*Options)) *fakeAgent {
 		o.Clock = fa.clk
 		o.Session.PingInterval = time.Hour
 		o.Session.PongWait = 24 * time.Hour
+		// A clock jump can race with the writer stopping a completed frame's timer.
+		o.Session.WriteWait = time.Hour
 		o.onRenewal = func(id uint32, err error) { fa.renewals <- renewalOutcome{id, err} }
 		if mod != nil {
 			mod(o)

@@ -104,7 +104,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    7, // R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
+			Revision:    8, // R8: project.manage_visitors (ptone/scion#4603); R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -923,6 +923,10 @@ func hubAdminPermissionIDs() []string {
 		"project.read":   true,
 		"project.list":   true,
 		"project.update": true,
+		// Project visitor grants (ptone/scion#4603). Granting and changing
+		// a grant's window also need every permission of the
+		// project-visitor role on the project (non-amplification).
+		"project.manage_visitors": true,
 		// Skill registries
 		"skill.read":          true,
 		"skill.list":          true,

@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -321,6 +322,32 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	if req.ViaTunnel {
 		if err := s.authorizeConduitAction(ctx, req.Identity, agent, ActionTunnel); err != nil {
 			return nil, nil, err
+		}
+	}
+	// Flat placement guard (requirePinnedPlacement), after the permission
+	// checks so a caller without permission learns nothing about the
+	// agent's placement. Every grant reaching an agent is refused for a
+	// pinned agent whose saved placement is inconsistent, the agent-port
+	// proxy, the TCP tunnel and the agent PTY path alike, for user and
+	// agent callers: fail closed on conduit access, as resolvePTYPath does
+	// for attach. The refusal is a *PlacementConflictError (409), never an
+	// authorization result. callAgentControl mints no grant and is not
+	// covered: it only queues a credential refresh on the agent's own
+	// session (Hub-internal credential upkeep).
+	// A managed runtime reaches no Runtime Broker and is never pinned, so
+	// it is not checked (as in resolvePTYPath).
+	if !isManagedAgentRuntime(agent.Runtime) {
+		if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+			if _, refused := placementRefusalOf(err); refused {
+				return nil, nil, err
+			}
+			// The check itself could not read the agent's Runtime Broker.
+			// For a pinned agent that is a temporary failure, answered as
+			// routing unavailable (503 registry_unavailable), not as a
+			// grant-key fault. An unpinned agent keeps today's path.
+			if agent.IsPinned() {
+				return nil, nil, fmt.Errorf("%w: agent placement check: %w", router.ErrRegistryUnavailable, err)
+			}
 		}
 	}
 

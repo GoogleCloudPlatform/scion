@@ -33,6 +33,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2203,10 +2204,10 @@ func (s *federatedBindingStore) ListRoleBindingsForPrincipals(ctx context.Contex
 		if !wanted[b.PrincipalType+":"+b.PrincipalID] {
 			continue
 		}
-		if len(scopeTypes) > 0 && !containsString(scopeTypes, b.ScopeType) {
+		if len(scopeTypes) > 0 && !slices.Contains(scopeTypes, b.ScopeType) {
 			continue
 		}
-		if len(scopeIDs) > 0 && !containsString(scopeIDs, b.ScopeID) && b.ScopeType != store.RoleScopeSystem {
+		if len(scopeIDs) > 0 && !slices.Contains(scopeIDs, b.ScopeID) && b.ScopeType != store.RoleScopeSystem {
 			continue
 		}
 		cp := *b

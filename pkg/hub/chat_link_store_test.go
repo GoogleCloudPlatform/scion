@@ -40,7 +40,7 @@ func newTestChatLinkStore(t *testing.T) *ChatLinkStore {
 	t.Cleanup(func() { client.Close() }) //nolint:errcheck
 
 	ctx := context.Background()
-	require.NoError(t, client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	return NewChatLinkStore(client)
 }
