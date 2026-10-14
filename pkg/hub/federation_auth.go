@@ -26,6 +26,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // FederationTokenHeader is the HTTP header carrying federation OIDC identity tokens.
@@ -87,6 +88,11 @@ type FederationAuthOptions struct {
 	// experiment). When false, a hub issuer's user-kind credential is refused
 	// whatever the issuer's accept_user_tokens says.
 	AcceptHubUserTokens bool
+	// PlatformAuthSA is this hub's platform service account email
+	// (AuthConfig.PlatformAuthSA). A federated identity whose email is that
+	// account is refused (federationPrincipalRefusal). Empty leaves that
+	// part of the check inert.
+	PlatformAuthSA string
 }
 
 // isGoogleUserIssuerMissingAudience reports whether issuer is the Google
@@ -401,6 +407,12 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 		}
 	}
 
+	// 10. Refuse principals that are not people, whatever the claims say
+	// (federationPrincipalRefusal).
+	if reason := federationPrincipalRefusal(identity, opts); reason != "" {
+		return nil, fmt.Errorf("federation: %s", reason)
+	}
+
 	a.log.Debug("federation token validated",
 		"issuer", identity.IssuerURL(),
 		"type", identity.Type(),
@@ -408,6 +420,48 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 	)
 
 	return identity, nil
+}
+
+// federationPrincipalRefusal is the principal check every federation
+// credential passes before it is accepted. It returns a non-empty reason
+// when the verified identity must be refused, and "" otherwise.
+//
+// Invariant (ptone/scion#5080): every endpoint that accepts federation
+// credentials refuses test identities and the platform service account,
+// whatever the credential's own claims say (its kind, its email_verified,
+// the issuer's flags). AuthenticateWithOptions is the only place a
+// federation credential is verified, and it runs this check last, so every
+// route that accepts one inherits it. TestFederationPrincipalCheckCensus
+// fails when a new place accepts federation credentials without it.
+//
+// The receiving hub knows only the claims, so the check reads the email of
+// identities that carry one (user and service account identities; an agent
+// identity has none):
+//   - an email in a reserved test identity domain
+//     (store.IsReservedTestIdentityEmail);
+//   - an email of the federated account synthetic shape
+//     (store.IsFederatedSyntheticEmail);
+//   - this hub's platform service account (isReservedPlatformIdentity with
+//     opts.PlatformAuthSA).
+func federationPrincipalRefusal(identity FederatedIdentity, opts FederationAuthOptions) string {
+	var email string
+	switch id := identity.(type) {
+	case *FederatedUserIdentity:
+		email = id.Email()
+	case *FederatedServiceIdentity:
+		email = id.Email()
+	default:
+		return ""
+	}
+	switch {
+	case store.IsReservedTestIdentityEmail(email):
+		return "credential names a test identity"
+	case store.IsFederatedSyntheticEmail(email):
+		return "credential names a federated account address"
+	case isReservedPlatformIdentity(email, opts.PlatformAuthSA):
+		return "credential names the platform service account"
+	}
+	return ""
 }
 
 // extractHubTokenIdentity builds the identity for a token from an issuer

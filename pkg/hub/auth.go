@@ -382,6 +382,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				fedOpts := FederationAuthOptions{
 					AcceptHubUserTokens: cfg.FederationHubUserTokensEnabled != nil && cfg.FederationHubUserTokensEnabled(),
+					PlatformAuthSA:      cfg.PlatformAuthSA,
 				}
 				identity, err := fedAuth.AuthenticateWithOptions(federationToken, fedOpts)
 				if err != nil {
