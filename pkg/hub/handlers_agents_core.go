@@ -1078,7 +1078,7 @@ type createRollback struct {
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
 // delete + 5s compensation + 5s release), plus about 20s for the fallback
 // below (up to three row-delete attempts with backoff, then marking the row
-// failed or deactivating its edges and service-account assignments).
+// failed).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
@@ -1090,9 +1090,10 @@ type createRollback struct {
 // quotas held (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
-// delete of the agent row on its own, then, once the row is gone, a
-// standalone best-effort deactivation of the agent's delegation edges and
-// service-account assignments (same cause and op ID). The correlation ID is
+// delete of the agent row without the audit record, in one transaction
+// with the deactivation of the agent's delegation edges and
+// service-account assignments and the hard-delete hooks (same cause and op
+// ID; deleteFailedCreateRow). The correlation ID is
 // returned so the caller can report it (writeCreateFailure). The return
 // value is "" when the compensation committed.
 func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
@@ -1172,19 +1173,17 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		compensationFailureCorrelationID = compensationFailureID(ctx)
 		logCompensationFailure(ctx, agent.ID, compensationFailureCorrelationID, opID, err)
-		// Fallback, sharing one store budget. First remove the row so a
-		// failed compensation does not also leave the agent in place. Only
-		// once the row is gone, deactivate its edges on their own (this
-		// succeeds when the transaction failed on another write, for example
-		// the audit insert). When the delete fails, the row keeps its active
-		// edge, so it stays held to its recorded ceiling. When the
-		// deactivation fails, the edge stays active with a deleted delegate,
-		// which nothing reads as authority (the walk, the provenance lookup
-		// and the mint all need the agent row).
+		// Fallback: remove the row so a failed compensation does not also
+		// leave the agent in place. The row delete commits only together
+		// with the deactivation of the agent's edges and service-account
+		// assignments under the same cause and op ID, without the audit
+		// record (this succeeds when the compensation failed on the audit
+		// insert). When it fails, the row keeps its active edge and
+		// assignment, so it stays held to its recorded ceiling.
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent.ID)
+		derr := s.deleteFailedCreateRow(ctx, agent, opID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
@@ -1215,23 +1214,6 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 				s.agentLifecycleLog.Warn("Create-failure cleanup: marking the row failed also failed", "agent_id", agent.ID, "error", err)
 			}
 			return
-		}
-		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
-		defer fcancel()
-		now := time.Now()
-		if _, derr := s.store.DeactivateDelegationEdgesForDelegate(fctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
-			Cause: store.EdgeDeactivationCreateCompensation,
-			At:    &now,
-			OpID:  opID,
-		}); derr != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
-		}
-		if _, derr := s.store.DeactivateAgentServiceAccountAssignments(fctx, agent.ID, store.Deactivation{
-			Cause: store.EdgeDeactivationCreateCompensation,
-			At:    &now,
-			OpID:  opID,
-		}); derr != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: service-account assignment deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
 	}()
 	if rb.DeleteWon != nil {
@@ -1301,7 +1283,15 @@ func isCreateCleanupRefusedRow(a *store.Agent) bool {
 // in the delete's transaction; ptone/scion#3557, ptone/scion#3958); a row a
 // delete holds, or one already gone or soft-deleted, returns
 // errCreateRowDeleteHeld.
-func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) error {
+//
+// Each attempt runs agentHardDeleteWork in the row delete's transaction:
+// the agent's delegation edges and service-account assignments are
+// deactivated with cause create_compensation under opID, and the
+// hard-delete hooks run, so the row is removed only together with them.
+// A failure there rolls the attempt back and keeps the row.
+func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, opID string) error {
+	agentID := agent.ID
+	actor := auditActorFromContext(ctx)
 	var err error
 	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
 		if attempt > 0 {
@@ -1310,8 +1300,17 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) erro
 		func() {
 			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer cancel()
+			now := time.Now()
 			var n int
-			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, createRowHeldCheck(nil))
+			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+				createRowHeldCheck(func(tx store.Store) error {
+					_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
+						Cause: store.EdgeDeactivationCreateCompensation,
+						At:    &now,
+						OpID:  opID,
+					}, "compensation fallback")
+					return werr
+				}))
 			if err == nil && n == 0 {
 				err = errCreateRowDeleteHeld
 			}
