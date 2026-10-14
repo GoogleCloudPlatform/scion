@@ -430,8 +430,9 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	// as an abandoned delete, and is logged.
 	if lapsedClaim {
 		// The restore has committed: finish the clear even if the
-		// caller's request has ended meanwhile.
-		clearCtx := context.WithoutCancel(ctx)
+		// caller's request has ended meanwhile, within its own bound.
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
+		defer cancel()
 		lapsedBefore := time.Now()
 		none := store.DeletionStateNone
 		pred := store.DeletionPredicate{States: []string{store.DeletionStateDeleting}, DeletedAtNull: true, LeaseExpiredBefore: &lapsedBefore}
