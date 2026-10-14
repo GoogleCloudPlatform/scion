@@ -829,7 +829,7 @@ func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
 // or {} clears it. An omitted map section is not written.
 var bodyMergedSections = []string{
 	"access", "endpoints", "lifecycle", "notifications", "federation",
-	"auto_expose_ports", "quotas", "agent_secrets",
+	"auto_expose_ports", "quotas", "agent_secrets", hubObservabilitySection,
 }
 
 // bodyPathForKoanf returns the JSON path in a server-config PUT body
