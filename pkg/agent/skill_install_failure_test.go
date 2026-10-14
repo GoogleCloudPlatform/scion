@@ -91,7 +91,7 @@ func TestInstallResolvedSkills_OptionalInstallFailureSkipped(t *testing.T) {
 	record, skipped, err := installResolvedSkills(context.Background(),
 		installFailSkills(srv.URL, content, true), skillsDest, agentHome)
 	if err != nil {
-		t.Fatalf("an optional skill's install failure must not fail the install, got: %v", err)
+		t.Fatalf("an optional skill install failure must not fail the install, got: %v", err)
 	}
 
 	if len(record.Skills) != 1 || record.Skills[0].URI != installFailGoodURI {
@@ -127,7 +127,7 @@ func TestInstallResolvedSkills_RequiredInstallFailureTypedError(t *testing.T) {
 	}
 	var skillErr *SkillResolutionError
 	if !errors.As(err, &skillErr) {
-		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+		t.Fatalf("required install failure: expected a *SkillResolutionError, got %T: %v", err, err)
 	}
 	if skillErr.URI != installFailMissingURI {
 		t.Errorf("error URI = %q, want %q", skillErr.URI, installFailMissingURI)
@@ -167,7 +167,7 @@ func TestInstallResolvedSkills_FilesystemErrorDoesNotLeakPath(t *testing.T) {
 	_, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome)
 	var skillErr *SkillResolutionError
 	if !errors.As(err, &skillErr) {
-		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+		t.Fatalf("filesystem install failure: expected a *SkillResolutionError, got %T: %v", err, err)
 	}
 	if skillErr.Message != skillInstallFailedOnBroker {
 		t.Errorf("error message = %q, want the fixed %q", skillErr.Message, skillInstallFailedOnBroker)
@@ -259,7 +259,7 @@ func TestProvisionAgent_RequiredSkillInstallFailure_YieldsSkillResolutionError(t
 	}
 	var skillErr *SkillResolutionError
 	if !errors.As(err, &skillErr) {
-		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+		t.Fatalf("provision required install failure: expected a *SkillResolutionError, got %T: %v", err, err)
 	}
 	if skillErr.URI != installFailMissingURI {
 		t.Errorf("error URI = %q, want %q", skillErr.URI, installFailMissingURI)
