@@ -66,10 +66,13 @@ func TestRelayNotifyGrantKeysChanged(t *testing.T) {
 	}
 	// Barrier: the relay answers each RPC after anything it queued on that
 	// session before, so a hint sent to these sessions would arrive first.
-	for _, s := range []conduit.LocalSession{plain, user} {
+	for name, s := range map[string]conduit.LocalSession{"plain": plain, "user": user} {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_, _ = s.Call(ctx, &conduitv1.RpcRequest{Path: "/barrier"})
+		resp, err := s.Call(ctx, &conduitv1.RpcRequest{Path: "/barrier"})
 		cancel()
+		if err != nil || resp == nil {
+			t.Fatalf("%s: the barrier call did not reach the relay: %v", name, err)
+		}
 	}
 	if plainHints.Load() != 0 || userHints.Load() != 0 {
 		t.Fatalf("hints reached other sessions: plain %d, user %d", plainHints.Load(), userHints.Load())
