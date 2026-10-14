@@ -16,8 +16,10 @@ package entc
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -77,7 +79,8 @@ type fkReconcileResult struct {
 	// Unrepaired lists orphans left in place, one entry per foreign key.
 	Unrepaired []fkOrphanGroup
 	// Repaired lists the keys whose declared action changed rows, in the
-	// order applied. A key appears once per pass that changed rows.
+	// order applied. A key appears once per pass that changed rows. It is
+	// read only by tests, which check it against PendingSQLiteFKRepairs.
 	Repaired []fkRepair
 }
 
@@ -86,7 +89,8 @@ type fkRepair struct {
 	info fkInfo
 	rows int64
 	// pass is the repair pass, from 0. Pass 0 repairs the orphans that
-	// existed before the reconcile; later passes follow cascades.
+	// existed before the reconcile; later passes follow cascades. Read
+	// only by tests.
 	pass int
 }
 
@@ -105,6 +109,25 @@ type FKRepairGroup struct {
 	Action string
 	// Rows is the number of orphaned rows.
 	Rows int
+	// Orphans is a digest of which rows are orphaned (their sorted rowids,
+	// and the count of rows without one), so two sets of orphans with the
+	// same count can be told apart.
+	Orphans string
+}
+
+// digest returns a stable hex digest of the violating rows.
+func (r *fkViolatingRows) digest() string {
+	ids := make([]int64, 0, len(r.rowids))
+	for id := range r.rowids {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	h := sha256.New()
+	for _, id := range ids {
+		fmt.Fprintf(h, "%d\n", id)
+	}
+	fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // diagnostic renders the unrepaired orphans with suggested repair SQL. It
@@ -408,6 +431,34 @@ func fkRepairStatement(ctx context.Context, q sqlQuerier, info fkInfo, parentExi
 	}
 }
 
+// BeforeFKReconcileFunc is called by AutoMigrate on SQLite just before the
+// foreign key reconcile, with the keys whose orphaned rows it is about to
+// change (never empty). Returning an error aborts AutoMigrate before the
+// reconcile or the schema migration writes anything.
+type BeforeFKReconcileFunc func(ctx context.Context, db *sql.DB, groups []FKRepairGroup) error
+
+// pendingSQLiteFKRepairs is PendingSQLiteFKRepairs; a variable so tests can
+// make the pre-check fail.
+var pendingSQLiteFKRepairs = PendingSQLiteFKRepairs
+
+// runBeforeFKReconcile runs the pre-check and, when the reconcile is about
+// to change rows, the hook. A pre-check failure is logged and the reconcile
+// runs as it would without a hook.
+func runBeforeFKReconcile(ctx context.Context, db *sql.DB, hook BeforeFKReconcileFunc) error {
+	if hook == nil {
+		return nil
+	}
+	groups, err := pendingSQLiteFKRepairs(ctx, db)
+	if err != nil {
+		slog.Warn("foreign key reconcile: pre-check failed; continuing without the pre-reconcile step", "error", err)
+		return nil
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	return hook(ctx, db, groups)
+}
+
 // PendingSQLiteFKRepairs reports, without writing, the foreign keys whose
 // orphaned rows the reconcile run by AutoMigrate on SQLite would change: the
 // keys whose declared ON DELETE action is applied automatically (CASCADE,
@@ -449,6 +500,7 @@ func PendingSQLiteFKRepairs(ctx context.Context, db *sql.DB) ([]FKRepairGroup, e
 			Parent:       info.parent,
 			Action:       info.onDelete,
 			Rows:         initial[k].count(),
+			Orphans:      initial[k].digest(),
 		})
 	}
 	return out, nil

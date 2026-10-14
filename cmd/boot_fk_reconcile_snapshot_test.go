@@ -162,7 +162,8 @@ func TestFKReconcileSnapshot_UnrepairableOnlyNoSnapshot(t *testing.T) {
 	require.NoError(t, s.Close())
 }
 
-// A snapshot that is needed but fails stops startup before any row changes.
+// A snapshot that is needed but fails stops startup before the reconcile
+// changes any rows.
 func TestFKReconcileSnapshot_SnapshotFailureFailsStartup(t *testing.T) {
 	f := newRepairFixture(t)
 	s := f.boot(t)
@@ -178,7 +179,7 @@ func TestFKReconcileSnapshot_SnapshotFailureFailsStartup(t *testing.T) {
 	_, _, err := initStore(context.Background(), f.cfg)
 	require.Error(t, err)
 	msg := err.Error()
-	assert.Contains(t, msg, "refusing to start")
+	assert.Contains(t, msg, "refusing to continue")
 	assert.Contains(t, msg, "no space left on device")
 	assert.Contains(t, msg, filepath.Dir(f.dbPath), "the error names where space is needed")
 	assert.Contains(t, msg, "bytes", "the error says how much space is needed")
@@ -202,7 +203,7 @@ func TestFKReconcileSnapshot_SnapshotInProgressFailsStartup(t *testing.T) {
 	tmp := f.dbPath + "." + fkReconcileSnapshotLabel(groups) + ".tmp"
 	require.NoError(t, os.WriteFile(tmp, nil, 0o600))
 
-	err = snapshotBeforeFKReconcile(ctx, fakeRepairDB{db: db, dialect: "sqlite3"})
+	err = snapshotBeforeFKReconcile(ctx, db, groups)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, entadapter.ErrSnapshotInProgress), err)
 	assert.Contains(t, err.Error(), tmp)
@@ -219,59 +220,108 @@ func TestFKReconcileSnapshot_RetryReusesSnapshot(t *testing.T) {
 	require.NoError(t, s.Close())
 	seedOrphanBinding(t, f.dbPath)
 	db := openRawFKDB(t, f.dbPath)
-	rdb := fakeRepairDB{db: db, dialect: "sqlite3"}
+	pending := func() []entc.FKRepairGroup {
+		g, err := entc.PendingSQLiteFKRepairs(ctx, db)
+		require.NoError(t, err)
+		require.NotEmpty(t, g)
+		return g
+	}
 
 	logs, restore := captureSlog(t)
 	defer restore()
-	require.NoError(t, snapshotBeforeFKReconcile(ctx, rdb))
+	require.NoError(t, snapshotBeforeFKReconcile(ctx, db, pending()))
 	first := fkSnapshots(t, f.dbPath)
 	require.Len(t, first, 1)
 
 	logs.Reset()
-	require.NoError(t, snapshotBeforeFKReconcile(ctx, rdb))
+	require.NoError(t, snapshotBeforeFKReconcile(ctx, db, pending()))
 	assert.Equal(t, first, fkSnapshots(t, f.dbPath))
 	assert.Contains(t, logs.String(), "reusing the database snapshot")
 
 	fkInsertRow(t, db, "role_bindings", map[string]any{"id": uuid.NewString(), "role_definition_id": uuid.NewString()})
-	require.NoError(t, snapshotBeforeFKReconcile(ctx, rdb))
+	require.NoError(t, snapshotBeforeFKReconcile(ctx, db, pending()))
 	assert.Len(t, fkSnapshots(t, f.dbPath), 2, "a different set of orphans gets its own snapshot")
 }
 
-func TestFKReconcileSnapshot_PreCheckFailureContinues(t *testing.T) {
+// Orphans that come back after a completed reconcile, with the same key
+// and the same count but different rows, get a new snapshot that holds
+// them, not the earlier one.
+func TestFKReconcileSnapshot_SameCountDifferentRowsNewSnapshot(t *testing.T) {
 	f := newRepairFixture(t)
 	s := f.boot(t)
-	defer func() { _ = s.Close() }()
+	require.NoError(t, s.Close())
 
-	orig := pendingFKRepairs
-	pendingFKRepairs = func(context.Context, *sql.DB) ([]entc.FKRepairGroup, error) {
-		return nil, errors.New("boom")
+	seedOrphanBinding(t, f.dbPath)
+	s = f.boot(t)
+	require.NoError(t, s.Close())
+	first := fkSnapshots(t, f.dbPath)
+	require.Len(t, first, 1)
+
+	secondID, gone := seedOrphanBinding(t, f.dbPath)
+	s = f.boot(t)
+	snaps := fkSnapshots(t, f.dbPath)
+	require.Len(t, snaps, 2, "a later reconcile must not reuse the earlier snapshot")
+	require.NoError(t, s.Close())
+	var latest string
+	for _, p := range snaps {
+		if p != first[0] {
+			latest = p
+		}
 	}
-	t.Cleanup(func() { pendingFKRepairs = orig })
+	snapDB, err := sql.Open("sqlite", "file:"+latest+"?mode=ro")
+	require.NoError(t, err)
+	defer func() { _ = snapDB.Close() }()
+	assert.Equal(t, sql.NullString{String: gone, Valid: true}, roleDefinitionRef(t, snapDB, secondID), "the new snapshot holds the new orphan")
+}
+
+// The maintenance migrate helper snapshots too.
+func TestFKReconcileSnapshot_MaintenanceMigrate(t *testing.T) {
+	ctx := context.Background()
+	f := newRepairFixture(t)
+	s := f.boot(t)
+	require.NoError(t, s.Close())
+	bindingID, gone := seedOrphanBinding(t, f.dbPath)
+
+	client, err := entc.OpenSQLite("file:"+f.dbPath, entc.PoolConfig{MaxOpenConns: 1})
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	require.NoError(t, migrateHubSchema(ctx, client, false, true))
+
+	snaps := fkSnapshots(t, f.dbPath)
+	require.Len(t, snaps, 1)
+	snapDB, err := sql.Open("sqlite", "file:"+snaps[0]+"?mode=ro")
+	require.NoError(t, err)
+	defer func() { _ = snapDB.Close() }()
+	assert.Equal(t, sql.NullString{String: gone, Valid: true}, roleDefinitionRef(t, snapDB, bindingID))
+}
+
+// An in-memory database has no file to snapshot: skipped, no error.
+func TestFKReconcileSnapshot_InMemorySkipped(t *testing.T) {
+	db, err := sql.Open("sqlite", "file::memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	orig := snapshotSQLite
+	snapshotSQLite = func(context.Context, *sql.DB, string, time.Time) (entadapter.SQLiteSnapshot, error) {
+		t.Fatal("no snapshot for an in-memory database")
+		return entadapter.SQLiteSnapshot{}, nil
+	}
+	t.Cleanup(func() { snapshotSQLite = orig })
 
 	logs, restore := captureSlog(t)
 	defer restore()
-	require.NoError(t, snapshotBeforeFKReconcile(context.Background(), s.(timestampRepairDB)))
-	assert.Contains(t, logs.String(), "pre-check failed")
-	assert.Empty(t, fkSnapshots(t, f.dbPath))
-}
-
-func TestFKReconcileSnapshot_SkipsNonSQLite(t *testing.T) {
-	orig := pendingFKRepairs
-	pendingFKRepairs = func(context.Context, *sql.DB) ([]entc.FKRepairGroup, error) {
-		t.Fatal("the pre-check must not run on Postgres")
-		return nil, nil
-	}
-	t.Cleanup(func() { pendingFKRepairs = orig })
-	db, err := sql.Open("sqlite", "file::memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-	require.NoError(t, snapshotBeforeFKReconcile(context.Background(), fakeRepairDB{db: db, dialect: "postgres"}))
+	groups := []entc.FKRepairGroup{{Table: "t", Columns: []string{"c"}, Parent: "p", Action: "CASCADE", Rows: 1}}
+	require.NoError(t, snapshotBeforeFKReconcile(context.Background(), db, groups))
+	assert.Contains(t, logs.String(), "in-memory database; no snapshot taken")
 }
 
 func TestFKReconcileSnapshotLabel(t *testing.T) {
-	a := []entc.FKRepairGroup{{Table: "t", ForeignKeyID: 0, Columns: []string{"c"}, Rows: 1}}
-	b := []entc.FKRepairGroup{{Table: "t", ForeignKeyID: 0, Columns: []string{"c"}, Rows: 2}}
+	a := []entc.FKRepairGroup{{Table: "t", ForeignKeyID: 0, Columns: []string{"c"}, Rows: 1, Orphans: "x"}}
+	b := []entc.FKRepairGroup{{Table: "t", ForeignKeyID: 0, Columns: []string{"c"}, Rows: 2, Orphans: "x"}}
+	c := []entc.FKRepairGroup{{Table: "t", ForeignKeyID: 0, Columns: []string{"c"}, Rows: 1, Orphans: "y"}}
 	assert.Equal(t, fkReconcileSnapshotLabel(a), fkReconcileSnapshotLabel(a))
 	assert.NotEqual(t, fkReconcileSnapshotLabel(a), fkReconcileSnapshotLabel(b))
+	assert.NotEqual(t, fkReconcileSnapshotLabel(a), fkReconcileSnapshotLabel(c), "same count, different rows")
 	assert.Regexp(t, `^`+fkReconcileSnapshotLabelPrefix+`-[0-9a-f]{8}$`, fkReconcileSnapshotLabel(a))
 }

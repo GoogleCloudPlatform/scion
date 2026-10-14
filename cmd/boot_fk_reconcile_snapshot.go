@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -26,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -35,55 +35,41 @@ import (
 // before the foreign key reconcile: <db file>.<prefix>-<fingerprint>-<UTC time>.bak.
 const fkReconcileSnapshotLabelPrefix = "pre-fk-reconcile"
 
-// pendingFKRepairs is entc.PendingSQLiteFKRepairs; a variable so tests can
-// make the pre-check fail.
-var pendingFKRepairs = entc.PendingSQLiteFKRepairs
-
 // fkReconcileSnapshotLabel names the snapshot after a fingerprint of the
-// repairs. SnapshotSQLite reuses an existing snapshot with the same label,
-// so a boot that retries the same reconcile (after it failed, or the hub
-// stopped before the migration) reuses the snapshot instead of writing
-// another copy, while a later, different set of orphans gets its own
-// snapshot instead of an older one.
+// repairs, including which rows are orphaned. SnapshotSQLite reuses an
+// existing snapshot with the same label, so a boot that retries the same
+// reconcile (after it failed, or the hub stopped before the migration)
+// reuses the snapshot instead of writing another copy, while any later,
+// different set of orphaned rows gets its own snapshot instead of an older
+// one, even with the same counts.
 func fkReconcileSnapshotLabel(groups []entc.FKRepairGroup) string {
 	h := sha256.New()
 	for _, g := range groups {
-		fmt.Fprintf(h, "%s\x00%d\x00%s\x00%d\n", g.Table, g.ForeignKeyID, strings.Join(g.Columns, ","), g.Rows)
+		fmt.Fprintf(h, "%s\x00%d\x00%s\x00%d\x00%s\n", g.Table, g.ForeignKeyID, strings.Join(g.Columns, ","), g.Rows, g.Orphans)
 	}
 	return fkReconcileSnapshotLabelPrefix + "-" + hex.EncodeToString(h.Sum(nil)[:4])
 }
 
-// snapshotBeforeFKReconcile snapshots a SQLite database before the schema
-// migration applies the declared ON DELETE action to orphaned rows (see
-// entc.AutoMigrate), so an operator can recover the rows the reconcile
-// deletes or clears. It runs in initStore just before migrateStore.
+// snapshotBeforeFKReconcile is the entc.BeforeFKReconcileFunc that hub
+// startup (initStore) and the maintenance commands that migrate the hub
+// database (migrateHubStore, migrateHubSchema) pass to the schema
+// migration. entc.AutoMigrate calls it on SQLite, after PreMigrate and just
+// before the reconcile applies the declared ON DELETE action to orphaned
+// rows, with the keys whose rows the reconcile is about to change; it is
+// not called when there are none (a healthy database, or only orphans the
+// reconcile leaves in place). It snapshots the database so an operator can
+// recover the rows the reconcile deletes or clears.
 //
-// The read-only pre-check, entc.PendingSQLiteFKRepairs, lists the keys the
-// reconcile will change; when there are none (a healthy database, or only
-// orphans the reconcile leaves in place) nothing is written or logged. The
-// snapshot is written next to the database file by the same helper as the
-// UTC timestamp repair (VACUUM INTO, mode 0600, about the database size). If
-// both repairs run on one boot, each writes its own copy.
+// The snapshot is written next to the database file by the same helper as
+// the UTC timestamp repair (VACUUM INTO, mode 0600, about the database
+// size). If both repairs run on one boot, each writes its own copy.
 //
-// A snapshot failure is returned, and fails startup: the reconcile changes
-// rows permanently, so it does not run without a copy to recover from. A
-// pre-check failure is logged and boot continues; the migration then runs
-// the reconcile as it would without this step. An in-memory database has
-// no file to copy and is skipped. Postgres is skipped.
-func snapshotBeforeFKReconcile(ctx context.Context, s timestampRepairDB) error {
+// A snapshot failure is returned, which aborts the migration (and so
+// startup) before the reconcile changes any rows: the reconcile changes
+// rows permanently, so it does not run without a copy to recover from. An
+// in-memory database has no file to copy and is skipped.
+func snapshotBeforeFKReconcile(ctx context.Context, db *sql.DB, groups []entc.FKRepairGroup) error {
 	const label = "foreign key reconcile"
-	db, dbDialect := s.DB(), s.Dialect()
-	if db == nil || dbDialect != dialect.SQLite {
-		return nil
-	}
-	groups, err := pendingFKRepairs(ctx, db)
-	if err != nil {
-		slog.Warn(label+": pre-check failed; no snapshot was taken before the schema migration", "error", err)
-		return nil
-	}
-	if len(groups) == 0 {
-		return nil
-	}
 	for _, g := range groups {
 		slog.Warn(label+": orphaned rows will get their key's declared ON DELETE action before the schema migration",
 			"table", g.Table, "column", strings.Join(g.Columns, ","), "parent", g.Parent, "action", g.Action, "rows", g.Rows)
@@ -101,10 +87,10 @@ func snapshotBeforeFKReconcile(ctx context.Context, s timestampRepairDB) error {
 	snap, err := snapshotSQLite(ctx, db, fkReconcileSnapshotLabel(groups), time.Now())
 	switch {
 	case errors.Is(err, entadapter.ErrSnapshotInProgress):
-		return fmt.Errorf("%s: refusing to start without a database snapshot: %w", label, err)
+		return fmt.Errorf("%s: refusing to continue without a database snapshot: %w", label, err)
 	case err != nil:
-		return fmt.Errorf("%s: refusing to start: the database snapshot taken before repairing orphaned rows failed, "+
-			"and the repair changes rows permanently. %s, then restart the hub: %w", label, snapshotSpaceHint(file), err)
+		return fmt.Errorf("%s: refusing to continue: the database snapshot taken before repairing orphaned rows failed, "+
+			"and the repair changes rows permanently. %s, then retry: %w", label, snapshotSpaceHint(file), err)
 	case snap.Reused:
 		slog.Warn(label+": reusing the database snapshot from an earlier attempt; no new snapshot written", "path", snap.Path)
 	default:

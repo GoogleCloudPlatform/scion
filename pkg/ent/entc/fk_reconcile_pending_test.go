@@ -19,6 +19,7 @@ package entc
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -189,4 +190,128 @@ func TestPendingSQLiteFKRepairs_HubSchema(t *testing.T) {
 	require.Equal(t, []string{"role_definition_id"}, pending[0].Columns)
 	require.Equal(t, "SET NULL", pending[0].Action)
 	require.Equal(t, 1, pending[0].Rows)
+}
+
+// The digest tells apart two sets of orphans with the same count.
+func TestPendingSQLiteFKRepairs_OrphanDigest(t *testing.T) {
+	ctx := context.Background()
+	db := openFKTestDB(t)
+	mustExec(t, db,
+		`CREATE TABLE parent (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE child (id TEXT PRIMARY KEY, pid TEXT REFERENCES parent(id) ON DELETE SET NULL)`,
+		`INSERT INTO child VALUES ('a', 'gone')`,
+	)
+	first, err := PendingSQLiteFKRepairs(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	again, err := PendingSQLiteFKRepairs(ctx, db)
+	require.NoError(t, err)
+	require.Equal(t, first[0].Orphans, again[0].Orphans, "the digest is stable")
+
+	mustExec(t, db, `UPDATE child SET pid = NULL WHERE id = 'a'`, `INSERT INTO child VALUES ('b', 'gone')`)
+	other, err := PendingSQLiteFKRepairs(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, other, 1)
+	require.Equal(t, first[0].Rows, other[0].Rows)
+	require.NotEqual(t, first[0].Orphans, other[0].Orphans, "different rows, same count")
+}
+
+// The hook runs inside AutoMigrate, after anything the caller did before
+// it, and sees the database as the reconcile will: an orphan created after
+// an earlier pre-check (as PreMigrate's deletes can) is reported to it.
+func TestAutoMigrate_BeforeFKReconcileHookSeesLateOrphans(t *testing.T) {
+	ctx := context.Background()
+	path := openMigratedFile(t)
+	client, db := openHubFile(t, path)
+
+	early, err := PendingSQLiteFKRepairs(ctx, db)
+	require.NoError(t, err)
+	require.Empty(t, early)
+
+	// After the early pre-check, a delete on a connection without
+	// enforcement leaves a SET NULL orphan.
+	mustExec(t, db, "PRAGMA foreign_keys = OFF")
+	roleID, bindingID := uuid.NewString(), uuid.NewString()
+	insertRow(t, db, "role_definitions", map[string]any{"id": roleID})
+	insertRow(t, db, "role_bindings", map[string]any{"id": bindingID, "role_definition_id": roleID})
+	mustExec(t, db, fmt.Sprintf(`DELETE FROM role_definitions WHERE id = '%s'`, roleID))
+	mustExec(t, db, "PRAGMA foreign_keys = ON")
+
+	var calls int
+	var seen []FKRepairGroup
+	hook := func(ctx context.Context, hdb *sql.DB, groups []FKRepairGroup) error {
+		calls++
+		seen = groups
+		// The reconcile has not run yet.
+		require.Equal(t, 1, fkCountRows(t, hdb, fmt.Sprintf(
+			`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id = '%s'`, bindingID, roleID)))
+		// The hook holds AutoMigrate's process lock.
+		require.Len(t, autoMigrateSem, 1)
+		return nil
+	}
+	require.NoError(t, AutoMigrate(ctx, client, WithBeforeFKReconcile(hook)))
+	require.Equal(t, 1, calls)
+	require.Len(t, seen, 1)
+	require.Equal(t, "role_bindings", seen[0].Table)
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
+		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id IS NULL`, bindingID)))
+
+	// Nothing left to reconcile: the hook is not called.
+	require.NoError(t, AutoMigrate(ctx, client, WithBeforeFKReconcile(hook)))
+	require.Equal(t, 1, calls)
+}
+
+// A hook error aborts AutoMigrate before the reconcile or the schema
+// migration writes anything.
+func TestAutoMigrate_BeforeFKReconcileHookErrorLeavesDatabaseUntouched(t *testing.T) {
+	ctx := context.Background()
+	path := openMigratedFile(t)
+	client, db := openHubFile(t, path)
+	// The next migration must rebuild this table; it stays nullable if
+	// the migration does not run.
+	makeColumnNullable(t, db, "role_bindings", "principal_id")
+	bindingID, gone := uuid.NewString(), uuid.NewString()
+	insertRow(t, db, "role_bindings", map[string]any{"id": bindingID, "principal_id": "p", "role_definition_id": gone})
+	mustExec(t, db, "PRAGMA foreign_keys = ON")
+	var schemaBefore string
+	require.NoError(t, db.QueryRow(`SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master ORDER BY name)`).Scan(&schemaBefore))
+
+	errHook := errors.New("snapshot failed")
+	err := AutoMigrate(ctx, client, WithBeforeFKReconcile(func(context.Context, *sql.DB, []FKRepairGroup) error { return errHook }))
+	require.ErrorIs(t, err, errHook)
+
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
+		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id = '%s'`, bindingID, gone)), "the orphan is untouched")
+	require.False(t, columnNotNull(t, db, "role_bindings", "principal_id"), "the schema migration did not run")
+	var schemaAfter string
+	require.NoError(t, db.QueryRow(`SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_master ORDER BY name)`).Scan(&schemaAfter))
+	require.Equal(t, schemaBefore, schemaAfter)
+	require.Len(t, autoMigrateSem, 0, "the lock is released")
+}
+
+// A pre-check failure is logged; the hook is not called and the reconcile
+// runs as it would without one.
+func TestAutoMigrate_BeforeFKReconcilePreCheckFailureContinues(t *testing.T) {
+	ctx := context.Background()
+	path := openMigratedFile(t)
+	client, db := openHubFile(t, path)
+	mustExec(t, db, "PRAGMA foreign_keys = OFF")
+	bindingID := uuid.NewString()
+	insertRow(t, db, "role_bindings", map[string]any{"id": bindingID, "role_definition_id": uuid.NewString()})
+	mustExec(t, db, "PRAGMA foreign_keys = ON")
+
+	orig := pendingSQLiteFKRepairs
+	pendingSQLiteFKRepairs = func(context.Context, *sql.DB) ([]FKRepairGroup, error) { return nil, errors.New("boom") }
+	t.Cleanup(func() { pendingSQLiteFKRepairs = orig })
+
+	logs := captureSlog(t)
+	called := false
+	require.NoError(t, AutoMigrate(ctx, client, WithBeforeFKReconcile(func(context.Context, *sql.DB, []FKRepairGroup) error {
+		called = true
+		return nil
+	})))
+	require.False(t, called)
+	require.Contains(t, logs.String(), "pre-check failed")
+	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
+		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id IS NULL`, bindingID)))
 }
