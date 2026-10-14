@@ -1004,15 +1004,9 @@ async function runDiagnosticLegs(): Promise<void> {
           .first()
           .waitFor({ state: 'visible', timeout: 15_000 });
         await tab(page, 'preview').click({ timeout: 15_000 });
-        await clickInFrameLink(
-          page,
-          r,
-          'member v1 via R2-11 path',
-          '#to-page2',
-          'page2.html',
-          1,
-          { graded: false }
-        );
+        await clickInFrameLink(page, r, 'member v1 via R2-11 path', '#to-page2', 'page2.html', 1, {
+          graded: false,
+        });
       } catch (err) {
         r.ui.legError = redactViews(firstLine(err));
       }
