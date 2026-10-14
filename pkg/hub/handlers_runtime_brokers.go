@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -110,10 +111,18 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			resources[i] = brokerResource(&result.Items[i])
 		}
 		caps = s.authzService.ComputeCapabilitiesBatch(ctx, ident, resources, "broker")
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		for i, broker := range result.Items {
-			if broker.AutoProvide && i < len(caps) && !capabilityAllows(caps[i], ActionDispatch) {
-				caps[i].Actions = append(caps[i].Actions, string(ActionDispatch))
+		// The dispatch capability follows the dispatch rule: for a
+		// project-filtered listing, the project-aware rule agent creation
+		// uses; otherwise the project-independent one.
+		var project *store.Project
+		if projectID != "" {
+			if p, err := s.store.GetProject(ctx, projectID); err == nil {
+				project = p
+			}
+		}
+		for i := range result.Items {
+			if i < len(caps) {
+				s.reportBrokerDispatchCapability(ctx, caps[i], &result.Items[i], project)
 			}
 		}
 	}
@@ -391,10 +400,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		// Auto-provide brokers grant dispatch to all authenticated users.
-		if broker.AutoProvide && !capabilityAllows(resp.Cap, ActionDispatch) {
-			resp.Cap.Actions = append(resp.Cap.Actions, string(ActionDispatch))
-		}
+		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -402,6 +408,13 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 
 func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
+
+	// Updating a broker is a governance action on a hub-level record that
+	// user access tokens cannot take (GOV_PENDING); broker.update is then
+	// checked on the record.
+	if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending); !ok {
+		return
+	}
 
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
@@ -483,6 +496,12 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
+	// Deregistering a broker is a governance action that user access tokens
+	// cannot take (GOV_PENDING); broker.delete is then checked on the record.
+	if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending); !ok {
+		return
+	}
+
 	// Get broker info before deletion for authz and audit logging
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
@@ -495,9 +514,8 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// Attribution for the audit events below. Read from the full identity rather
-	// than the user identity: a caller that is not a user now has to pass the
-	// check above rather than skip it, so the event should name whoever it was.
+	// Attribution for the audit events below, read from the identity that
+	// passed the checks above.
 	var actorID string
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		actorID = ident.ID()
@@ -545,6 +563,26 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reportBrokerDispatchCapability adds the dispatch action to caps when the
+// caller may have an agent dispatched to broker: canUseBrokerForProject when
+// a project is given, canDispatchToBroker otherwise. The capability then
+// matches the decision agent creation makes, including auto-provide brokers
+// and providers shared with the owner's consent.
+func (s *Server) reportBrokerDispatchCapability(ctx context.Context, caps *Capabilities, broker *store.RuntimeBroker, project *store.Project) {
+	if caps == nil || broker == nil || capabilityAllows(caps, ActionDispatch) {
+		return
+	}
+	var allowed bool
+	if project != nil {
+		allowed = s.canUseBrokerForProject(ctx, broker, project)
+	} else {
+		allowed = s.canDispatchToBroker(ctx, broker)
+	}
+	if allowed {
+		caps.Actions = append(caps.Actions, string(ActionDispatch))
+	}
 }
 
 // checkBrokerDispatchAccess verifies that the caller may have an agent in
@@ -953,33 +991,42 @@ func heartbeatBrokerIsFlat(load func() (*store.RuntimeBroker, error)) bool {
 	return err == nil && b.IsFlat()
 }
 
+// authorizeBrokerHeartbeatUser decides the user path of the broker
+// heartbeat. Only the broker itself heartbeats as a matter of course; a user
+// may do so only on an interactive session or dev credential
+// (HOST_OPERATIONS) and only with broker.update granted on the broker by a
+// role binding. The check names the broker by ID without reading its row,
+// so the owner relationship does not apply here and a heartbeat reads the
+// broker row only when its own processing needs it. It writes the response
+// and returns false when the caller is refused.
+func (s *Server) authorizeBrokerHeartbeatUser(w http.ResponseWriter, r *http.Request, id string) bool {
+	ctx := r.Context()
+	resource := Resource{Type: permissions.ResourceBroker, ID: id}
+	user, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonHostOperations)
+	if !ok {
+		logAuthzDenial(r, GetIdentityFromContext(ctx), resource, ActionUpdate, "heartbeat user path requires a session credential")
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, user, resource, ActionUpdate)
+	if !decision.Allowed {
+		logAuthzDenial(r, user, resource, ActionUpdate, decision.Reason)
+		Forbidden(w)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
-	// heartbeats modify agent state and broker liveness).
+	// Authorize: the broker itself, or a user on an interactive session or
+	// dev credential holding broker.update on the broker (heartbeats modify
+	// agent state and broker liveness). A user access token is refused with
+	// the HOST_OPERATIONS session-only reason.
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
 		// Broker sending its own heartbeat — allowed
-	} else {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			logAuthzDenial(r, nil, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "no identity")
-			Unauthorized(w)
-			return
-		}
-		if userIdent, ok := identity.(UserIdentity); ok {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				Resource{Type: "runtime_broker", ID: id}, ActionUpdate)
-			if !decision.Allowed {
-				logAuthzDenial(r, userIdent, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, decision.Reason)
-				Forbidden(w)
-				return
-			}
-		} else {
-			logAuthzDenial(r, identity, Resource{Type: "runtime_broker", ID: id}, ActionUpdate, "non-user non-broker identity")
-			Forbidden(w)
-			return
-		}
+	} else if !s.authorizeBrokerHeartbeatUser(w, r, id) {
+		return
 	}
 
 	var heartbeat brokerHeartbeatRequest

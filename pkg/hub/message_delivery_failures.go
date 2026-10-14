@@ -103,7 +103,7 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 
 	brokerIdent := GetBrokerIdentityFromContext(ctx)
 	if brokerIdent == nil || brokerIdent.BrokerID() != brokerID {
-		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "runtime_broker", ID: brokerID}, ActionUpdate,
+		logAuthzDenial(r, GetIdentityFromContext(ctx), Resource{Type: "broker", ID: brokerID}, ActionUpdate,
 			"message-failures may only be reported by the broker itself")
 		Forbidden(w)
 		return
