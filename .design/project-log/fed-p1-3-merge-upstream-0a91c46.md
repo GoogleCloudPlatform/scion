@@ -34,3 +34,7 @@ Date: 2026-10-13. Branch: scion/mmr-fed-p1-3.
   (count 223: upstream 219 plus the four `project.visitors.*` operations) and the shared
   experiment loop in `authzop_sqlite_helpers_test.go` (upstream's text, which already enables
   `federation.project_visitors`) needed a hand resolution.
+- 2026-10-14: merged upstream main again at 9151dbb1b004. The operation catalog report (count
+  280: upstream 276 plus the four `project.visitors.*` operations) and one `opPatternOverrides`
+  row in `authzop_sqlite_helpers_test.go` (the `project.visitors.update` row, kept after
+  upstream's realigned block) needed a hand resolution.
