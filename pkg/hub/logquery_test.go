@@ -139,7 +139,7 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				AgentID: "agent-123",
 			},
 			projectID: "my-project",
-			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.agent_id = "agent-123"`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts") AND labels.agent_id = "agent-123"`,
 		},
 		{
 			name: "message log uses ID-based sender and recipient filter",
@@ -195,7 +195,7 @@ func TestBuildLogFilter_Whitelist(t *testing.T) {
 			name:      "default filter produces whitelist not exclusion",
 			opts:      LogQueryOptions{},
 			projectID: "my-project",
-			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts")`,
 		},
 		{
 			name:      "whitelist excludes Cloud SQL logs implicitly",
@@ -204,14 +204,14 @@ func TestBuildLogFilter_Whitelist(t *testing.T) {
 			// The whitelist only admits scion-server, scion-agents, scion-messages.
 			// A Cloud SQL logName like "projects/my-project/logs/cloudsql.googleapis.com%2Fpostgres.log"
 			// would NOT match any of these, so it is excluded.
-			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts")`,
 		},
 		{
 			name:      "whitelist excludes request log implicitly",
 			opts:      LogQueryOptions{},
 			projectID: "my-project",
 			// scion_request_log is NOT in the whitelist, so it is excluded.
-			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts")`,
 		},
 		{
 			name: "explicit LogID overrides whitelist",
@@ -246,7 +246,7 @@ func TestBuildLogFilter_HubName(t *testing.T) {
 				HubName: "scion-community",
 			},
 			projectID: "my-project",
-			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.hub = "scion-community"`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts") AND labels.hub = "scion-community"`,
 		},
 		{
 			name: "HubName filter omitted when empty",
@@ -254,7 +254,7 @@ func TestBuildLogFilter_HubName(t *testing.T) {
 				HubName: "",
 			},
 			projectID: "my-project",
-			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages")`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts")`,
 		},
 		{
 			name: "HubName filter with agent and severity",
@@ -264,7 +264,7 @@ func TestBuildLogFilter_HubName(t *testing.T) {
 				Severity: "ERROR",
 			},
 			projectID: "my-project",
-			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages") AND labels.agent_id = "agent-123" AND severity >= ERROR AND labels.hub = "scion-gteam"`,
+			expected:  `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts") AND labels.agent_id = "agent-123" AND severity >= ERROR AND labels.hub = "scion-gteam"`,
 		},
 		{
 			name: "HubName filter without project ID",

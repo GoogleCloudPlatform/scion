@@ -105,7 +105,14 @@ func NewArtifactLogger(cfg ArtifactLoggerConfig) (*slog.Logger, func(), error) {
 		}
 	}
 
-	return slog.New(&requestIDHandler{inner: handler}), cleanup, nil
+	return slog.New(NewRequestIDHandler(handler)), cleanup, nil
+}
+
+// NewRequestIDHandler wraps inner so every record logged with a request
+// context carries that request's id (RequestIDFromContext) under
+// AttrRequestID, unless it already has one.
+func NewRequestIDHandler(inner slog.Handler) slog.Handler {
+	return &requestIDHandler{inner: inner}
 }
 
 // requestIDHandler adds the request id of the record's context (see
