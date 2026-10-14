@@ -199,12 +199,26 @@ func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 	if report.Message != want {
 		t.Errorf("stored message = %q, want %q", report.Message, want)
 	}
-	for _, v := range []string{"pw-1", "qv-2", "qv-3", resolverTestQueryValue} {
+	for _, v := range []string{"pw-1", "qv-2", "qv-3", resolverTestQueryValue, "ARBITRARY-UPSTREAM-BODY"} {
 		if strings.Contains(logs, v) {
 			t.Errorf("logs carry %q: %s", v, logs)
 		}
 	}
-	assertResolverLogRecord(t, logs, "runLaunch: agent start failed", startErrTextRunID)
+	// The reference was redacted, so the resolver message is withheld.
+	rec := logRecord(t, logs, resolverLogMsg)
+	if got, want := rec["error"], `required skill "https://(redacted URL)" could not be resolved: (resolver message withheld)`; got != want {
+		t.Errorf("skill record error = %v, want %q", got, want)
+	}
+	if rec["correlation_id"] != startErrTextRunID || rec["skill_uri"] != "https://(redacted URL)" {
+		t.Errorf("skill record correlation_id %v skill_uri %v, want %q and the redacted URL", rec["correlation_id"], rec["skill_uri"], startErrTextRunID)
+	}
+	general := logRecord(t, logs, "runLaunch: agent start failed")
+	if general["correlation_id"] != startErrTextRunID {
+		t.Errorf("general record correlation_id = %v, want %q", general["correlation_id"], startErrTextRunID)
+	}
+	if cause, ok := general["cause"]; ok {
+		t.Errorf("general record carries a runtime cause %v", cause)
+	}
 }
 
 // TestProvisionOnly_SkillResolverError_FixedReasonPhrase covers the
@@ -389,4 +403,56 @@ func TestProvisionOnly_SkillFailureWithEarlierCase_LogsOnce(t *testing.T) {
 		t.Errorf("response body carries resolver text: %s", w.Body.String())
 	}
 	assertResolverLogRecord(t, logs.String(), "Agent provision failed: template or harness-config not found", runID)
+}
+
+// TestSkillFailure_ParserMessagesWithheld builds resolver messages with the
+// real reference parsers, for references that are redacted, and checks no
+// part of the reference (userinfo, query value, token value) reaches the
+// log records, the span text, the user-visible text or the skill detail.
+func TestSkillFailure_ParserMessagesWithheld(t *testing.T) {
+	parseGH := func(ref string) error { _, err := agent.ParseGitHubSkillURI(ref); return err }
+	parseGCP := func(ref string) error { _, err := agent.ParseGCPSkillURI(ref); return err }
+	tests := []struct {
+		ref   string
+		parse func(string) error
+	}{
+		{"GH://o/r/s?k=qv-1", parseGH},
+		{"gh://o/r/s?k=qv-1", parseGH},
+		{"gh://u:pw-1@o/r/s@main", parseGH},
+		{"gh://u:pw-1@o/r/s\tx", parseGH},
+		{"gh://o/r/s?token=qv-1!", parseGH},
+		{"GH://u:pw-1@o/r/s", parseGH},
+		{"gcp-skill://u:pw-1@a/id@v", parseGCP},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			msg := "resolved"
+			if err := tt.parse(tt.ref); err != nil {
+				msg = err.Error()
+			}
+			e := &agent.SkillResolutionError{URI: tt.ref, Code: agent.SkillErrCodeInvalidURI, Message: msg}
+
+			srv := newTestServer(t)
+			logs := &syncBuffer{}
+			srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+			srv.logSkillResolutionFailure(skillFailureFrom(e, "run-parser-5061"), "agent_id", "a1")
+
+			outputs := map[string]string{
+				"log":     logs.String(),
+				"span":    spanErrorText(fmt.Errorf("provision: %w: %w", e, context.DeadlineExceeded)),
+				"public":  skillResolutionPublicText(e, "run-parser-5061"),
+				"details": publicSkillRef(tt.ref),
+			}
+			for where, out := range outputs {
+				for _, part := range []string{"pw-1", "qv-1", "u:pw"} {
+					if strings.Contains(out, part) {
+						t.Errorf("%s text carries %q: %s", where, part, out)
+					}
+				}
+			}
+			if !strings.Contains(outputs["log"], resolverMessageWithheld) {
+				t.Errorf("log text does not withhold the resolver message: %s", outputs["log"])
+			}
+		})
+	}
 }

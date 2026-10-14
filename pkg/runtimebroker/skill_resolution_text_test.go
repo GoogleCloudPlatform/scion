@@ -123,7 +123,7 @@ func TestSkillLogText_RefWithRawSpaceInPassword(t *testing.T) {
 		URI: "https://alice:p w-1@skills.example.test/x", Code: agent.SkillErrCodeResolveFailed,
 		Message: "boom at https://h.example.test/x?k=qv-1",
 	}
-	if got, want := skillLogText(e), `required skill "https://(redacted URL)" could not be resolved: boom at https://(redacted URL)`; got != want {
+	if got, want := skillLogText(e), `required skill "https://(redacted URL)" could not be resolved: (resolver message withheld)`; got != want {
 		t.Errorf("skillLogText = %q, want %q", got, want)
 	}
 	if got, want := skillResolutionPublicText(e, "r"), `required skill "https://(redacted URL)" could not be resolved: resolver error (ref r)`; got != want {
@@ -370,20 +370,45 @@ func TestAsyncLaunch_SkillResolverError_StatusInStoredText(t *testing.T) {
 }
 
 // TestSkillLogText_SchemeAfterOtherText checks a reference with text before
-// its scheme is redacted whole, in the log text and the user-visible text,
-// also where the message quotes it.
+// its scheme is redacted whole, and its resolver message withheld, in the
+// log text and the user-visible text.
 func TestSkillLogText_SchemeAfterOtherText(t *testing.T) {
 	const uri = "git+https://u:pw-1@h.example.test/x?k=qv-2"
 	e := &agent.SkillResolutionError{
 		URI: uri, Code: "unsupported_scheme",
 		Message: `no resolver registered for scheme "git+https"; cannot fetch ` + uri,
 	}
-	want := `required skill "(redacted URL)" could not be resolved: no resolver registered for scheme "git+https"; cannot fetch (redacted URL)`
+	want := `required skill "(redacted URL)" could not be resolved: (resolver message withheld)`
 	if got := skillLogText(e); got != want {
 		t.Errorf("skillLogText = %q, want %q", got, want)
 	}
 	if got, want := skillResolutionPublicText(e, "r"), `required skill "(redacted URL)" could not be resolved: resolver error (ref r)`; got != want {
 		t.Errorf("public text = %q, want %q", got, want)
+	}
+}
+
+// TestSkillLogText_BareSchemeRefLeavesMessageAlone checks a bare-scheme
+// reference does not rewrite the scheme text in the message: the message is
+// withheld whole.
+func TestSkillLogText_BareSchemeRefLeavesMessageAlone(t *testing.T) {
+	e := &agent.SkillResolutionError{URI: "http:", Code: agent.SkillErrCodeResolveFailed, Message: "net/http: request canceled"}
+	if got, want := skillLogText(e), `required skill "http://" could not be resolved: (resolver message withheld)`; got != want {
+		t.Errorf("skillLogText = %q, want %q", got, want)
+	}
+}
+
+func TestSkillSchemeRest_ASCIIOnly(t *testing.T) {
+	if _, ok := skillSchemeRest("SKILL://scope/name"); !ok {
+		t.Error("upper-case ASCII scheme not recognised")
+	}
+	if _, ok := skillSchemeRest("s\u212aill://scope/name"); ok {
+		t.Error("a Kelvin sign matched the ASCII k of skill://")
+	}
+	if got := redactSkillRef("s\u212aill://scope/name"); got != redactedURL {
+		t.Errorf("redactSkillRef(Kelvin-sign scheme) = %q, want %q", got, redactedURL)
+	}
+	if got := redactSkillRef("gh://u%3Apw-1@o/r/s"); got != redactedURL {
+		t.Errorf("redactSkillRef(percent-encoded colon) = %q, want %q", got, redactedURL)
 	}
 }
 

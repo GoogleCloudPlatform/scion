@@ -105,24 +105,42 @@ var skillSchemes = []string{"gh://", "gcp-skill://", "skill://"}
 // skillSchemeRest returns the part of uri after its skill scheme (one of
 // skillSchemes, in any case, at the start of uri), and whether it has one.
 func skillSchemeRest(uri string) (string, bool) {
-	lower := strings.ToLower(uri)
 	for _, scheme := range skillSchemes {
-		if strings.HasPrefix(lower, scheme) {
+		if hasASCIIPrefixFold(uri, scheme) {
 			return uri[len(scheme):], true
 		}
 	}
 	return "", false
 }
 
+// hasASCIIPrefixFold reports whether s starts with prefix, an ASCII
+// lower-case string, ignoring ASCII case only (so no Unicode letter, such
+// as the Kelvin sign, matches an ASCII one).
+func hasASCIIPrefixFold(s, prefix string) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // isSkillSchemeRefShown reports whether a skill-scheme reference, whose
 // part after the scheme is rest, can be shown as it is: rest holds no
-// http(s) scheme, no whitespace, no "?" or "#", and no ":" (so no
-// user:password@ form). An "@" is allowed, as in gh://o/r/s@ref or
-// skill://scope/name@version.
+// http(s) scheme, no whitespace, no "?" or "#", and no ":" or "%" (so no
+// user:password@ form, percent-encoded or not). An "@" is allowed, as in
+// gh://o/r/s@ref or skill://scope/name@version.
 func isSkillSchemeRefShown(rest string) bool {
 	return !urlStartPattern.MatchString(rest) &&
 		strings.IndexFunc(rest, unicode.IsSpace) < 0 &&
-		!strings.ContainsAny(rest, "?#:")
+		!strings.ContainsAny(rest, "?#:%")
 }
 
 // publicSkillRef returns redactSkillRef(uri) cut to maxPublicSkillRefLen
@@ -324,18 +342,24 @@ func trimURLTrailing(rest string) (head, trailing string) {
 
 // skillLogText returns the full text of e for the server-side log, built
 // from its parts: the reference as redactSkillRef gives it, and the message
-// with its URLs redacted (see redactURLsInText).
+// with its URLs redacted (see redactURLsInText). When redactSkillRef changed
+// the reference, the message is withheld (see resolverMessageWithheld): a
+// resolver message can quote the reference, or parts of it, in any form.
+// The code, status and correlation id stay in their own log attributes.
 func skillLogText(e *agent.SkillResolutionError) string {
 	redacted := *e
 	redacted.URI = redactSkillRef(e.URI)
-	redacted.Message = e.Message
-	if e.URI != "" && redacted.URI != e.URI {
-		// The message may quote the reference itself.
-		redacted.Message = strings.ReplaceAll(redacted.Message, e.URI, redacted.URI)
+	if redacted.URI != e.URI {
+		redacted.Message = resolverMessageWithheld
+	} else {
+		redacted.Message = redactURLsInText(e.Message)
 	}
-	redacted.Message = redactURLsInText(redacted.Message)
 	return redacted.Error()
 }
+
+// resolverMessageWithheld replaces the resolver message in the log text of
+// a skill failure whose reference was redacted.
+const resolverMessageWithheld = "(resolver message withheld)"
 
 // skillFailure is a skill resolution failure in a create or start error,
 // with the correlation id that its user-visible text and its log record
