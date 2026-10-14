@@ -59,6 +59,9 @@ var fedCredentialCensus = map[string]string{
 	"federation_auth.go:(*FederationAuthenticator).Authenticate":                   fedCensusWrapper,
 	"federation_auth.go:federationPrincipalRefusal":                                fedCensusCheck,
 	"test_identity_workload_issuer.go:(*workloadIssuerAuthenticator).authenticate": fedCensusRefuses,
+	// Reads the Google issuer configuration for the external bearer path;
+	// that path never receives the federation header and verifies nothing here.
+	"auth_external_bearer.go:googleTrust":                                          fedCensusNoCredential,
 	"federation_auth.go:(*FederationAuthenticator).IssuerConfig":                   fedCensusNoCredential,
 	"federation_auth.go:NewFederationAuthenticator":                                fedCensusNoCredential,
 	"federation_auth.go:extractHubTokenIdentity":                                   fedCensusNoCredential,

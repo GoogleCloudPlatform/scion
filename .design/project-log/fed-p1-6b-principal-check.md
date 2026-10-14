@@ -28,3 +28,6 @@
 - On the peer hub user access path the service account email rule refuses the platform service
   account before the principal check runs, so request-level tests of the platform service account
   rule use an issuer_type user credential, where other service account emails are accepted.
+- The census also finds `googleTrust` (auth_external_bearer.go), which reads the federation
+  authenticator only to look up the Google issuer configuration for the external bearer path and
+  verifies no credential; it is classified no-credential.
