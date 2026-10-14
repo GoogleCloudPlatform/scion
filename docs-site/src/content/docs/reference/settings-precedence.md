@@ -50,7 +50,6 @@ Every row that makes a claim about behaviour carries a status marker, defined on
 | **`Changed in this release`** | Behaviour changed by the settings-precedence release, with a one-line before → after. See the [release notes](/scion/release-notes/). |
 | **`Unchanged`** | Explicitly *not* changed. Present because a neighbouring row would otherwise imply it was. |
 | **`Known gap`** | Documented as broken or incomplete. Not fixed here. |
-| **`Pending`** | The intended model is stated; the current behaviour does not match it and the resolution is not yet decided. |
 
 ### How the citations on this page are pinned
 
@@ -727,9 +726,8 @@ This is not a rule you can repair by flipping an inequality — there is no sing
 
 #### Why the hub tier is missing from that chain, and why that is the same rule twice
 
-A chain has one rung per participant, so writing the hub tier into it would **publish a settled
-precedence position** — the one thing this page says twice, below, that it is not publishing. It
-would also be false half the time: in Postgres mode the hub tier sits just above
+A chain has one rung per participant, and any single rung for the hub tier would be false half
+the time: in Postgres mode the hub tier sits just above
 `default_resources`, and in **file mode it sits at the bottom of the broker chain, *below*
 `default_resources`**. A chain cannot express "this rung moves with deployment mode" any more than
 it can express an interleave.
@@ -1050,7 +1048,9 @@ above them did.
 
 - **Limits and `resources`** (`default_max_turns`, `default_max_model_calls`,
   `default_max_duration`, `resources`) follow this model. The Runtime Broker applies them on
-  every start, below the template and the agent's own config. In Postgres mode they rank above
+  every start, below the template and the agent's own config (for `resources`, also below the
+  broker's profile resources and harness overrides; see
+  [Resources interleaves](#resources-interleaves-and-cannot-be-given-one-rank)). In Postgres mode they rank above
   the broker's own `settings.yaml` defaults, and in file mode at the bottom (see the next
   section). A change to them reaches an agent at its next start or restart (see
   [the change below](#changed-in-this-release--hub-agent_defaults-limits-and-resources-apply-on-every-start)).
