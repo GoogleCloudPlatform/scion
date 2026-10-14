@@ -5474,6 +5474,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
+		if writeBrokerOutcomeUnknown(w, err) {
+			return
+		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
 		return
 	}

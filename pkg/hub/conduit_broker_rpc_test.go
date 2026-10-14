@@ -340,10 +340,13 @@ func TestConduitBrokerTunnel_CallerCancelReachesBrokerHandler(t *testing.T) {
 	}
 }
 
-// TestConduitBrokerTunnel_NotConstructedInProduction checks that, with
-// routing still on the control channel, no production code constructs the
-// conduit broker tunnel or the broker's conduit RPC handler: only their
-// own constructors may, so broker requests keep the control channel path.
+// TestConduitBrokerTunnel_NotConstructedInProduction checks that no
+// production code constructs the local-session conduit broker tunnel:
+// broker requests reach conduit sessions only through the router
+// (routedBrokerTunnel), which resolves remote sessions and applies the
+// session-end rules. The broker's conduit RPC handler is wired in
+// production since broker RPCs route over conduit, so it is no longer
+// guarded.
 func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 	// guarded maps each directory to the guarded names (a constructor
 	// called, or a type built with a composite literal) and to the one
@@ -352,8 +355,7 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 		names       map[string]bool
 		constructor string
 	}{
-		".":                {names: map[string]bool{"newConduitBrokerTunnel": true, "conduitBrokerTunnel": true}, constructor: "newConduitBrokerTunnel"},
-		"../runtimebroker": {names: map[string]bool{"newConduitRPCHandler": true, "conduitRPCHandler": true}, constructor: "newConduitRPCHandler"},
+		".": {names: map[string]bool{"newConduitBrokerTunnel": true, "conduitBrokerTunnel": true}, constructor: "newConduitBrokerTunnel"},
 	}
 	for dir, g := range guarded {
 		// pkgmove:scan-covers pkg/hub/apierr
