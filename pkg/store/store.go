@@ -2510,8 +2510,8 @@ type ScheduledEventStore interface {
 	// Returns ErrNotFound if the event doesn't exist or is not pending.
 	CancelScheduledEvent(ctx context.Context, id string) error
 
-	// CancelScheduledEventWithReason marks a pending event as cancelled and
-	// records reason as its error. Like CancelScheduledEvent, it changes the
+	// CancelScheduledEventWithReason marks a pending event as cancelled and,
+	// when reason is not empty, records it as the event's error. Like CancelScheduledEvent, it changes the
 	// event only while it is still pending, and returns ErrNotFound if the
 	// event doesn't exist or is no longer pending (for example, fired or
 	// claimed), leaving that event's status as it was.
