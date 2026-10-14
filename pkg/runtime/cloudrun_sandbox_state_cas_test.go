@@ -449,7 +449,7 @@ exit 0`, release))
 	}
 	watchDone := make(chan struct{})
 	go func() {
-		rtX.watchSandbox(context.Background(), "dev", nonceA)
+		rtX.watchSandbox(context.Background(), "dev", nonceA, 0)
 		close(watchDone)
 	}()
 
@@ -671,7 +671,7 @@ esac`, deleting, ack))
 				}
 				watchDone := make(chan struct{})
 				go func() {
-					rtX.watchSandbox(context.Background(), "dev", nonceA)
+					rtX.watchSandbox(context.Background(), "dev", nonceA, 0)
 					close(watchDone)
 				}()
 				delDone := make(chan error, 1)

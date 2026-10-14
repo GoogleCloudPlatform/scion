@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 287
+**Operations:** 289
 
 ## Table of Contents
 
@@ -192,26 +192,20 @@
 - [group.read](#groupread) — Read group details or list groups
 - [group.create](#groupcreate) — Create a new group
 - [group.update](#groupupdate) — Update group metadata
-- [user.read](#userread) — Read a user profile
-- [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
+- [user.read](#userread) — Read user profile or list users
 - [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
-- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
+- [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
-- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
-- [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
-- [hub.audit.effectiveaccess](#hubauditeffectiveaccess) — Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
-- [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
-- [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
-- [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
-- [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
-- [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
-- [user.chatlink.verify](#userchatlinkverify) — Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
+- [user.skillinjection.read](#userskillinjectionread) — List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+- [template.user.read](#templateuserread) — List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+- [template.user.create](#templateusercreate) — Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+- [template.user.update](#templateuserupdate) — Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+- [template.user.delete](#templateuserdelete) — Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -263,6 +257,14 @@
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [template.user.clone](#templateuserclone) — Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+- [template.user.reimport](#templateuserreimport) — Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+- [skill.user.create](#skillusercreate) — Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+- [harnessconfig.user.clone](#harnessconfiguserclone) — Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+- [harnessconfig.user.delete](#harnessconfiguserdelete) — Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+- [harnessconfig.user.reimport](#harnessconfiguserreimport) — Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+- [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+- [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -7076,12 +7078,13 @@
 
 **Domain:** user
 
-**Description:** Read a user profile
+**Description:** Read user profile or list users
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/users` |
 | http_route | GET | `/api/v1/users/{id}` |
 
 **Principals:** `user`
@@ -7099,38 +7102,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-
----
-
-## user.list
-
-**Domain:** user
-
-**Description:** List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/users` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
-
-**Base Permission:** `user.list`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `list-scoped`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestUserListToken_RequiresUserListAndHubBoundary`
 
 ---
 
@@ -7168,7 +7139,7 @@
 
 **Domain:** role
 
-**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
+**Description:** Read role definitions and permission registry
 
 ### Entry Points
 
@@ -7177,16 +7148,12 @@
 | http_route | GET | `/api/v1/admin/roles` |
 | http_route | GET | `/api/v1/admin/roles/{id}` |
 | http_route | GET | `/api/v1/admin/roles/export` |
-| http_route | HEAD | `/api/v1/admin/roles/export` |
 | http_route | GET | `/api/v1/admin/roles/{id}/export` |
-| http_route | HEAD | `/api/v1/admin/roles/{id}/export` |
 | http_route | GET | `/api/v1/admin/permissions` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.read`
 
@@ -7199,8 +7166,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
-- `pkg/hub:TestRoleRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -7219,9 +7184,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.read`
 
@@ -7234,7 +7197,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
 
 ---
 
@@ -7242,7 +7204,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
+**Description:** Read access constraint definitions
 
 ### Entry Points
 
@@ -7250,13 +7212,10 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/access-constraints` |
 | http_route | GET | `/api/v1/admin/access-constraints/{id}` |
-| http_route | GET | `/api/v1/admin/access-constraints/{id}/affected-principals` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.read`
 
@@ -7269,40 +7228,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintReadToken_DoesNotAdmitConstraintAdmin`
-- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsStillDenied`
-
----
-
-## hub.audit.constraint
-
-**Domain:** hub
-
-**Description:** Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/admin/access-constraints/{id}/audit` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `not_found`
-
-### Tests
-
-- `pkg/hub:TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary`
 
 ---
 
@@ -7458,224 +7383,23 @@
 
 ---
 
-## hub.audit.effectiveaccess
+## user.skillinjection.read
 
-**Domain:** hub
+**Domain:** user.skillinjection
 
-**Description:** Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
+**Description:** List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/admin/effective-access` |
-| http_route | HEAD | `/api/v1/admin/effective-access` |
+| http_route | GET | `/api/v1/users/me/injected-skills` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
-
----
-
-## hub.audit.explain
-
-**Domain:** hub
-
-**Description:** Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/authz/explain` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
-
----
-
-## user.self.explain
-
-**Domain:** user
-
-**Description:** Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/authz/explain` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`
-
-### Exemptions
-
-- **authentication_only:** Explains the caller's own authorization; every explained decision runs with the caller's own credential (scope: caller's own authorization only) — waives: `base_permission`
-
----
-
-## user.self.profile
-
-**Domain:** user
-
-**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/me` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
-
-### Exemptions
-
-- **authentication_only:** Reads the caller's own profile; carries no authority (scope: caller's own profile only) — waives: `base_permission`
-
----
-
-## user.self.scopes
-
-**Domain:** user
-
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/scopes` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
-
-### Exemptions
-
-- **authentication_only:** Lists the selector catalog and the caller's own mint eligibility; carries no authority (scope: selector catalog and caller's own eligibility only) — waives: `base_permission`
-
----
-
-## user.self.adminstatus
-
-**Domain:** user
-
-**Description:** Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/admin-status` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestAdminStatusToken_ReportsCeilingIntersection`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestAdminStatusToken_ReportsCeilingIntersection`
-
-### Exemptions
-
-- **authentication_only:** Reads the caller's own admin status; a token's permission list is limited to its ceiling and boundary (scope: caller's own admin status only) — waives: `base_permission`
-
----
-
-## user.self.groups
-
-**Domain:** user
-
-**Description:** List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/users/me/groups` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`)
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`)
 
 **Resource Resolver:** self-principal
 
@@ -7685,31 +7409,102 @@
 
 ### Tests
 
-- `pkg/hub:TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`
+- `pkg/hub:TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`
 
 ### Exemptions
 
-- **authentication_only:** Lists the caller's own group memberships; a project token sees only its boundary project's groups and groups with no project (scope: caller's own groups only) — waives: `base_permission`
+- **authentication_only:** The path names no user; the subject is always the caller, and the list carries only the caller's own entries (scope: caller's own user-scope injected skills) — waives: `base_permission`
 
 ---
 
-## user.invite.redeem
+## template.user.read
 
-**Domain:** user
+**Domain:** template
 
-**Description:** Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
+**Description:** List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/auth/invite/redeem` |
+| http_route | GET | `/api/v1/users/me/templates` |
+| http_route | GET | `/api/v1/users/me/templates/{id}` |
+| http_route | GET | `/api/v1/users/me/templates/{id}/download` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+
+---
+
+## template.user.create
+
+**Domain:** template
+
+**Description:** Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.update
+
+**Domain:** template
+
+**Description:** Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/users/me/templates/{id}` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/upload` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/finalize` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
 
 **Resource Resolver:** self-principal
 
@@ -7719,47 +7514,49 @@
 
 ### Tests
 
-- `pkg/hub:TestInviteRedeem_SessionOnly`
-
-### Exemptions
-
-- **authentication_only:** Redeems an invitation for the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
 
 ---
 
-## user.chatlink.verify
+## template.user.delete
 
-**Domain:** user
+**Domain:** template
 
-**Description:** Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
+**Description:** Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/telegram/link/verify` |
-| http_route | POST | `/api/v1/discord/link/verify` |
-| http_route | POST | `/api/v1/teams/link/verify` |
+| http_route | DELETE | `/api/v1/users/me/templates/{id}` |
+| http_route | DELETE | `/api/v1/templates/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.delete`
 
 **Resource Resolver:** self-principal
 
-**Effects:** `update-resource`
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
 
 **Denial Codes:** `forbidden`
 
 ### Tests
 
-- `pkg/hub:TestChatLinkVerify_SessionOnly`
-
-### Exemptions
-
-- **authentication_only:** Links an external chat account to the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -9538,6 +9335,274 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
+
+---
+
+## template.user.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## template.user.reimport
+
+**Domain:** template
+
+**Description:** Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTemplateUserReimport_RequiresUpdateAction`
+
+---
+
+## skill.user.create
+
+**Domain:** skill
+
+**Description:** Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeSkillCreate_RequiresSkillCreate`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.clone
+
+**Domain:** harnessconfig
+
+**Description:** Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## harnessconfig.user.delete
+
+**Domain:** harnessconfig
+
+**Description:** Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `harnessconfig.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** config_id, config_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserDelete_RequiresDeleteAction`
+
+---
+
+## harnessconfig.user.reimport
+
+**Domain:** harnessconfig
+
+**Description:** Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserReimport_RequiresUpdateAction`
+
+---
+
+## template.user.import
+
+**Domain:** template
+
+**Description:** Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.import
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
 
 ---
 

@@ -18,25 +18,33 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 )
 
-// agentFilesRunOwner returns the run recorded on disk as the owner of the
-// agent's files (agent-info.json runId, ptone/scion#2675) when it differs
-// from runID, and "" otherwise. Agent files are addressed by name only, so
-// a delete or failure cleanup for run runID removes them only when no other
-// run owns them.
+// agentFilesRunOwner returns the run recorded as the owner of the agent's
+// files (agent.RecordedRunOwner: the host-owned host state file,
+// ptone/scion#2675 and ptone/scion#4771) when it differs from runID, and
+// "" otherwise. Agent files are addressed by name only, so a delete or
+// failure cleanup for run runID removes them only when no other run owns
+// them.
 //
-// It returns "" -- the caller proceeds as before -- when runID is empty (a
-// caller that names no run) and when no run is recorded (an agent
-// provisioned before run IDs were recorded, or one provisioned but never
-// started). An empty projectPath resolves the way DeleteAgentFiles resolves
-// it.
-func agentFilesRunOwner(agentName, projectPath, runID string) string {
+// A non-nil error means the owner is unknown (no trusted root for target,
+// or a record that cannot be read or is not a valid run ID): the caller
+// keeps the files, as for another run's.
+//
+// It returns "" and no error -- the caller proceeds as before -- when runID
+// is empty (a caller that names no run) and when no run is recorded (an
+// agent provisioned before run IDs were recorded, or one provisioned but
+// never started).
+func agentFilesRunOwner(target agent.RunOwnerTarget, runID string) (string, error) {
 	if runID == "" {
-		return ""
+		return "", nil
 	}
-	if owner := agent.GetSavedRunID(agentName, projectPath); owner != "" && owner != runID {
-		return owner
+	owner, err := agent.RecordedRunOwner(target)
+	if err != nil {
+		return "", err
 	}
-	return ""
+	if owner != "" && owner != runID {
+		return owner, nil
+	}
+	return "", nil
 }
 
 // deleteInFlightRunID returns the run of a start of a run other than runID

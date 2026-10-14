@@ -183,6 +183,19 @@ func parseLabels(raw []string) (map[string]string, error) {
 	return m, nil
 }
 
+// resolveBranch returns the branch for a new agent: the --branch flag if
+// given, else the inline config's branch, else "" (the default). Local and
+// Hub create and start all use it, so they apply the same precedence.
+func resolveBranch(flag string, inlineCfg *api.ScionConfig) string {
+	if flag != "" {
+		return flag
+	}
+	if inlineCfg != nil {
+		return inlineCfg.Branch
+	}
+	return ""
+}
+
 // loadInlineConfig loads a ScionConfig from the --config flag path.
 // If path is "-", reads from stdin. Supports YAML and JSON formats.
 // Returns (nil, nil) if no inline config path is set.
@@ -867,15 +880,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	// Apply inline config overrides to CLI options
-	effectiveBranch := branch
+	effectiveBranch := resolveBranch(branch, inlineCfg)
 	effectiveTask := strings.TrimSpace(task)
 	effectiveHarnessConfig := harnessConfigFlag
 	effectiveHarnessAuth := harnessAuthFlag
 
 	if inlineCfg != nil {
-		if effectiveBranch == "" && inlineCfg.Branch != "" {
-			effectiveBranch = inlineCfg.Branch
-		}
 		if effectiveTask == "" && inlineCfg.Task != "" {
 			effectiveTask = inlineCfg.Task
 		}
@@ -1333,7 +1343,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
 		Workspace:       workspace,
 		Labels:          parsedLabels,
 		Resume:          resume,

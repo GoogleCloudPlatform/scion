@@ -959,6 +959,10 @@ type DeleteAgentOptions struct {
 	// its files on the NFS export or its branch (runtimebroker deleteAgent,
 	// ?localOnly). Send it only to a broker advertising AgentMove.
 	LocalOnly bool
+	// PurgeRetained sends the delete as a removal of a soft-deleted agent's
+	// retained files after the retention window (api.PurgeRetainedQueryParam,
+	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
+	PurgeRetained bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -982,6 +986,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.LocalOnly {
 		query += "&localOnly=true"
+	}
+	if opts.PurgeRetained {
+		query += "&" + api.PurgeRetainedQueryParam + "=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -4991,9 +4998,14 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		// and agents soft-deleted earlier stay until a retention is set
 		// again. That is what a hub started with retention 0 does, and a
 		// save never deletes those agents at once.
+		//
+		// Each expired agent's broker is first asked to remove the files a
+		// soft delete retained there (retained_files_purge.go,
+		// ptone/scion#4744); a record whose broker cannot be reached yet
+		// is kept for a later run.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
-			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			purged, err := s.purgeExpiredAgents(ctx, cutoff)
 			if err != nil {
 				slog.Error("Scheduler: agent purge failed", "error", err)
 			} else if purged > 0 {
@@ -5343,7 +5355,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.
-	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, agent.RuntimeBrokerID, project); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {

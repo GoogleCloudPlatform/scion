@@ -27,11 +27,11 @@ This is the default for **plain (non-git) projects**, where there is no git hist
 
 Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a **shared checkout**, isolating working trees while sharing one clone's history.
 
-Every agent operates on the same repository history but has an independent working directory (typically created under `../.scion_worktrees/<project>/<agent>` on a dedicated branch) mounted as `/workspace`. Agents cannot step on each other's uncommitted changes, and their work is merged back to the main branch manually (for example, `git merge <agent-branch>`).
+Every agent operates on the same repository history but has an independent working directory on a dedicated branch. In both cases the agent starts in its worktree under `/repo-root`, not `/workspace`. For a repository linked to the local workstation Hub it is a worktree of your own checkout, at `/repo-root/.scion/agents/<name>/workspace` (merge the agent's branch locally); for a Hub-managed project it is a worktree of the Runtime Broker's shared base clone (push the agent's branch, then merge). Agents cannot step on each other's uncommitted changes.
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** supported in **local mode** and on **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker). On Kubernetes it requires NFS workspace storage.
+- **Availability:** used automatically for **repositories linked to the local workstation Hub**, and for **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the broker; see [Linked git projects](/scion/local/workspace/#linked-git-projects)). On Kubernetes it requires NFS workspace storage.
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent
@@ -111,7 +111,7 @@ The Hub rejects unknown values with `400`. The mode is stored in the server-owne
 
 ## Runtime environment variables
 
-Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent (Hub-dispatched agents, including Workstation mode). Agents started in local mode without a Runtime Broker do not get them.
+Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent, including on the workstation server.
 
 ### `SCION_WORKSPACE_MODE`
 
@@ -132,7 +132,7 @@ Present (value `"true"`) when the workspace is a git repository. Absent when the
 
 `SCION_WORKSPACE_GIT` is separate from `SCION_WORKSPACE_MODE` because `shared-plain` can be either git-backed or a plain directory — the mode alone cannot disambiguate. Absent means false; there is no `"false"` string value.
 
-**Compatibility note:** Older broker versions emitted only `SCION_SHARED_WORKSPACE=true` for shared-plain git workspaces. The `sciontool init` compat shim prefers the new vars and falls back to `SCION_SHARED_WORKSPACE` when they are absent. `SCION_SHARED_WORKSPACE` is deprecated and tracked for removal in [ptone/scion#575](https://github.com/ptone/scion/issues/575).
+**Compatibility note:** The legacy `SCION_SHARED_WORKSPACE` variable has been removed ([ptone/scion#575](https://github.com/ptone/scion/issues/575)). The broker no longer sets it, and `sciontool init` ignores it if it is present. Use `SCION_WORKSPACE_MODE=shared-plain` together with `SCION_WORKSPACE_GIT=true` to detect a shared git workspace. An agent started by an older broker that sets neither new variable is treated as not being in a shared git workspace. An agent image whose `sciontool` predates `SCION_WORKSPACE_MODE` ([ptone/scion#572](https://github.com/ptone/scion/issues/572)) reads only the legacy variable, so on a current broker it also skips the shared-workspace git setup.
 
 ---
 

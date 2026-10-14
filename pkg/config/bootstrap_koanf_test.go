@@ -916,3 +916,57 @@ func TestLoadUnseededBootstrapKoanf_PublicURL(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadAboveSeedBootstrapKoanf checks that the above-seed bootstrap merge
+// has only the layers above SCION_SEED_*: a settings.yaml value (also one
+// equal to the coded default) and a SCION_SERVER_* value are in it, while a
+// seed value and a key only the coded defaults set are not
+// (ptone/scion#4983).
+func TestLoadAboveSeedBootstrapKoanf(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTTEMPLATE", "SCION_SERVER_DEFAULTHARNESSCONFIG",
+		"SCION_SEED_DEFAULTHARNESSCONFIG", "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SEED_SERVER_HUB_ADMINEMAILS",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultTemplate, _ := embeddedAgentDefaultsForTest(t)
+	if defaultTemplate == "" {
+		t.Fatal("precondition: the embedded defaults should set default_template")
+	}
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", "seed-template")
+	t.Setenv("SCION_SERVER_LOGLEVEL", "debug")
+
+	scionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	content := "schema_version: \"1\"\ndefault_template: " + defaultTemplate + "\n"
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(content), 0644); err != nil {
+		t.Fatalf("write settings.yaml: %v", err)
+	}
+
+	k := LoadAboveSeedBootstrapKoanfWithConfigPath("")
+	if got := k.String("default_template"); got != defaultTemplate {
+		t.Errorf("default_template = %q, want the settings.yaml value %q", got, defaultTemplate)
+	}
+	if got := k.String("server.log_level"); got != "debug" {
+		t.Errorf("server.log_level = %q, want the SCION_SERVER_LOGLEVEL value %q", got, "debug")
+	}
+	for _, key := range []string{"default_harness_config", "server.hub.admin_emails", "server.hub.port"} {
+		if k.Exists(key) {
+			t.Errorf("%s = %v, want it unset (only the coded defaults set it)", key, k.Get(key))
+		}
+	}
+
+	// The seed value is left out; without the settings.yaml value the key
+	// is unset.
+	if err := os.Remove(filepath.Join(scionDir, "settings.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if k := LoadAboveSeedBootstrapKoanfWithConfigPath(""); k.Exists("default_template") {
+		t.Errorf("default_template = %v, want it unset (only a seed value sets it)", k.Get("default_template"))
+	}
+}
