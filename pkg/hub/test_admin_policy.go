@@ -544,7 +544,6 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AsyncAgentLaunch:             testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
-	"web.terminal_workspace":                 testAdminPolicyDeny,
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
