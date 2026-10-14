@@ -186,9 +186,10 @@ func (w *separateRelayWorld) startAgentDialingRelay(t *testing.T, relayAddr stri
 	// Host to the relay's registered public endpoint (relayServesHost; a
 	// dial naming another host is refused with 403, which
 	// TestRelayAdmit_BindsRelayAndHost in conduit_relay_ops_test.go covers),
-	// so the dial must present the relay's own host, as a hub conduit
-	// ingress in proxy mode must too. The Proxy hook sets that Host on the
-	// built upgrade request and uses no proxy.
+	// so a direct dial must present the relay's own host (design §3.9; a
+	// dial through the hub conduit ingress presents the hub's host
+	// instead). The Proxy hook sets that Host on the built upgrade request
+	// and uses no proxy.
 	toRelay := &websocket.Dialer{
 		HandshakeTimeout: 45 * time.Second,
 		NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
