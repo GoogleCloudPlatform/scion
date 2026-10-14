@@ -887,8 +887,9 @@ func TestAdminWebSessions_MemberMintDecidesOnlyTheMemberCapability(t *testing.T)
 	e := newWS4Env(t, false, true)
 	fx := e.issue()
 	rec := &ws4DecisionRecorder{}
+	prev := e.srv.authzService.decisionAuditEmitter
 	e.srv.authzService.SetDecisionAuditEmitter(rec)
-	t.Cleanup(func() { e.srv.authzService.SetDecisionAuditEmitter(nil) })
+	t.Cleanup(func() { e.srv.authzService.SetDecisionAuditEmitter(prev) })
 
 	e.mint(fx.Identity.ID)
 	assert.Positive(t, rec.count(permissionTestIdentityIssue), "the member capability is decided")
