@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -335,6 +336,8 @@ func TestDecisionLogRefusals(t *testing.T) {
 			logActionWrite, logReasonNotVersionPublisher, "PUT /api/v1/artifacts/{id}/versions/{seq}/files/{path}", true},
 		{"credential does not permit publishing", agentX, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=project-2", `x`, http.StatusForbidden,
 			logActionCreate, logReasonCredentialNotPermit, "POST /api/v1/artifacts", false},
+		{"publish into a garbage scope", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=" + url.QueryEscape("forged\nlabel="+strings.Repeat("x", 300)), `x`, http.StatusForbidden,
+			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
 		{"move into a project the owner cannot publish in", userU, http.MethodPatch, artifactPath(id), `{"scopeRef":"project-3"}`, http.StatusForbidden,
 			logActionMove, logReasonNotAuthorizedInScope, "PATCH /api/v1/artifacts/{id}", true},
 	}
@@ -355,6 +358,9 @@ func TestDecisionLogRefusals(t *testing.T) {
 		} else {
 			want[logKeyArtifactID] = nil
 			want[logKeyProjectID] = "project-2"
+			if tc.name == "publish into a garbage scope" {
+				want[logKeyProjectID] = nil // caller text without a project id's shape is not logged
+			}
 		}
 		checkEntry(t, tc.name, one(t, tc.name, entries), "WARN", want)
 	}

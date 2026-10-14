@@ -423,7 +423,31 @@ func (s *Service) logCreateRefusal(r *http.Request, scope string) {
 	if !s.host.Permits(r.Context(), scope, PermissionCreate) {
 		reason = logReasonCredentialNotPermit
 	}
-	s.logRefusal(r, logActionCreate, reason, &Artifact{ScopeRef: scope})
+	// The scope is caller text here (the publish refused before any lookup):
+	// log it only when it has a project id's shape.
+	logged := &Artifact{}
+	if projectIDShaped(scope) {
+		logged.ScopeRef = scope
+	}
+	s.logRefusal(r, logActionCreate, reason, logged)
+}
+
+// maxLoggedScopeBytes bounds a caller-supplied scope written to the log.
+const maxLoggedScopeBytes = 64
+
+// projectIDShaped reports whether s looks like a project id: 1 to
+// maxLoggedScopeBytes ASCII letters, digits, '-' or '_' (a UUID passes).
+func projectIDShaped(s string) bool {
+	if s == "" || len(s) > maxLoggedScopeBytes {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // logWriteRefusal writes the refusal of a version write on a by a caller

@@ -392,7 +392,7 @@ The Hub writes one structured entry per artifact decision to a dedicated log, `s
 |---|---|
 | `artifact_id` | The artifact. It comes from the parsed route, never from the raw path. |
 | `version_seq` | The version number. |
-| `project_id` | The artifact's home project. For a move, the home it moved from. For a refused publish, the target project. For an expiry deletion, the home the sweep found it in. A summary entry has none. |
+| `project_id` | The artifact's home project. For a move, the home it moved from. For a refused publish, the requested target project, only when it has a project id's shape (letters, digits, `-` or `_`, at most 64 bytes); otherwise it is left out. For an expiry deletion, the home the sweep found it in. A summary entry has none. |
 | `route` | The method and route template, for example `POST /api/v1/artifacts/{id}/grants`. It never contains a path segment. The share-link route appears as `/api/v1/artifacts/shared/{token}`. |
 | `outcome` | `allowed`, `refused` or `error`. |
 | `reason` | Why a request was refused or failed. It is always a fixed code, never free text: `not_found`, `hidden`, `unauthenticated`, `credential_not_permitted`, `agent_cannot_administer`, `not_owner_or_admin_grant`, `not_owner_admin_grant_or_project_admin`, `no_write_access`, `expired`, `review_only`, `not_version_publisher`, `not_authorized_in_scope`, `cross_project_sharing_disabled`, `store_error`, `principal_check_failed`, or a discarded version code. |

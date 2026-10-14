@@ -135,11 +135,12 @@ const (
 	ReviewClauseDelegatingUser = "delegating_user"
 )
 
-// ReviewGrantClauser is an optional extension of ReviewGrantAuthority
-// (ptone/scion#5120). It makes the same decision as MayGrantReview, in the
-// same single evaluation, and names the clause that allowed it, so the
-// decision log can record it without asking the host a second question. A
-// host that has it is asked instead of MayGrantReview.
+// ReviewGrantClauser is an optional host interface that replaces
+// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
+// asks it instead of MayGrantReview. It makes the same decision as
+// MayGrantReview, in the same single evaluation, and names the clause that
+// allowed it, so the decision log can record it without asking the host a
+// second question.
 type ReviewGrantClauser interface {
 	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
 	// when the caller holds project administration in homeScope,
