@@ -296,6 +296,34 @@ func TestConduitDialer_HelloAndHeaders(t *testing.T) {
 	assert.Empty(t, caps.GetRpc())
 }
 
+// TestConduitDialer_SupersededIncarnationNeverTerminal: a broker's 4409
+// superseded_incarnation is never terminal. The hub sends it after
+// admission when a newer incarnation of the broker was admitted; every
+// such close, however long they persist, redials after the maximum
+// backoff and stops nothing. Only admission refusals count toward the
+// close-code table's terminal stop, and an admission refusal of a broker
+// for its incarnation also keeps redialing.
+func TestConduitDialer_SupersededIncarnationNeverTerminal(t *testing.T) {
+	d, err := NewConduitDialer(ConduitDialConfig{
+		HubEndpoint: "http://hub.invalid",
+		BrokerID:    "broker-1",
+		Log:         slog.New(slog.NewTextHandler(&syncBuffer{}, nil)),
+	})
+	require.NoError(t, err)
+	superseded := &conduit.CloseError{Code: closeSupersededIncarnation, Reason: "superseded_incarnation"}
+	// One close a minute for 30 minutes, past any 10-minute window.
+	for i := 0; i < 30; i++ {
+		delay, err := d.decide(conduit.End{SessionErr: superseded, Lived: time.Minute}, time.Second)
+		require.NoError(t, err, "post-admission close %d", i)
+		assert.Equal(t, conduit.BackoffMax, delay, "post-admission close %d", i)
+	}
+	for i := 0; i < 30; i++ {
+		delay, err := d.decide(conduit.End{DialErr: superseded}, time.Second)
+		require.NoError(t, err, "admission refusal %d", i)
+		assert.Equal(t, conduit.BackoffMax, delay, "admission refusal %d", i)
+	}
+}
+
 // TestConduitDialer_PostAdmissionCloses: closes after the upgrade follow
 // the close-code rules, never the fallback: 4503 and 4401 redial with the
 // session backoff, 4400 waits the maximum backoff, 4403 stops the dialer.
