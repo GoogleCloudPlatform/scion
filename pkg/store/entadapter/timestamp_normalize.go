@@ -797,13 +797,14 @@ type SQLiteSnapshot struct {
 // disk once; the earliest snapshot holds the values from before the first
 // repair. Reusing a snapshot sets its modification time to now, which
 // PruneSQLiteSnapshots treats as its last use. Otherwise the copy is
-// written with VACUUM INTO to "<file>.<label>.tmp" and renamed into place when it is complete, so a
-// ".bak" file is never partial. The temporary file is created exclusively,
-// with mode snapshotFileMode, before VACUUM INTO fills it (the driver keeps
-// an existing file's mode); on failure only that file is removed. If the
-// temporary file already exists the call fails with ErrSnapshotInProgress.
-// It also fails for an in-memory database. A new copy needs about as much free space as
-// the database file.
+// written with VACUUM INTO to "<file>.<label>.tmp" and renamed into place
+// when it is complete, so a ".bak" file is never partial. The temporary
+// file is created exclusively, with mode snapshotFileMode, before VACUUM
+// INTO fills it (the driver keeps an existing file's mode); on failure only
+// that file is removed. If the temporary file already exists the call
+// fails with ErrSnapshotInProgress. It also fails for an in-memory
+// database. A new copy needs about as much free space as the database
+// file.
 func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time) (SQLiteSnapshot, error) {
 	var file string
 	if err := db.QueryRowContext(ctx, "SELECT file FROM pragma_database_list WHERE name = 'main'").Scan(&file); err != nil {
