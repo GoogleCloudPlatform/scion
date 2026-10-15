@@ -43918,6 +43918,7 @@ type HarnessConfigMutation struct {
 	storage_uri             *string
 	storage_bucket          *string
 	storage_path            *string
+	layout                  *string
 	files                   *string
 	status                  *harnessconfig.Status
 	image_status            *harnessconfig.ImageStatus
@@ -44575,6 +44576,55 @@ func (m *HarnessConfigMutation) ResetStoragePath() {
 	delete(m.clearedFields, harnessconfig.FieldStoragePath)
 }
 
+// SetLayout sets the "layout" field.
+func (m *HarnessConfigMutation) SetLayout(s string) {
+	m.layout = &s
+}
+
+// Layout returns the value of the "layout" field in the mutation.
+func (m *HarnessConfigMutation) Layout() (r string, exists bool) {
+	v := m.layout
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLayout returns the old "layout" field's value of the HarnessConfig entity.
+// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HarnessConfigMutation) OldLayout(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLayout is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLayout requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLayout: %w", err)
+	}
+	return oldValue.Layout, nil
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (m *HarnessConfigMutation) ClearLayout() {
+	m.layout = nil
+	m.clearedFields[harnessconfig.FieldLayout] = struct{}{}
+}
+
+// LayoutCleared returns if the "layout" field was cleared in this mutation.
+func (m *HarnessConfigMutation) LayoutCleared() bool {
+	_, ok := m.clearedFields[harnessconfig.FieldLayout]
+	return ok
+}
+
+// ResetLayout resets all changes to the "layout" field.
+func (m *HarnessConfigMutation) ResetLayout() {
+	m.layout = nil
+	delete(m.clearedFields, harnessconfig.FieldLayout)
+}
+
 // SetFiles sets the "files" field.
 func (m *HarnessConfigMutation) SetFiles(s string) {
 	m.files = &s
@@ -45096,7 +45146,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -45132,6 +45182,9 @@ func (m *HarnessConfigMutation) Fields() []string {
 	}
 	if m.storage_path != nil {
 		fields = append(fields, harnessconfig.FieldStoragePath)
+	}
+	if m.layout != nil {
+		fields = append(fields, harnessconfig.FieldLayout)
 	}
 	if m.files != nil {
 		fields = append(fields, harnessconfig.FieldFiles)
@@ -45198,6 +45251,8 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.StorageBucket()
 	case harnessconfig.FieldStoragePath:
 		return m.StoragePath()
+	case harnessconfig.FieldLayout:
+		return m.Layout()
 	case harnessconfig.FieldFiles:
 		return m.Files()
 	case harnessconfig.FieldStatus:
@@ -45253,6 +45308,8 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldStorageBucket(ctx)
 	case harnessconfig.FieldStoragePath:
 		return m.OldStoragePath(ctx)
+	case harnessconfig.FieldLayout:
+		return m.OldLayout(ctx)
 	case harnessconfig.FieldFiles:
 		return m.OldFiles(ctx)
 	case harnessconfig.FieldStatus:
@@ -45367,6 +45424,13 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStoragePath(v)
+		return nil
+	case harnessconfig.FieldLayout:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLayout(v)
 		return nil
 	case harnessconfig.FieldFiles:
 		v, ok := value.(string)
@@ -45499,6 +45563,9 @@ func (m *HarnessConfigMutation) ClearedFields() []string {
 	if m.FieldCleared(harnessconfig.FieldStoragePath) {
 		fields = append(fields, harnessconfig.FieldStoragePath)
 	}
+	if m.FieldCleared(harnessconfig.FieldLayout) {
+		fields = append(fields, harnessconfig.FieldLayout)
+	}
 	if m.FieldCleared(harnessconfig.FieldFiles) {
 		fields = append(fields, harnessconfig.FieldFiles)
 	}
@@ -45557,6 +45624,9 @@ func (m *HarnessConfigMutation) ClearField(name string) error {
 		return nil
 	case harnessconfig.FieldStoragePath:
 		m.ClearStoragePath()
+		return nil
+	case harnessconfig.FieldLayout:
+		m.ClearLayout()
 		return nil
 	case harnessconfig.FieldFiles:
 		m.ClearFiles()
@@ -45622,6 +45692,9 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldStoragePath:
 		m.ResetStoragePath()
+		return nil
+	case harnessconfig.FieldLayout:
+		m.ResetLayout()
 		return nil
 	case harnessconfig.FieldFiles:
 		m.ResetFiles()

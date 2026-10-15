@@ -39,6 +39,8 @@ const (
 	FieldStorageBucket = "storage_bucket"
 	// FieldStoragePath holds the string denoting the storage_path field in the database.
 	FieldStoragePath = "storage_path"
+	// FieldLayout holds the string denoting the layout field in the database.
+	FieldLayout = "layout"
 	// FieldFiles holds the string denoting the files field in the database.
 	FieldFiles = "files"
 	// FieldStatus holds the string denoting the status field in the database.
@@ -80,6 +82,7 @@ var Columns = []string{
 	FieldStorageURI,
 	FieldStorageBucket,
 	FieldStoragePath,
+	FieldLayout,
 	FieldFiles,
 	FieldStatus,
 	FieldImageStatus,
@@ -112,6 +115,8 @@ var (
 	HarnessValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
+	// DefaultLayout holds the default value on creation for the "layout" field.
+	DefaultLayout string
 	// DefaultBuiltImage holds the default value on creation for the "built_image" field.
 	DefaultBuiltImage string
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -245,6 +250,11 @@ func ByStorageBucket(opts ...sql.OrderTermOption) OrderOption {
 // ByStoragePath orders the results by the storage_path field.
 func ByStoragePath(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStoragePath, opts...).ToFunc()
+}
+
+// ByLayout orders the results by the layout field.
+func ByLayout(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLayout, opts...).ToFunc()
 }
 
 // ByFiles orders the results by the files field.
