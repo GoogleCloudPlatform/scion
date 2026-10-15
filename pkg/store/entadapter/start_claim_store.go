@@ -500,6 +500,9 @@ func launchClaimKind(launchKind string) (kind store.StartClaimKind, ok bool) {
 // claimPairsWithLaunch reports whether row holds a start claim of the kind
 // a launch of launchKind pairs with (launchClaimKind).
 func claimPairsWithLaunch(row *ent.Agent, launchKind string) bool {
+	if row == nil {
+		return false
+	}
 	kind, ok := launchClaimKind(launchKind)
 	return ok && row.StartClaimID != nil && row.StartClaimKind == string(kind)
 }

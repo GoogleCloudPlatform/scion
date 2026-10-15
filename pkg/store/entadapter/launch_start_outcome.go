@@ -26,6 +26,9 @@ import (
 // isStartKindLaunch reports whether row's current launch is a start or
 // restart launch.
 func isStartKindLaunch(row *ent.Agent) bool {
+	if row == nil {
+		return false
+	}
 	return row.LaunchKind == store.LaunchKindStart || row.LaunchKind == store.LaunchKindRestart
 }
 

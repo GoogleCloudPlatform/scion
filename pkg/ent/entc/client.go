@@ -258,7 +258,7 @@ func UTCTimeHook(next ent.Mutator) ent.Mutator {
 func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
 	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 		am, ok := m.(*ent.AgentMutation)
-		if !ok || !(am.Op().Is(ent.OpUpdate) || am.Op().Is(ent.OpUpdateOne)) {
+		if !ok || (!am.Op().Is(ent.OpUpdate) && !am.Op().Is(ent.OpUpdateOne)) {
 			return next.Mutate(ctx, m)
 		}
 		phase, set := am.Phase()

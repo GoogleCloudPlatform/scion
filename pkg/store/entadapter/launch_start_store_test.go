@@ -772,3 +772,19 @@ func TestStartClaim_LaunchEndSettlement_PairedKinds(t *testing.T) {
 		})
 	}
 }
+
+// TestStartKindHelpers_NilRow pins the defensive nil checks on the
+// start-kind helpers (upstream review): a nil row is neither a start-kind
+// launch nor a holder of a paired claim.
+func TestStartKindHelpers_NilRow(t *testing.T) {
+	got := true
+	if assert.NotPanics(t, func() { got = isStartKindLaunch(nil) }, "isStartKindLaunch(nil)") {
+		assert.False(t, got)
+	}
+	for _, kind := range []string{store.LaunchKindCreate, store.LaunchKindStart, store.LaunchKindRestart} {
+		got = true
+		if assert.NotPanics(t, func() { got = claimPairsWithLaunch(nil, kind) }, "claimPairsWithLaunch(nil, %s)", kind) {
+			assert.False(t, got, kind)
+		}
+	}
+}
