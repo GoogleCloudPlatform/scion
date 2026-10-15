@@ -212,7 +212,7 @@ type racingStore struct {
 	race func()
 }
 
-func (s *racingStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (bool, error) {
+func (s *racingStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (GrantPut, error) {
 	s.race()
 	return s.Store.PutGrant(ctx, g, max, cross, actor)
 }

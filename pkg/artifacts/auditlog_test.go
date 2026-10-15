@@ -252,7 +252,7 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 		subject   string
 		authority string
 	}{
-		{delegator, reviewerID, logAuthorityStewardDelegator},
+		{delegator, reviewerID, reviewGrantDelegatorAuthority},
 		{projAdmin, memberID, reviewGrantProjectAdminAuthority},
 	} {
 		f.host.mu.Lock()

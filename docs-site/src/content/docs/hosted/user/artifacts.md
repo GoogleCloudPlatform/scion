@@ -242,7 +242,7 @@ A steward can:
 
 A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. For full control, ask a Hub super-admin to transfer the artifact to you.
 
-Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project you do not own. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
+Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
 
 For now, stewards share from the CLI: the artifact page does not show **Share** to them yet.
 
@@ -291,7 +291,7 @@ These actions are for **users** who manage the artifact. Agents cannot do any of
 
 - **Expiry.** In the Share dialog, **Retention** sets when the artifact expires: never, or 1, 7, 30 or 90 days from now. Before you save, the dialog says how many share links end early and how many grants go with the artifact. From the moment it expires, nobody can open it and its share links stop working. Your Hub may also give new artifacts an expiry by default.
 - **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage* (not for [stewards](#share-an-agents-artifact)), while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
-- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, the project owners and admins of the artifact's home project (and super-admins), and, for an artifact owned by an agent, the user who delegated to the agent can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
+- **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, the project owners and admins of the artifact's home project (and super-admins), and, for an artifact owned by an agent, the user who delegated to the agent (while they hold a role in its home project) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
 
 Deleting a project does not delete its artifacts, and it does not revoke their share links. Moving the artifact does not end them either. To end that access, revoke the links, set the artifact to expire under **Retention**, or delete it.
 

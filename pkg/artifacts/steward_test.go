@@ -406,9 +406,13 @@ func TestStewardEvents(t *testing.T) {
 	if rec := f.jsonDo(ownerSteward, http.MethodPost, grantsPath(f.id), reviewBody(SubjectPrincipal, "user:outsider", GrantWrite)); rec.Code != http.StatusOK {
 		t.Fatalf("change: %d %s", rec.Code, rec.Body.String())
 	}
-	// The same level again is a no-op: no event.
+	// The same level again is a no-op: no event and no decision log entry.
+	c.take(t)
 	if rec := f.jsonDo(ownerSteward, http.MethodPost, grantsPath(f.id), reviewBody(SubjectPrincipal, "user:outsider", GrantWrite)); rec.Code != http.StatusOK {
 		t.Fatalf("repeat: %d %s", rec.Code, rec.Body.String())
+	}
+	if entries, _ := c.take(t); len(entries) != 0 {
+		t.Errorf("a no-op put was logged: %v", entries)
 	}
 	rec := f.jsonDo(delegSteward, http.MethodPost, linksPath(f.id), `{"ttlHours": 2}`)
 	if rec.Code != http.StatusCreated {
@@ -588,7 +592,8 @@ func TestStewardNotFoundParity(t *testing.T) {
 // (design D24, which serves callers who are not stewards) records a
 // grant_created event: a home-project admin as
 // reviewGrantProjectAdminAuthority, the delegating user as
-// steward_delegator.
+// reviewGrantDelegatorAuthority (never a steward authority: the path serves
+// only callers who are not stewards).
 func TestReviewGrantEventAuthority(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
 	f.host.allowAdmin(projAdmin, "project-1")
@@ -599,7 +604,7 @@ func TestReviewGrantEventAuthority(t *testing.T) {
 		authority string
 	}{
 		{projAdmin, memberID, reviewGrantProjectAdminAuthority},
-		{delegator, reviewerID, AuthorityStewardDelegator},
+		{delegator, reviewerID, reviewGrantDelegatorAuthority},
 	} {
 		if rec := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, tc.subject, GrantReview)); rec.Code != http.StatusCreated {
 			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
@@ -627,7 +632,7 @@ func laxActor(actor *Actor) *Actor {
 	return &Actor{Kind: actor.Kind, Ref: actor.Ref, Authority: AuthorityAdminGrant}
 }
 
-func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (bool, error) {
+func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (GrantPut, error) {
 	return s.Store.PutGrant(ctx, g, max, cross, laxActor(actor))
 }
 

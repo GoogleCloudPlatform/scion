@@ -42,13 +42,13 @@ func TestStorePutGrant(t *testing.T) {
 		g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x",
 			Permission: GrantRead, CreatedAt: time.Now()}
 		created, err := st.PutGrant(ctx, g, 3, true, testActor)
-		if err != nil || !created {
+		if err != nil || created != GrantPutCreated {
 			t.Fatalf("PutGrant: %v %v", created, err)
 		}
 		again := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x",
 			Permission: GrantAdmin, CreatedAt: time.Now()}
 		created, err = st.PutGrant(ctx, again, 3, true, testActor)
-		if err != nil || created || again.ID != g.ID {
+		if err != nil || created != GrantPutChanged || again.ID != g.ID {
 			t.Fatalf("update: %v %v id %s want %s", created, err, again.ID, g.ID)
 		}
 		grants, _ := st.ListGrants(ctx, a.ID)
@@ -427,10 +427,10 @@ func TestStorePutReviewGrant(t *testing.T) {
 			return ""
 		}
 		created, err := st.PutReviewGrant(ctx, review("user:r"), 10, "project-1", testActor)
-		if err != nil || !created || permOf("user:r") != GrantReview {
+		if err != nil || created != GrantPutCreated || permOf("user:r") != GrantReview {
 			t.Fatalf("new review grant: %v %v %q", created, err, permOf("user:r"))
 		}
-		if created, err := st.PutReviewGrant(ctx, review("user:r"), 10, "project-1", testActor); err != nil || created {
+		if created, err := st.PutReviewGrant(ctx, review("user:r"), 10, "project-1", testActor); err != nil || created != GrantPutUnchanged {
 			t.Errorf("repeat: %v %v", created, err)
 		}
 		// Read, write and admin are never replaced.
@@ -510,7 +510,7 @@ func TestStorePutGrantReview(t *testing.T) {
 		a, _, _, home := seedArtifact(t, st, "")
 		g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 			Permission: GrantReview, CreatedAt: time.Now()}
-		if created, err := st.PutGrant(ctx, g, 10, false, testActor); err != nil || !created {
+		if created, err := st.PutGrant(ctx, g, 10, false, testActor); err != nil || created != GrantPutCreated {
 			t.Fatalf("PutGrant review: %v %v", created, err)
 		}
 		grants, err := st.ListGrants(ctx, a.ID)
@@ -528,12 +528,12 @@ func TestStorePutGrantReview(t *testing.T) {
 		}
 		again := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 			Permission: GrantReview, CreatedAt: time.Now()}
-		if created, err := st.PutGrant(ctx, again, 10, false, testActor); err != nil || created {
+		if created, err := st.PutGrant(ctx, again, 10, false, testActor); err != nil || created != GrantPutUnchanged {
 			t.Errorf("repeat review: %v %v", created, err)
 		}
 		up := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:rv",
 			Permission: GrantWrite, CreatedAt: time.Now()}
-		if created, err := st.PutGrant(ctx, up, 10, false, testActor); err != nil || created {
+		if created, err := st.PutGrant(ctx, up, 10, false, testActor); err != nil || created != GrantPutChanged {
 			t.Errorf("review to write: %v %v", created, err)
 		}
 		// Back to review over write, and over read or admin: refused, the

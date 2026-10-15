@@ -404,8 +404,9 @@ type Store interface {
 	// PutGrant adds the principal or scope grant g to its artifact, or,
 	// when the artifact already has a grant for the same subject, sets
 	// that grant's permission to g's (g.ID and g.CreatedAt then take the
-	// stored grant's). created reports which. Under the artifact's lock it
-	// reads the artifact's home scope and refuses an admin grant to it
+	// stored grant's). The GrantPut result reports which, or
+	// GrantPutUnchanged when the grant already had g's permission. Under
+	// the artifact's lock it reads the artifact's home scope and refuses an admin grant to it
 	// (ErrHomeGrantAdmin) and, unless crossScope, a scope grant to any
 	// other scope (ErrCrossScopeDisabled), and a review grant over a
 	// subject's read, write or admin grant (ErrReviewReplacesAccess). It
@@ -417,7 +418,7 @@ type Store interface {
 	// permission when an existing grant's permission changes (none when
 	// it already had g's permission). An actor with a steward authority
 	// may not give admin (ErrStewardActionNotAllowed).
-	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (created bool, err error)
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (GrantPut, error)
 
 	// PutReviewGrant is PutGrant for a review grant (design D24): g must
 	// be a review grant to a user principal. Under the artifact's lock it
@@ -427,7 +428,7 @@ type Store interface {
 	// holds a principal grant other than review on it (a read, write or
 	// admin grant is never replaced this way).
 	// It records its events like PutGrant.
-	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (created bool, err error)
+	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (GrantPut, error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and
@@ -616,3 +617,17 @@ func NewStore(db *sql.DB, driverName string) Store {
 		return &sqlStore{db: db, dialect: dialectSQLite}
 	}
 }
+
+// GrantPut is what PutGrant and PutReviewGrant did. Only GrantPutCreated and
+// GrantPutChanged changed anything, and only they record an event; the
+// decision log follows the same rule.
+type GrantPut int
+
+const (
+	// GrantPutUnchanged: the subject already held the permission.
+	GrantPutUnchanged GrantPut = iota
+	// GrantPutChanged: an existing grant's permission was changed.
+	GrantPutChanged
+	// GrantPutCreated: a new grant was added.
+	GrantPutCreated
+)

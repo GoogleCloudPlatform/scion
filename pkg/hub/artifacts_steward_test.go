@@ -301,23 +301,7 @@ func TestArtifactStewardOnRoutes(t *testing.T) {
 		path := "/api/v1/artifacts/" + id
 		share := []byte(`{"subjectKind":"principal","subjectRef":"user:` + f.outside + `","permission":"read"}`)
 
-		// A delegating user with no role left in the home project, given
-		// a read grant on the artifact: the grant lets it read, but it is
-		// not a steward (a grant never counts as a role).
-		bindings, err := f.s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, f.delegator)
-		require.NoError(t, err)
-		for _, b := range bindings {
-			if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.home {
-				require.NoError(t, f.s.DeleteRoleBinding(context.Background(), b.ID))
-			}
-		}
-		_, err = st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("st-routes-read"), ArtifactID: id,
-			SubjectKind: artifacts.SubjectPrincipal, SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.delegator),
-			Permission: artifacts.GrantRead, CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, false,
-			&artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner})
-		require.NoError(t, err)
-
-		for name, uid := range map[string]string{"home-project admin": f.admin, "member": f.member, "delegating user with only a grant": f.delegator} {
+		for name, uid := range map[string]string{"home-project admin": f.admin, "member": f.member} {
 			u := f.user(uid)
 			rec := identityArtifactRequest(t, f.srv, u, http.MethodGet, path, nil)
 			require.Equal(t, http.StatusOK, rec.Code, "%s GET: %s", name, rec.Body.String())
@@ -339,6 +323,69 @@ func TestArtifactStewardOnRoutes(t *testing.T) {
 		last := evs[len(evs)-1]
 		assert.Equal(t, artifacts.EventDeleted, last.Action)
 		assert.Equal(t, artifacts.AuthorityCustodianProjectAdmin, last.Authority)
+	})
+
+	// The artifact moved to a project where the delegating user holds no
+	// role, and the user reads it through a principal read grant. The
+	// delegation chain still resolves to the user (still admitted to the
+	// agent's project), so only the role-read check in the current home
+	// stands between it and stewardship: a grant on the artifact never
+	// counts as a role.
+	t.Run("delegating user without a role in the moved home", func(t *testing.T) {
+		f := newReviewGrantFixture(t)
+		st, blobs := enableArtifactsForTest(t, f.srv)
+		id := reviewGrantArtifact(t, f, st, blobs)
+		path := "/api/v1/artifacts/" + id
+		setup := &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: "test-setup", Authority: artifacts.AuthorityOwner}
+		_, err := st.UpdateArtifact(context.Background(), id, artifacts.ArtifactUpdate{
+			HomeGrant: &artifacts.Grant{ID: tid("st-moved-home"), ArtifactID: id, SubjectKind: artifacts.SubjectScope,
+				SubjectRef: f.other, Permission: artifacts.GrantRead, CreatedAt: time.Now()},
+			MaxGrants: artifacts.MaxGrantsPerArtifact, Actor: setup})
+		require.NoError(t, err)
+		_, err = st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("st-moved-read"), ArtifactID: id,
+			SubjectKind: artifacts.SubjectPrincipal, SubjectRef: artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.delegator),
+			Permission: artifacts.GrantRead, CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, false, setup)
+		require.NoError(t, err)
+
+		me := f.user(f.delegator)
+		rec := identityArtifactRequest(t, f.srv, me, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "GET through the grant: %s", rec.Body.String())
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.CanShare, "canShare")
+		assert.Empty(t, resp.ShareAuthority, "shareAuthority")
+		share := []byte(`{"subjectKind":"principal","subjectRef":"user:` + f.outside + `","permission":"read"}`)
+		rec = identityArtifactRequest(t, f.srv, me, http.MethodPost, path+"/grants", share)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "share: %s", rec.Body.String())
+		rec = identityArtifactRequest(t, f.srv, me, http.MethodPost, path+"/links", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "link: %s", rec.Body.String())
+	})
+
+	// A user access token is held to its own limits on the steward path: an
+	// owner token without artifact:manage is not a steward (the service's
+	// credential gate), the same token with artifact:manage is.
+	t.Run("owner token without artifact:manage", func(t *testing.T) {
+		f := newReviewGrantFixture(t)
+		st, blobs := enableArtifactsForTest(t, f.srv)
+		id := reviewGrantArtifact(t, f, st, blobs)
+		path := "/api/v1/artifacts/" + id
+		owner := NewAuthenticatedUser(f.owner, "rg-owner@test.com", "owner", "member", "api")
+		share := []byte(`{"subjectKind":"principal","subjectRef":"user:` + f.outside + `","permission":"read"}`)
+
+		noManage := artifactTestUAT(t, owner, f.home, "artifact:read", "artifact:steward")
+		rec := identityArtifactRequest(t, f.srv, noManage, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.CanShare, "canShare without artifact:manage")
+		rec = identityArtifactRequest(t, f.srv, noManage, http.MethodPost, path+"/grants", share)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "share without artifact:manage: %s", rec.Body.String())
+		rec = identityArtifactRequest(t, f.srv, noManage, http.MethodPost, path+"/links", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "link without artifact:manage: %s", rec.Body.String())
+
+		withManage := artifactTestUAT(t, owner, f.home, "artifact:read", "artifact:steward", "artifact:manage")
+		rec = identityArtifactRequest(t, f.srv, withManage, http.MethodPost, path+"/grants", share)
+		assert.Equal(t, http.StatusCreated, rec.Code, "share with artifact:manage: %s", rec.Body.String())
 	})
 
 	t.Run("steward deletes", func(t *testing.T) {

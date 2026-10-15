@@ -334,12 +334,18 @@ func (s *Service) adminRefusalReason(ctx context.Context, a *Artifact) string {
 	return logReasonNotAdministrator
 }
 
-// logGrantPut writes a principal or scope grant created (created) or
-// changed by the caller of r, which acted by authority.
-func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, created bool, authority string) {
-	action := logActionGrantChanged
-	if created {
+// logGrantPut writes a principal or scope grant created or changed (put) by
+// the caller of r, which acted by authority. A put that changed nothing is
+// not logged, as it records no event.
+func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string) {
+	var action string
+	switch put {
+	case GrantPutCreated:
 		action = logActionGrantCreated
+	case GrantPutChanged:
+		action = logActionGrantChanged
+	default:
+		return
 	}
 	s.logAllowed(r, logEntry{action: action, artifact: a, authority: authority,
 		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission})
@@ -517,22 +523,33 @@ const reviewClauseUnnamed = "unnamed"
 // then this one constant names their authority.
 const reviewGrantProjectAdminAuthority = AuthorityCustodianProjectAdmin
 
+// reviewGrantDelegatorAuthority is the authority recorded for a review grant
+// given on the review-grant path (design D24) by the owning agent's
+// delegating user. That path serves only callers who are not stewards (a
+// steward is served by the manager path first), so a delegating user here
+// failed the steward check (for example, it holds no role in the
+// artifact's current home project) and is not recorded as one. The path is
+// removed with the grant ladder; until then this one constant names it.
+const reviewGrantDelegatorAuthority = "review_grant"
+
 // reviewGrantUnnamedAuthority is the authority recorded for a review grant
 // allowed by a host that implements ReviewGrantAuthority but not
 // ReviewGrantClauser, which does not name the clause. The hub names it.
 const reviewGrantUnnamedAuthority = "review_grant"
 
 // reviewGrantAuthority is the authority of a review grant allowed by
-// clause, recorded on its event and logged: steward_delegator for the
-// owning agent's delegating user, reviewGrantProjectAdminAuthority for an
-// admin of the home project, and reviewGrantUnnamedAuthority when the host
-// did not name the clause.
+// clause, recorded on its event and logged: reviewGrantDelegatorAuthority
+// for the owning agent's delegating user, reviewGrantProjectAdminAuthority
+// for an admin of the home project, and reviewGrantUnnamedAuthority when
+// the host did not name the clause. None is a steward authority, so the
+// write carries no steward precondition (callerActor); PutReviewGrant
+// re-checks the home and owner kind under the artifact's lock itself.
 func reviewGrantAuthority(clause string) string {
 	switch clause {
 	case ReviewClauseProjectAdmin:
 		return reviewGrantProjectAdminAuthority
 	case ReviewClauseDelegatingUser:
-		return AuthorityStewardDelegator
+		return reviewGrantDelegatorAuthority
 	}
 	return reviewGrantUnnamedAuthority
 }

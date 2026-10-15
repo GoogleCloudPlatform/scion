@@ -31,7 +31,8 @@ import (
 // the same for every artifact and every reason, and never why this caller
 // was refused.
 const retireForbiddenMessage = "only the artifact's owner, a user with an admin grant on it, " +
-	"an admin of its home project, or, on an artifact owned by an agent, the agent's delegating user, may delete it"
+	"an admin of its home project, or, on an artifact owned by an agent, the agent's delegating user " +
+	"while they hold a role in its home project, may delete it"
 
 func writeRetireForbidden(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, "forbidden", retireForbiddenMessage)

@@ -335,7 +335,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	// The store decides the home and cross-project rules again under the
 	// artifact's lock, against the home scope as it is then (a concurrent
 	// move may have changed it); the checks above answer early.
-	created, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()), actor)
+	put, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()), actor)
 	switch {
 	case errors.Is(err, ErrStewardActionNotAllowed):
 		s.refuseStewardAction(w, r, logActionShare, a)
@@ -365,10 +365,10 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	status := http.StatusOK
-	if created {
+	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
-	s.logGrantPut(r, a, g, created, authority)
+	s.logGrantPut(r, a, g, put, authority)
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
 }
 
@@ -440,7 +440,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: subject,
 		Permission: GrantReview, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
 	}
-	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef, actor)
+	put, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef, actor)
 	switch {
 	case errors.Is(err, ErrReviewReplacesAccess):
 		s.refuseReviewReplacesAccess(w, r, a, subject)
@@ -463,9 +463,9 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
-	s.logGrantPut(r, a, g, created, actor.Authority)
+	s.logGrantPut(r, a, g, put, actor.Authority)
 	status := http.StatusOK
-	if created {
+	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
