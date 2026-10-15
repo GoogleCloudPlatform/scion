@@ -131,6 +131,27 @@ func (hb *brokerHeartbeatRequest) completeTargets() map[string]bool {
 	return out
 }
 
+// targetRuntimes returns the runtime name (runtime.Runtime.Name()) of each
+// target the heartbeat's inventory lists, by target ID. A target listed
+// twice with different runtime names maps to "", which no halt trusts.
+func (hb *brokerHeartbeatRequest) targetRuntimes() map[string]string {
+	if hb.Inventory == nil {
+		return nil
+	}
+	out := make(map[string]string, len(hb.Inventory.Targets))
+	for _, t := range hb.Inventory.Targets {
+		if t.ID == "" {
+			continue
+		}
+		if prev, seen := out[t.ID]; seen && prev != t.Runtime {
+			out[t.ID] = ""
+			continue
+		}
+		out[t.ID] = t.Runtime
+	}
+	return out
+}
+
 // agentRuntimeTarget returns the runtime target recorded on an agent, or "".
 func agentRuntimeTarget(a *store.Agent) string {
 	if a.AppliedConfig == nil {
@@ -475,6 +496,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	}
 
 	complete := hb.completeTargets()
+	runtimes := hb.targetRuntimes()
 	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
@@ -530,7 +552,10 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 		if !a.LastSeen.IsZero() && !a.LastSeen.Before(cutoff) {
 			continue
 		}
-		updated, err := s.store.MarkAgentContainerMissing(ctx, a.ID, brokerID, cutoff, missingAgentMessage)
+		// The inventory target's runtime decides whether the agent may be
+		// halted (not the runtime recorded on the agent).
+		haltRuntime := runtimes[agentRuntimeTarget(&a)]
+		updated, err := s.store.MarkAgentContainerMissing(ctx, a.ID, brokerID, cutoff, haltRuntime, missingAgentMessage)
 		if err != nil {
 			s.agentLifecycleLog.Warn("heartbeat reconcile: failed to mark agent container missing",
 				"broker_id", brokerID, "agent_id", a.ID, "error", err)
@@ -541,12 +566,17 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 			continue
 		}
 		s.missingAgents.forget(brokerID, a.ID)
-		s.agentLifecycleLog.Warn("heartbeat reconcile: agent container missing, marked error",
+		s.agentLifecycleLog.Warn("heartbeat reconcile: agent container missing, marked "+updated.Phase,
 			"broker_id", brokerID, "agent_id", a.ID, "agent", a.Slug, "project_id", a.ProjectID,
 			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
 			"exit_reason", updated.ExitReason)
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
 		s.events.PublishAgentStatus(ctx, updated)
+		if updated.Phase == string(state.PhaseHalted) {
+			// This write halted the agent; the CAS would otherwise have
+			// stored error.
+			s.onAgentHalted(ctx, updated, string(state.PhaseError))
+		}
 	}
 }
 

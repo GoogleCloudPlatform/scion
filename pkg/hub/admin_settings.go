@@ -461,6 +461,10 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if resp.Server != nil && resp.Server.Hub != nil {
 		resp.Server.Hub.HubClass = ""
 		resp.Server.Hub.TestIdentities = nil
+		// Nor is the relay-peer secret, which is never returned.
+		if c := resp.Server.Hub.Conduit; c != nil {
+			c.PeerSecret = ""
+		}
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
@@ -509,6 +513,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
+	// An empty relay-peer secret is ignored; any other value is refused.
+	rawBody = dropEmptyPeerSecret(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
