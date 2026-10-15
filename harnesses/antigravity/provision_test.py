@@ -288,6 +288,20 @@ class ModelResolutionTest(unittest.TestCase):
                 model = provision._resolve_model(ctx)
         self.assertEqual(model, "Gemini 4 Argon (Medium)")
 
+    def test_scion_model_unset_uses_harness_config_model_extra_large(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="extra-large")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
+
+    def test_scion_model_unset_uses_harness_config_model_xl_shorthand(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="xl")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
+
     def test_agy_model_env_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             ctx = make_ctx(tmp)
