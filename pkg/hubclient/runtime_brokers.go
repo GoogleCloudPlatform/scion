@@ -273,6 +273,23 @@ type BrokerHeartbeat struct {
 	// broker's online/offline status. An older broker omits it and the
 	// hub keeps the stored value; an older hub ignores it.
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
+	// RuntimeTargetPresentation is a flat Runtime Broker instance's full
+	// FC4-a presentation (config.PresentInstance), sent on every heartbeat
+	// as a snapshot, so a lost update or a Hub restore is repaired by the
+	// next beat. The Hub stores it read-only, only from the broker's own
+	// credentials, and only when the fence below advances. A legacy broker
+	// and an older broker omit it; the Hub then keeps the stored value.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	// PresentationTargetID is the instance's runtime target ID
+	// (RuntimeTargetDescriptor.ID); the Hub stores the presentation only
+	// when it equals the row's stored target.
+	PresentationTargetID string `json:"presentationTargetId,omitempty"`
+	// PresentationEpoch is the reporting process's start time in Unix
+	// nanoseconds, fixed for the process life; PresentationSeq is its
+	// per-process heartbeat counter. Together they fence the write: an
+	// older process can never overwrite a newer one's snapshot.
+	PresentationEpoch int64 `json:"presentationEpoch,omitempty"`
+	PresentationSeq   int64 `json:"presentationSeq,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.

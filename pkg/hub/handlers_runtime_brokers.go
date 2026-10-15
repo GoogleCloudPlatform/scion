@@ -714,6 +714,17 @@ type brokerHeartbeatRequest struct {
 	// Omitted by an older broker, in which case the stored value is left
 	// unchanged.
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
+	// RuntimeTargetPresentation is a flat instance's full FC4-a
+	// presentation (see hubclient.BrokerHeartbeat.RuntimeTargetPresentation),
+	// with its fence: the instance's runtime target ID, and the reporting
+	// process's epoch and per-process sequence. It is stored only from the
+	// broker's own credentials (ApplyRuntimeTargetPresentation); the wire
+	// carries no hash. Omitted by an older broker or a legacy one, in which
+	// case the stored value is left unchanged.
+	RuntimeTargetPresentation *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
+	PresentationTargetID      string                         `json:"presentationTargetId,omitempty"`
+	PresentationEpoch         int64                          `json:"presentationEpoch,omitempty"`
+	PresentationSeq           int64                          `json:"presentationSeq,omitempty"`
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -959,8 +970,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// Authorize: broker self-access or user with CheckAccess (ActionUpdate —
 	// heartbeats modify agent state and broker liveness).
+	brokerSelf := false
 	if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == id {
 		// Broker sending its own heartbeat — allowed
+		brokerSelf = true
 	} else {
 		identity := GetIdentityFromContext(ctx)
 		if identity == nil {
@@ -1113,6 +1126,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				}
 			}
 		}
+	}
+
+	// A flat instance's presentation is stored only when the request is
+	// authenticated as the broker itself (write rule 1): the user path,
+	// which this handler also admits, never writes it, so the presentation
+	// stays read-only to Hub users. Rules 2-4 (flat row, experiment on,
+	// target bound, fence advances) and the Hub-computed hash are
+	// ApplyRuntimeTargetPresentation's. An omitted field keeps the stored
+	// value.
+	if !brokerSelf {
+		if heartbeat.RuntimeTargetPresentation != nil {
+			s.agentLifecycleLog.Warn("heartbeat: ignoring runtimeTargetPresentation sent without the broker's own credentials",
+				"broker_id", id)
+		}
+	} else if _, err := s.ApplyRuntimeTargetPresentation(ctx, id, heartbeat.PresentationTargetID,
+		heartbeat.RuntimeTargetPresentation, heartbeat.PresentationEpoch, heartbeat.PresentationSeq, time.Now()); err != nil {
+		s.agentLifecycleLog.Warn("heartbeat: failed to store runtime target presentation",
+			"broker_id", id, "error", err)
 	}
 
 	// Process agent status updates from each project
