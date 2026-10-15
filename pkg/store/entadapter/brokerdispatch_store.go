@@ -447,10 +447,11 @@ var expirePageSize = 500
 // ExpireAndListStuckPendingMessages transitions up to expirePageSize messages
 // stuck in pending state past the given cutoff to failed, recording the
 // reason, and returns the rows it transitioned, oldest first. It matches the
-// same rows as ExpireStuckPendingMessages (agent recipients only). Each row is flipped by
-// its own compare-and-swap on dispatch_state inside one transaction, so a row
-// that a concurrent writer dispatched after the select is neither expired nor
-// returned. Inside WithTx it runs in the caller's transaction.
+// same rows as ExpireStuckPendingMessages (agent recipients only). Each row
+// is flipped by its own compare-and-swap on dispatch_state inside one
+// transaction, so a row that a concurrent writer dispatched after the select
+// is neither expired nor returned. Inside WithTx it runs in the caller's
+// transaction.
 func (s *BrokerDispatchStore) ExpireAndListStuckPendingMessages(ctx context.Context, before time.Time, reason string) ([]store.ExpiredPendingMessage, error) {
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
