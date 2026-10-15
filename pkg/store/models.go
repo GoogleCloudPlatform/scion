@@ -153,8 +153,8 @@ type Agent struct {
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
-	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
-	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
+	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
+	// EndLaunch, ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
 	// launch_error / end an active launch" rule inside UpdateAgent and
 	// UpdateAgentStatus when the written phase is "running" (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
@@ -171,6 +171,21 @@ type Agent struct {
 	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
 	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
 	LaunchCause string `json:"-"`
+	// LaunchPriorPhase is the effective resting phase a start or restart
+	// launch began from (BeginStartLaunch; "" for a create launch). A
+	// failed start-kind launch reads it to choose its end phase
+	// (ptone/scion#4669).
+	LaunchPriorPhase string `json:"-"`
+	// LaunchRevokeOnFail is the Hub's decision, taken when a start launch
+	// began, whether a failed end revokes the start's credential.
+	LaunchRevokeOnFail bool `json:"-"`
+	// LaunchResumePhase is the resume memory of a failed start: the resting
+	// phase a start-kind launch began from when its failure left the row in
+	// phase error, or "". Read it through EffectiveRestingPhase. Written by
+	// the launch-ending writes of start-kind launches, and cleared by the
+	// store on any write of a phase other than starting or error
+	// (entc.ClearLaunchResumePhaseHook).
+	LaunchResumePhase string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -325,6 +340,25 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	return a.LaunchState == "active" || a.LaunchError != ""
+}
+
+// EffectiveRestingPhase returns the phase the Hub's branch selectors read
+// to choose how to start agent a (ptone/scion#4669): the resume memory
+// LaunchResumePhase when the stored phase is error, the memory is set and
+// no launch is active on the row, and otherwise the stored phase. A failed
+// async start from suspended, created, provisioning or halted leaves the row
+// in error with the memory set, so a later plain start or resume behaves
+// as it would have before the failed attempt. Callers keep the result in
+// a local variable and never write it back to a.Phase, which whole-row
+// UpdateAgent writes would persist.
+func EffectiveRestingPhase(a *Agent) string {
+	if a == nil {
+		return ""
+	}
+	if a.Phase == "error" && a.LaunchResumePhase != "" && a.LaunchState != LaunchStateActive {
+		return a.LaunchResumePhase
+	}
+	return a.Phase
 }
 
 // ReincarnationState values for Agent.ReincarnationState.

@@ -318,6 +318,9 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
@@ -381,6 +384,9 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		// Both refusals give the uniform 403, whichever store check runs
 		// first.
 		s.writeAdminForbidden(w, r)
+		return
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
 		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
@@ -592,6 +598,8 @@ func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error)
 		return true
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the owner already has an artifact with this key in that project")
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
