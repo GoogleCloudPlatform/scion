@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -732,23 +733,22 @@ func TestConduitTunnel_GoAwayDrain(t *testing.T) {
 	// deadline (conduit.DefaultWriteWait), which also runs on the relay
 	// clock: one jump of WriteWait or more fires the write timer of a
 	// frame the relay is still writing (an echo, a window update) and
-	// ends the session mid-drain (ptone/scion#5209). A round trip between
-	// steps lets every in-flight write finish before the next one.
+	// ends the session mid-drain (ptone/scion#5209). Steps of WriteWait/2
+	// with a round trip between them let every in-flight write finish,
+	// so no write is in flight across two steps (one WriteWait).
+	// The session's timers run on the relay clock.
 	const drainStep = conduit.DefaultWriteWait / 2
-	require.Zero(t, (drain/2)%drainStep, "each half of the drain is a whole number of steps")
-	advanceDrain := func(d time.Duration, label string) {
-		for left := d - drainStep; left >= 0; left -= drainStep {
-			tf.relayClock.Advance(drainStep)
-			if left > 0 {
-				roundTrip(t, st, label+", "+left.String()+" to go")
-			}
+	require.Zero(t, drain%(2*drainStep), "each half of the drain is a whole number of steps")
+	n := int(drain / drainStep)
+	for i := 1; i <= n; i++ {
+		tf.relayClock.Advance(drainStep)
+		switch {
+		case i == n/2:
+			roundTrip(t, st, "half way through the drain")
+		case i < n:
+			roundTrip(t, st, "drain step "+strconv.Itoa(i))
 		}
 	}
-	advanceDrain(drain/2, "first half of the drain")
-	roundTrip(t, st, "half way through the drain")
-
-	// The session's timers run on the relay clock.
-	advanceDrain(drain/2, "second half of the drain")
 	assert.Equal(t, conduit.CloseRelayRestart, closeCode(t, streamEnd(t, st)), "closed at the drain deadline")
 }
 
