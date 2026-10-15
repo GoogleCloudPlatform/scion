@@ -447,6 +447,7 @@ func (a *AuthzService) AgentEffectCeiling(ctx context.Context, agentID string, o
 //	sc, err := a.loadScopeCeilings(ctx, agent)
 //	ceiling, err := projectChainCeiling(sc.Chain, opts)
 //	scopes := filterScopes(a.mintCandidateScopes(agent), ceiling, sc)
+//	scopes, err = a.clampTestAdminRootedScopes(ctx, agent, scopes)
 //
 // With zero options and a fully recorded chain the scopes equal the minted
 // scopes; with AllowUnrecordedLegacy they are a subset of them. The ceiling
@@ -467,5 +468,11 @@ func (a *AuthzService) EffectiveAgentAuthority(ctx context.Context, agent *store
 	if err != nil {
 		return nil, store.EffectCeiling{}, err
 	}
-	return filterScopes(a.mintCandidateScopes(agent), ceiling, sc), ceiling, nil
+	// As at mint, an agent rooted at an admin-kind test identity holds no
+	// clamped scope (admin tier A3).
+	scopes, err := a.clampTestAdminRootedScopes(ctx, agent, filterScopes(a.mintCandidateScopes(agent), ceiling, sc))
+	if err != nil {
+		return nil, store.EffectCeiling{}, err
+	}
+	return scopes, ceiling, nil
 }

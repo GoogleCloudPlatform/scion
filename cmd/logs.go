@@ -17,21 +17,15 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
 
-var (
-	logsTail   int
-	logsFollow bool
-)
+var logsTail int
 
 // logsCmd represents the logs command
 var logsCmd = &cobra.Command{
@@ -41,65 +35,17 @@ var logsCmd = &cobra.Command{
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
-
-		// Validate --follow restrictions
-		if logsFollow {
-			if nonInteractive {
-				return fmt.Errorf("--follow is not supported in non-interactive mode")
-			}
-		}
-
-		// Check if Hub is enabled
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
-		if hubCtx != nil {
-			if logsFollow {
-				return fmt.Errorf("--follow is not supported for agents on a hub")
-			}
-			return getHubLogs(cmd.Context(), hubCtx, agentName)
-		}
-
-		// Local mode: read from filesystem
-		rt := runtime.GetRuntime(projectPath, profile)
-
-		// Find the agent to get its project path
-		agents, err := rt.List(context.Background(), map[string]string{
-			"scion.agent": "true",
-			"scion.name":  agentName,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to find agent %s: %w", agentName, err)
-		}
-		if len(agents) == 0 {
-			return fmt.Errorf("agent %s not found", agentName)
-		}
-
-		a := agents[0]
-		if a.ProjectPath == "" {
-			return fmt.Errorf("agent %s has no project path configured", agentName)
-		}
-
-		agentLogPath := filepath.Join(a.ProjectPath, "agents", agentName, "home", "agent.log")
-		if _, err := os.Stat(agentLogPath); os.IsNotExist(err) {
-			return fmt.Errorf("log file not found: %s\n\nThe agent may not have started yet or does not produce logs", agentLogPath)
-		}
-
-		data, err := os.ReadFile(agentLogPath)
-		if err != nil {
-			return fmt.Errorf("failed to read log file: %w", err)
-		}
-
-		fmt.Print(string(data))
-		return nil
+		return getHubLogs(cmd.Context(), hubCtx, agentName)
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(logsCmd)
 	logsCmd.Flags().IntVarP(&logsTail, "tail", "n", 100, "Number of lines from end")
-	logsCmd.Flags().BoolVarP(&logsFollow, "follow", "f", false, "Stream logs in real-time")
 }
 
 // getHubLogs retrieves agent logs via the hub relay (hub -> broker -> agent.log).

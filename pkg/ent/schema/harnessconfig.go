@@ -63,6 +63,14 @@ func (HarnessConfig) Fields() []ent.Field {
 			Optional(),
 		field.String("storage_path").
 			Optional(),
+		// layout is the storage layout of the harness-config's files
+		// (ptone/scion#4219): "" is the legacy path layout
+		// (<storage_path>/<file path>), "blobs" is the content-addressed
+		// layout (<storage_path>.blobs/<sha256 hex>). Only
+		// CreateHarnessConfig and UpdateHarnessConfigContent write it.
+		field.String("layout").
+			Optional().
+			Default(""),
 		field.String("files").
 			Optional(),
 		field.Enum("status").

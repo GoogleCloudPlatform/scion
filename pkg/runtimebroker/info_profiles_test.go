@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -158,5 +159,46 @@ profiles:
 	remote, ok := byName["remote"]
 	if !ok || remote.Attach != nil {
 		t.Errorf("remote (different type, no live instance on this Server) = %+v, want Attach=nil", remote)
+	}
+}
+
+// Retained built-in profiles (ptone/scion#5113) resolve by name but are not
+// advertised as selectable profiles.
+func TestBuildInfoProfiles_SkipsRetainedBuiltinProfiles(t *testing.T) {
+	writeHomeSettings(t, `schema_version: "1"
+active_profile: gke
+runtimes:
+  gke-autopilot:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: gke-autopilot
+`)
+	prev := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, map[string]config.V1ProfileConfig{
+		"gke":       {Runtime: "gke-autopilot"},
+		"local-nfs": {Runtime: "gke-autopilot"},
+	}, nil, "")
+	overlay.SetProfileReferences(config.ProfileReferences{Agents: map[string]int{"local": 2}})
+	config.SetGlobalSettingsOverlay(overlay)
+
+	vs, _, err := config.LoadEffectiveSettings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := vs.ResolveRuntime("local"); err != nil {
+		t.Fatalf("precondition: retained local does not resolve: %v", err)
+	}
+
+	byName := infoProfilesByName((&Server{}).buildInfoProfiles("docker"))
+	if _, ok := byName["local"]; ok {
+		t.Errorf("retained built-in local advertised: %+v", byName)
+	}
+	for _, name := range []string{"gke", "local-nfs"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("stored profile %s not advertised: %+v", name, byName)
+		}
 	}
 }

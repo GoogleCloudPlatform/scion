@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerregistration"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
@@ -371,6 +372,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+	}
+	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
 	}
 
 	var activator brokerhost.Activator
@@ -745,6 +749,31 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 		log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
 	}
 	return true
+}
+
+// enableColocatedProfileReferences enables built-in profile retention on the
+// installed settings overlay for the legacy co-located broker
+// (ptone/scion#5113): it counts the references the broker's agents and
+// projects hold (or, if that fails, retains conservatively), and loads the
+// settings once so the retention WARN appears at startup. A no-op when no
+// overlay is installed or no legacy co-located broker is registered (a flat
+// host, or a failed registration): the overlay then behaves as before.
+func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
+	overlay := config.GetGlobalSettingsOverlay()
+	if overlay == nil || hubSrv == nil {
+		return
+	}
+	brokerID := hubSrv.LegacyColocatedBrokerID()
+	if brokerID == "" {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		log.Printf("Built-in profile retention not enabled: the global settings directory cannot be resolved: %v", err)
+		return
+	}
+	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
+	_, _, _ = config.LoadEffectiveSettings("")
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one

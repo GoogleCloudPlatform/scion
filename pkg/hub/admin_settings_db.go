@@ -250,6 +250,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// Deprecated env keys (SCION_SERVER_* targeting Layer-1 keys).
 	resp.DeprecatedEnvKeys = s.computeDeprecatedEnvKeys(ops)
 
+	// Built-in profiles and runtimes the co-located broker's overlay retains
+	// (ptone/scion#5113): the overlay-level set, read-only.
+	if overlay, _, _ := s.profileRefs.target(); overlay != nil {
+		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
+	}
+
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
