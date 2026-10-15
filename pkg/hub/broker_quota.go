@@ -44,14 +44,14 @@ const reconcileMinReservationAge = 15 * time.Minute
 
 // isBrokerQuotaCountedPhase reports whether phase currently counts toward an
 // agent's runtime broker's max_agents_per_broker ceiling (ptone/scion#1963).
-// Only stopped, suspended, and error are excluded: a container in any other
-// phase (created/provisioning/cloning/starting/running) either occupies, or
-// is actively moving toward occupying, broker capacity. Stopped and suspended
-// agents have no running container; error means the container already
-// exited or crashed.
+// Only stopped, suspended, error and halted are excluded: a container in any
+// other phase (created/provisioning/cloning/starting/running) either
+// occupies, or is actively moving toward occupying, broker capacity. Stopped
+// and suspended agents have no running container; error means the container
+// already exited or crashed; halted means the platform ended it.
 func isBrokerQuotaCountedPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended, state.PhaseError:
+	case state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseHalted:
 		return false
 	default:
 		return true

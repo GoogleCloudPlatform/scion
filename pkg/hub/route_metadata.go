@@ -1149,6 +1149,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// The residue report of an admin-kind identity (A3) is session only,
+	// for a human super-admin (checked again in the handler).
+	"GET /api/v1/test-identities/admin/{id}/residue": {
+		Pattern: "GET /api/v1/test-identities/admin/{id}/residue", RouteID: "testIdentities.admin.residue",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 	// Workload-bound issuer delegations (phase X2): test_identity.issue at
 	// hub scope from an interactive session only (no PAT, agent or
 	// workload credential). The handlers further require a live human

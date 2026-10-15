@@ -621,10 +621,12 @@ func (s *BrokerAuthService) issueJoinToken(ctx context.Context, brokerID, create
 		return nil, fmt.Errorf("failed to create join token: %w", err)
 	}
 
+	// The stored expiry: the store bounds a token minted by a test identity
+	// with an admin role by the identity's expiry (admin tier A3).
 	return &CreateBrokerRegistrationResponse{
 		BrokerID:      brokerID,
 		JoinToken:     joinToken,
-		ExpiresAt:     expiresAt,
+		ExpiresAt:     joinTokenRecord.ExpiresAt,
 		Reregistered:  reregistered,
 		Reissued:      reissued,
 		JoinTokenTTL:  ttl,

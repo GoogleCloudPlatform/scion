@@ -70,6 +70,7 @@ func main() {
 	fmt.Println("  send_queue_size  Max queued messages per channel (default: 100)")
 	fmt.Println("  send_min_delay   Minimum delay between sends (default: 50ms)")
 	fmt.Println("  agent_cache_ttl  TTL for cached agent list (default: 5m)")
+	fmt.Println("  async_create     Opt /scion thread in to asynchronous agent create when the hub supports it (default: true)")
 	fmt.Println("  downloads_path   Override directory for inbound attachment downloads (default: /workspace/downloads, supports {project_slug} placeholder)")
 	fmt.Println("  register_url     Public URL for user-facing registration links (default: hub_url)")
 	os.Exit(0)
@@ -158,7 +159,7 @@ func serveStandalone() {
 			"bot_token", "application_id", "public_key", "guild_ids", "guild_id",
 			"hub_url", "hmac_key", "broker_id",
 			"mention_routing", "send_queue_size", "send_min_delay",
-			"agent_cache_ttl", "downloads_path",
+			"agent_cache_ttl", "async_create", "downloads_path",
 			"transport_mode", "transport_audience",
 			"register_url",
 		},

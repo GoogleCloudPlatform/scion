@@ -267,6 +267,10 @@ type testAdminActor struct {
 	IssuerCredentialID string
 	IssuanceID         string
 	PurposeHash        string
+	// IdentityID and ExpiresAt are the identity's user ID and expiry, the
+	// inputs of grant shaping (grantShapingMiddleware).
+	IdentityID string
+	ExpiresAt  time.Time
 }
 
 type testAdminActorKey struct{}
@@ -294,7 +298,10 @@ func testAdminCredentialFor(clientType ClientType) string {
 // contextWithTestAdminActor records u's immutable issuance facts on ctx,
 // and how the request authenticated (testAdminCredentialFor).
 func contextWithTestAdminActor(ctx context.Context, u *store.User, credential string) context.Context {
-	a := testAdminActor{Kind: u.Kind, Credential: credential}
+	a := testAdminActor{Kind: u.Kind, Credential: credential, IdentityID: u.ID}
+	if u.ExpiresAt != nil {
+		a.ExpiresAt = *u.ExpiresAt
+	}
 	if u.IssuedBy != nil {
 		a.IssuerID = *u.IssuedBy
 	}
@@ -846,8 +853,9 @@ var errTestAdminSinkWrite = errors.New("test admin audit sink write failed")
 // tier design §3.3, for a human super-admin on an interactive session (or
 // dev credential) only. It first bumps the session generation of every
 // admin-kind identity, so their browser web sessions end on their next
-// request (WS4), then deletes every admin-kind identity, live or
-// expired, with its role bindings, group memberships and user-scope data,
+// request (WS4), then deletes every admin-kind identity, live or expired,
+// with every grant stamped with its issuance (admin tier A3), its role
+// bindings, group memberships and user-scope data,
 // and writes a test_admin_revoke audit record and sink line for each. An
 // identity the user delete refuses (it owns agents, or is a project's last
 // owner) is instead suspended and stripped of its role bindings in one
@@ -961,6 +969,20 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 			return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
 		}
 		return nil
+	}
+	// The grants the identity handed out (stamped with its issuance, admin
+	// tier A3) end first. Its stamped resources (agents, projects) stay
+	// for the purge route, which also removes any grant left here.
+	if u.IssuanceID != nil && *u.IssuanceID != "" {
+		report := &TestIdentityPurgeReport{IdentityID: u.ID}
+		run := fixturePurgeRun{rootID: u.ID, user: u, issuanceID: *u.IssuanceID, trigger: testAdminRevokeMutation, actor: auditActor}
+		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: auditActor.CorrelationID, Trigger: testAdminRevokeMutation}
+		if u.IssuedBy != nil {
+			run.issuerID, basis.IssuerID = *u.IssuedBy, *u.IssuedBy
+		}
+		if err := s.purgeTestAdminGrants(ctx, run, basis, report); err != nil {
+			return "", err
+		}
 	}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := deleteUserRowCascadeTx(ctx, tx, u.ID, s.membershipNow()); err != nil {

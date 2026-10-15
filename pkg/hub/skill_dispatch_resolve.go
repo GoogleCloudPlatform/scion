@@ -245,6 +245,12 @@ func (s *Server) creatorIdentityForAgent(ctx context.Context, agent *store.Agent
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
+		// The scopes an agent rooted at an admin-kind test identity is
+		// issued (admin tier A3); a root lookup error resolves no creator.
+		scopes, err := s.authzService.clampTestAdminRootedScopes(ctx, creator, scopes)
+		if err != nil {
+			return nil
+		}
 		return &agentIdentityWrapper{&AgentTokenClaims{
 			Claims:    jwt.Claims{Subject: creator.ID},
 			ProjectID: creator.ProjectID,

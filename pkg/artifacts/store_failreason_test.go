@@ -23,12 +23,12 @@ import (
 )
 
 // TestStoreMigratesVersionFailReason: the fail_reason migration is the
-// last ledger entry, numbered 0008; a database at 0007 is upgraded by Init
+// ledger entry after 0007_orphans, numbered 0008; a database at 0007 is upgraded by Init
 // without touching existing rows (a failed version keeps every value and
 // has no reason, so it lists as discarded), and Init stays idempotent.
 func TestStoreMigratesVersionFailReason(t *testing.T) {
-	if last := migrations[len(migrations)-1]; last.name != migrationVersionFailReason {
-		t.Fatalf("last migration %q, want %q", last.name, migrationVersionFailReason)
+	if i := migrationIndex(migrationVersionFailReason); i < 1 || migrations[i-1].name != migrationOrphans {
+		t.Fatalf("migration %q is not right after %q", migrationVersionFailReason, migrationOrphans)
 	}
 	if got := migrationVersionFailReason; got != "0008_version_fail_reason" {
 		t.Fatalf("migrationVersionFailReason = %q, want 0008_version_fail_reason", got)
@@ -94,4 +94,15 @@ func TestStoreMigratesVersionFailReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+// migrationIndex returns the position of migration name in the ledger
+// order, or -1.
+func migrationIndex(name string) int {
+	for i, m := range migrations {
+		if m.name == name {
+			return i
+		}
+	}
+	return -1
 }
