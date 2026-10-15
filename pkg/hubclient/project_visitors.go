@@ -24,7 +24,8 @@ import (
 )
 
 // ProjectVisitorService handles a project's visitor grants: access for
-// users of a trusted issuer, granted by email (ptone/scion#4603). The
+// users of a trusted issuer, granted by email or, through visitor rules, by
+// email domain (ptone/scion#4603). The
 // routes need an interactive session and project.manage_visitors, and
 // answer 404 while the hub's federation.project_visitors experiment is off.
 type ProjectVisitorService interface {
@@ -37,8 +38,23 @@ type ProjectVisitorService interface {
 	// Update replaces a grant's window; a nil bound is cleared.
 	Update(ctx context.Context, visitorID string, req *UpdateProjectVisitorRequest) (*ProjectVisitor, error)
 
-	// Remove revokes a grant.
+	// Remove revokes a grant. Revoking a visitor a rule bound also
+	// excludes that visitor from the rule.
 	Remove(ctx context.Context, visitorID string) error
+
+	// ListRules returns the project's visitor rules.
+	ListRules(ctx context.Context) ([]ProjectVisitorRule, error)
+
+	// AddRule adds a visitor rule for the users of an issuer with a
+	// verified email in a domain.
+	AddRule(ctx context.Context, req *AddProjectVisitorRuleRequest) (*ProjectVisitorRule, error)
+
+	// UpdateRule replaces a rule's window, and that of every visitor it
+	// bound; a nil bound is cleared.
+	UpdateRule(ctx context.Context, ruleID string, req *UpdateProjectVisitorRequest) (*ProjectVisitorRule, error)
+
+	// RemoveRule removes a rule and every visitor binding it created.
+	RemoveRule(ctx context.Context, ruleID string) error
 }
 
 // ProjectVisitor is one visitor grant of a project.
@@ -57,6 +73,41 @@ type ProjectVisitor struct {
 	NotBefore      *time.Time `json:"notBefore,omitempty"`
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
+	// Source is "email" for a grant by email, or "rule" for a visitor a
+	// visitor rule bound, whose ID is SourceRuleID.
+	Source       string `json:"source,omitempty"`
+	SourceRuleID string `json:"sourceRuleId,omitempty"`
+}
+
+// ProjectVisitorRule is one visitor rule of a project: visitor access for
+// the users of Issuer whose verified email's domain is Domain (exact,
+// case-insensitive match).
+type ProjectVisitorRule struct {
+	ID     string `json:"id"`
+	Issuer string `json:"issuer"`
+	Domain string `json:"domain"`
+	// IssuerAccepted reports whether the hub accepts visitors from Issuer
+	// now. While it is false the rule binds no one and its visitors'
+	// requests are refused.
+	IssuerAccepted bool       `json:"issuerAccepted"`
+	CreatedBy      string     `json:"createdBy,omitempty"`
+	NotBefore      *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+// ListProjectVisitorRulesResponse is the rule list response body.
+type ListProjectVisitorRulesResponse struct {
+	Rules []ProjectVisitorRule `json:"rules"`
+}
+
+// AddProjectVisitorRuleRequest is the request body for adding a visitor
+// rule.
+type AddProjectVisitorRuleRequest struct {
+	Issuer    string     `json:"issuer"`
+	Domain    string     `json:"domain"`
+	NotBefore *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 // ListProjectVisitorsResponse is the list response body.
@@ -125,6 +176,47 @@ func (s *projectVisitorService) Update(ctx context.Context, visitorID string, re
 
 func (s *projectVisitorService) Remove(ctx context.Context, visitorID string) error {
 	resp, err := s.c.delete(ctx, s.basePath()+"/"+url.PathEscape(visitorID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+func (s *projectVisitorService) rulesPath() string {
+	return s.basePath() + "/rules"
+}
+
+func (s *projectVisitorService) ListRules(ctx context.Context) ([]ProjectVisitorRule, error) {
+	resp, err := s.c.get(ctx, s.rulesPath(), nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[ListProjectVisitorRulesResponse](resp)
+	if err != nil {
+		return nil, err
+	}
+	return out.Rules, nil
+}
+
+func (s *projectVisitorService) AddRule(ctx context.Context, req *AddProjectVisitorRuleRequest) (*ProjectVisitorRule, error) {
+	// Not retried: a repeated rule answers 409.
+	resp, err := s.c.postNoRetry(ctx, s.rulesPath(), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectVisitorRule](resp)
+}
+
+func (s *projectVisitorService) UpdateRule(ctx context.Context, ruleID string, req *UpdateProjectVisitorRequest) (*ProjectVisitorRule, error) {
+	resp, err := s.c.patch(ctx, s.rulesPath()+"/"+url.PathEscape(ruleID), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectVisitorRule](resp)
+}
+
+func (s *projectVisitorService) RemoveRule(ctx context.Context, ruleID string) error {
+	resp, err := s.c.delete(ctx, s.rulesPath()+"/"+url.PathEscape(ruleID), nil)
 	if err != nil {
 		return err
 	}

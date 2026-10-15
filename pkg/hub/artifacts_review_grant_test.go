@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -212,4 +213,66 @@ func TestArtifactHostMayGrantReview_ChainLive(t *testing.T) {
 		assert.False(t, f.may(newArtifactHost(&Server{}), f.user(f.admin), f.agent.ID, f.home))
 		assert.False(t, f.may(&artifactHost{}, f.user(f.admin), f.agent.ID, f.home))
 	})
+}
+
+// TestArtifactHostReviewGrantClause: ReviewGrantClause makes MayGrantReview's
+// decision and names its clause, project administration first
+// (ptone/scion#5120).
+func TestArtifactHostReviewGrantClause(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	cases := []struct {
+		name     string
+		identity Identity
+		agentID  string
+		home     string
+		want     string
+	}{
+		{"delegating user", f.user(f.delegator), f.agent.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"delegating user, agent-spawned agent", f.user(f.delegator), f.child.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"home-project admin", f.user(f.admin), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
+		{"home-project owner", f.user(f.owner), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
+		{"another user's delegate", f.user(f.member), f.sibling.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"plain project member", f.user(f.member), f.agent.ID, f.home, ""},
+		{"admin of another project", f.user(f.otherAdmin), f.agent.ID, f.home, ""},
+		{"no identity", nil, f.agent.ID, f.home, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.identity != nil {
+				ctx = contextWithIdentity(ctx, tc.identity)
+			}
+			assert.Equal(t, tc.want, host.ReviewGrantClause(ctx, tc.agentID, tc.home))
+			assert.Equal(t, tc.want != "", host.MayGrantReview(ctx, tc.agentID, tc.home), "MayGrantReview agrees")
+		})
+	}
+}
+
+// TestArtifactHostReviewGrantClauseAuditsOnce: the host evaluates the review
+// rule once. For a delegating user that is exactly one authorization decision,
+// the project.manage deny of AdministersScope on the home project (the
+// provenance resolution records no decision), the same single record the
+// review rule wrote before it named its clause. A second evaluation, or an
+// extra check added for the decision log, would change the count.
+func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
+	emitter := &recordingDecisionAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home))
+	require.Len(t, emitter.records, 1, "one decision for a delegating user's review clause")
+	r := emitter.records[0]
+	assert.Equal(t, "deny", r.Result)
+	assert.Equal(t, "project", r.ResourceType)
+	assert.Equal(t, f.home, r.ResourceID)
+	assert.Equal(t, string(ActionManage), r.Permission)
+	assert.Equal(t, f.delegator, r.PrincipalID)
+
+	// MayGrantReview, the same evaluation, records the same one decision.
+	emitter.records = nil
+	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home))
+	require.Len(t, emitter.records, 1)
+	assert.Equal(t, "deny", emitter.records[0].Result)
 }

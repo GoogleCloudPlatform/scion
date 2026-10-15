@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "spec_version": "1.0.0",
+  "plugins": [
+    {
+      "name": "acme.tools",
+      "version": "1.2.0",
+      "description": "Acme tools",
+      "dir": "plugins/acme.tools",
+      "digest": "sha256:53645a58fba961db6f7fb9d6c706dd3b255b228f06d89470f415ae1bfaca276a",
+      "source": {
+        "template": "my-template",
+        "path": "plugins/acme"
+      },
+      "skills": [
+        "deploy",
+        "review"
+      ],
+      "skills_dir_conflict": true,
+      "mcp": {
+        "servers": {
+          "local": {
+            "type": "stdio",
+            "command": "./bin/srv",
+            "args": [
+              "${PLUGIN_DATA}/x"
+            ]
+          }
+        },
+        "invalid": [
+          {
+            "severity": "warning",
+            "message": "mcp server \"old\" skipped: \"url\" must use https unless the host is localhost or a loopback address"
+          }
+        ]
+      },
+      "diagnostics": [
+        {
+          "severity": "warning",
+          "message": "unknown manifest field \"foo\" ignored"
+        },
+        {
+          "severity": "warning",
+          "message": "mcp server \"old\" skipped: \"url\" must use https unless the host is localhost or a loopback address"
+        }
+      ]
+    }
+  ]
+}

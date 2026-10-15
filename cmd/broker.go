@@ -486,6 +486,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	if endpoint == "" {
 		return errHubNotConfigured
 	}
+	if err := checkBrokerHubURL(endpoint); err != nil {
+		return err
+	}
 
 	// Step 1: Check if local broker server is running
 	port := resolveBrokerPort(cmd)
@@ -506,7 +509,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// Check Hub connectivity
 	if _, err := client.Health(ctx); err != nil {
-		return fmt.Errorf("hub at %s is not responding: %w", endpoint, err)
+		return fmt.Errorf("hub at %s is not responding: %w", config.RedactURL(endpoint), err)
 	}
 
 	// Get project name for display
@@ -890,7 +893,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		default:
 			fmt.Println("Multiple hub connections found. Specify which to deregister with --name:")
 			for _, c := range all {
-				fmt.Printf("  - %s (%s)\n", c.Name, c.HubEndpoint)
+				fmt.Printf("  - %s (%s)\n", c.Name, config.RedactURL(c.HubEndpoint))
 			}
 			return fmt.Errorf("use --name to specify which hub connection to deregister")
 		}
@@ -1908,7 +1911,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		for _, conn := range status.HubConnections {
 			connStatus := brokerHubConnectionDisplayStatus(liveStatusMap, conn.Name, status.ServerRunning)
 			fmt.Printf("  %s\n", conn.Name)
-			fmt.Printf("    Hub:         %s\n", conn.HubEndpoint)
+			fmt.Printf("    Hub:         %s\n", config.RedactURL(conn.HubEndpoint))
 			fmt.Printf("    Auth:        %s\n", conn.AuthMode)
 			fmt.Printf("    Status:      %s\n", connStatus)
 			if !conn.RegisteredAt.IsZero() {
@@ -1937,7 +1940,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		if status.BrokerName != "" {
 			fmt.Printf("  Broker Name: %s\n", status.BrokerName)
 		}
-		fmt.Printf("  Hub:         %s\n", status.HubEndpoint)
+		fmt.Printf("  Hub:         %s\n", config.RedactURL(status.HubEndpoint))
 		if status.HubConnected {
 			fmt.Printf("  Connected:   yes (%s)\n", status.HubStatus)
 			if status.BrokerStatus != "" {
@@ -2043,7 +2046,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 		if s, ok := liveStatusMap[c.Name]; ok {
 			status = s
 		}
-		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", c.Name, c.HubEndpoint, authMode, status, regDate)
+		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", c.Name, config.RedactURL(c.HubEndpoint), authMode, status, regDate)
 	}
 	_ = w.Flush()
 
@@ -2116,7 +2119,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 	if !status.LastHeartbeat.IsZero() {
 		fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 	}
-	fmt.Printf("  Hub:         %s\n", status.HubEndpoint)
+	fmt.Printf("  Hub:         %s\n", config.RedactURL(status.HubEndpoint))
 	fmt.Println()
 
 	// Projects

@@ -191,6 +191,7 @@ var routePermissionClassifications = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin":             "hub-admin:test-identity",
 	"POST /api/v1/test-identities/admin/revoke-all":  "hub-admin:test-identity",
+	"GET /api/v1/test-identities/admin/{id}/residue": "hub-admin:test-identity",
 	"POST /api/v1/test-identity-delegations":         "hub-admin:test-identity",
 	"GET /api/v1/test-identity-delegations":          "hub-admin:test-identity",
 	"DELETE /api/v1/test-identity-delegations/{id}":  "hub-admin:test-identity",

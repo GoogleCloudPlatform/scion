@@ -167,9 +167,10 @@ func (r *doctorReport) heading(title string) {
 // add records c in *section and prints it in text mode.
 func (r *doctorReport) add(section *[]scionruntime.CheckResult, c scionruntime.CheckResult) {
 	// Messages can carry text from the Hub, brokers and integrations
-	// (names, reasons); never let it drive the terminal.
-	c.Message = stripControlChars(c.Message)
-	c.Remediation = stripControlChars(c.Remediation)
+	// (names, reasons); never let it drive the terminal. Errors can quote
+	// a URL, which is shown without its user info.
+	c.Message = config.RedactURLsIn(stripControlChars(c.Message))
+	c.Remediation = config.RedactURLsIn(stripControlChars(c.Remediation))
 	*section = append(*section, c)
 	var icon string
 	switch c.Status {
@@ -361,8 +362,8 @@ func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 
 // localSettingsChecks runs the checks that read only this machine: D5
 // NFS mounts, D10 Kubernetes block ServiceAccount, D11 server hub endpoint
-// deprecation (server hosts only), D6 telemetry, D7 container images and
-// D8 broker credentials. They are reported with the
+// deprecation (server hosts only), D12 inotify limits, D6 telemetry, D7
+// container images and D8 broker credentials. They are reported with the
 // Hub checks, as before.
 func (r *doctorReport) localSettingsChecks() {
 	// D5: NFS Mount Status (local check against this host's global
@@ -397,6 +398,10 @@ func (r *doctorReport) localSettingsChecks() {
 	if d11, ok := checkDoctorServerHubEndpointHere(); ok {
 		r.add(&r.HubChecks, d11)
 	}
+
+	// D12: inotify limits (local check, read-only): the per-user limits
+	// that a Docker or Podman broker's agents share, and their current use.
+	r.add(&r.HubChecks, checkDoctorInotifyLimitsHere())
 
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())
@@ -585,7 +590,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 			return scionruntime.CheckResult{
 				Name:        "hub-connectivity",
 				Status:      "fail",
-				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, hubclient.HintProxyError(err)),
+				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", config.RedactURL(hubEP), hubclient.HintProxyError(err)),
 				Remediation: "Verify the Hub is running and the endpoint is correct",
 			}, false
 		}
@@ -621,7 +626,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, err),
+			Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", config.RedactURL(hubEP), err),
 			Remediation: "Verify the Hub is running and the endpoint is correct",
 		}, false
 	}
@@ -655,6 +660,7 @@ func probeDoctorHubConnectivity(hubEP string, client hubclient.Client) (res scio
 // warns with the status verbatim. Non-healthy checks are named in the message.
 func doctorHubHealthResult(hubEP string, health healthProbeResponse) scionruntime.CheckResult {
 	res := scionruntime.CheckResult{Name: "hub-connectivity"}
+	hubEP = config.RedactURL(hubEP)
 	checks := ""
 	if names := nonHealthyChecks(health); len(names) > 0 {
 		checks = " (" + strings.Join(names, "; ") + ")"

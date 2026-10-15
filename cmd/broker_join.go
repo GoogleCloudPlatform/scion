@@ -240,6 +240,9 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 	if endpoint == "" {
 		return errHubNotConfigured
 	}
+	if err := checkBrokerHubURL(endpoint); err != nil {
+		return err
+	}
 
 	// The broker server does not have to be running yet: a provisioning
 	// script may join first and start the broker afterwards.
@@ -308,7 +311,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 
 	persistBrokerHubSettings(os.Stderr, globalDir, endpoint, joined.BrokerID, hubName)
 
-	fmt.Printf("Broker %s joined hub %s; credentials saved to %s\n", joined.BrokerID, endpoint, multiStore.Dir())
+	fmt.Printf("Broker %s joined hub %s; credentials saved to %s\n", joined.BrokerID, config.RedactURL(endpoint), multiStore.Dir())
 	return nil
 }
 
@@ -359,6 +362,11 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete broker join: %w", err)
 	}
+	// The broker ID names the broker's state directory; refuse one that is
+	// not a single path element before saving anything.
+	if err := brokercredentials.ValidateBrokerIDPathElement(joinResp.BrokerID); err != nil {
+		return nil, fmt.Errorf("failed to complete broker join: %w", err)
+	}
 
 	// Resolve transport config from flags, then env
 	transportMode := p.TransportMode
@@ -395,15 +403,20 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 // (one with a dev token): there the key would take precedence over the
 // co-located localhost and move the local broker onto the registered hub.
 // The CLI's hub.endpoint is never written. Failures are reported to w as
-// warnings, as 'register' has always done.
+// warnings, as 'register' has always done. A broker ID that is not a single
+// path element is not saved, and neither is anything else (warned to w).
 func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubName string) {
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		_, _ = fmt.Fprintf(w, "Warning: not saving the broker ID or hub settings: %v\n", err)
+		return
+	}
 	// hub.brokerId first: on a legacy-format file this write migrates it to
 	// the v1 format the in-place edit below needs.
 	if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save broker ID: %v\n", err)
 	}
 	if endpoint != "" && apiclient.ResolveDevToken() != "" {
-		slog.Debug("Not saving server.broker.hub_endpoint: this host runs a co-located workstation hub", "endpoint", endpoint)
+		slog.Debug("Not saving server.broker.hub_endpoint: this host runs a co-located workstation hub", "endpoint", config.RedactURL(endpoint))
 	} else if endpoint != "" {
 		if err := saveBrokerHubEndpointIfUnset(globalDir, endpoint); err != nil {
 			_, _ = fmt.Fprintf(w, "Warning: failed to save hub endpoint to global settings: %v\n", err)
@@ -413,6 +426,16 @@ func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubNam
 	if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save hub connection to settings: %v\n", err)
 	}
+}
+
+// checkBrokerHubURL applies the hub list's rule (config.ValidateHubURL)
+// to the hub URL of a broker registration, before anything is sent or
+// saved.
+func checkBrokerHubURL(endpoint string) error {
+	if err := config.ValidateHubURL(endpoint); err != nil {
+		return fmt.Errorf("%w; pass a plain http(s) hub URL (no user info, query or fragment)", err)
+	}
+	return nil
 }
 
 // brokerHubEndpointSettingPath is server.broker.hub_endpoint, the hub a

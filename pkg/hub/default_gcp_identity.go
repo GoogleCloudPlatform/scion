@@ -136,8 +136,9 @@ func (s *Server) projectProfileDefaultSA(ctx context.Context, runtimeBrokerID st
 
 // pinResolvedProfile pins profile onto the agent's applied config and its
 // CreateInputs (what reincarnate replays) when they name none yet, so the
-// agent dispatches under the profile a profile-scoped default was chosen
-// for. An explicit profile already set is never overwritten.
+// agent dispatches under the profile a profile-scoped default, or the
+// passthrough mode decision (translatePassthroughForSandbox), was made for.
+// An explicit profile already set is never overwritten.
 func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 	if ac == nil || profile == "" {
 		return
@@ -396,9 +397,8 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // sends no metadata mode, and the broker applies its runtime default
 // ("block" on most runtimes, "passthrough" on Kubernetes).
 //
-// Unlike brokerHasCloudRunSandboxProfile (handlers_agents_core.go), which
-// treats a broker as qualifying when any one of its profiles matches, this
-// resolves the single profile this agent's dispatch will actually use
+// Like resolvePassthroughProfile (handlers_agents_core.go), this resolves
+// the single profile this agent's dispatch will actually use
 // (resolveAgentRuntimeProfileType), because one broker can run more than one
 // runtime profile and only one of them applies to a given agent. On a grant
 // it returns that profile's name so the caller can pin AppliedConfig.Profile

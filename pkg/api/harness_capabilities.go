@@ -77,4 +77,13 @@ type HarnessAdvancedCapabilities struct {
 	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth" koanf:"auth"`
 	MCP       HarnessMCPCapabilities       `json:"mcp" yaml:"mcp" koanf:"mcp"`
 	Resume    CapabilityField              `json:"resume" yaml:"resume" koanf:"resume"`
+	// AgentPlugins describes native Agent Plugins install support. An empty
+	// Support (a harness-config that predates the capability) is treated as no.
+	// Harness-configs declare it in the agent-plugins.yaml bundle file
+	// (config.AgentPluginsSidecarFile), which the harnesses report here
+	// (config.HarnessConfigEntry.AgentPluginsCapability). The
+	// capabilities.agent_plugins key of config.yaml is deprecated: binaries
+	// built before it reject it (ptone/scion#5196). It is still read as the
+	// fallback when the bundle has no sidecar.
+	AgentPlugins CapabilityField `json:"agent_plugins" yaml:"agent_plugins" koanf:"agent_plugins"`
 }

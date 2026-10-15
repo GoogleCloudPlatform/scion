@@ -41,13 +41,19 @@ type CreateTestIdentityDelegationRequest struct {
 	// WorkloadSub is the service account unique id the delegation is
 	// pinned to; it must be in the hub's startup allowlist.
 	WorkloadSub string `json:"workloadSub"`
-	// Scopes holds exactly one scope, "test_identity:issue".
+	// Scopes holds exactly one scope: "test_identity:issue", or on a hub
+	// running the admin tiers "test_identity:issue_admin" or
+	// "test_identity:issue_super_admin".
 	Scopes []string `json:"scopes"`
-	// TTLSeconds is the delegation lifetime (0: the hub default).
+	// TTLSeconds is the delegation lifetime (0: the hub's default for the
+	// scope).
 	TTLSeconds int64 `json:"ttlSeconds,omitempty"`
-	// MemberCap is the number of live identities the delegation may hold
-	// (0: the hub default, 5).
+	// MemberCap is the number of live identities a member-scope delegation
+	// may hold (0: the hub default, 5).
 	MemberCap int `json:"memberCap,omitempty"`
+	// AdminCap is the number of live admin-kind identities an admin-scope
+	// delegation may hold (0: the scope's maximum).
+	AdminCap int `json:"adminCap,omitempty"`
 	// Label is a short label for the test window.
 	Label string `json:"label,omitempty"`
 }
@@ -59,7 +65,8 @@ type TestIdentityDelegation struct {
 	GrantorID   string     `json:"grantorId"`
 	WorkloadSub string     `json:"workloadSub"`
 	Scope       string     `json:"scope"`
-	MemberCap   int        `json:"memberCap"`
+	MemberCap   int        `json:"memberCap,omitempty"`
+	AdminCap    int        `json:"adminCap,omitempty"`
 	Label       string     `json:"label,omitempty"`
 	Created     time.Time  `json:"created"`
 	ExpiresAt   time.Time  `json:"expiresAt"`

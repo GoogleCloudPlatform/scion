@@ -41,8 +41,8 @@ env_template:
 model_aliases:
   small: "Gemini 3.1 Flash Lite"
   medium: "Gemini 3.8 Flash (Medium)"
-  large: "Gemini 3.1 Pro (Low)"
-  extra-large: "Gemini 3.1 Pro (Low)"
+  large: "Gemini 4 Argon (Medium)"
+  extra-large: "Gemini 4 Argon (High)"
 
 # SCION_THINKING_LEVEL (0-100) -> `agy --effort <value>` in agy-wrapper.sh.
 # Applied by scion_harness.resolve_thinking in provision.py. Each level maps

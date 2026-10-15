@@ -1583,10 +1583,10 @@ Exactly one list is.
    NOT among them: PersistentPreRunE clears requiresProject for the server
    subtree before that check runs.
 
-   --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Its only consumer on
-   this path is config.RequireImageRegistry, and that call is skipped whenever
-   requiresRegistry is cleared for the hub or server subtree; LoadSettings does
-   not take it.
+   --profile/-p IS THE WEAK ENTRY AND IS LABELLED AS ONE. Nothing on this path
+   reads it: its former consumer, the CLI's image_registry pre-check
+   (config.RequireImageRegistry in cmd/root.go), was removed with local mode,
+   and LoadSettings does not take it.
    Every other consumer of the variable is a client subcommand. So it is INERT on
    server start today and I could find no harm for it - by axis (d), that is the
    same answer that removed the updateStrategy refusal. It survives here on the
@@ -3567,10 +3567,10 @@ registry variable with an empty literal value, rather than modelling the env
 layer's precedence here. The hub's DB-backed settings overlay does not count: startRuntimeBroker
 installs it after this check has run.
 
-Not the check described under --profile in the reserved-flag comments. That
-one, config.RequireImageRegistry in cmd/root.go, is skipped for the server
-subtree and never runs on hub start; this one is in the server itself and
-always does.
+Not the CLI pre-check the reserved-flag comments mention under --profile.
+That one, config.RequireImageRegistry in cmd/root.go, was removed with local
+mode and never ran on hub start; this one is in the server itself and always
+does.
 
 Not evaluated under config.existingSecret, where this define is not reached:
 the settings file is the operator's, and the hub's own check still applies.

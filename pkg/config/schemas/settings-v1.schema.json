@@ -37,6 +37,16 @@
       "x-scope": "any",
       "x-since": "1"
     },
+    "local_experiments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+      },
+      "description": "Experiments enabled for solo/local (non-broker) provisioning. Only experiments consulted on the local provisioning path take effect (currently hub.agent_plugins); hub features are toggled on the hub.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
     "default_harness_auth": {
       "type": "string",
       "enum": ["", "api-key", "oauth-token", "auth-file", "vertex-ai", "none"],
@@ -1021,7 +1031,8 @@
           },
           "additionalProperties": false
         },
-        "resume": { "$ref": "#/$defs/capabilityField" }
+        "resume": { "$ref": "#/$defs/capabilityField" },
+        "agent_plugins": { "$ref": "#/$defs/capabilityField" }
       },
       "additionalProperties": false
     },
@@ -1328,6 +1339,10 @@
               "type": "array",
               "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
               "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            },
+            "admin_web_sessions": {
+              "type": "string",
+              "description": "Turns on browser web sessions for the admin test identity kinds. The value is the hub id the setting is bound to and must equal this hub's resolved hub id; unset means off. Read once at startup. The hub refuses to start when it is set and --test-mode is not admin or super-admin (the test super-admin kind also needs super-admin), or when the value is another hub id. Admin web sessions are for systemd test hubs only: the Helm chart renders only --test-mode=member, so a Helm hub with this setting refuses to start."
             }
           },
           "additionalProperties": false

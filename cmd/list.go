@@ -24,7 +24,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcache"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -33,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -110,42 +108,8 @@ var listCmd = &cobra.Command{
 			return err
 		}
 
-		if hubCtx != nil {
-			return listAgentsViaHub(hubCtx)
-		}
-
-		// Local mode (unreachable: requireHub never returns a nil context;
-		// removed with the local tails)
-		return listAgentsLocal()
+		return listAgentsViaHub(hubCtx)
 	},
-}
-
-// listAgentsLocal lists agents using the local runtime
-func listAgentsLocal() error {
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	filters := map[string]string{
-		"scion.agent": "true",
-	}
-
-	if listAll {
-		// Cross-project listing might need a way to find all projects.
-		// For now, mgr.List handles current project and what's provided in filters.
-	} else {
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		if projectDir != "" {
-			filters["scion.project_path"] = projectDir
-			filters["scion.project"] = config.GetProjectName(projectDir)
-		}
-	}
-
-	agents, err := mgr.List(context.Background(), filters)
-	if err != nil {
-		return err
-	}
-
-	return displayAgents(agents, listAll, false)
 }
 
 // listAgentsViaHub lists agents using the Hub API
@@ -250,7 +214,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		if userID != "" {
 			// A user has no Ancestry chain of its own — nothing to list.
-			return displayAgents(nil, listAll, true)
+			return displayAgents(nil, listAll)
 		}
 		refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 		if err != nil {
@@ -266,7 +230,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// on the wire from "no id restriction at all", which would
 			// silently widen the result to every authorized agent instead
 			// of none.
-			return displayAgents(nil, listAll, true)
+			return displayAgents(nil, listAll)
 		}
 		opts.IDs = refAgent.Ancestry
 
@@ -337,7 +301,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
 	}
 
-	return displayAgents(agents, listAll, true)
+	return displayAgents(agents, listAll)
 }
 
 // resolveOwnerID resolves --owner's value — a user's display name, email,
@@ -754,8 +718,6 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 	return info
 }
 
-// displayAgents displays agents in the requested format
-// hubMode indicates if the listing is from Hub (shows BROKER column)
 // filterRunningAgents returns only agents whose phase is not stopped, error
 // or halted.
 func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
@@ -878,7 +840,8 @@ func sortAgentsByField(agents []api.AgentInfo) {
 	})
 }
 
-func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
+// displayAgents displays agents in the requested format.
+func displayAgents(agents []api.AgentInfo, all bool) error {
 	if listRunning {
 		agents = filterRunningAgents(agents)
 	}
@@ -928,11 +891,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if hubMode {
-		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
-	} else {
-		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tPHASE\tCONTAINER\tLAST ACTIVITY")
-	}
+	_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	for _, a := range agents {
 		phase := a.Phase
 		if phase == "" {
@@ -961,11 +920,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if broker == "" {
 			broker = a.RuntimeBrokerID
 		}
-		if hubMode {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
-		} else {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, phase, containerStatus, lastActivity)
-		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
 	}
 	_ = w.Flush()
 	if hint := provisionedOnlyListHint(agents, all); hint != "" {
