@@ -222,9 +222,9 @@ var ErrTestModeRemovedFlag = testAdminGateErr("test_mode", "removed_flag",
 // (EnableTestIdentities, TestAdminGate) are exactly what the level grants,
 // and, for every level but off, the member preconditions the resolution
 // carries hold (hub id binding equals cfg.HubID, cfg.HubIDPinned, hub class
-// test, marker for this hub id with class test, no explicit --production). The user store is
-// checked by New itself. It does not repeat the admin gate checks
-// (validateTestAdminGateConfig) or read the database.
+// test, marker for this hub id with class test, no explicit --production).
+// The user store is checked by New itself. It does not repeat the admin
+// gate checks (validateTestAdminGateConfig) or read the database.
 func ValidateTestModeConfig(cfg ServerConfig) error {
 	level := cfg.TestMode.level()
 	known := false

@@ -288,6 +288,11 @@ func PersistentHubID() string {
 	return id
 }
 
+// HubIDEnvVar is the environment equivalent of server.hub.hub_id. Set, it
+// pins the hub id like the settings key does (ResolveHubIDFromEnv reads it
+// directly, and the SCION_SERVER_ overlay also maps it onto HubServerConfig.HubID).
+const HubIDEnvVar = "SCION_SERVER_HUB_HUBID"
+
 // resolvedHubIDOnce guards the one-time computation of the fallback hub ID
 // (from K_SERVICE or hostname). The result is cached because ResolveHubIDFromEnv
 // is called multiple times during startup and the inputs (hostname, K_SERVICE)
@@ -312,7 +317,7 @@ var (
 // additionally checks the struct-level HubID field.
 func ResolveHubIDFromEnv() string {
 	// Explicit env var takes precedence and is not cached (it's a cheap lookup).
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+	if v := os.Getenv(HubIDEnvVar); v != "" {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
@@ -352,7 +357,7 @@ func (c *HubServerConfig) ResolveHubID() string {
 // cache: the two are expected to disagree on the first-boot, no-file-yet
 // case, for exactly the reason above.
 func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
-	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+	if v := os.Getenv(HubIDEnvVar); v != "" {
 		return v, true
 	}
 	if kService := cloudrunenv.ServiceName(); kService != "" {

@@ -16,6 +16,9 @@ package cmd
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -310,7 +313,7 @@ func TestTestMode_DaemonParentRefuses(t *testing.T) {
 // pkg/hub TestTestMode_NewRefusesUnpinnedHubIDAtEveryNonOffLevel.
 func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 	t.Cleanup(resetTestModeFlags)
-	t.Setenv(hubIDEnvVar, "")
+	t.Setenv(config.HubIDEnvVar, "")
 	// buildHubServerConfig resolves a derived id, which may persist
 	// ~/.scion/hub-id: keep that out of the real home.
 	t.Setenv("HOME", t.TempDir())
@@ -334,6 +337,8 @@ func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 			assert.Contains(t, err.Error(), "--test-mode="+string(level))
 			assert.Contains(t, err.Error(), "server.hub.hub_id")
 			assert.Contains(t, err.Error(), "hub_id_not_pinned")
+			assert.Contains(t, err.Error(), "current resolved hub id is", "the error prints the id to pin")
+			assert.Contains(t, err.Error(), "never a new value")
 			assert.NoError(t, validateTestModeHubIDPinned(pinned))
 
 			// resolveTestMode.
@@ -343,6 +348,7 @@ func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 			res, err := resolveTestMode(in)
 			require.ErrorIs(t, err, hub.ErrTestModeHubIDNotPinned)
 			assert.Contains(t, err.Error(), "server.hub.hub_id")
+			assert.Contains(t, err.Error(), "current resolved hub id is \""+tiaCmdHubID+"\"")
 			var named *hub.TestAdminGateError
 			require.True(t, errors.As(err, &named), "the error is named")
 			assert.Equal(t, testModeResolution{}, res, "a refused level is never lowered")
@@ -356,7 +362,7 @@ func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 
 	t.Run("env pins the id", func(t *testing.T) {
 		t.Cleanup(resetTestModeFlags)
-		t.Setenv(hubIDEnvVar, tiaCmdHubID)
+		t.Setenv(config.HubIDEnvVar, tiaCmdHubID)
 		assert.True(t, hubIDPinned(derived))
 		require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=member:"+tiaCmdHubID)))
 		assert.NoError(t, validateTestModeHubIDPinned(derived))
@@ -372,4 +378,33 @@ func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 			assert.Equal(t, testModeResolution{}, res, args)
 		}
 	})
+}
+
+// TM-h layer 1 wiring: runServerStart calls validateTestModeHubIDPinned
+// after validateTestModeRequiresHub (so a process without a hub reports
+// requires_hub first) and before initStore opens the store.
+func TestTestMode_HubIDPinnedCheckWiredInServerStart(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "server_foreground.go", nil, 0)
+	require.NoError(t, err)
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "runServerStart" {
+			fn = fd
+		}
+	}
+	require.NotNil(t, fn, "runServerStart not found")
+	pos := map[string][]token.Pos{}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				pos[id.Name] = append(pos[id.Name], call.Pos())
+			}
+		}
+		return true
+	})
+	for _, name := range []string{"validateTestModeRequiresHub", "validateTestModeHubIDPinned", "initStore"} {
+		require.Len(t, pos[name], 1, "%s is called exactly once in runServerStart", name)
+	}
+	assert.Less(t, pos["validateTestModeRequiresHub"][0], pos["validateTestModeHubIDPinned"][0])
+	assert.Less(t, pos["validateTestModeHubIDPinned"][0], pos["initStore"][0])
 }

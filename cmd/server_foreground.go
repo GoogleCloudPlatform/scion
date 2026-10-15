@@ -289,9 +289,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateHostedHAPreflight(cfg); err != nil {
 		return err
 	}
-	if err := validateTestModeHubIDPinned(cfg); err != nil {
-		return err
-	}
 	if err := validateServerPreflight(cfg); err != nil {
 		return err
 	}
@@ -353,6 +350,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 8. Initialize store
 	if err := validateTestModeRequiresHub(enableHub); err != nil {
+		return err
+	}
+	if err := validateTestModeHubIDPinned(cfg); err != nil {
 		return err
 	}
 	var s store.Store
