@@ -508,15 +508,17 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 // global catalog. The check is the resource's create permission
 // (template.create or harness_config.create) on a collection-level request at
 // the hub scope, so a user access token needs that selector on a hub
-// boundary. Any other resource type is refused.
+// boundary. The target is the global-scope collection resource built by
+// templateScopeResource / harnessConfigScopeResource, the same target the
+// direct global create routes check. Any other resource type is refused.
 func (s *Server) globalImportDecision(ctx context.Context, user UserIdentity, authzResourceType string) Decision {
 	var target Resource
 	var permissionID string
 	switch authzResourceType {
 	case "template":
-		target, permissionID = Resource{Type: "template"}, "template.create"
+		target, permissionID = templateScopeResource(store.TemplateScopeGlobal, ""), "template.create"
 	case "harness_config":
-		target, permissionID = Resource{Type: "harness_config"}, "harness_config.create"
+		target, permissionID = harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), "harness_config.create"
 	default:
 		return Decision{Allowed: false, Reason: "unsupported import resource type"}
 	}
