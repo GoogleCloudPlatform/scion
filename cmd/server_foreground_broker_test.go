@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRequireImageRegistryForBroker_NoRegistry(t *testing.T) {
@@ -155,7 +156,8 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	require.NoError(t, err)
 
 	assert.Equal(t, "configured-broker", got)
 }

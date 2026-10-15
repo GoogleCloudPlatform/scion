@@ -227,7 +227,8 @@ func TestFlatRollback_LegacyRecoveryDoesNotAdoptFlatRow(t *testing.T) {
 	require.Equal(t, "embedded", flat.row.Labels["scion.io/broker-role"], "the flat instance is the embedded Runtime Broker (R7)")
 
 	// 2. Rollback to legacy hosting with no persisted legacy ID.
-	legacyID := resolveBrokerID(ctx, &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", s)
+	legacyID, err := resolveBrokerID(ctx, &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", s)
+	require.NoError(t, err)
 	assert.NotEqual(t, flatID, legacyID, "the legacy recovery never adopts the flat Runtime Broker ID")
 	if data, readErr := os.ReadFile(filepath.Join(globalDir, "settings.yaml")); readErr == nil {
 		assert.NotContains(t, string(data), flatID, "the flat ID is never persisted as a legacy ID")

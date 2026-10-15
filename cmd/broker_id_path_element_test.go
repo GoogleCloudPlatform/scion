@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -29,7 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // brokerIDsNotPathElement are broker IDs that are not a single path element.
@@ -99,9 +102,120 @@ func TestCompleteJoinAndPersist_BrokerIDPathElement(t *testing.T) {
 func TestBrokerLocalStatePaths_BrokerIDPathElement(t *testing.T) {
 	for name, id := range brokerIDsNotPathElement {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", id),
-				"state path listed for broker ID %q", id)
+			got := brokerLocalStatePaths("/g", "/h/.scion", id)
+			assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, got, "state path listed for broker ID %q", id)
 		})
 	}
 	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "b-1"))
+}
+
+// assertNothingWritten fails when dir holds any file, so no settings file
+// of any name or format was created.
+func assertNothingWritten(t *testing.T, dir, msg string, args ...any) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, append([]any{msg}, args...)...)
+}
+
+// TestAdoptDedupedBrokerID_BrokerIDPathElement: a deduplicated broker ID
+// that is not a single path element is an error and nothing is saved; a
+// valid one is saved to hub.brokerId.
+func TestAdoptDedupedBrokerID_BrokerIDPathElement(t *testing.T) {
+	for name, id := range brokerIDsNotPathElement {
+		if id == "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			globalDir := t.TempDir()
+			err := adoptDedupedBrokerID(globalDir, id, func(string, ...any) {})
+			require.Error(t, err, "deduplicated broker ID %q adopted", id)
+			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
+			assertNothingWritten(t, globalDir, "settings written for deduplicated broker ID %q", id)
+		})
+	}
+	globalDir := t.TempDir()
+	require.NoError(t, adoptDedupedBrokerID(globalDir, "11111111-2222-3333-4444-555555555555", func(string, ...any) {}))
+	gs, err := config.LoadSettings(globalDir)
+	require.NoError(t, err)
+	require.NotNil(t, gs.Hub)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", gs.Hub.BrokerID)
+}
+
+// TestRecoverEmbeddedBrokerID_BrokerIDPathElement: a recovered broker ID
+// that is not a single path element is an error and nothing is saved; a
+// valid one is returned and saved to hub.brokerId.
+func TestRecoverEmbeddedBrokerID_BrokerIDPathElement(t *testing.T) {
+	for name, id := range brokerIDsNotPathElement {
+		if id == "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			globalDir := t.TempDir()
+			got, err := recoverEmbeddedBrokerID(globalDir, id, func(string, ...any) {})
+			require.Error(t, err, "recovered broker ID %q was used", id)
+			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
+			assert.Empty(t, got)
+			assertNothingWritten(t, globalDir, "settings written for recovered broker ID %q", id)
+		})
+	}
+	globalDir := t.TempDir()
+	got, err := recoverEmbeddedBrokerID(globalDir, "11111111-2222-3333-4444-555555555555", func(string, ...any) {})
+	require.NoError(t, err)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", got)
+	gs, err := config.LoadSettings(globalDir)
+	require.NoError(t, err)
+	require.NotNil(t, gs.Hub)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", gs.Hub.BrokerID)
+}
+
+// embeddedBrokerStore is a store whose single embedded broker has ID id;
+// resolveBrokerID calls only FindEmbeddedBroker.
+type embeddedBrokerStore struct {
+	store.Store
+	id string
+}
+
+func (s embeddedBrokerStore) FindEmbeddedBroker(context.Context) (*store.RuntimeBroker, error) {
+	return &store.RuntimeBroker{ID: s.id}, nil
+}
+
+// TestResolveBrokerID_RecoveredIDNotPathElementRefuses: with no configured
+// ID, a recovered broker ID that is not a single path element stops broker
+// ID resolution: no ID is generated in its place and no settings are
+// written.
+func TestResolveBrokerID_RecoveredIDNotPathElementRefuses(t *testing.T) {
+	globalDir := t.TempDir()
+	got, err := resolveBrokerID(context.Background(), &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", embeddedBrokerStore{id: "../x"})
+	require.Error(t, err, "broker ID resolution went on with recovered ID %q", "../x")
+	assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
+	assert.Empty(t, got, "an ID was substituted for the recovered one")
+	assertNothingWritten(t, globalDir, "settings written after a refused recovery")
+
+	got, err = resolveBrokerID(context.Background(), &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", embeddedBrokerStore{id: "11111111-2222-3333-4444-555555555555"})
+	require.NoError(t, err)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", got)
+}
+
+// TestPersistBrokerHubSettings_BrokerIDPathElement: a broker ID that is not
+// a single path element leaves the settings file unchanged: no broker ID,
+// hub endpoint or hub connection is written.
+func TestPersistBrokerHubSettings_BrokerIDPathElement(t *testing.T) {
+	for name, id := range brokerIDsNotPathElement {
+		if id == "" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			globalDir := isolateServerHubEndpointEnv(t)
+			path := writeServerHubEndpointTestSettings(t, globalDir, "")
+			before, err := os.ReadFile(path)
+			require.NoError(t, err)
+			var w bytes.Buffer
+			persistBrokerHubSettings(&w, globalDir, "https://hub.example.com", id, "hub-example-com")
+			after, err := os.ReadFile(path)
+			require.NoError(t, err)
+			assert.Equal(t, string(before), string(after), "settings were written for broker ID %q", id)
+			assert.Contains(t, w.String(), "Warning: not saving the broker ID or hub settings")
+		})
+	}
 }
