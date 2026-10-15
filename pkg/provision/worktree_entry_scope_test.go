@@ -20,10 +20,12 @@ package provision
 // (ptone/scion#5071).
 
 import (
-	"fmt"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -135,7 +137,7 @@ func TestProvisionShared_BranchHeldByHiddenWorktree_ClearErrorAndKeepsEntry(t *t
 
 	err := ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-3", "sibling"))
 	require.Error(t, err, "expected ProvisionShared to fail for a branch held by another worktree")
-	assert.Contains(t, err.Error(), fmt.Sprintf("git worktree remove %q", sibling), "error should name the holder and how to clear it")
+	assert.Contains(t, err.Error(), "git worktree remove "+sibling, "error should name the holder and how to clear it")
 	requireSiblingIntact(t, workspace, sibling, restore)
 }
 
@@ -148,8 +150,9 @@ func TestClearOwnStaleWorktreeEntry_EmptyDirRegistered(t *testing.T) {
 	// As after a removal: the agent is no longer in the sharer registry.
 	_, err := UnregisterSharerElsewhere(workspace, "agent-1", "")
 	require.NoError(t, err)
-	require.NoError(t, os.Mkdir(worktreePath, 0o751))
-	require.NoError(t, os.Chmod(worktreePath, 0o751))
+	// The broker makes the leaf setgid (2775); the mode must survive.
+	require.NoError(t, os.Mkdir(worktreePath, 0o775))
+	require.NoError(t, os.Chmod(worktreePath, fs.ModeSetgid|0o775))
 	sibling, restore := addHiddenSiblingWorktree(t, workspace)
 	in := mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")
 
@@ -158,7 +161,7 @@ func TestClearOwnStaleWorktreeEntry_EmptyDirRegistered(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the own stale entry should be removed")
 	fi, err := os.Stat(worktreePath)
 	require.NoError(t, err, "the empty directory should be created again")
-	assert.Equal(t, os.FileMode(0o751), fi.Mode().Perm())
+	assert.Equal(t, fs.ModeSetgid|0o775, fi.Mode()&(fs.ModePerm|fs.ModeSetgid|fs.ModeSticky))
 	entries, err := os.ReadDir(worktreePath)
 	require.NoError(t, err)
 	assert.Empty(t, entries)
@@ -195,7 +198,11 @@ func TestClearOwnStaleWorktreeEntry_RemovalFails_ClearError(t *testing.T) {
 
 	err := clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), fmt.Sprintf("git worktree remove %q", worktreePath))
+	assert.Contains(t, err.Error(), "remove the empty directory")
+	assert.Contains(t, err.Error(), "git worktree unlock worktrees/agent-1")
+	assert.Contains(t, err.Error(), "git worktree remove worktrees/agent-1")
+	_, advice, _ := strings.Cut(err.Error(), "Make sure")
+	assert.NotContains(t, advice, worktreePath, "the advice does not show the init container's path")
 	assert.DirExists(t, worktreePath, "the empty directory should be created again")
 	assert.DirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the locked entry is kept")
 	requireSiblingIntact(t, workspace, sibling, restore)
@@ -216,4 +223,87 @@ func TestClearOwnStaleWorktreeEntry_UsesSafeGitCommand(t *testing.T) {
 	assert.ErrorIs(t, err, ErrCommondirPresent)
 	require.NoError(t, os.Remove(commondir))
 	assert.DirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the entry is kept when the command is refused")
+}
+
+// When the empty directory cannot be removed (here: its parent is not
+// writable; a mount point gives EBUSY), nothing else is touched and the
+// error says to remove the directory first.
+func TestClearOwnStaleWorktreeEntry_RmdirFails_ClearError(t *testing.T) {
+	workspace, origin, worktreePath := staleOwnEntry(t)
+	require.NoError(t, os.Mkdir(worktreePath, 0o755))
+	worktreesDir := filepath.Dir(worktreePath)
+	require.NoError(t, os.Chmod(worktreesDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(worktreesDir, 0o755) })
+	in := mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")
+
+	err := clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath)
+	require.NoError(t, os.Chmod(worktreesDir, 0o755))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "remove the empty directory")
+	assert.DirExists(t, worktreePath)
+	assert.DirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the entry is kept")
+}
+
+// When the entry is removed but the directory cannot be created again, the
+// error says so (not that the entry was kept).
+func TestClearOwnStaleWorktreeEntry_RecreateFails_ClearError(t *testing.T) {
+	workspace, origin, worktreePath := staleOwnEntry(t)
+	require.NoError(t, os.Mkdir(worktreePath, 0o755))
+	sibling, restore := addHiddenSiblingWorktree(t, workspace)
+	orig := recreateEmptyDir
+	recreateEmptyDir = func(string, os.FileMode, int, int) error { return errors.New("recreate refused") }
+	t.Cleanup(func() { recreateEmptyDir = orig })
+	in := mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")
+
+	err := clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not create its empty directory again")
+	assert.Contains(t, err.Error(), "recreate refused")
+	assert.NoDirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the own entry was removed")
+	requireSiblingIntact(t, workspace, sibling, restore)
+}
+
+// An empty directory at the agent's own path that git has no entry for is
+// left alone.
+func TestClearOwnStaleWorktreeEntry_EmptyDirNotRegisteredLeftAlone(t *testing.T) {
+	workspace := provisionTwoMountedWorktrees(t)
+	origin := worktreeGit(t, workspace, "remote", "get-url", "origin")
+	worktreePath := WorktreePath(workspace, "agent-3")
+	require.NoError(t, os.Mkdir(worktreePath, 0o755))
+	before, err := os.Stat(worktreePath)
+	require.NoError(t, err)
+	in := mountedWorktreeInput(workspace, origin, "agent-3", "agent-three")
+
+	require.NoError(t, clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath))
+
+	after, err := os.Stat(worktreePath)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(before, after), "the directory should not be replaced")
+}
+
+// Outside MountedWorktree the error shows the path as is and does not
+// describe an NFS export.
+func TestStaleEntryError_LocalMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "workspace", "worktrees", "agent-1")
+	in := ProvisionInput{Resolved: ResolvedWorkspace{HostPath: filepath.Dir(filepath.Dir(path))}, AgentID: "agent-1"}
+	for _, state := range []staleEntryState{staleEntryKept, staleEntryDirKept, staleEntryDirNotRecreated} {
+		msg := staleEntryError(in, path, state, errors.New("x")).Error()
+		assert.Contains(t, msg, path)
+		assert.NotContains(t, msg, "NFS")
+	}
+}
+
+func TestParseWorktreeList(t *testing.T) {
+	out := "worktree /repo\nHEAD 1111\nbranch refs/heads/main\n\n" +
+		"worktree \"/w/with\\ttab and \\303\\251\"\nHEAD 2222\nbranch refs/heads/b1\n\n" +
+		"worktree \"/w/bad\\q\"\nHEAD 3333\ndetached\n\n" +
+		"worktree /w/plain path\nHEAD 4444\nbranch refs/heads/b2\nprunable gitdir file points to non-existent location\n"
+	got := parseWorktreeList(out)
+	want := []worktreeEntry{
+		{path: "/repo", branch: "main"},
+		{path: "/w/with\ttab and \u00e9", branch: "b1"},
+		{path: "\"/w/bad\\q\"", branch: ""},
+		{path: "/w/plain path", branch: "b2"},
+	}
+	assert.Equal(t, want, got)
 }

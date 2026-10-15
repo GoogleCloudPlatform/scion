@@ -878,7 +878,10 @@ func moveWorktreeAside(base, name, prefix string) (string, error) {
 // checkout and the agent's worktree belong to the agents' user rather than
 // the caller, so both are listed in safe.directory for this command only.
 func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...string) (string, error) {
-	cmd, _ := sharedCheckoutGitCmd(base, worktree)(ctx, args...)
+	cmd, err := sharedCheckoutGitCmd(base, worktree)(ctx, args...)
+	if err != nil {
+		return "", err
+	}
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
@@ -3489,7 +3492,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				return registered(attachPath)
 			}
 			if holder != "" {
-				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", util.WorktreeBranchHeldError(branchName, holder))
+				return worktreeOutcome{}, branchHeldError(in, branchName, holder)
 			}
 			return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
 				branchName, outputStr)
@@ -3516,7 +3519,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 						return registered(attachPath)
 					}
 					if holder != "" {
-						return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", util.WorktreeBranchHeldError(branchName, holder))
+						return worktreeOutcome{}, branchHeldError(in, branchName, holder)
 					}
 					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
 				}
@@ -3574,6 +3577,17 @@ func branchInOtherWorktreeError(in ProvisionInput, branch, path string) error {
 		"on a broker that mounts the export (which removes the worktree). "+
 		"If no agent uses it any more, remove it (git worktree remove %s, run in the shared checkout) and start the agent again",
 		branch, mountedDisplayPath(in, path), rel)
+}
+
+// branchHeldError reports that branch is held by the worktree entry at
+// holder, whose directory this process cannot see. For MountedWorktree the
+// path is shown relative to the shared checkout, as in
+// branchInOtherWorktreeError.
+func branchHeldError(in ProvisionInput, branch, holder string) error {
+	if in.MountedWorktree {
+		return branchInOtherWorktreeError(in, branch, holder)
+	}
+	return fmt.Errorf("ProvisionShared: %w", util.WorktreeBranchHeldError(branch, holder))
 }
 
 // sharedCheckoutRel returns path relative to the shared checkout, or path
@@ -3829,8 +3843,17 @@ func listWorktreeEntries(ctx context.Context, repoDir string) ([]worktreeEntry, 
 	if err != nil {
 		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
+	return parseWorktreeList(string(output)), nil
+}
+
+// parseWorktreeList parses 'git worktree list --porcelain' output. A path
+// git printed quoted (C-style, with octal escapes) is unquoted; one that
+// cannot be unquoted is kept as printed. Current git prints the path
+// unquoted in this output; the unquote covers git versions or settings
+// that quote it.
+func parseWorktreeList(output string) []worktreeEntry {
 	var entries []worktreeEntry
-	for _, line := range strings.Split(string(output), "\n") {
+	for _, line := range strings.Split(output, "\n") {
 		switch {
 		case strings.HasPrefix(line, "worktree "):
 			path := strings.TrimPrefix(line, "worktree ")
@@ -3844,7 +3867,7 @@ func listWorktreeEntries(ctx context.Context, repoDir string) ([]worktreeEntry, 
 			entries[len(entries)-1].branch = strings.TrimPrefix(line, "branch refs/heads/")
 		}
 	}
-	return entries, nil
+	return entries
 }
 
 // findWorktreeForBranch returns the path of the worktree that has branch
@@ -3901,26 +3924,23 @@ func worktreeRegisteredAt(ctx context.Context, repoDir, path string) (bool, erro
 //   - worktreePath an empty directory (made for the pod mount) that git
 //     still has an entry for: git refuses to remove the entry of a
 //     directory that exists, so the empty directory is removed, the entry
-//     removed, and the directory created again with the same mode and
-//     owner.
-//   - Anything else (a non-empty directory, a file, a link) is left alone;
-//     the add reports it.
+//     removed, and the directory created again with the same mode
+//     (including setgid and sticky) and owner. The directory's own ACL is
+//     not carried over; the new directory inherits its parent's default
+//     ACL, as a newly made one would.
+//   - Anything else (a non-empty directory, a file, a link, an empty
+//     directory git has no entry for) is left alone.
 //
-// Any failing step returns an error that names the path and how to clear
-// the entry by hand.
+// Any failing step returns an error that names the path and what to do,
+// depending on the state the step left behind.
 func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, worktreePath string) error {
 	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
 		return SafeGitCommand(ctx, base, args...)
 	}
-	stale := func(err error) error {
-		return fmt.Errorf("ProvisionShared: git still has an entry for this agent's worktree at %s that could not be removed: %w. "+
-			"Remove it with git worktree remove %q in the shared checkout, and start the agent again",
-			mountedDisplayPath(in, worktreePath), err, worktreePath)
-	}
 	fi, err := os.Lstat(worktreePath)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
-			return stale(err)
+			return staleEntryError(in, worktreePath, staleEntryKept, err)
 		}
 		return nil
 	}
@@ -3933,33 +3953,75 @@ func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, wo
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
-		return stale(fmt.Errorf("cannot read the owner of %s", worktreePath))
+		return staleEntryError(in, worktreePath, staleEntryDirKept, fmt.Errorf("cannot read the owner of %s", worktreePath))
 	}
 	if err := os.Remove(worktreePath); err != nil {
-		return stale(err)
+		return staleEntryError(in, worktreePath, staleEntryDirKept, err)
 	}
-	entryErr := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd)
-	if err := recreateEmptyDir(worktreePath, fi.Mode().Perm(), int(st.Uid), int(st.Gid)); err != nil {
-		return stale(errors.Join(entryErr, err))
+	mode := fi.Mode() & (fs.ModePerm | fs.ModeSetgid | fs.ModeSticky)
+	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
+		if mkErr := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); mkErr != nil {
+			err = errors.Join(err, mkErr)
+		}
+		return staleEntryError(in, worktreePath, staleEntryDirKept, err)
 	}
-	if entryErr != nil {
-		return stale(entryErr)
+	if err := recreateEmptyDir(worktreePath, mode, int(st.Uid), int(st.Gid)); err != nil {
+		return staleEntryError(in, worktreePath, staleEntryDirNotRecreated, err)
 	}
 	slog.Info("ProvisionShared: removed a stale git entry for the agent's empty worktree directory",
 		"agent_id", in.AgentID, "path", worktreePath)
 	return nil
 }
 
-// recreateEmptyDir creates dir with mode and owner. A variable so tests can
-// make it fail.
+// staleEntryState is what a failed clearOwnStaleWorktreeEntry step left
+// behind, which decides the advice in its error.
+type staleEntryState int
+
+const (
+	// staleEntryKept: the path is missing and git's entry for it is kept.
+	staleEntryKept staleEntryState = iota
+	// staleEntryDirKept: an empty directory is at the path and git's entry
+	// for it is kept.
+	staleEntryDirKept
+	// staleEntryDirNotRecreated: git's entry was removed, but the empty
+	// directory could not be created again.
+	staleEntryDirNotRecreated
+)
+
+// staleEntryError reports a failed clearOwnStaleWorktreeEntry step. Paths
+// are shown relative to the shared checkout for MountedWorktree, whose
+// mount paths exist only in the init container.
+func staleEntryError(in ProvisionInput, path string, state staleEntryState, err error) error {
+	shown, gitPath := path, path
+	if in.MountedWorktree {
+		shown, gitPath = mountedDisplayPath(in, path), sharedCheckoutRel(in, path)
+	}
+	switch state {
+	case staleEntryDirKept:
+		return fmt.Errorf("ProvisionShared: %s is an empty directory that git still has a worktree entry for, and the entry could not be removed: %w. "+
+			"Make sure nothing is mounted at it and remove the empty directory, unlock the entry if it is locked (git worktree unlock %s), "+
+			"then run git worktree remove %s in the shared checkout and start the agent again", shown, err, gitPath, gitPath)
+	case staleEntryDirNotRecreated:
+		return fmt.Errorf("ProvisionShared: removed git's stale worktree entry at %s, but could not create its empty directory again: %w. "+
+			"Start the agent again", shown, err)
+	default:
+		return fmt.Errorf("ProvisionShared: git still has a worktree entry at %s, where nothing exists any more, and it could not be removed: %w. "+
+			"Unlock the entry if it is locked (git worktree unlock %s), then run git worktree remove %s in the shared checkout and start the agent again",
+			shown, err, gitPath, gitPath)
+	}
+}
+
+// recreateEmptyDir creates dir with mode and owner. The mode is applied
+// after the owner, since changing the owner can clear setgid. A variable
+// so tests can make it fail.
 var recreateEmptyDir = func(dir string, mode os.FileMode, uid, gid int) error {
-	if err := os.Mkdir(dir, mode); err != nil {
+	if err := os.Mkdir(dir, mode.Perm()); err != nil {
 		return err
 	}
-	if err := os.Chmod(dir, mode); err != nil {
+	if err := os.Lchown(dir, uid, gid); err != nil {
 		return err
 	}
-	return os.Lchown(dir, uid, gid)
+	return os.Chmod(dir, mode)
 }
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for
