@@ -168,3 +168,31 @@ func TestGrantShaping_VisitorBindingClampedLast(t *testing.T) {
 		assert.Nil(t, got.SourceRuleID, tc.name)
 	}
 }
+
+// A visitor rule's binding is written at the visitor's first contact, with
+// the federated visitor as the request's actor and the rule's creator as
+// the row's: it is not shaped, carries no issuance ID and keeps the rule's
+// window.
+func TestGrantShaping_RuleBindingAtFirstContactUnshaped(t *testing.T) {
+	e := newVisitorShapingEnv(t)
+	ctx := context.Background()
+	owner := e.humanUser(t)
+	start := time.Now().Add(-time.Minute).UTC().Truncate(time.Second)
+	end := testAdminExpiry(*e.admin.ExpiresAt).Add(24 * time.Hour)
+	rule := &store.ProjectVisitorRule{ProjectID: e.projectID, Issuer: testFedIssuer, Domain: "corp.com",
+		NotBefore: &start, ExpiresAt: &end, CreatedBy: owner.ID}
+	require.NoError(t, e.cs.CreateProjectVisitorRule(store.ContextWithGrantActor(ctx, owner.ID), rule))
+
+	alice := createFederatedUser(t, e.cs, testFedIssuer, "alice@corp.com", store.UserStatusActive)
+	rb := e.ruleBinding(alice.ID, rule)
+	rb.CreatedBy = rule.CreatedBy
+	created, err := e.cs.CreateVisitorRoleBinding(store.ContextWithGrantActor(ctx, alice.ID), rb)
+	require.NoError(t, err)
+	got, err := e.cs.GetRoleBinding(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.IssuanceID, "not stamped")
+	require.NotNil(t, got.SourceRuleID)
+	assert.Equal(t, rule.ID, *got.SourceRuleID)
+	require.NotNil(t, got.ExpiresAt)
+	assert.True(t, got.ExpiresAt.Equal(end), "the rule's window, not clamped: stored %v want %v", got.ExpiresAt, end)
+}
