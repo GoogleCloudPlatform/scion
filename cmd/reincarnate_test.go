@@ -230,11 +230,9 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 	restoreAllSilenceUsage(t)
 	origProjectPath := projectPath
 	origHubEndpoint := hubEndpoint
-	origNoHub := noHub
 	t.Cleanup(func() {
 		projectPath = origProjectPath
 		hubEndpoint = origHubEndpoint
-		noHub = origNoHub
 		reincarnateHandoffTemplate = false
 		reincarnateDryRun = false
 		rootCmd.SetArgs(nil)

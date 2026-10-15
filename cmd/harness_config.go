@@ -86,7 +86,7 @@ var harnessConfigListCmd = &cobra.Command{
 		// Include Hub results if requested or when running in hub context (agent containers)
 		if includeHub {
 			hubCtx, err := requireHub(gp)
-			if err == nil && hubCtx != nil {
+			if err == nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
 					Status: "active",
 				})
@@ -444,33 +444,31 @@ var harnessConfigShowCmd = &cobra.Command{
 			return fmt.Errorf("harness-config %q not found locally and Hub unavailable: %w", name, err)
 		}
 
-		if hubCtx != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-			resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
-				Name:   name,
-				Status: "active",
-			})
-			if err == nil {
-				for _, hc := range resp.HarnessConfigs {
-					if hc.Name == name || hc.Slug == name {
-						if isJSONOutput() {
-							return outputJSON(hc)
-						}
-						fmt.Printf("Name:         %s\n", hc.Name)
-						fmt.Printf("Source:       hub\n")
-						fmt.Printf("ID:           %s\n", hc.ID)
-						fmt.Printf("Harness:      %s\n", hc.Harness)
-						fmt.Printf("Status:       %s\n", hc.Status)
-						fmt.Printf("Content Hash: %s\n", truncateHash(hc.ContentHash))
-						fmt.Printf("Scope:        %s\n", hc.Scope)
-						fmt.Printf("Files:        %d\n", len(hc.Files))
-						if hc.SourceURL != "" {
-							fmt.Printf("Source URL:   %s\n", hc.SourceURL)
-						}
-						return nil
+		resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
+			Name:   name,
+			Status: "active",
+		})
+		if err == nil {
+			for _, hc := range resp.HarnessConfigs {
+				if hc.Name == name || hc.Slug == name {
+					if isJSONOutput() {
+						return outputJSON(hc)
 					}
+					fmt.Printf("Name:         %s\n", hc.Name)
+					fmt.Printf("Source:       hub\n")
+					fmt.Printf("ID:           %s\n", hc.ID)
+					fmt.Printf("Harness:      %s\n", hc.Harness)
+					fmt.Printf("Status:       %s\n", hc.Status)
+					fmt.Printf("Content Hash: %s\n", truncateHash(hc.ContentHash))
+					fmt.Printf("Scope:        %s\n", hc.Scope)
+					fmt.Printf("Files:        %d\n", len(hc.Files))
+					if hc.SourceURL != "" {
+						fmt.Printf("Source URL:   %s\n", hc.SourceURL)
+					}
+					return nil
 				}
 			}
 		}
