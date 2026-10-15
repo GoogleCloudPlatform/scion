@@ -1131,6 +1131,26 @@ func TestBuildPod_PB1_PlacementValidation(t *testing.T) {
 			t.Fatalf("pod spec shares the caller's node selector map: %v", selector)
 		}
 	})
+
+	t.Run("copies the runtime class name", func(t *testing.T) {
+		k := &api.KubernetesConfig{RuntimeClassName: "gvisor", NodeSelector: map[string]string{"pool": "agents"}}
+		pod, err := rt.buildPod("default", placementRunConfig(k))
+		if err != nil {
+			t.Fatalf("buildPod: %v", err)
+		}
+		k.RuntimeClassName = "mutated"
+		k.NodeSelector["pool"] = "mutated"
+		if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
+			t.Fatalf("pod runtime class follows the caller's config: %v", pod.Spec.RuntimeClassName)
+		}
+		if pod.Spec.NodeSelector["pool"] != "agents" {
+			t.Fatalf("pod node selector follows the caller's config: %v", pod.Spec.NodeSelector)
+		}
+		*pod.Spec.RuntimeClassName = "changed-on-pod"
+		if k.RuntimeClassName != "mutated" {
+			t.Fatalf("pod spec shares the caller's runtime class name: %q", k.RuntimeClassName)
+		}
+	})
 }
 
 // PB1 (accepted values): a placement the API server accepts is still

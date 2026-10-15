@@ -3026,7 +3026,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			pod.Spec.ServiceAccountName = config.Kubernetes.ServiceAccountName
 		}
 		if config.Kubernetes.RuntimeClassName != "" {
-			pod.Spec.RuntimeClassName = &config.Kubernetes.RuntimeClassName
+			// Copy the value so the pod spec does not point into the
+			// caller's configuration.
+			runtimeClassName := config.Kubernetes.RuntimeClassName
+			pod.Spec.RuntimeClassName = &runtimeClassName
 		}
 		if len(config.Kubernetes.NodeSelector) > 0 {
 			// Copy the map so later changes to the pod spec never reach
