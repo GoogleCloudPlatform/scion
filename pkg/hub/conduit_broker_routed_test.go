@@ -44,7 +44,7 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// Routed broker requests (design v2.21.35 §7 "3.3b items"; contracts.md §2
+// Routed broker requests (design §7, broker RPC routing; contracts.md §2
 // "Ambiguous broker results"). The fixture is a hub with its in-process
 // relay and hub.conduit on, the dispatcher built by the production wiring
 // (CreateAuthenticatedDispatcher), and broker conduit sessions dialed with
@@ -190,23 +190,19 @@ func (f *routedBrokerFixture) dialRoutedBroker(t *testing.T, o routedBrokerOpts)
 	return b
 }
 
-// waitBrokerSession waits until the registry lists sessionID.
+// waitBrokerSession checks that the registry lists sessionID. The relay
+// inserts the session's row during admission, before it sends the
+// Welcome that conduit.Dial returns, so no wait is needed.
 func (f *routedBrokerFixture) waitBrokerSession(t *testing.T, sessionID string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalBroker, f.brokerID)
-		require.NoError(t, err)
-		for _, v := range ps.Sessions {
-			if v.Session.SessionID == sessionID {
-				return
-			}
+	ps, err := f.regStore.ListPrincipalSessions(context.Background(), registry.PrincipalBroker, f.brokerID)
+	require.NoError(t, err)
+	for _, v := range ps.Sessions {
+		if v.Session.SessionID == sessionID {
+			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("broker session %s was never registered", sessionID)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatalf("broker session %s is not registered after its Welcome", sessionID)
 }
 
 // seedRoutedAgent creates a project and an agent on the fixture's broker.

@@ -41,7 +41,7 @@ import (
 )
 
 // Transient broker requests through the conduit Router (design §3.5
-// "Where route() ends up", §7 Phase 3 "3.3b items").
+// "Where route() ends up", §7 broker RPC routing).
 //
 // With hub.conduit on, HybridBrokerClient sends logs, exec, image and
 // project cleanup requests through Router.Resolve(broker) to a broker

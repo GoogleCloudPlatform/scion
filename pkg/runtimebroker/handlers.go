@@ -7056,7 +7056,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		// The project directory is already gone (an earlier delete got
 		// this far). Its project-configs entry may remain, so remove it
 		// now: success only once both are gone, so a repeated delete
-		// converges (design §7 Phase 3, CleanupProject).
+		// converges (design §7, CleanupProject convergence).
 		requestedID := r.URL.Query().Get("project_id")
 		dir, err := orphanProjectConfigDir(globalDir, slug, requestedID)
 		if err != nil {

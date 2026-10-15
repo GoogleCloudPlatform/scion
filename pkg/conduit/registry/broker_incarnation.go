@@ -21,7 +21,7 @@ import (
 )
 
 // BrokerIncarnation returns broker brokerID's reference incarnation
-// (design §3.4, v2.21.32): the endpoint_incarnation of its live session
+// (design §3.4, broker incarnation reference): the endpoint_incarnation of its live session
 // with the highest connection_epoch, which is the most recently admitted
 // one. Liveness is the same rule Eligible applies (relay live and of the
 // session's generation, session not stale); a draining session still

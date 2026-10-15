@@ -23,7 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// Project cleanup converges (design §7 Phase 3, CleanupProject): the
+// Project cleanup converges (design §7, CleanupProject convergence): the
 // project-configs entry is removed even when the project directory is
 // already gone, and the delete succeeds only once both are gone.
 

@@ -107,9 +107,9 @@ type Config struct {
 	// Brokers, when set, resolves broker streams and broker RPCs that name
 	// no operation (Want.Capability empty); the conduit registry is not
 	// consulted for those. The hub sets it to its legacy owner-only adapter
-	// over the broker control channel (design §7 "Phase 2"). A broker RPC
+	// over the broker control channel (design §3.5, legacy broker adapter). A broker RPC
 	// that names its operation is resolved through the registry, against
-	// the broker's reference incarnation (design v2.21.35 §7 "3.3b items").
+	// the broker's reference incarnation (design §7, broker RPC routing).
 	Brokers BrokerResolver
 }
 
@@ -281,8 +281,8 @@ func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (
 
 // brokerRPCOverConduit reports whether a broker request is resolved
 // through the conduit registry even when Config.Brokers is set: an RPC
-// that names the capability (the operation) it needs (design v2.21.35 §7
-// "3.3b items"). The registry then returns only sessions whose Hello
+// that names the capability (the operation) it needs (design §7, broker
+// RPC routing). The registry then returns only sessions whose Hello
 // lists that operation. Streams, and RPCs that name no operation, keep the
 // legacy adapter.
 func brokerRPCOverConduit(req Request) bool {
@@ -290,7 +290,7 @@ func brokerRPCOverConduit(req Request) bool {
 }
 
 // withBrokerIncarnation sets req.BrokerIncarnation to the broker's
-// reference incarnation (design §3.4, v2.21.32): that of its live session
+// reference incarnation (design §3.4, broker incarnation reference): that of its live session
 // with the highest connection_epoch. A caller-supplied incarnation that
 // differs from the reference resolves nothing. With no reference (no live
 // session, or a newest session without an incarnation) the result is
