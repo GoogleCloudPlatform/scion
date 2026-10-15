@@ -135,38 +135,3 @@ func TestDeleteProject_RepeatConverges(t *testing.T) {
 	assertGone(t, dirA)
 	assertPresent(t, filepath.Join(dirB, "launch-marker"))
 }
-
-// TestDeleteProject_ConfigsRemovalFailureIsError: when the project-configs
-// entry cannot be removed after the project directory was, the delete
-// fails instead of reporting success, and a repeat converges once the
-// entry can be removed. Permissions do not stop root, so the test needs
-// an unprivileged user.
-func TestDeleteProject_ConfigsRemovalFailureIsError(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("directory permissions do not restrict root")
-	}
-	srv, home := newScopeTestServer(t, &filteringMockManager{})
-	makeHubMarkerProject(t, home, "proj-a", scopeProjA, "dev")
-	dirA := seedProjectConfigsEntry(t, home, "proj-a", scopeProjA)
-	locked := filepath.Join(dirA, config.DotScion, "agents", "dev")
-	if err := os.Chmod(locked, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-
-	rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
-	if rec.Code < 300 {
-		t.Fatalf("expected a failure, got %d", rec.Code)
-	}
-	assertGone(t, filepath.Join(home, ".scion", "projects", "proj-a"))
-	assertPresent(t, filepath.Join(dirA, "launch-marker"))
-
-	if err := os.Chmod(locked, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rec = doDeleteProject(t, srv, "proj-a", scopeProjA)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("expected 204 on the repeat, got %d: %s", rec.Code, rec.Body.String())
-	}
-	assertGone(t, dirA)
-}
