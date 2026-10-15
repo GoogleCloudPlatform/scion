@@ -254,12 +254,12 @@
 - [skill.update](#skillupdate) — Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Register skills in a skill registry
-- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by template read
+- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
 - [template.read](#templateread) — Read template definitions or discover available templates
 - [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
 - [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
 - [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
-- [harnessconfig.list](#harnessconfiglist) — List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by harness config read
+- [harnessconfig.list](#harnessconfiglist) — List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan
 - [harnessconfig.read](#harnessconfigread) — Read harness configurations
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
@@ -9307,7 +9307,7 @@
 
 **Domain:** template
 
-**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by template read
+**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
 
 ### Entry Points
 
@@ -9319,7 +9319,7 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `admit` (target `hub_collection`; boundaries `project`, `hub`)
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `template.list`
 
@@ -9475,7 +9475,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by harness config read
+**Description:** List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan
 
 ### Entry Points
 
@@ -9487,7 +9487,7 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `admit` (target `hub_collection`; boundaries `project`, `hub`)
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `harness_config.list`
 
