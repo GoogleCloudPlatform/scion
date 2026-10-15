@@ -417,9 +417,9 @@ func guardedUses(f *ast.File, names map[string]bool, constructor string) []*ast.
 	return guardedUsesAllowing(f, names, map[string]map[string]bool{constructor: nil})
 }
 
-// funcDeclKey names fd as allowed lists it: "Func" for a free function,
+// guardFuncDeclKey names fd as allowed lists it: "Func" for a free function,
 // "(*Recv).Method" or "(Recv).Method" for a method.
-func funcDeclKey(fd *ast.FuncDecl) string {
+func guardFuncDeclKey(fd *ast.FuncDecl) string {
 	if fd.Recv == nil || len(fd.Recv.List) == 0 {
 		return fd.Name.Name
 	}
@@ -436,7 +436,7 @@ func funcDeclKey(fd *ast.FuncDecl) string {
 
 // guardedUsesAllowing returns the calls of, and composite literals of, the
 // names in f, except where a function or method allowed lists (keys as
-// funcDeclKey gives them) may use that name (a nil set allows every
+// guardFuncDeclKey gives them) may use that name (a nil set allows every
 // name).
 func guardedUsesAllowing(f *ast.File, names map[string]bool, allowed map[string]map[string]bool) []*ast.Ident {
 	var out []*ast.Ident
@@ -444,7 +444,7 @@ func guardedUsesAllowing(f *ast.File, names map[string]bool, allowed map[string]
 		var permitted map[string]bool
 		all := false
 		if fd, ok := decl.(*ast.FuncDecl); ok {
-			if set, listed := allowed[funcDeclKey(fd)]; listed {
+			if set, listed := allowed[guardFuncDeclKey(fd)]; listed {
 				permitted, all = set, set == nil
 			}
 		}
