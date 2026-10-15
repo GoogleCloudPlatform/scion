@@ -72,6 +72,7 @@ const (
 	ActionDelete         = "delete"
 	ActionList           = "list"
 	ActionManage         = "manage"
+	ActionSteward        = "steward" // artifact.steward: share and retire an agent's artifact within bounds (design D25)
 	ActionAttach         = "attach"
 	ActionPortAccess     = "port_access"
 	ActionRegister       = "register"
@@ -234,9 +235,10 @@ var Registry = []Permission{
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
-	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (canAdminister)"},
+	{ID: "artifact.update", Resource: ResourceArtifact, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "artifact:update", Description: "Edit artifact metadata (title, key, expiry)", Reserved: "no artifact route checks artifact.update; PATCH on an artifact is gated by artifact.manage (adminAuthorityWith)"},
 	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; DELETE on an artifact is gated by artifact.manage (ptone/scion#4529)"},
-	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdminister", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
+	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdministerWith", "pkg/artifacts/links.go:func (s *Service) stewardAuthority", "pkg/artifacts/grants.go:func (s *Service) reviewGrantSubject", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
+	{ID: "artifact.steward", Resource: ResourceArtifact, Action: ActionSteward, CapabilityKind: CapabilityResource, UATScope: "artifact:steward", Description: "Share and delete artifacts owned by agents in the project (no admin grants, no moves)", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) StewardClause", "pkg/artifacts/links.go:func (s *Service) stewardAuthority"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

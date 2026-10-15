@@ -39,7 +39,9 @@ references to it show as unavailable, and its stored files are removed
 after the hub's grace period. A deleted artifact cannot be restored.
 
 The artifact's owner, a user it granted admin, or an admin of its home
-project can delete it. Agents cannot delete artifacts.
+project can delete it, and so can the user who delegated to the agent that
+owns it, while they hold a role in its home project. Agents cannot delete
+artifacts.
 
 The command asks for confirmation; pass --yes (or --non-interactive, or the
 cli.interactive_disabled setting, which imply it) to skip the prompt.

@@ -295,6 +295,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// PATCH and DELETE are gated by artifact.manage).
 		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
 		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
+		// artifact.steward is checked by the hub's StewardClause inside the
+		// artifact.manage-gated routes (adminAuthorityWith), not as a route
+		// base permission (design D25, ptone/scion#5144).
+		"artifact.steward": "Checked by StewardClause within the artifact.manage-gated routes, not route-enforced (ptone/scion#5144)",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
