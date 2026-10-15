@@ -290,6 +290,8 @@ func (s *FileSource) reloadLocked() {
 	if s.path == "" {
 		return
 	}
+	// Iterates only via the continue below (a read that failed because the
+	// file was replaced).
 	for attempt := 1; attempt <= reloadAttempts; attempt++ {
 		fi, err := os.Lstat(s.path)
 		if err != nil {
@@ -312,7 +314,8 @@ func (s *FileSource) reloadLocked() {
 		if err != nil {
 			s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
 			// Retry only when the path was replaced during the read. Both
-			// identities come from Lstat, which does not follow a link.
+			// identities come from Lstat, which does not follow a link at the
+			// final path component.
 			if attempt < reloadAttempts {
 				if now, lerr := os.Lstat(s.path); lerr == nil && !os.SameFile(fi, now) {
 					continue

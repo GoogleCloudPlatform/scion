@@ -423,6 +423,27 @@ func TestFileSource_ReadFailureWithoutReplaceNotRetried(t *testing.T) {
 	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
 }
 
+// A read that fails and leaves the path gone is not retried: there is no
+// new file to read, and the read error is the one recorded.
+func TestFileSource_ReadFailureThenPathGoneNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		require.NoError(t, os.Remove(p))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	// Status re-checks the path and reports a missing file without an
+	// error, so inspect the error recorded by the Token call directly.
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
+	assert.Empty(t, src.fileToken)
+}
+
 // A file replaced during every read is read at most three times in
 // one call; then the failure is reported and no value is kept.
 func TestFileSource_ReadRetryIsBounded(t *testing.T) {
