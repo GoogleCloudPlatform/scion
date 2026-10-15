@@ -388,15 +388,20 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.logs.read",
 		Domain:      "agent",
-		Description: "Read an agent's runtime logs and Cloud Logging entries",
+		Description: "Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/cloud-logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/cloud-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/cloud-logs/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream", Method: "GET"},
 		},
 		// An agent caller reads only agents of its own project
-		// (checkAgentReadScope and the handlers' project check).
+		// (checkAgentReadScope and the handlers' project check). The log
+		// stream re-checks a user access token on every
+		// streamCredentialRecheckInterval and ends once the token stops
+		// validating or loses agent.read.
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
@@ -411,14 +416,20 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.messages.read",
 		Domain:      "agent",
-		Description: "Read an agent's message history and message logs",
+		Description: "Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/messages", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/message-logs", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/messages/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/message-logs/stream", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{projectId}/agents/{id}/message-logs/stream", Method: "GET"},
 		},
 		// agent.attach on the agent gives the full history; agent.read alone
-		// gives only the messages the caller took part in.
+		// gives only the messages the caller took part in. The streams apply
+		// the same rule for every caller, and a stream opened by a user
+		// access token ends once the token stops validating or loses the
+		// permission that admitted it.
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
@@ -506,7 +517,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.attach",
 		Domain:      "agent",
-		Description: "Attach to an agent session via WebSocket",
+		Description: "Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach",
 		EntryPoints: []EntryPoint{
 			// The live route dispatches on /pty (pkg/hub/pty_handlers.go
 			// handleAgentPTY, invoked from handlers_agents_core.go's
