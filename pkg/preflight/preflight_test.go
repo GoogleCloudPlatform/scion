@@ -190,6 +190,8 @@ func TestProfileFindingSeverity(t *testing.T) {
 		{config.ProfileFindingDroppedUnused, false, SeverityWarn, "settings.profiles.dropped_unused_profile"},
 		{config.ProfileFindingActiveProfileFallback, false, SeverityInfo, "settings.profiles.active_profile_fallback"},
 		{config.ProfileFindingActiveProfileChanged, false, SeverityInfo, "settings.profiles.active_profile_changed"},
+		{config.ProfileFindingRetainedBuiltinProfile, false, SeverityInfo, "settings.profiles.retained_builtin_profile"},
+		{config.ProfileFindingRetainedBuiltinRuntime, false, SeverityInfo, "settings.profiles.retained_builtin_runtime"},
 		{config.ProfileCatalogFindingKind("future_kind"), false, SeverityBlock, "settings.profiles.future_kind"},
 	}
 	for _, c := range cases {
