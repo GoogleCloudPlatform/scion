@@ -305,6 +305,17 @@ Only a human super-admin's interactive session creates an admin delegation. An a
 a dev credential, an agent, a workload delegation and every test identity are refused; the test
 admin identities are refused by the test-admin policy.
 
+### Which command issues admin test identities
+
+Two commands issue test hub-admins and test super-admins. They are for different callers and never stand in for each other:
+
+| Caller | Command | Credential | Where the token goes |
+|---|---|---|---|
+| A human operator, on the hub itself | `scion hub test-identity issue --admin-role ... --out <file>` | your own sign-in as a live super-admin (no hub profile, not in agent mode) | the `--out` file only |
+| A runner on another hub, for example an agent | `scion hub test-identity issue-admin --admin-role ... --as <alias> --run <label>` | the profile's admin issuer delegation (a hub profile is required; in agent mode only for a profile of another hub) | the run cache file `~/.scion/hub-profiles/<profile>/run-<label>/<alias>.json` only |
+
+The human command uses your session, so the authority is yours at that moment. The runner command acts through a delegation that a super-admin created on the target, so the hub re-checks the delegation and its grantor at every mint. `issue --admin-role` refuses a hub profile and agent mode, and `issue-admin` refuses to run without a target-hub profile. The run cache file is created exclusively with mode `0600`, symlinks are refused, an alias that already exists is refused before any request, and the token is never printed. `teardown --run <label>` removes the file.
+
 **Add the admin delegations to the runner's profile.** An admin delegation pins the target's
 admin issuer service account, `<T>-admin-issuer` (see the prerequisites below), so the profile
 names that account with `--admin-issuer-sa`. It must differ from `--issuer-sa`, and is required
@@ -373,8 +384,8 @@ does not issue member identities (`403`). A member delegation reaches no admin i
 `delete --as <admin alias>` is refused by the CLI, and `teardown` reports an admin alias as
 `left-to-expire` and removes its cache file: the identity ends at its expiry (at most an hour),
 or earlier through `POST /api/v1/test-identities/admin/revoke-all` by a human super-admin, a
-purge (`delete --purge`) by the grantor's own sign-in or a human super-admin, or a restart without the
-admin level.
+purge (`delete --purge`) by the grantor (on its own sign-in or access token) or a human
+super-admin, or a restart without the admin level.
 
 **Audit.** The identity records the delegation id. The `test_admin_issue` audit record names the
 delegation, the grantor, the issuer account's subject, the token's issue time and the run

@@ -234,3 +234,97 @@ func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 	assertAdminIssuerAuthorization(t, e.lastTargetRequest(t, "POST", "/api/v1/test-identities/admin"), hubprofiletest.SuperAdminDelegation)
 	e.assertClean(t)
 }
+
+// A4-style golden test for issue-admin: exact standard output (only the
+// identity's ID, email, kind, role, expiries and the cache path), empty
+// standard error, the cache file at mode 0600 holding the token, and an
+// existing alias refused before any request, leaving the file unchanged.
+func TestHubTestIdentityIssueAdmin_GoldenOutputAndFile(t *testing.T) {
+	e := newX3bEnv(t)
+	e.saveAdminProfiles(t)
+	r, err := e.run(t, "--hub-profile", "t9", "hub", "test-identity", "issue-admin", "--admin-role", "hub-admin",
+		"--purpose", "admin journey", "--as", "admin1", "--run", "r1")
+	require.NoError(t, err, r.stdout+r.stderr)
+	cache := filepath.Join(e.home, ".scion", "hub-profiles", "t9", "run-r1", "admin1.json")
+	ent, err := hubprofile.ReadEntry(e.home, "t9", "r1", "admin1")
+	require.NoError(t, err)
+	want := "Issued test identity " + ent.IdentityID + " as \"admin1\" (run r1, profile t9)\n" +
+		"  Email:         " + ent.Email + "\n" +
+		"  Kind:          " + hubprofile.KindTestHubAdmin + "\n" +
+		"  Role:          member\n" +
+		"  Expires:       " + formatTestIdentityTime(ent.ExpiresAt) + "\n" +
+		"  Token expires: " + formatTestIdentityTime(ent.TokenExpiresAt) + "\n" +
+		"  Cache file:    " + cache + " (mode 0600)\n"
+	assert.Equal(t, want, r.stdout)
+	assert.Empty(t, r.stderr)
+	fi, err := os.Lstat(cache)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	require.NotEmpty(t, ent.Token)
+	assert.NotContains(t, r.stdout, ent.Token)
+	before, err := os.ReadFile(cache)
+	require.NoError(t, err)
+
+	// The alias exists: refused before any request, the file unchanged.
+	n := len(e.target.Recorded())
+	_, err = e.run(t, "--hub-profile", "t9", "hub", "test-identity", "issue-admin", "--admin-role", "hub-admin",
+		"--purpose", "admin journey", "--as", "admin1", "--run", "r1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+	assert.Len(t, e.target.Recorded(), n, "no request for a taken alias")
+	after, err := os.ReadFile(cache)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+	e.assertClean(t)
+}
+
+// The two admin issuance commands in both directions (option 1, A4 kept):
+// A4's issue --admin-role still refuses a hub profile (human mode, pointing
+// to issue-admin) and agent mode, and issue-admin still refuses outside a
+// target profile (without one in human and agent mode, and with a profile
+// for the agent's own hub). No request, no file, no cache.
+func TestHubTestIdentityAdminCommands_EachInItsContext(t *testing.T) {
+	e := newX3bEnv(t)
+	e.saveAdminProfiles(t)
+	dir := resolvedTempDir(t)
+	a4 := func(out string) []string {
+		return []string{"hub", "test-identity", "issue", "--admin-role", "hub-admin", "--purpose", "admin journey", "--out", filepath.Join(dir, out)}
+	}
+
+	// Agent mode: A4's issue --admin-role is refused with and without a profile.
+	_, err := e.run(t, append([]string{"--hub-profile", "t9"}, a4("agent-profile.token")...)...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available in agent mode")
+	_, err = e.run(t, a4("agent.token")...)
+	require.Error(t, err)
+
+	// Human mode: A4's issue --admin-role refuses a hub profile and names
+	// the runner's command.
+	t.Setenv("SCION_CLI_MODE", "human")
+	_, err = e.run(t, append([]string{"--hub-profile", "t9"}, a4("human-profile.token")...)...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issue --admin-role is not available with a hub profile")
+	assert.Contains(t, err.Error(), "issue-admin")
+
+	// issue-admin outside a target profile: refused in human mode without a
+	// profile, and in agent mode without one or with the agent's own hub.
+	noProfile := []string{"hub", "test-identity", "issue-admin", "--admin-role", "hub-admin", "--purpose", "admin journey"}
+	_, err = e.run(t, noProfile...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issue-admin needs a hub profile")
+	t.Setenv("SCION_CLI_MODE", "agent")
+	_, err = e.run(t, noProfile...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "runs only against a target-hub profile")
+	_, err = e.run(t, append([]string{"--hub-profile", "own9"}, append(noProfile, "--as", "a", "--run", "r1")...)...)
+	require.ErrorIs(t, err, hubprofile.ErrOwnHub)
+
+	for _, f := range []string{"agent-profile.token", "agent.token", "human-profile.token"} {
+		_, statErr := os.Lstat(filepath.Join(dir, f))
+		assert.True(t, os.IsNotExist(statErr), "%s must not exist", f)
+	}
+	assert.Empty(t, e.target.Recorded(), "no request in any refused context")
+	_, statErr := os.Lstat(filepath.Join(e.home, ".scion", "hub-profiles", "t9"))
+	assert.True(t, os.IsNotExist(statErr), "no run cache")
+	e.assertClean(t)
+}

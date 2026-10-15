@@ -125,6 +125,11 @@ func IssueToCache(ctx context.Context, s *Session, req IssueRequest) (*CacheEntr
 	return e, nil
 }
 
+// fillAdminEntry writes an issued admin identity into its reserved cache
+// file. A test replaces it to exercise the path where the identity was
+// issued but could not be cached.
+var fillAdminEntry = (*Reservation).Fill
+
 // AdminIssueRequest are the inputs of IssueAdminToCache.
 type AdminIssueRequest struct {
 	Alias string
@@ -183,7 +188,7 @@ func IssueAdminToCache(ctx context.Context, s *Session, req AdminIssueRequest) (
 		DelegationID: delegationID,
 		ExpiresAt:    resp.Identity.ExpiresAt, TokenExpiresAt: resp.TokenExpiresAt, Token: resp.AccessToken,
 	}
-	if err := res.Fill(e); err != nil {
+	if err := fillAdminEntry(res, e); err != nil {
 		_ = RemoveEntry(s.opts.Home, s.opts.Profile.Name, s.opts.Run, req.Alias)
 		return nil, fmt.Errorf("admin test identity %s was issued but could not be cached (%v); it expires at %s (a delegation cannot delete it; a human super-admin can revoke it)", resp.Identity.ID, err, expires)
 	}

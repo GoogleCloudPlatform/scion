@@ -16,6 +16,7 @@ package hubprofile
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -260,4 +261,46 @@ func TestTeardown_AdminAliasesLeftToExpire(t *testing.T) {
 	assert.Equal(t, "left-to-expire", rep.Items[0].Outcome)
 	assert.True(t, rep.Complete)
 	assert.True(t, rep.CacheRemoved)
+}
+
+// A4-style token handling for admin issuance through a profile: when the
+// identity was issued but its cache file could not be written, the error
+// names the identity and its expiry and never carries the token; when the
+// hub refuses the request, the error carries no token either. No cache
+// file is left behind in either case.
+func TestIssueAdminToCache_ErrorPathsCarryNoToken(t *testing.T) {
+	h := newHarness(t, false)
+	p := adminProfile(h.target, TransportNone)
+	s := h.mustOpen(p, "", "r1")
+
+	orig := fillAdminEntry
+	t.Cleanup(func() { fillAdminEntry = orig })
+	fillAdminEntry = func(r *Reservation, e *CacheEntry) error {
+		_ = r.f.Close()
+		return errors.New("simulated write failure")
+	}
+	_, err := IssueAdminToCache(context.Background(), s, AdminIssueRequest{Alias: "a1", AdminRole: TierHubAdmin, Purpose: "admin journey"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "was issued but could not be cached")
+	assert.Contains(t, err.Error(), "expires at")
+	for _, tok := range h.target.FixtureTokens() {
+		assert.NotContains(t, err.Error(), tok)
+		assert.NotContains(t, err.Error(), strings.Split(tok, ".")[1])
+	}
+	_, statErr := os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "a1.json"))
+	assert.True(t, os.IsNotExist(statErr), "no cache file is left")
+	fillAdminEntry = orig
+
+	// The hub refuses (the delegation does not cover the requested kind):
+	// nothing cached, no token.
+	wrong := adminProfile(h.target, TransportNone)
+	wrong.IssuerDelegations[TierSuperAdmin] = hubprofiletest.HubAdminDelegation
+	s2 := h.mustOpen(wrong, "", "r1")
+	_, err = IssueAdminToCache(context.Background(), s2, AdminIssueRequest{Alias: "a2", AdminRole: TierSuperAdmin, Purpose: "admin journey"})
+	require.Error(t, err)
+	for _, tok := range h.target.FixtureTokens() {
+		assert.NotContains(t, err.Error(), tok)
+	}
+	_, statErr = os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "a2.json"))
+	assert.True(t, os.IsNotExist(statErr))
 }

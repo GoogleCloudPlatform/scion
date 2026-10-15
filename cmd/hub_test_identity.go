@@ -126,7 +126,10 @@ super-admin for the super-admin role). The issuer must be a live human
 super-admin. --purpose (8 to 200 characters) and --out are required, --role
 does not apply, and the token is never re-issued. Lifetimes: hub-admin
 token 15m (at most 30m), identity 1h; super-admin token 10m (at most 15m),
-identity 30m. Not available in agent mode or with a hub profile.
+identity 30m. Not available in agent mode or with a hub profile: this is
+the human operator's command, issued on your own session. A runner acting
+through an admin issuer delegation on another test hub uses 'issue-admin'
+with a hub profile instead.
 
 Examples:
   scion hub test-identity issue --out ./fixture.token

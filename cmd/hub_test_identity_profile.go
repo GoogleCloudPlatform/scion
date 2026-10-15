@@ -71,7 +71,9 @@ for a test super-admin; systemd test hubs only), and the profile must hold
 the admin delegation of that role (--issuer-delegation hub-admin=<id> or
 super-admin=<id>) and the target's admin issuer service account
 (--admin-issuer-sa). This command needs a hub profile; it never uses your
-own login. In agent mode it runs only with a profile for another hub.
+own login. In agent mode it runs only with a profile for another hub. It is
+the runner's command, acting through a delegation; a human operator issuing
+on their own session uses 'issue --admin-role' without a profile.
 
 The token goes only to the run cache (mode 0600); only the identity's ID,
 email, kind, role, expiry and the cache file are printed. --purpose is required
