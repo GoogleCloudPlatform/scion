@@ -453,13 +453,13 @@ type moveFirstStore struct {
 	to string
 }
 
-func (m *moveFirstStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool) (bool, error) {
+func (m *moveFirstStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (GrantPut, error) {
 	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
 		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
 			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
-		return false, err
+		return GrantPutUnchanged, err
 	}
-	return m.Store.PutGrant(ctx, g, max, cross)
+	return m.Store.PutGrant(ctx, g, max, cross, actor)
 }
 
 // TestGrantHomeRulesUnderLock: the home project's read/write-only rule

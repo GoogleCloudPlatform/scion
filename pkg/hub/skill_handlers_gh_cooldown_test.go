@@ -156,7 +156,7 @@ func TestSkillsResolve_GHRateLimitedRefInBatch(t *testing.T) {
 	require.Len(t, resp.Errors, 2, "errors: %+v", resp.Errors)
 	for _, e := range resp.Errors {
 		assert.Equal(t, agent.GitHubRateLimitedCode, e.Code, "%s", e.URI)
-		assert.Contains(t, e.Message, e.URI, "error must name the ref")
+		assert.Equal(t, "rate limited by the skill source", e.Message, "%s", e.URI)
 	}
 	assert.Equal(t, int64(1), gh.limitedCalls.Load(), "the limited ref must be requested once, with no retry")
 	assert.Equal(t, int64(2), gh.calls.Load(), "only the first ref's commit + contents may be requested")

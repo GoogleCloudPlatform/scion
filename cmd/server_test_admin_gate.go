@@ -187,6 +187,11 @@ type testModeInputs struct {
 	// is complete (G3, super-admin only). Nil means
 	// hub.TestAdminPolicyComplete.
 	PolicyComplete func() error
+
+	// AdminWebSessions is the value of
+	// server.hub.test_identities.admin_web_sessions: the hub id the admin
+	// web session setting is bound to, or "" (off). Phase WS4.
+	AdminWebSessions string
 }
 
 // testAdminPolicyComplete is the G3 check. A variable only so tests can
@@ -198,6 +203,7 @@ type testModeResolution struct {
 	EnableTestIdentities bool
 	TestAdminGate        hub.TestAdminGateConfig
 	TestMode             hub.TestModeConfig
+	TestAdminWebSessions hub.TestAdminWebSessionsConfig
 }
 
 // resolveTestMode checks every precondition of the requested level and
@@ -211,9 +217,22 @@ type testModeResolution struct {
 // never lowered. Off returns the zero resolution. hub.New re-checks the
 // result and verifies the actual signing-key sources (G7) before it
 // captures the gate.
+//
+// The admin web session setting (server.hub.test_identities.admin_web_sessions,
+// WS4) refuses startup unless the level is admin or super-admin and its
+// value is the resolved hub id; it is never ignored and never lowers the
+// level. The Helm chart renders only --test-mode=member (G9), so a Helm
+// hub with the setting refuses to start.
 func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	var off testModeResolution
 	level := in.Level
+	if in.AdminWebSessions != "" && !level.IsAdminLevel() {
+		shown := level
+		if shown == "" {
+			shown = hub.TestModeOff
+		}
+		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityAdminWebSessionsKey, shown, hub.ErrTestAdminWebSessionsBelowAdmin)
+	}
 	if level == "" || level == hub.TestModeOff {
 		return off, nil
 	}
@@ -311,6 +330,15 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			ProductionFlag: in.ProductionFlagExplicit,
 		},
 	}
+	if in.AdminWebSessions != "" {
+		// The level is admin or super-admin (checked first). The binding is
+		// this hub's resolved id, as for --test-mode itself (G2).
+		if in.AdminWebSessions != in.ResolvedHubID {
+			return refuse(fmt.Errorf("%w: %s is %q, resolved hub id %q", hub.ErrTestAdminWebSessionsHubIDMismatch,
+				config.TestIdentityAdminWebSessionsKey, in.AdminWebSessions, in.ResolvedHubID))
+		}
+		res.TestAdminWebSessions = hub.TestAdminWebSessionsConfig{HubID: in.AdminWebSessions}
+	}
 	if level.IsAdminLevel() {
 		res.TestAdminGate = hub.TestAdminGateConfig{
 			HubAdmin:        true,
@@ -340,6 +368,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		Federation:              hubCfg.Federation,
 		SharedSigningSecret:     hubCfg.SharedSigningSecret != "",
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
+		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
 		ReadMarker: func() (*testinfra.Marker, error) {
 			if entClient == nil {
 				return nil, testinfra.ErrMarkerAbsent

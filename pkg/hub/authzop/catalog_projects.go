@@ -722,14 +722,19 @@ var projectOperations = []OperationSpec{
 	// read check (an artifact the caller cannot read answers 404 as for a
 	// missing one), then requires a user principal whose credential permits
 	// artifact.manage in the artifact's home project and who owns the
-	// artifact or holds an unexpired admin grant on it (adminAuthorityWith,
-	// pkg/artifacts/links.go); a reader that may not manage gets 403.
+	// artifact or holds an unexpired admin grant on it, or, on an artifact
+	// owned by an agent, is a steward (an owner of the home project, through
+	// artifact.steward, or the agent's delegating user who reads in the home
+	// project; adminAuthorityWith, pkg/artifacts/links.go); a reader that
+	// may not manage gets 403. A steward may not give admin or move the
+	// artifact (403 steward_action_not_allowed), and its writes are refused
+	// with 404 when the artifact moved or changed owner meanwhile.
 	// Agents never pass: they are not users, and artifact.manage has no
 	// agent scope.
 	{
 		ID:          "artifact.update",
 		Domain:      "artifact",
-		Description: "Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)",
+		Description: "Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "PATCH"},
 		},
@@ -749,11 +754,14 @@ var projectOperations = []OperationSpec{
 			AfterFields:   []string{"newExpiresAt", "toScope"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled"},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "steward_action_not_allowed"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
+			{Package: "pkg/hub", Function: "TestArtifactStewardOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestPatchExpiry"},
 			{Package: "pkg/artifacts", Function: "TestPatchRehome"},
+			{Package: "pkg/artifacts", Function: "TestStewardBoundedTable"},
+			{Package: "pkg/artifacts", Function: "TestStewardRaceAnswersNotFound"},
 		},
 		Bearer: artifactManageBearer,
 	},
@@ -775,13 +783,14 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
+			{Package: "pkg/artifacts", Function: "TestStewardBoundedTable"},
 		},
 		Bearer: artifactManageBearer,
 	},
 	{
 		ID:          "artifact.grant.put",
 		Domain:      "artifact",
-		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
 		},
@@ -791,9 +800,18 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
+		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
-		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_subject_cannot_read", "review_replaces_access"},
+		// grant_created and grant_changed are written in the same
+		// transaction as the grant (pkg/artifacts/store_grants.go).
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (grant_created, grant_changed)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			BeforeFields:  []string{"oldPermission"},
+			AfterFields:   []string{"grantId", "subjectKind", "subjectRef", "permission", "newPermission"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_subject_cannot_read", "review_replaces_access", "steward_action_not_allowed"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
 			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},
@@ -801,16 +819,11 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
 			{Package: "pkg/artifacts", Function: "TestReviewGrantAllowed"},
 			{Package: "pkg/artifacts", Function: "TestReviewGrantDenied"},
+			{Package: "pkg/hub", Function: "TestArtifactStewardOnRoutes"},
+			{Package: "pkg/artifacts", Function: "TestStewardBoundedTable"},
+			{Package: "pkg/artifacts", Function: "TestStewardEvents"},
+			{Package: "pkg/artifacts", Function: "TestStoreCreationEvents"},
 		},
-		// No exemption kind names a known audit gap; route_guarded is the
-		// closest (the route is reached only through the manage check), and
-		// the gap itself is tracked in ptone/scion#4882.
-		Exemptions: []Exemption{{
-			Kind:   ExemptionRouteGuarded,
-			Reason: "The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed)",
-			Scope:  "artifact grant creation and change",
-			Waives: []WaivedObligation{WaiveAuditObligation},
-		}},
 		Bearer: artifactManageBearer,
 	},
 	{
@@ -828,7 +841,7 @@ var projectOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:           GovernanceDomainSpecific,
-			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)",
+			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) and, on an artifact owned by an agent, its stewards remove its grants; the home project's grant is refused (409 home_grant)",
 			DomainCallback: "pkg/artifacts.(*Service).adminAuthorityWith",
 		},
 		AuthorityEval: AuthorityEvalNone,
@@ -880,20 +893,22 @@ var projectOperations = []OperationSpec{
 		BasePermission:        "artifact.manage",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin",
+		DelegationDescription: "A link gives read of the current version only, which the creating manager (the owner or an admin grantee) or steward already holds; it gives no write, review or admin",
 		AuthorityEval:         AuthorityEvalNone,
 		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsShareLinkOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestLinkManagePermissions"},
+			{Package: "pkg/artifacts", Function: "TestStewardEvents"},
 		},
-		// See artifact.grant.put for the exemption kind.
-		Exemptions: []Exemption{{
-			Kind:   ExemptionRouteGuarded,
-			Reason: "The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked)",
-			Scope:  "artifact share link creation",
-			Waives: []WaivedObligation{WaiveAuditObligation},
-		}},
+		// link_created is written in the same transaction as the link, with
+		// its id and expiry, never the token (pkg/artifacts/store_links.go).
+		AuditObligation: &AuditObligation{
+			EventType:     "artifact_event (link_created)",
+			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
+			AfterFields:   []string{"linkId", "expiresAt"},
+			Atomic:        true,
+		},
 		Bearer: artifactManageBearer,
 	},
 	{
@@ -911,7 +926,7 @@ var projectOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:           GovernanceDomainSpecific,
-			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links",
+			Description:    "Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) and, on an artifact owned by an agent, its stewards revoke its share links",
 			DomainCallback: "pkg/artifacts.(*Service).adminAuthorityWith",
 		},
 		AuthorityEval: AuthorityEvalNone,
@@ -931,7 +946,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.delete",
 		Domain:      "artifact",
-		Description: "Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project",
+		Description: "Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee), on an artifact owned by an agent for its stewards (an owner of its home project, or the agent's delegating user who reads there), and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "DELETE"},
 		},

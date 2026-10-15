@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -235,7 +236,7 @@ func TestReviewGrantNeverReplacesGrant(t *testing.T) {
 		t.Run(perm, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
 			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
-				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false); err != nil {
+				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false, testActor); err != nil {
 				t.Fatal(err)
 			}
 			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)),
@@ -271,13 +272,13 @@ type movingReviewStore struct {
 	to string
 }
 
-func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string, actor *Actor) (GrantPut, error) {
 	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
 		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
 			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
-		return false, err
+		return GrantPutUnchanged, err
 	}
-	return m.Store.PutReviewGrant(ctx, g, max, home)
+	return m.Store.PutReviewGrant(ctx, g, max, home, actor)
 }
 
 // TestReviewGrantHomeUnderLock: authority checked against the old home
@@ -340,12 +341,12 @@ type deletingReviewStore struct {
 	db *sql.DB
 }
 
-func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string, actor *Actor) (GrantPut, error) {
 	s := d.Store.(*sqlStore)
 	if _, err := d.db.ExecContext(ctx, s.rebind("UPDATE artifact SET deleted_at = ? WHERE id = ?"), s.timeArg(time.Now()), g.ArtifactID); err != nil {
-		return false, err
+		return GrantPutUnchanged, err
 	}
-	return d.Store.PutReviewGrant(ctx, g, max, home)
+	return d.Store.PutReviewGrant(ctx, g, max, home, actor)
 }
 
 // TestReviewGrantArtifactDeletedMeanwhile: an artifact deleted between the
@@ -412,8 +413,8 @@ func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
 // after the handler's checks.
 type replacingReviewStore struct{ Store }
 
-func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string) (bool, error) {
-	return false, ErrReviewReplacesAccess
+func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string, *Actor) (GrantPut, error) {
+	return GrantPutUnchanged, ErrReviewReplacesAccess
 }
 
 // TestReviewGrantStoreReplaceRefusal: on the review-access path, the
@@ -477,7 +478,7 @@ func TestReviewGrantSubjectCannotReadDespiteOtherGrants(t *testing.T) {
 		{"another user holds a read grant", func(f *fixture, id string) { f.grantPrincipal(id, reviewer) }},
 		{"subject holds a review grant only", func(f *fixture, id string) {
 			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
-				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false); err != nil {
+				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false, testActor); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -485,19 +486,21 @@ func TestReviewGrantSubjectCannotReadDespiteOtherGrants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
 			tc.setup(f, id)
-			records := captureRefusalLogs(t)
+			c := captureLog(f, slog.LevelInfo)
 			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, stranger, GrantReview)),
 				CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
-			if got := records(); len(got) != 1 || got[0]["reason"] != "subject_unreadable" || got[0]["grantee"] != stranger {
+			if got, _ := c.take(t); len(got) != 1 || got[0][logKeyReason] != logReasonReviewSubjectUnreadable || got[0][logKeySubjectRef] != stranger {
 				t.Errorf("refusal records: %v", got)
 			}
 		})
 	}
 }
 
-// TestReviewGrantRefusalLogged: every 403 on the review-access path logs
-// exactly one record with its reason, the artifact id and, when the body
-// named a well-formed user, the grantee; a granted request logs none.
+// TestReviewGrantRefusalLogged: every 403 on the review-access path writes
+// exactly one WARN decision log entry (action share, outcome refused) with
+// its reason, the artifact, the caller and the route and, when the body named
+// a well-formed user, that grantee as the subject; a granted request and a
+// 500 write no refusal entry.
 func TestReviewGrantRefusalLogged(t *testing.T) {
 	stranger := "user:stranger"
 	for _, tc := range []struct {
@@ -509,83 +512,127 @@ func TestReviewGrantRefusalLogged(t *testing.T) {
 		grantee string
 		status  int
 	}{
-		{"no authority", member, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "caller", reviewerID, http.StatusForbidden},
-		{"agent caller", agentA, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "caller", "", http.StatusForbidden},
+		{"no authority", member, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "review_caller", reviewerID, http.StatusForbidden},
+		{"agent caller", agentA, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "review_caller", "", http.StatusForbidden},
 		{"credential lacks manage", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
-			func(f *fixture, id string) { f.host.deny(delegator, "project-1", PermissionManage) }, "caller", "", http.StatusForbidden},
-		{"malformed body", delegator, "junk", nil, "body", "", http.StatusForbidden},
-		{"read permission", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantRead), nil, "body", "", http.StatusForbidden},
-		{"subject cannot read", delegator, reviewBody(SubjectPrincipal, stranger, GrantReview), nil, "subject_unreadable", stranger, http.StatusForbidden},
+			func(f *fixture, id string) { f.host.deny(delegator, "project-1", PermissionManage) }, "review_caller", "", http.StatusForbidden},
+		{"malformed body", delegator, "junk", nil, "review_body", "", http.StatusForbidden},
+		{"read permission", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantRead), nil, "review_body", "", http.StatusForbidden},
+		{"subject cannot read", delegator, reviewBody(SubjectPrincipal, stranger, GrantReview), nil, "review_subject_unreadable", stranger, http.StatusForbidden},
 		{"subject holds a read grant only", delegator, reviewBody(SubjectPrincipal, "user:user-granted", GrantReview),
 			func(f *fixture, id string) { f.grantPrincipal(id, principal{PrincipalKindUser, "user-granted", ""}) },
-			"existing_access", "user:user-granted", http.StatusForbidden},
+			"review_existing_access", "user:user-granted", http.StatusForbidden},
 		{"store: existing grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
-			func(f *fixture, id string) { f.svc.SetStore(replacingReviewStore{f.store}) }, "existing_access", reviewerID, http.StatusForbidden},
+			func(f *fixture, id string) { f.svc.SetStore(replacingReviewStore{f.store}) }, "review_existing_access", reviewerID, http.StatusForbidden},
 		{"store: moved meanwhile", projAdmin, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
-			func(f *fixture, id string) { f.svc.SetStore(&movingReviewStore{Store: f.store, to: "project-3"}) }, "store_refused", reviewerID, http.StatusForbidden},
+			func(f *fixture, id string) { f.svc.SetStore(&movingReviewStore{Store: f.store, to: "project-3"}) }, "review_store_refused", reviewerID, http.StatusForbidden},
 		{"granted", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "", "", http.StatusCreated},
+		{"subject check fails", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
+			func(f *fixture, id string) { f.host.subjectErr = errors.New("subject check down") }, "", "", http.StatusInternalServerError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
 			if tc.setup != nil {
 				tc.setup(f, id)
 			}
-			records := captureRefusalLogs(t)
+			c := captureLog(f, slog.LevelInfo)
 			rec := f.postGrantBody(tc.caller, id, tc.body)
 			if rec.Code != tc.status {
 				t.Fatalf("status %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
 			}
-			got := records()
+			got, raw := c.take(t)
 			if tc.reason == "" {
-				if len(got) != 0 {
-					t.Errorf("refusal records for a granted request: %v", got)
+				for _, e := range got {
+					if e[logKeyOutcome] == logOutcomeRefused {
+						t.Errorf("refusal entry for a granted request: %s", raw)
+					}
 				}
 				return
 			}
 			if len(got) != 1 {
-				t.Fatalf("refusal records: %v, want exactly one", got)
+				t.Fatalf("decision log entries: %s; want exactly one", raw)
 			}
-			r := got[0]
-			if r["level"] != "WARN" || r["reason"] != tc.reason || r["artifact_id"] != id {
-				t.Errorf("record %v, want reason %q artifact_id %q", r, tc.reason, id)
+			want := map[string]any{
+				logKeyAction: logActionShare, logKeyOutcome: logOutcomeRefused, logKeyReason: tc.reason,
+				logKeyArtifactID: id, logKeyProjectID: "project-1", logKeyOwnerKind: PrincipalKindAgent,
+				logKeyPrincipalKind: tc.caller.kind, logKeyPrincipalID: tc.caller.ref,
+				logKeyRoute:       "POST /api/v1/artifacts/{id}/grants",
+				logKeySubjectKind: nil, logKeySubjectRef: nil, logKeyPermission: nil,
 			}
-			if g, ok := r["grantee"]; tc.grantee == "" && ok || tc.grantee != "" && g != tc.grantee {
-				t.Errorf("grantee %v, want %q", g, tc.grantee)
+			if tc.grantee != "" {
+				want[logKeySubjectKind], want[logKeySubjectRef], want[logKeyPermission] = SubjectPrincipal, tc.grantee, GrantReview
 			}
-			for k := range r {
-				switch k {
-				case "time", "level", "msg", "reason", "artifact_id", "grantee":
-				default:
-					t.Errorf("unexpected log key %q", k)
-				}
-			}
+			checkEntry(t, tc.name, got[0], "WARN", want)
 		})
 	}
 }
 
-// captureRefusalLogs sends the default slog logger to a JSON buffer for the
-// rest of the test and returns a function listing the review-grant refusal
-// records written so far.
-func captureRefusalLogs(t *testing.T) func() []map[string]any {
-	t.Helper()
-	var buf bytes.Buffer
+// TestReviewGrantRefusalOnlyInDecisionLog: a review-grant refusal goes to the
+// decision log only; the hub's general log gets no record of it.
+func TestReviewGrantRefusalOnlyInDecisionLog(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	c := captureLog(f, slog.LevelInfo)
+	var general bytes.Buffer
 	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&general, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return func() []map[string]any {
-		var out []map[string]any
-		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-			if line == "" {
-				continue
-			}
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err != nil {
-				t.Fatalf("log line %q: %v", line, err)
-			}
-			if m["msg"] == "artifacts: review grant refused" {
-				out = append(out, m)
+	if rec := f.postGrantBody(member, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if got, raw := c.take(t); len(got) != 1 {
+		t.Errorf("decision log entries: %s; want one", raw)
+	}
+	if general.Len() != 0 {
+		t.Errorf("the general log got a record of the refusal: %s", general.String())
+	}
+}
+
+// TestReviewGrantRefusalLogLeaksNothing: text from a refused request body
+// never reaches the decision log, whatever field carries it, and a body
+// that does not validate names no subject.
+func TestReviewGrantRefusalLogLeaksNothing(t *testing.T) {
+	const sentinel = "SENTINEL-REVIEW-7c1d"
+	f, id := newReviewGrantFixture(t)
+	c := captureLog(f, slog.LevelDebug)
+	for _, body := range []string{
+		`{"subjectKind":"principal","subjectRef":"user:` + sentinel + ` x","permission":"review"}`,
+		`{"subjectKind":"principal","subjectRef":"` + reviewerID + `","permission":"review","note":"` + sentinel + `"}`,
+		`{"subjectKind":"` + sentinel + `","subjectRef":"` + reviewerID + `","permission":"review"}`,
+		sentinel,
+	} {
+		if rec := f.postGrantBody(delegator, id, body); rec.Code != http.StatusForbidden {
+			t.Fatalf("body %q: status %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+	entries, raw := c.take(t)
+	if len(entries) != 4 {
+		t.Fatalf("decision log entries: %s; want four refusals", raw)
+	}
+	for _, e := range entries {
+		for _, k := range []string{logKeySubjectKind, logKeySubjectRef, logKeyPermission} {
+			if _, ok := e[k]; ok {
+				t.Errorf("a refusal of an invalid body carries %s: %v", k, e)
 			}
 		}
-		return out
+	}
+	if strings.Contains(raw, sentinel) {
+		t.Errorf("the decision log carries request body text: %s", raw)
+	}
+}
+
+// TestReviewGrantRefusalLogReasons pins the decision log reason of each
+// refusal value, and that a value outside the five maps to review_refused.
+func TestReviewGrantRefusalLogReasons(t *testing.T) {
+	for reason, want := range map[reviewGrantRefusal]string{
+		reviewRefusalCaller:            "review_caller",
+		reviewRefusalBody:              "review_body",
+		reviewRefusalSubjectUnreadable: "review_subject_unreadable",
+		reviewRefusalExistingAccess:    "review_existing_access",
+		reviewRefusalStoreRefused:      "review_store_refused",
+		"anything else":                "review_refused",
+	} {
+		if got := reason.logReason(); got != want {
+			t.Errorf("%q.logReason() = %q, want %q", reason, got, want)
+		}
 	}
 }

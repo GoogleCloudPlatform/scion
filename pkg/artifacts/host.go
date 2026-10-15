@@ -54,6 +54,10 @@ const (
 	PermissionUpdate = "artifact.update"
 	PermissionDelete = "artifact.delete"
 	PermissionManage = "artifact.manage"
+	// PermissionSteward is held by a home project's owners (and
+	// super-admins): it makes them stewards of the artifacts agents own in
+	// that project (design D25). It is never agent-callable.
+	PermissionSteward = "artifact.steward"
 )
 
 // Host is the service's only view of the system it runs in. It answers
@@ -185,6 +189,26 @@ type ReviewGrantAuthority interface {
 	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
 }
 
+// Review grant clauses, as ReviewGrantClauser names them.
+const (
+	ReviewClauseProjectAdmin   = "project_admin"
+	ReviewClauseDelegatingUser = "delegating_user"
+)
+
+// ReviewGrantClauser is an optional host interface that replaces
+// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
+// asks it instead of MayGrantReview. It makes the same decision as
+// MayGrantReview, in the same single evaluation, and names the clause that
+// allowed it, so the decision log can record it without asking the host a
+// second question.
+type ReviewGrantClauser interface {
+	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
+	// when the caller holds project administration in homeScope,
+	// ReviewClauseDelegatingUser when it is the delegating user of agent
+	// ownerAgentID, or "" when MayGrantReview would answer false.
+	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string
+}
+
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
 // The owner liveness reconciler asks it which artifact owners still exist,
 // so it can mark the artifacts of a deleted agent or user. A host without
@@ -211,4 +235,35 @@ type ScopeAdministrator interface {
 	// with the caller's credential limits applied. Any lookup failure
 	// answers false.
 	AdministersScope(ctx context.Context, scopeRef string) bool
+}
+
+// Steward clauses, as Stewardship names them (design D25).
+const (
+	// StewardClauseProjectOwner: the caller holds artifact.steward in the
+	// artifact's home project (its owners, and super-admins).
+	StewardClauseProjectOwner = "project_owner"
+	// StewardClauseDelegator: the caller is the user at the root of the
+	// owning agent's live delegation chain and reads in the home project
+	// through a role.
+	StewardClauseDelegator = "delegator"
+)
+
+// Stewardship is an optional extension of Host (design D25,
+// ptone/scion#5144). For an artifact owned by an agent, the agent cannot
+// share it (sharing is user-only), so the humans accountable for it are
+// its stewards: they may share it within bounds (no admin grant, no move),
+// change its expiry and delete it. The service asks it only for an
+// artifact owned by an agent, after the owner and admin-grant checks, for
+// a user whose credential permits artifact.manage in the home project. A
+// host without it has no stewards (fail closed).
+type Stewardship interface {
+	// StewardClause reports which steward clause the calling user
+	// satisfies for an artifact owned by agent ownerAgentID and homed in
+	// project homeScope: StewardClauseProjectOwner,
+	// StewardClauseDelegator, or "" for none. sponsorRef and orphaned come
+	// from the artifact row (sponsorRef is "" until sponsors are recorded).
+	// A grant on the artifact never makes the caller a steward: the clauses
+	// are decided from roles and the delegation chain only. Any lookup
+	// failure answers "".
+	StewardClause(ctx context.Context, ownerAgentID, homeScope, sponsorRef string, orphaned bool) string
 }
