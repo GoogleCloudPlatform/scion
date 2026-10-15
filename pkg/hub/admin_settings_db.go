@@ -1229,7 +1229,14 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs[sec] = merged
 		mergedBaseRevs[sec] = rev
-		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) {
+		// The no-op compares with the filtered base, which leaves out a
+		// seeded row's hub_name, public_url and image_registry. A request
+		// that sends public_url or a changed hub_name must still write: a
+		// seeded row keeps its own values in effect, so skipping the write
+		// would lose an explicit clear or set of those keys. image_registry
+		// resolves from the file tier, never from the seeded row, so only
+		// it may be filtered into a no-op (ptone/scion#3916).
+		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) && !fp.has("public_url") && !fp.has("hub_name") {
 			noopRevs[sec] = rev
 		}
 	}
