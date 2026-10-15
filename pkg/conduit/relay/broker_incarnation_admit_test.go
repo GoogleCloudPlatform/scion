@@ -19,6 +19,7 @@ package relay_test
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -57,6 +58,24 @@ func (ev *brokerIncarnationEvents) snapshot() (map[string]int, []string) {
 		out[k] = v
 	}
 	return out, append([]string(nil), ev.flaps...)
+}
+
+// waitSuperseded waits until the superseded count reported for brokerID
+// is want. The relay reports the count after it closed the sessions, so a
+// test that saw a close waits for the report.
+func (ev *brokerIncarnationEvents) waitSuperseded(t *testing.T, brokerID string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		superseded, _ := ev.snapshot()
+		if superseded[brokerID] == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("superseded = %v, want %s: %d", superseded, brokerID, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // requireClosedWith waits for ls to end and requires close code code.
@@ -106,9 +125,10 @@ func TestBrokerAdmissionClosesOlderIncarnation(t *testing.T) {
 	requireOpen(t, other, "another broker's session")
 	requireOpen(t, cur, "the new incarnation's session")
 
+	evA.waitSuperseded(t, "broker-1", 2)
 	superseded, flaps := evA.snapshot()
-	if superseded["broker-1"] != 2 || len(superseded) != 1 {
-		t.Fatalf("superseded = %v, want broker-1: 2", superseded)
+	if len(superseded) != 1 {
+		t.Fatalf("superseded = %v, want only broker-1", superseded)
 	}
 	if len(flaps) != 0 {
 		t.Fatalf("flaps = %v, want none", flaps)
@@ -139,6 +159,7 @@ func TestBrokerIncarnationFlapReported(t *testing.T) {
 	first, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	second, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
 	requireClosedWith(t, first, relay.CloseSupersededIncarnation, "proc-1 session")
+	ev.waitSuperseded(t, "broker-1", 1)
 	if _, flaps := ev.snapshot(); len(flaps) != 0 {
 		t.Fatalf("flaps = %v after a first change, want none", flaps)
 	}
@@ -146,11 +167,8 @@ func TestBrokerIncarnationFlapReported(t *testing.T) {
 	back, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	requireClosedWith(t, second, relay.CloseSupersededIncarnation, "proc-2 session")
 	requireOpen(t, back, "the returning proc-1 session")
-	superseded, flaps := ev.snapshot()
-	if len(flaps) != 1 || flaps[0] != "broker-1/proc-1" {
+	ev.waitSuperseded(t, "broker-1", 2)
+	if _, flaps := ev.snapshot(); len(flaps) != 1 || flaps[0] != "broker-1/proc-1" {
 		t.Fatalf("flaps = %v, want [broker-1/proc-1]", flaps)
-	}
-	if superseded["broker-1"] != 2 {
-		t.Fatalf("superseded = %v, want broker-1: 2", superseded)
 	}
 }

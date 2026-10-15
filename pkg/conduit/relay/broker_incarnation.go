@@ -89,16 +89,25 @@ func (b *brokerIncarnations) admit(id, inc string, now time.Time) bool {
 	return flap
 }
 
-// CloseOlderIncarnationSessions closes, with code and reason, every local
-// session of the principal whose endpoint incarnation is not inc and whose
-// connection epoch is below epoch. It returns the number closed. Rows are
-// deleted as each session ends.
+// CloseOlderIncarnationSessions closes, with code and reason, every open
+// local session of the principal whose endpoint incarnation is not inc and
+// whose connection epoch is below epoch. It returns the number it closed;
+// a session is closed and counted by at most one call. Rows are deleted as
+// each session ends.
 func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64, code uint32, reason string) int {
 	r.mu.Lock()
 	var hit []*entry
 	for _, e := range r.sessions {
-		if e.rec.PrincipalKind == kind && e.rec.PrincipalID == id &&
-			e.rec.EndpointIncarnation != inc && e.rec.ConnectionEpoch < epoch {
+		if e.rec.PrincipalKind != kind || e.rec.PrincipalID != id ||
+			e.rec.EndpointIncarnation == inc || e.rec.ConnectionEpoch >= epoch {
+			continue
+		}
+		select {
+		case <-e.sess.Done():
+			continue
+		default:
+		}
+		if e.supersededClosed.CompareAndSwap(false, true) {
 			hit = append(hit, e)
 		}
 	}

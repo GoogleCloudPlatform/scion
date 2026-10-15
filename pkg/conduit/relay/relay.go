@@ -332,6 +332,10 @@ type entry struct {
 	// closeForbidden records that a user StreamOpen was refused before
 	// sess was set; Serve closes the session with 4403 once it is.
 	closeForbidden atomic.Bool
+	// supersededClosed records that the session was closed because a newer
+	// incarnation of its broker was admitted, so it is closed and counted
+	// once (broker_incarnation.go).
+	supersededClosed atomic.Bool
 	// capAt is when the session reaches the lifetime cap (zero: no cap).
 	// Set before the entry is registered; read-only afterwards.
 	capAt time.Time
