@@ -1835,7 +1835,7 @@ func nonEmptyEnvProvider(prefix string, mapKey func(string) string) *env.Env {
 // match them against the registry.
 func LoadEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 	return k
 }
 
@@ -1845,7 +1845,7 @@ func LoadEnvKoanf() *koanf.Koanf {
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
 	return k
 }
 
@@ -1940,7 +1940,7 @@ func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.K
 	// 4. SCION_SERVER_* environment variables (highest precedence in bootstrap).
 	// Uses serverEnvToOpsettingsKey which re-adds the "server." prefix for keys
 	// that belong under V1ServerConfig (e.g. HUB_ADMINEMAILS → server.hub.admin_emails).
-	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyTypedEnvProvider("SCION_SERVER_", serverEnvToOpsettingsKey), nil)
 
 	// 5. Split comma-separated list values from env vars. Koanf's env provider
 	// loads everything as strings; list fields need explicit splitting so

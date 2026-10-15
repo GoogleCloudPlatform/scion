@@ -59,6 +59,11 @@ type ServerEnvEntry struct {
 	GlobalConfig string
 	// Canonical is the canonical env name, e.g. SCION_SERVER_HUB_ADMINEMAILS.
 	Canonical string
+	// Type is the setting's JSON type when the schema gives it exactly one
+	// (boolean, integer, number, string, array), else "". The env loaders
+	// that feed the opsettings keyspace convert a boolean, integer or number
+	// value to that type, and ValidateServerEnv checks it at server startup.
+	Type string
 	// Aliases are the legacy env names that still set the setting, sorted:
 	// the spelling that keeps each field's underscores
 	// (SCION_SERVER_HUB_ADMIN_EMAILS), the GlobalConfig spelling
@@ -309,7 +314,7 @@ func buildServerEnvTable() *serverEnvTable {
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
-		e := ServerEnvEntry{Path: p, GlobalConfig: globalConfigPathForSetting(p)}
+		e := ServerEnvEntry{Path: p, GlobalConfig: globalConfigPathForSetting(p), Type: schemaNodeSingleType(leaves[p])}
 		e.Canonical = serverEnvPrefix + canonicalServerEnvSuffix(p)
 		e.Aliases = serverEnvAliasCandidates(e, leaves[p])
 		t.byPath[p] = len(t.entries)
@@ -712,6 +717,29 @@ func schemaNodeType(node map[string]interface{}) string {
 				return s
 			}
 		}
+	}
+	return ""
+}
+
+// schemaNodeSingleType returns a schema node's JSON type when it has exactly
+// one besides "null", else "".
+func schemaNodeSingleType(node map[string]interface{}) string {
+	switch v := node["type"].(type) {
+	case string:
+		return v
+	case []interface{}:
+		one := ""
+		for _, t := range v {
+			s, ok := t.(string)
+			if !ok || s == "null" {
+				continue
+			}
+			if one != "" {
+				return ""
+			}
+			one = s
+		}
+		return one
 	}
 	return ""
 }
