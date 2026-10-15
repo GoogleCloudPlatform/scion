@@ -48,26 +48,6 @@ func TestCreateOutput_SaysNotStarted(t *testing.T) {
 		assert.Contains(t, hint, startCmd)
 	})
 
-	t.Run("local text", func(t *testing.T) {
-		var buf bytes.Buffer
-		writeLocalCreateResult(&buf, name)
-		out := buf.String()
-		assert.Contains(t, out, "Agent 'my-agent' created successfully.")
-		assert.Contains(t, out, "not started")
-		assert.Contains(t, out, startCmd)
-	})
-
-	t.Run("local json", func(t *testing.T) {
-		r := localCreateResult(name)
-		assert.Equal(t, "success", r.Status)
-		assert.Equal(t, "create", r.Command)
-		assert.Equal(t, name, r.Agent)
-		assert.Contains(t, r.Message, startCmd)
-		assert.Equal(t, false, r.Details["started"])
-		assert.Equal(t, true, r.Details["provisioned"])
-		assert.Equal(t, startCmd, r.Details["startCommand"])
-	})
-
 	t.Run("hub json details", func(t *testing.T) {
 		details := map[string]interface{}{"phase": "created"}
 		addCreateNotStartedDetails(details, name, true)

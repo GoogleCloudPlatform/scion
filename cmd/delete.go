@@ -18,18 +18,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -127,62 +124,9 @@ container --self has no effect.`,
 		}
 
 		if deleteStopped {
-			if hubCtx != nil {
-				return deleteStoppedViaHub(hubCtx)
-			}
-
-			// Require an explicit project context — error if not in a project (unless --global)
-			resolvedProjectPath, _, err := config.RequireProjectPath(projectPath)
-			if err != nil {
-				return err
-			}
-
-			mgr := agent.NewManager(runtime.GetRuntime(projectPath, profile))
-			return deleteStoppedLocal(mgr, resolvedProjectPath)
+			return deleteStoppedViaHub(hubCtx)
 		}
-
-		// Use Hub if available
-		if hubCtx != nil {
-			return deleteAgentsViaHub(hubCtx, args)
-		}
-
-		// Local mode - delete each agent
-		var errs []string
-		var results []map[string]interface{}
-		for _, agentName := range args {
-			if err := deleteAgentLocal(agentName); err != nil {
-				errs = append(errs, fmt.Sprintf("%s: %v", agentName, err))
-				if isJSONOutput() {
-					results = append(results, map[string]interface{}{
-						"agent":  agentName,
-						"status": "error",
-						"error":  err.Error(),
-					})
-				}
-			} else if isJSONOutput() {
-				results = append(results, map[string]interface{}{
-					"agent":  agentName,
-					"status": "success",
-				})
-			}
-		}
-
-		if isJSONOutput() {
-			status := "success"
-			if len(errs) > 0 {
-				status = "partial"
-			}
-			return outputJSONResult(map[string]interface{}{
-				"status":  status,
-				"command": "delete",
-				"results": results,
-			}, len(errs) > 0, "failed to delete some agents")
-		}
-
-		if len(errs) > 0 {
-			return fmt.Errorf("failed to delete some agents:\n  %s", strings.Join(errs, "\n  "))
-		}
-		return nil
+		return deleteAgentsViaHub(hubCtx, args)
 	},
 }
 
@@ -339,6 +283,13 @@ func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bo
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
 	branchDeleted, err = agent.DeleteAgentFiles(agentName, projectPath, removeBranch)
+	if errors.Is(err, agent.ErrAgentProjectUnresolved) {
+		// The project has no local checkout here (for example a hub-native
+		// project reached with --project from another directory): there
+		// are no local files or sync state to clean up (ptone/scion#5083).
+		util.Debugf("delete: skipping local cleanup for agent %s: %v", agentName, err)
+		return false, nil
+	}
 
 	// Keep sync watermark current after a successful Hub delete. If hub server
 	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
@@ -618,149 +569,6 @@ func deleteStoppedViaHub(hubCtx *HubContext) error {
 	}
 
 	return deleteAgentsViaHub(hubCtx, agentNames)
-}
-
-// deleteStoppedLocal deletes every stopped agent of the project at
-// resolvedProjectPath through mgr (local mode, no Hub). In JSON mode it
-// writes one result document and, if any delete failed, exits non-zero
-// like the Hub path does.
-func deleteStoppedLocal(mgr agent.Manager, resolvedProjectPath string) error {
-	filters := map[string]string{
-		"scion.agent":        "true",
-		"scion.project_path": resolvedProjectPath,
-		"scion.project":      config.GetProjectName(resolvedProjectPath),
-	}
-
-	agents, err := mgr.List(context.Background(), filters)
-	if err != nil {
-		return err
-	}
-
-	results := []map[string]interface{}{}
-	var deleted, failed int
-	for _, a := range agents {
-		if a.ContainerID == "" {
-			continue // No container
-		}
-
-		// Get the canonical agent name from labels (Docker Names field has leading slash)
-		agentName := a.Labels["scion.name"]
-		if agentName == "" {
-			continue // Not a scion-managed container
-		}
-
-		// Skip running/provisioning agents
-		if a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseProvisioning) {
-			continue
-		}
-
-		statusf("Deleting stopped agent '%s' (status: %s)...\n", agentName, a.ContainerStatus)
-
-		targetProjectPath := a.ProjectPath
-		if targetProjectPath == "" {
-			targetProjectPath = resolvedProjectPath
-		}
-
-		branchDeleted, err := mgr.Delete(context.Background(), agentName, true, targetProjectPath, !preserveBranch)
-		if err != nil {
-			failed++
-			if isJSONOutput() {
-				results = append(results, map[string]interface{}{
-					"agent":  agentName,
-					"status": "error",
-					"error":  err.Error(),
-				})
-			} else {
-				fmt.Fprintf(os.Stderr, "Failed to delete agent '%s': %v\n", agentName, err)
-			}
-			continue
-		}
-
-		if branchDeleted {
-			statusf("Git branch associated with agent '%s' deleted.\n", agentName)
-		}
-		statusf("Agent '%s' deleted.\n", agentName)
-		deleted++
-		results = append(results, map[string]interface{}{
-			"agent":  agentName,
-			"status": "success",
-		})
-	}
-
-	if isJSONOutput() {
-		doc := map[string]interface{}{
-			"status":  "success",
-			"command": "delete",
-			"results": results,
-		}
-		if len(results) == 0 {
-			doc["message"] = "No stopped agents found."
-		} else if failed > 0 {
-			doc["status"] = "partial"
-		}
-		return outputJSONResult(doc, failed > 0, "failed to delete some stopped agents")
-	}
-
-	if deleted == 0 {
-		statusln("No stopped agents found.")
-	}
-	return nil
-}
-
-// textOutf prints a local delete progress line to stdout in text mode, as
-// scion delete always has, and prints nothing in JSON mode so stdout holds
-// only the JSON document.
-func textOutf(format string, a ...interface{}) {
-	if isJSONOutput() {
-		return
-	}
-	fmt.Printf(format, a...)
-}
-
-func deleteAgentLocal(agentName string) error {
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	textOutf("Deleting agent '%s'...\n", agentName)
-
-	// We check if it exists in List to provide better feedback
-	util.Debugf("delete: listing containers for %s", agentName)
-	listStart := time.Now()
-	agents, _ := mgr.List(context.Background(), map[string]string{"scion.name": agentName})
-	util.Debugf("delete: container list completed in %v", time.Since(listStart))
-	containerFound := false
-	for _, a := range agents {
-		if strings.EqualFold(a.Name, agentName) || a.ID == agentName || strings.EqualFold(strings.TrimPrefix(a.Name, "/"), agentName) {
-			containerFound = true
-			break
-		}
-	}
-
-	if !containerFound {
-		// Check if an agent directory exists on the filesystem, in any
-		// state-directory layout DeleteAgentFiles removes (including an
-		// external one, and a directory kept by stale-directory cleanup).
-		agentDirExists, err := agent.LocalAgentDirExists(agentName, projectPath)
-		if err != nil {
-			return err
-		}
-		if !agentDirExists {
-			return fmt.Errorf("agent '%s' not found", agentName)
-		}
-		textOutf("No container found, removing agent definition...\n")
-	}
-
-	branchDeleted, err := mgr.Delete(context.Background(), agentName, true, projectPath, !preserveBranch)
-	if err != nil {
-		return err
-	}
-
-	if branchDeleted {
-		textOutf("Git branch associated with agent '%s' deleted.\n", agentName)
-	}
-
-	textOutf("Agent '%s' deleted.\n", agentName)
-	return nil
 }
 
 var preserveBranch bool

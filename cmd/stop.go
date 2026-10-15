@@ -23,13 +23,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 )
 
@@ -82,15 +79,11 @@ has no effect.`,
 			if err != nil {
 				return err
 			}
-			if hubCtx != nil {
-				return stopAllAgentsViaHub(hubCtx)
-			}
-			return stopAllAgents()
+			return stopAllAgentsViaHub(hubCtx)
 		}
 
 		agentName := api.Slugify(args[0])
 
-		// Check if Hub should be used, excluding the target agent from sync requirements.
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
@@ -103,206 +96,8 @@ has no effect.`,
 			}
 		}
 
-		if hubCtx != nil {
-			return stopAgentViaHub(hubCtx, agentName)
-		}
-
-		// Local mode
-		rt := runtime.GetRuntime(projectPath, profile)
-		mgr := agent.NewManager(rt)
-
-		statusf("Stopping agent '%s'...\n", agentName)
-		if err := mgr.Stop(context.Background(), agentName, projectPath, ""); err != nil {
-			return err
-		}
-
-		_ = agent.UpdateAgentConfig(agentName, projectPath, "stopped", "", "")
-
-		if stopRm {
-			if _, err := mgr.Delete(context.Background(), agentName, true, projectPath, false); err != nil {
-				return err
-			}
-			if isJSONOutput() {
-				return outputJSON(ActionResult{
-					Status:  "success",
-					Command: "stop",
-					Agent:   agentName,
-					Message: fmt.Sprintf("Agent '%s' stopped and removed.", agentName),
-					Details: map[string]interface{}{"removed": true},
-				})
-			}
-			statusf("Agent '%s' stopped and removed.\n", agentName)
-		} else {
-			if isJSONOutput() {
-				return outputJSON(ActionResult{
-					Status:  "success",
-					Command: "stop",
-					Agent:   agentName,
-					Message: fmt.Sprintf("Agent '%s' stopped.", agentName),
-				})
-			}
-			statusf("Agent '%s' stopped.\n", agentName)
-		}
-
-		return nil
+		return stopAgentViaHub(hubCtx, agentName)
 	},
-}
-
-// stopAllAgents stops all running agents in the current project using the local runtime.
-func stopAllAgents() error {
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	filters := map[string]string{
-		"scion.agent": "true",
-	}
-
-	projectDir, _ := config.GetResolvedProjectDir(projectPath)
-	if projectDir != "" {
-		filters["scion.project_path"] = projectDir
-		filters["scion.project"] = config.GetProjectName(projectDir)
-	}
-
-	agents, err := mgr.List(context.Background(), filters)
-	if err != nil {
-		return err
-	}
-
-	// Filter for running agents
-	type runningAgent struct {
-		Name string
-	}
-	var running []runningAgent
-	for _, a := range agents {
-		if a.ContainerID == "" {
-			continue
-		}
-
-		agentName := a.Labels["scion.name"]
-		if agentName == "" {
-			continue
-		}
-
-		if a.Phase == string(state.PhaseRunning) {
-			running = append(running, runningAgent{Name: agentName})
-		}
-	}
-
-	// Without a Hub the project ID is unknown, so the current agent is
-	// matched by name (fail closed).
-	running, skipped := skipCurrentAgentForStopAllRm(running, "", func(ra runningAgent) []string {
-		return []string{ra.Name}
-	})
-
-	if len(running) == 0 {
-		return reportNoAgentsToStop(skipped)
-	}
-
-	if stopRm {
-		names := make([]string, len(running))
-		for i, ra := range running {
-			names[i] = ra.Name
-		}
-		if !confirmStopAllRm(names) {
-			// Declined: nothing is stopped; in JSON mode stdout stays empty.
-			return nil
-		}
-	}
-
-	type agentResult struct {
-		Name    string
-		Status  string
-		Error   string
-		Removed bool
-	}
-
-	var (
-		mu      sync.Mutex
-		results []agentResult
-	)
-
-	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
-	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
-		func(i int) {
-			name := running[i].Name
-
-			res := agentResult{Name: name, Status: "success"}
-
-			agentRt := runtime.GetRuntime(projectPath, profile)
-			agentMgr := agent.NewManager(agentRt)
-
-			if err := agentMgr.Stop(context.Background(), name, projectPath, ""); err != nil {
-				res.Status = "error"
-				res.Error = err.Error()
-				mu.Lock()
-				results = append(results, res)
-				mu.Unlock()
-				return
-			}
-
-			_ = agent.UpdateAgentConfig(name, projectPath, "stopped", "", "")
-
-			if stopRm {
-				if _, err := agentMgr.Delete(context.Background(), name, true, projectPath, false); err != nil {
-					res.Status = "error"
-					res.Error = fmt.Sprintf("stopped but failed to remove: %v", err)
-					mu.Lock()
-					results = append(results, res)
-					mu.Unlock()
-					return
-				}
-				res.Removed = true
-			}
-
-			mu.Lock()
-			results = append(results, res)
-			mu.Unlock()
-		}, func(int) {})
-
-	if isJSONOutput() {
-		jsonResults := make([]map[string]interface{}, len(results))
-		hasErrors := false
-		for i, r := range results {
-			entry := map[string]interface{}{
-				"agent":  r.Name,
-				"status": r.Status,
-			}
-			if r.Error != "" {
-				entry["error"] = r.Error
-				hasErrors = true
-			}
-			if r.Removed {
-				entry["removed"] = true
-			}
-			jsonResults[i] = entry
-		}
-		overallStatus := "success"
-		if hasErrors {
-			overallStatus = "partial"
-		}
-		return outputJSONResult(withSkippedAgents(map[string]interface{}{
-			"status":  overallStatus,
-			"command": "stop",
-			"results": jsonResults,
-		}, skipped), hasErrors, "failed to stop some agents")
-	}
-
-	var errs []string
-	for _, r := range results {
-		if r.Error != "" {
-			statusf("Agent '%s': error: %s\n", r.Name, r.Error)
-			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
-		} else if r.Removed {
-			statusf("Agent '%s' stopped and removed.\n", r.Name)
-		} else {
-			statusf("Agent '%s' stopped.\n", r.Name)
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("failed to stop some agents:\n  %s", strings.Join(errs, "\n  "))
-	}
-	return nil
 }
 
 // confirmStopAllRm lists the agents that stop --all --rm will stop and
