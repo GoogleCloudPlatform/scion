@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -518,4 +519,37 @@ func TestWaitForLifecycleOutcome_LaunchResultEndsWait(t *testing.T) {
 	ch <- done
 	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, sync, "d-1", "start", isStartTerminal)
 	assert.ErrorIs(t, err, ErrDispatchFailed, "a synchronous owner's done row alone does not end the wait")
+}
+
+// TestHubInstanceSnapshot_MaxFeaturesFitRowCap pins that Features, which
+// the cap never trims, fits the 4 KiB row cap at its own limits next to the
+// largest checks, DB block and integrations: the integrations are cut, the
+// features kept.
+func TestHubInstanceSnapshot_MaxFeaturesFitRowCap(t *testing.T) {
+	checks := map[string]string{}
+	for i := 0; i < api.BrokerHealthMaxChecks; i++ {
+		checks[fmt.Sprintf("%02d", i)+strings.Repeat("c", api.HubInstanceMaxCheckNameChars-2)] = "unavailable: detail"
+	}
+	var integrations []api.HubInstanceIntegration
+	for i := 0; i < api.HubInstanceMaxIntegrations; i++ {
+		integrations = append(integrations, api.HubInstanceIntegration{
+			Name:    fmt.Sprintf("%02d", i) + strings.Repeat("n", api.HubInstanceMaxIntegrationNameChars-2),
+			Health:  "unhealthy",
+			Version: strings.Repeat("v", api.HubInstanceMaxIntegrationVersionBytes),
+		})
+	}
+	var features []string
+	for i := 0; i < api.HubInstanceMaxFeatures; i++ {
+		features = append(features, fmt.Sprintf("%02d", i)+strings.Repeat("f", api.HubInstanceMaxFeatureBytes-2))
+	}
+	snap := hubInstanceSnapshotFromChecks(strings.Repeat("l", hubInstanceMaxLabelBytes), strings.Repeat("v", 100), checks,
+		api.HubInstanceStats{
+			DB:           &api.HubInstanceDBStats{InUse: 1 << 30, Idle: 1 << 30, MaxOpen: 1 << 30, WaitCount: 1 << 62},
+			Integrations: integrations,
+			Features:     features,
+		})
+	b, err := json.Marshal(snap)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(b), api.HubInstanceRowMaxBytes)
+	assert.Equal(t, features, snap.Stats.Features, "features are never cut")
 }
