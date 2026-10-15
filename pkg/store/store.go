@@ -497,6 +497,10 @@ type AgentStore interface {
 	SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error
 
 	// DeleteAgent removes an agent by ID.
+	// It does not deactivate the agent's delegation edges or service-account
+	// assignments, which have no foreign key to the agent. A caller must
+	// deactivate them first, in the same transaction; callers are limited to
+	// the allowlist of hack/check-store-delete-callers.sh.
 	// Returns ErrNotFound if the agent doesn't exist.
 	DeleteAgent(ctx context.Context, id string) error
 
@@ -1436,6 +1440,11 @@ type ProjectStore interface {
 	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
 
 	// DeleteProject removes a project by ID.
+	// It does not deactivate the delegation edges or service-account
+	// assignments of the project's agents, which have no foreign key to the
+	// agents. A caller must deactivate any that exist first, in the same
+	// transaction; callers are limited to the allowlist of
+	// hack/check-store-delete-callers.sh.
 	// Returns ErrNotFound if the project doesn't exist.
 	DeleteProject(ctx context.Context, id string) error
 

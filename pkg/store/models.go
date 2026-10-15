@@ -3906,8 +3906,12 @@ type AuthorityProvenance struct {
 type EdgeDeactivationCause string
 
 const (
-	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
-	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
+	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// Agent deletes deactivate only the edges where the agent is the
+	// delegate, and a project delete records agent_hard_delete on both
+	// sides. ValidEdgeDeactivationCause accepts it.
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
