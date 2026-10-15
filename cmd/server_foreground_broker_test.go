@@ -156,7 +156,7 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 		Hub: &config.HubClientConfig{BrokerID: "configured-broker"},
 	}
 
-	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, t.TempDir(), "cloudrun-default", nil)
+	got, err := resolveBrokerID(context.Background(), cfg, settings, nil, isolatedGlobalDir(t), "cloudrun-default", nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "configured-broker", got)

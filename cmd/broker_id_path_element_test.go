@@ -109,11 +109,25 @@ func TestBrokerLocalStatePaths_BrokerIDPathElement(t *testing.T) {
 	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "b-1"))
 }
 
+// isolatedGlobalDir points HOME at a fresh temporary directory and returns
+// the global settings directory under it, where UpdateSetting(..., true)
+// writes. It does not create the directory.
+func isolatedGlobalDir(t *testing.T) string {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	dir, err := config.GetGlobalDir()
+	require.NoError(t, err)
+	return dir
+}
+
 // assertNothingWritten fails when dir holds any file, so no settings file
-// of any name or format was created.
+// of any name or format was created there. A missing dir holds nothing.
 func assertNothingWritten(t *testing.T, dir, msg string, args ...any) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return
+	}
 	require.NoError(t, err)
 	assert.Empty(t, entries, append([]any{msg}, args...)...)
 }
@@ -127,14 +141,14 @@ func TestAdoptDedupedBrokerID_BrokerIDPathElement(t *testing.T) {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			globalDir := t.TempDir()
+			globalDir := isolatedGlobalDir(t)
 			err := adoptDedupedBrokerID(globalDir, id, func(string, ...any) {})
 			require.Error(t, err, "deduplicated broker ID %q adopted", id)
 			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
 			assertNothingWritten(t, globalDir, "settings written for deduplicated broker ID %q", id)
 		})
 	}
-	globalDir := t.TempDir()
+	globalDir := isolatedGlobalDir(t)
 	require.NoError(t, adoptDedupedBrokerID(globalDir, "11111111-2222-3333-4444-555555555555", func(string, ...any) {}))
 	gs, err := config.LoadSettings(globalDir)
 	require.NoError(t, err)
@@ -151,7 +165,7 @@ func TestRecoverEmbeddedBrokerID_BrokerIDPathElement(t *testing.T) {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			globalDir := t.TempDir()
+			globalDir := isolatedGlobalDir(t)
 			got, err := recoverEmbeddedBrokerID(globalDir, id, func(string, ...any) {})
 			require.Error(t, err, "recovered broker ID %q was used", id)
 			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
@@ -159,7 +173,7 @@ func TestRecoverEmbeddedBrokerID_BrokerIDPathElement(t *testing.T) {
 			assertNothingWritten(t, globalDir, "settings written for recovered broker ID %q", id)
 		})
 	}
-	globalDir := t.TempDir()
+	globalDir := isolatedGlobalDir(t)
 	got, err := recoverEmbeddedBrokerID(globalDir, "11111111-2222-3333-4444-555555555555", func(string, ...any) {})
 	require.NoError(t, err)
 	assert.Equal(t, "11111111-2222-3333-4444-555555555555", got)
@@ -185,7 +199,7 @@ func (s embeddedBrokerStore) FindEmbeddedBroker(context.Context) (*store.Runtime
 // ID resolution: no ID is generated in its place and no settings are
 // written.
 func TestResolveBrokerID_RecoveredIDNotPathElementRefuses(t *testing.T) {
-	globalDir := t.TempDir()
+	globalDir := isolatedGlobalDir(t)
 	got, err := resolveBrokerID(context.Background(), &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "", embeddedBrokerStore{id: "../x"})
 	require.Error(t, err, "broker ID resolution went on with recovered ID %q", "../x")
 	assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
@@ -214,7 +228,7 @@ func TestResolveBrokerID_ConfiguredIDNotPathElementRefuses(t *testing.T) {
 		"deterministic default": {&config.GlobalConfig{}, &config.Settings{}, nil, bad},
 	} {
 		t.Run(name, func(t *testing.T) {
-			globalDir := t.TempDir()
+			globalDir := isolatedGlobalDir(t)
 			got, err := resolveBrokerID(context.Background(), tc.cfg, tc.settings, tc.vsBroker, globalDir, tc.defaultID, nil)
 			require.Error(t, err, "broker ID resolution returned %q", got)
 			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
@@ -222,6 +236,13 @@ func TestResolveBrokerID_ConfiguredIDNotPathElementRefuses(t *testing.T) {
 			assertNothingWritten(t, globalDir, "settings written for configured broker ID %q", bad)
 		})
 	}
+
+	// A valid deterministic default is returned unchanged and not saved.
+	globalDir := isolatedGlobalDir(t)
+	got, err := resolveBrokerID(context.Background(), &config.GlobalConfig{}, &config.Settings{}, nil, globalDir, "11111111-2222-3333-4444-555555555555", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "11111111-2222-3333-4444-555555555555", got)
+	assertNothingWritten(t, globalDir, "settings written for a deterministic broker ID")
 }
 
 // TestPersistBrokerHubSettings_BrokerIDPathElement: a broker ID that is not
