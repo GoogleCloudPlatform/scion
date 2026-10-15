@@ -253,10 +253,14 @@ class MuseInstaller(scion_harness.PluginInstaller):
             return self._finish_install(plugin, self._parse(proc))
         except scion_harness.PluginInstallError as exc:
             return self._abandon(plugin, exc)
+        except Exception as exc:  # noqa: BLE001 - an unexpected bug must not orphan the install either
+            return self._abandon(plugin, scion_harness.PluginInstallError(
+                f"unexpected error after muse plugins install: {type(exc).__name__}: {exc}"))
 
     def _finish_install(self, plugin: scion_harness.AgentPlugin, doc: dict[str, Any]) -> dict[str, Any]:
         installed = doc.get("installed") if isinstance(doc.get("installed"), dict) else {}
-        for d in doc.get("diagnostics") or []:
+        diagnostics = doc.get("diagnostics")
+        for d in diagnostics if isinstance(diagnostics, list) else []:
             if isinstance(d, dict) and d.get("severity") == "warning" and d.get("message"):
                 self.ctx.warn(f"agent plugin {plugin.name}: muse: {d['message']}")
         if self._needs_approval(doc, installed):

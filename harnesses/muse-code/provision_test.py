@@ -626,6 +626,8 @@ class _FakeMuseCLI:
         self.remove_rc: int | None = None
         self.enable_rc = 0
         self.enable_noop = False
+        # Applied to the install JSON before it is printed (malformed output).
+        self.install_output_patch: dict = {}
 
     def _lockfile(self, env) -> str:
         return os.path.join(env["XDG_DATA_HOME"], "muse", "plugins", "installed.json")
@@ -715,8 +717,10 @@ class _FakeMuseCLI:
             installed = {k: v for k, v in rec.items()
                          if k not in ("source_format_version", "manifest_family", "cache_path")}
             installed.update({"cache_path": cache, "manifest_family": "agent-plugins"})
-            return done(0, {"diagnostics": diagnostics, "installed": installed,
-                            "lockfile_path": self._lockfile(env), "plugin": {"id": pid}, "warning": None})
+            out = {"diagnostics": diagnostics, "installed": installed,
+                   "lockfile_path": self._lockfile(env), "plugin": {"id": pid}, "warning": None}
+            out.update(self.install_output_patch)
+            return done(0, out)
         pid = rest[0]
         if rest[1:] != ["--json"]:
             return done(2, err="bad argv")
@@ -1000,6 +1004,32 @@ class TestMuseAgentPlugins(unittest.TestCase):
         self.assertTrue(inst.is_present("a", ref))
         self.assertFalse(inst.is_present("a", {**ref, "package_sha256": "sha256:other"}))
         self.assertTrue(inst.is_present("a", {**ref, "package_sha256": ""}))
+
+    def test_malformed_install_diagnostics_tolerated(self) -> None:
+        # Upstream review (GoogleCloudPlatform/scion#3726): a non-list
+        # diagnostics field must not raise; the install is still recorded.
+        for bad in (7, True, {"severity": "warning"}, "warning"):
+            with self.subTest(diagnostics=bad):
+                self.cli.install_output_patch = {"diagnostics": bad}
+                self.stage({"a": f"d-{bad!r}"})
+                warnings: list[str] = []
+                self.reconcile(warnings)
+                self.assertEqual(warnings, [])
+                self.assertIn("a", self.state())
+                self.assertTrue(self.registry()["a"]["enabled"])
+
+    def test_unexpected_error_after_install_does_not_orphan(self) -> None:
+        # Any unexpected exception after a successful `plugins install`
+        # goes through the same cleanup as a PluginInstallError.
+        from unittest import mock
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        with mock.patch.object(provision.MuseInstaller, "_needs_approval", side_effect=RuntimeError("boom")):
+            self.reconcile(warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("unexpected error after muse plugins install: RuntimeError: boom", warnings[0])
+        self.assertEqual(self.cli.calls[-1], ["muse", "plugins", "remove", "a", "--json"])
+        self.assertNotIn("a", self.registry())
 
     def test_mcp_diagnostics_surface_as_warnings(self) -> None:
         # muse <= 1.4.7 keeps Agent Plugins MCP servers inactive (M3).
