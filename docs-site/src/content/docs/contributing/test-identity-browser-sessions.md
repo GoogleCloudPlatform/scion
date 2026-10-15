@@ -3,7 +3,7 @@ title: Browser Sessions as Test Identities
 description: Using scion hub test-identity web-code and the e2e harness helpers to open a browser session as a test identity on a test hub.
 ---
 
-This guide is for anyone who writes browser tests (for example with Playwright) against a test hub. It shows how a browser context can hold a hub web session as a **test identity**: a short-lived synthetic member or viewer user the hub issues for testing. No sign-in provider and no test-login endpoint are involved.
+This guide is for anyone who writes browser tests (for example with Playwright) against a test hub. It shows how a browser context can hold a hub web session as a **test identity**: a short-lived synthetic member or viewer user the hub issues for testing. Admin test identities can hold one too, on systemd test hubs that opt in (see [Admin test identities](#admin-test-identities-systemd-test-hubs-only)). No sign-in provider and no test-login endpoint are involved.
 
 The flow has three steps:
 
@@ -146,7 +146,7 @@ await page.goto('/', { waitUntil: 'domcontentloaded' });
 
 ## Session lifetime and teardown
 
-The session ends when the identity expires, when it is deleted, or when the hub's key changes. There is no refresh. After that, the next request with the session cookie answers `401` (an API or `fetch` request) or shows a "session ended" page (a browser navigation).
+The session ends when the identity expires, when it is deleted, or when the hub's key changes; an admin identity's session also ends at its kind's maximum lifetime and on revoke-all. There is no refresh. After that, the next request with the session cookie answers `401` (an API or `fetch` request) or shows a "session ended" page (a browser navigation).
 
 To tear down, close the context's pages, then delete the identity:
 
@@ -154,6 +154,44 @@ To tear down, close the context's pages, then delete the identity:
 scion hub test-identity delete "$ID"
 rm -rf "$dir"
 ```
+
+## Admin test identities (systemd test hubs only)
+
+The admin kinds, a test hub-admin (`kind: test_hub_admin`) and a test super-admin (`kind: test_super_admin`), can hold a browser session too, through the same web-login code and redeem. This is off by default and has its own startup setting on top of the requirements above:
+
+- **The hub runs at an admin level.** A test hub-admin needs `--test-mode=admin:<hub-id>` or `super-admin:<hub-id>`; a test super-admin needs `super-admin:<hub-id>`.
+- **`server.hub.test_identities.admin_web_sessions` is set to the hub's own id** (the same hub id as in `--test-mode`), in the settings file or the environment:
+
+  ```yaml
+  server:
+    hub:
+      test_identities:
+        admin_web_sessions: <hub-id>
+  ```
+
+  The setting is read once at startup and is never writable through the settings API (`422`). The hub refuses to start when it is set and `--test-mode` is `off` or `member`, or when its value is another hub id. It never lowers the level and is never silently ignored.
+
+Admin browser sessions are for **systemd test hubs only**. The Helm chart renders only `--test-mode=member`, so a Helm-deployed hub with this setting refuses to start.
+
+At startup the hub logs whether admin browser sessions are enabled, and the `[scion-test-admin-audit]` startup line carries `admin_web_sessions`. `GET /api/v1/test-infra/status` reports `testAdminWebSessions: true` while a test hub-admin can open a browser session (a test super-admin also needs `testSuperAdmin: true`), and the admin health summary reports `hub.test_admin_web_sessions_enabled`.
+
+### Minting a code for an admin identity
+
+Minting a code for an admin identity takes the same issuer checks as issuing one: the caller is the identity's issuer (or a super-admin session), is at that moment an active super-admin through their own role bindings, and holds the kind's capability. An access token must have a hub boundary, exactly the kind's scope (`test_identity:issue_admin` or `test_identity:issue_super_admin`) and an age of at most 8 hours; a token with `test_identity:issue` gets `403` for an admin identity. Workload issuer delegations cannot mint codes for admin identities.
+
+```bash
+# SCION_HUB_TOKEN carries exactly test_identity:issue_admin
+scion hub test-identity web-code "$ADMIN_ID" --out "$dir/code.txt"
+```
+
+Redeem the code as in [Redeeming the code in Playwright](#redeeming-the-code-in-playwright).
+
+### Lifetime, revocation and audit
+
+- An admin browser session never lasts longer than the kind's maximum identity lifetime: 60 minutes for a test hub-admin, 30 minutes for a test super-admin. The hub checks this on every request, together with the identity's own expiry.
+- `POST /api/v1/test-identities/admin/revoke-all` ends every admin browser session on its next request (page, API or event stream), before it deletes the identities. The session generation of each admin identity is advanced first, so a session ends even while the identity's delete is still pending or was refused. If a generation cannot be advanced, revoke-all answers `503` and deletes or suspends nothing; retry it.
+- Every API request from an admin browser session is written to the `[scion-test-admin-audit]` lines like a request with the identity's own token (user, kind, issuance ID), with `credential: "web_session"` instead of `credential: "bearer"`. Policy refusals and mutation audit labels carry the same `credential` value.
+- The session's per-request token has exactly the authority of the identity's own token. The browser session adds the web UI, not permissions.
 
 ## Reference use in this repository
 

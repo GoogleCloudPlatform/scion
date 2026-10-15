@@ -395,20 +395,33 @@ func testIdentityTokenTTL(requestedSeconds int64, expiresAt, now time.Time) (tim
 // permission check, and the rule that a test fixture cannot itself issue.
 // It writes the response and returns false on refusal.
 func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (UserIdentity, bool) {
+	user, _, ok := s.testIdentityCallerFor(w, r, permissionTestIdentityIssue)
+	return user, ok
+}
+
+// testIdentityCallerFor is testIdentityCaller with a list of permissions:
+// the handler-level check admits the caller when one of perms is allowed
+// at hub scope. They are decided in order until the first allowed one, and
+// the returned map holds that one (permissions after it are not decided).
+// The handler then requires the permission the request actually needs (the
+// web-login code route: test_identity.issue for a member-tier identity,
+// the admin kind's capability for an admin-kind identity, decided by
+// testAdminWebCodeIssuer when the map does not already hold it).
+func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, perms ...string) (UserIdentity, map[string]bool, bool) {
 	ctx := r.Context()
 	if !s.testIdentities.enabled {
 		NotFound(w, "endpoint")
-		return nil, false
+		return nil, nil, false
 	}
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-		return nil, false
+		return nil, nil, false
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok || isNilIdentity(user) {
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-		return nil, false
+		return nil, nil, false
 	}
 	switch GetCredentialContextFromContext(ctx).Kind {
 	case CredentialKindInteractive, CredentialKindDev, CredentialKindUAT:
@@ -424,7 +437,7 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		if st == nil || !isScoped || scoped.ID() != st.delegation.GrantorID || scoped.CredentialID() != st.delegation.ID {
 			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "workload delegation state missing or inconsistent")
 			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-			return nil, false
+			return nil, nil, false
 		}
 		// Admin-scope delegations (phase X4) are issue-only: they reach
 		// POST /api/v1/test-identities/admin and nothing here (member
@@ -433,28 +446,44 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		if st.delegation.Scope != testIdentityDelegationScope {
 			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "admin-scope workload delegations are issue-only")
 			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-			return nil, false
+			return nil, nil, false
 		}
 	default:
 		// Fail closed: broker on-behalf-of, agent, federation and any
 		// unknown credential cannot issue test identities.
 		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "credential kind not admitted for test identity issuance")
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-		return nil, false
+		return nil, nil, false
 	}
-	// Defence in depth: the route guard already ran this decision.
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:      principalContextForIdentity(user),
-		Credential:     credentialContextForIdentity(user),
-		Resource:       Resource{Type: permissions.ResourceTestIdentity},
-		Action:         ActionIssue,
-		Permission:     permissionTestIdentityIssue,
-		TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue),
-	})
-	if !decision.Allowed {
-		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, decision.Reason)
+	// Defence in depth: the route guard already ran this decision. The
+	// permissions are decided in order and the first allowed one ends the
+	// loop, so a caller allowed the first never has the others decided
+	// (each decision writes a decision audit record); a handler that needs
+	// a later permission decides it itself (testAdminWebCodeIssuer).
+	allowed := make(map[string]bool, len(perms))
+	reason := ""
+	for _, p := range perms {
+		if len(allowed) > 0 {
+			break
+		}
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:      principalContextForIdentity(user),
+			Credential:     credentialContextForIdentity(user),
+			Resource:       Resource{Type: permissions.ResourceTestIdentity},
+			Action:         Action(permissionAction(p)),
+			Permission:     p,
+			TargetEvidence: hubCollectionEvidence(p),
+		})
+		if decision.Allowed {
+			allowed[p] = true
+		} else if reason == "" {
+			reason = decision.Reason
+		}
+	}
+	if len(allowed) == 0 {
+		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, reason)
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-		return nil, false
+		return nil, nil, false
 	}
 	// A test identity of any kind never issues test identities, whatever
 	// grant it may have been given. The kind is read through
@@ -463,12 +492,12 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 		logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "test identity cannot issue test identities")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "a test identity cannot issue test identities",
 			map[string]interface{}{"reason": testIdentityReasonFixtureCall})
-		return nil, false
+		return nil, nil, false
 	} else if err != nil {
 		InternalError(w)
-		return nil, false
+		return nil, nil, false
 	}
-	return user, true
+	return user, allowed, true
 }
 
 // testIdentitiesGate answers 404 while the feature is off. It wraps the

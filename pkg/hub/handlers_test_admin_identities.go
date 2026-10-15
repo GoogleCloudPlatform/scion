@@ -272,7 +272,11 @@ func testAdminRowRejection(ctx context.Context, kindFn func(context.Context, str
 // row block, from the row it read, and feeds mutation audit labels
 // (auditActorFromContext).
 type testAdminActor struct {
-	Kind               string
+	Kind string
+	// Credential names how the request authenticated: "web_session" for a
+	// token the web server minted for a test identity web session (WS4),
+	// "bearer" for the identity's own access token.
+	Credential         string
 	IssuerID           string
 	IssuerCredentialID string
 	IssuanceID         string
@@ -285,9 +289,30 @@ type testAdminActor struct {
 
 type testAdminActorKey struct{}
 
-// contextWithTestAdminActor records u's immutable issuance facts on ctx.
-func contextWithTestAdminActor(ctx context.Context, u *store.User) context.Context {
-	a := testAdminActor{Kind: u.Kind, IdentityID: u.ID}
+// Values of testAdminActor.Credential.
+const (
+	testAdminCredentialBearer     = "bearer"
+	testAdminCredentialWebSession = "web_session"
+)
+
+// testAdminCredentialFor returns testAdminActor.Credential for a hub-issued
+// user token's client type. An admin-kind identity has no OAuth, test-login
+// or refresh path, so its only token with client type web is the one the
+// web server mints per request for its web session
+// (testIdentityAccessToken); its own access token is issued with client
+// type api. The client type is a signed claim, and it is used here for the
+// audit record only, never for an authorization decision.
+func testAdminCredentialFor(clientType ClientType) string {
+	if clientType == ClientTypeWeb {
+		return testAdminCredentialWebSession
+	}
+	return testAdminCredentialBearer
+}
+
+// contextWithTestAdminActor records u's immutable issuance facts on ctx,
+// and how the request authenticated (testAdminCredentialFor).
+func contextWithTestAdminActor(ctx context.Context, u *store.User, credential string) context.Context {
+	a := testAdminActor{Kind: u.Kind, Credential: credential, IdentityID: u.ID}
 	if u.ExpiresAt != nil {
 		a.ExpiresAt = *u.ExpiresAt
 	}
@@ -324,6 +349,7 @@ func (a testAdminActor) labels() string {
 	return boundedLabelsJSON(map[string]string{
 		"test_tier":            "admin",
 		"kind":                 a.Kind,
+		"credential":           a.Credential,
 		"issuer_id":            a.IssuerID,
 		"issuer_credential_id": a.IssuerCredentialID,
 		"issuance_id":          a.IssuanceID,
@@ -962,9 +988,11 @@ var errTestAdminSinkWrite = errors.New("test admin audit sink write failed")
 // handleRevokeAllTestAdminIdentities handles POST
 // /api/v1/test-identities/admin/revoke-all: the emergency stop of admin
 // tier design §3.3, for a human super-admin on an interactive session (or
-// dev credential) only. It deletes every admin-kind identity, live or
-// expired, with every grant stamped with its issuance (admin tier A3), its
-// role bindings, group memberships and user-scope data,
+// dev credential) only. It first bumps the session generation of every
+// admin-kind identity, so their browser web sessions end on their next
+// request (WS4), then deletes every admin-kind identity, live or expired,
+// with every grant stamped with its issuance (admin tier A3), its role
+// bindings, group memberships and user-scope data,
 // and writes a test_admin_revoke audit record and sink line for each. An
 // identity the user delete refuses (it owns agents, or is a project's last
 // owner) is instead suspended and stripped of its role bindings in one
@@ -1003,6 +1031,22 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// End every live browser session of these identities first (WS4): each
+	// row's session generation is bumped, on its own write, before any
+	// delete. A web session snapshots the generation at redeem and is
+	// refused on its next request (page, API or event stream) once the row
+	// moves on, even while the row delete below is still pending or is
+	// refused. It fails closed: if any bump fails, nothing is deleted and
+	// the answer is 503, so revoke-all never reports a revocation that may
+	// have left a live session behind. A row already gone needs no bump.
+	for i := range users {
+		if err := s.store.IncrementSessionGeneration(ctx, users[i].ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.ErrorContext(ctx, "test admin revoke-all: session generation bump failed; no identity deleted or suspended", "test_identity_id", users[i].ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"test admin revoke-all could not end every identity's web sessions; no identity was deleted or suspended; retry", nil)
+			return
+		}
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	now := s.testIdentities.clock()

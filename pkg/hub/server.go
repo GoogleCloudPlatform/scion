@@ -411,6 +411,12 @@ type ServerConfig struct {
 	// EnableTestIdentities and TestAdminGate differ from what the level
 	// grants. The zero value is off.
 	TestMode TestModeConfig
+	// TestAdminWebSessions is the admin-kind web session setting
+	// (server.hub.test_identities.admin_web_sessions, ptone/scion#4240
+	// phase WS4) cmd validated at startup. New refuses it unless the level
+	// is admin or super-admin and its hub id equals HubID
+	// (test_admin_web_sessions.go). The zero value is off.
+	TestAdminWebSessions TestAdminWebSessionsConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -1926,6 +1932,10 @@ type Server struct {
 	// (test_mode.go).
 	testMode testModeState
 
+	// testAdminWeb is the immutable admin-kind web session switch captured
+	// by New (test_admin_web_sessions.go).
+	testAdminWeb testAdminWebState
+
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
 	testAdminIssuance testAdminIssuanceState
@@ -2305,6 +2315,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The switches must be exactly what the resolved --test-mode grants,
 	// and the member preconditions it carries must hold.
 	if err := ValidateTestModeConfig(cfg); err != nil {
+		return nil, err
+	}
+	// Admin-kind web sessions (WS4): only at an admin level, bound to this
+	// hub's id.
+	if err := validateTestAdminWebSessionsConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Workload issuer allowlist and issuer audience (X2, X4): refuse a
@@ -2702,6 +2717,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
 	}
 	srv.testMode = newTestModeState(testModeCfg)
+	// Admin-kind web sessions (WS4) need the test admin audit sink, which
+	// records every session-originated admin request.
+	if cfg.TestAdminWebSessions.requested() && (srv.testAdminAudit == nil || srv.testAdminAudit.out == nil) {
+		return nil, ErrTestAdminWebSessionsRequiresAuditSink
+	}
+	srv.testAdminWeb = testAdminWebState{on: cfg.TestAdminWebSessions.requested()}
+	srv.logTestAdminWebSessionState()
 	// One startup line through the test admin audit sink for any level but
 	// off: the gate-start banner for the admin levels (it carries the level
 	// and preconditions too), the test-mode line for member.

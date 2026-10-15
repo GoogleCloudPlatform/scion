@@ -457,7 +457,7 @@ func TestTestAdmin_IssuedRowBindingAndAudit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, byActor, "a mutation under the admin-kind identity is audited")
 	// The same labels straight from the context the row block builds.
-	direct := auditActorFromContext(contextWithTestAdminActor(ctx, u))
+	direct := auditActorFromContext(contextWithTestAdminActor(ctx, u, testAdminCredentialBearer))
 	byActor = append(byActor, &store.MutationAuditRecord{CredentialLabels: direct.CredentialLabels, CorrelationID: direct.CorrelationID})
 	for _, r := range byActor {
 		var labels map[string]string
