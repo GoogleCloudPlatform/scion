@@ -83,7 +83,7 @@ func TestTestInfraMark_WritesMarkerAndAuditRow(t *testing.T) {
 func TestTestAdminGate_ReadsMarkerFromConfiguredStore(t *testing.T) {
 	_, client := tiaMarkDB(t)
 	ctx := context.Background()
-	hubCfg := hub.ServerConfig{HubID: tiaCmdHubID}
+	hubCfg := hub.ServerConfig{HubID: tiaCmdHubID, HubIDPinned: true}
 	gateCfg := &config.GlobalConfig{}
 	gateCfg.Hub.HubClass = config.HubClassTest
 
@@ -117,4 +117,10 @@ func TestTestAdminGate_ReadsMarkerFromConfiguredStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.EnableTestIdentities)
 	assert.False(t, res.TestAdminGate.HubAdmin)
+
+	// TM-h: the same hub with a derived (unpinned) id is refused before
+	// the marker is read.
+	hubCfg.HubIDPinned = false
+	_, err = resolveTestMode(testModeInputsFor(ctx, gateCfg, hubCfg, true, client2))
+	assert.ErrorIs(t, err, hub.ErrTestModeHubIDNotPinned)
 }
