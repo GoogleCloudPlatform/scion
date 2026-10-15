@@ -523,6 +523,75 @@ func TestCarryOverSkillsDir_SkipsPythonBytecode(t *testing.T) {
 	}
 }
 
+func TestCarryOverSkillsDir_SkipsAgentPluginDirs(t *testing.T) {
+	home := t.TempDir()
+	oldDir, newDir := filepath.Join(home, ".claude/skills"), filepath.Join(home, ".codex/skills")
+	writeSkill(t, oldDir, "one", "1")
+	// An Agent Plugins bundle installed by the claude harness: root
+	// plugin.json, generated .claude-plugin/, bundle skills below it.
+	writeSkill(t, filepath.Join(oldDir, "acme.tools", "skills"), "deploy", "d")
+	for path, content := range map[string]string{
+		"acme.tools/plugin.json":                `{"name":"acme.tools"}`,
+		"acme.tools/.claude-plugin/plugin.json": `{"name":"acme.tools"}`,
+	} {
+		p := filepath.Join(oldDir, path)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory named plugin.json, or a symlinked plugin.json, is not the
+	// mark of a bundle: those entries are still carried as skills.
+	writeSkill(t, oldDir, "dirmark", "2")
+	if err := os.MkdirAll(filepath.Join(oldDir, "dirmark", "plugin.json"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, oldDir, "linkmark", "3")
+	if err := os.Symlink("SKILL.md", filepath.Join(oldDir, "linkmark", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	copied, err := carryOverSkillsDir(home, ".claude/skills", ".codex/skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(copied)
+	if strings.Join(copied, ",") != "dirmark,linkmark,one" {
+		t.Fatalf("copied = %v, want [dirmark linkmark one]", copied)
+	}
+	if _, err := os.Lstat(filepath.Join(newDir, "acme.tools")); !os.IsNotExist(err) {
+		t.Fatalf("plugin dir carried into the new skills dir (err=%v)", err)
+	}
+	if got, ok := readSkill(t, newDir, "one"); !ok || got != "1" {
+		t.Fatalf("skill one = %q, %v", got, ok)
+	}
+}
+
+func TestCarryOverSkillsDir_OnlyAgentPluginDirs(t *testing.T) {
+	home := t.TempDir()
+	oldDir := filepath.Join(home, ".claude/skills")
+	p := filepath.Join(oldDir, "scion-smoke", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	copied, err := carryOverSkillsDir(home, ".claude/skills", ".codex/skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copied) != 0 {
+		t.Fatalf("copied = %v, want none", copied)
+	}
+	// Nothing was carried, so the new skills dir is not created.
+	if _, err := os.Lstat(filepath.Join(home, ".codex/skills")); !os.IsNotExist(err) {
+		t.Fatalf("new skills dir created (err=%v)", err)
+	}
+}
+
 // TestStart_HarnessConfigSwitchLogsCarryOverSummary checks that the
 // harness-config carry-over at Start logs the number of skills it copied
 // and none of their names.

@@ -52,7 +52,7 @@ The Runtime Broker's heartbeat lists agents on each runtime with its own deadlin
 
 ### Agent-Level Kubernetes Configuration
 
-Per-agent Kubernetes settings (the agent's `scion-agent.yaml` or `scion create --config`):
+Per-agent Kubernetes settings, in the `kubernetes:` block of an agent's inline config (`--config` or the create request). A template's `kubernetes:` block is ignored with a warning: Kubernetes settings are part of the agent's environment, which comes from settings and profiles.
 
 ```yaml
 kubernetes:
