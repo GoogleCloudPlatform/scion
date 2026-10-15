@@ -983,7 +983,7 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 			brokerRunning = true
 		}
 		if err := cleanupAfterDeregister(os.Stdout, multiStore.Dir(), remaining, listErr, brokerRunning,
-			brokerDeregisterPurgeLocal, brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), brokerID)); err != nil {
+			brokerDeregisterPurgeLocal, brokerLocalStatePathsFor(globalDir, brokerID)); err != nil {
 			return fmt.Errorf("broker '%s' was deregistered, but %w", brokerID, err)
 		}
 	}
@@ -998,6 +998,13 @@ func brokerScionHome(globalDir string) string {
 		return filepath.Join(home, ".scion")
 	}
 	return globalDir
+}
+
+// brokerLocalStatePathsFor is brokerLocalStatePaths for this host: the
+// default scion home and the configured state root.
+func brokerLocalStatePathsFor(globalDir, brokerID string) []string {
+	home := brokerScionHome(globalDir)
+	return brokerLocalStatePaths(globalDir, home, configuredBrokerStateRoot(home), brokerID)
 }
 
 // purgeLocalBrokerStateOnly runs 'deregister --purge-local' when there is
@@ -1026,7 +1033,7 @@ func purgeLocalBrokerStateOnly(cmd *cobra.Command, selected string) error {
 			selected, filepath.Join(credsDir, selected+".json"))
 	}
 	return cleanupAfterDeregister(os.Stdout, credsDir, excludeConnection(conns, selected), listErr, running, true,
-		brokerLocalStatePaths(globalDir, brokerScionHome(globalDir), getLocalBrokerID()))
+		brokerLocalStatePathsFor(globalDir, getLocalBrokerID()))
 }
 
 // brokerConnectionsLeft returns the credentials store directory and the hub

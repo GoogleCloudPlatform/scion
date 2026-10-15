@@ -2059,6 +2059,12 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// StateDir is the base directory of this broker's runtime state (launch
+	// journal, dispatch attempts, pending env-gather); the broker uses
+	// <state_dir>/<broker-id>. Empty means ~/.scion/runtime-broker-state.
+	// Must be absolute or start with ~/. Flat Runtime Broker instances do
+	// not use it. Read at startup.
+	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
 	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
@@ -4361,6 +4367,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Broker.ContainerHubEndpoint != "" {
 			gc.RuntimeBroker.ContainerHubEndpoint = v1.Broker.ContainerHubEndpoint
 		}
+		if v1.Broker.StateDir != "" {
+			gc.RuntimeBroker.StateDir = v1.Broker.StateDir
+		}
 		if v1.Broker.BrokerID != "" {
 			gc.RuntimeBroker.BrokerID = v1.Broker.BrokerID
 		}
@@ -4750,6 +4759,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		WriteTimeout:                  gc.RuntimeBroker.WriteTimeout.String(),
 		HubEndpoint:                   gc.RuntimeBroker.HubEndpoint,
 		ContainerHubEndpoint:          gc.RuntimeBroker.ContainerHubEndpoint,
+		StateDir:                      gc.RuntimeBroker.StateDir,
 		BrokerID:                      gc.RuntimeBroker.BrokerID,
 		BrokerName:                    gc.RuntimeBroker.BrokerName,
 		AllowContainerScriptHarnesses: &gc.RuntimeBroker.AllowContainerScriptHarnesses,

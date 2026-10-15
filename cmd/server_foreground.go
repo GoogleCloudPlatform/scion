@@ -292,6 +292,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateServerPreflight(cfg); err != nil {
 		return err
 	}
+	if err := validateBrokerStateDir(cfg); err != nil {
+		return err
+	}
 
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
@@ -3865,6 +3868,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		return err
 	}
 	if len(flatInstances) > 0 {
+		if warning := flatInstancesStateDirWarning(cfg); warning != "" {
+			log.Printf("WARNING: %s", warning)
+		}
 		autoProvide := serverAutoProvide
 		if enableHub && !cmd.Flags().Changed("auto-provide") {
 			autoProvide = true
@@ -4058,6 +4064,13 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		log.Printf("WARNING: %s", warning)
 	}
 
+	// The broker's state directory: <server.broker.state_dir>/<broker-id>,
+	// or the default when the setting is empty (validated at preflight).
+	rhStateDir, err := brokerStateDir(cfg.RuntimeBroker.StateDir, brokerID)
+	if err != nil {
+		return err
+	}
+
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,
@@ -4073,6 +4086,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,

@@ -153,10 +153,10 @@ func TestBrokerHubConnectionDisplayStatus(t *testing.T) {
 }
 
 func TestBrokerLocalStatePaths(t *testing.T) {
-	paths := brokerLocalStatePaths("/g", "/h/.scion", "b-1")
+	paths := brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", "b-1")
 	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, paths)
 	for _, bad := range []string{"", "..", "a/b"} {
-		assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", bad), bad)
+		assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", bad), bad)
 	}
 }
 
@@ -171,7 +171,7 @@ func brokerStateFixture(t *testing.T) (home string, paths []string) {
 	for _, f := range []string{"broker.log", "settings.yaml", "hub-id", "runtime-broker-state/b-1/state.db"} {
 		require.NoError(t, os.WriteFile(filepath.Join(home, f), []byte("x"), 0o644))
 	}
-	return home, brokerLocalStatePaths(home, home, "b-1")
+	return home, brokerLocalStatePaths(home, home, filepath.Join(home, "runtime-broker-state"), "b-1")
 }
 
 func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
