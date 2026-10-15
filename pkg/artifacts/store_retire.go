@@ -37,6 +37,12 @@ const (
 	EventGrantRemoved  = "grant_removed"
 	EventLinkRevoked   = "link_revoked"
 	EventMoved         = "moved"
+	// EventGrantCreated, EventGrantChanged and EventLinkCreated record who
+	// gave access, and by what authority (ptone/scion#4882). A link_created
+	// event carries the link id and expiry, never the token or its hash.
+	EventGrantCreated = "grant_created"
+	EventGrantChanged = "grant_changed"
+	EventLinkCreated  = "link_created"
 )
 
 // Event actor kinds: the principal kinds, and system for the hub's own
@@ -50,7 +56,20 @@ const (
 	AuthorityCustodianProjectAdmin = "custodian_project_admin"
 	AuthorityRetention             = "retention"
 	AuthorityReconciler            = "reconciler"
+	// AuthorityStewardProjectOwner and AuthorityStewardDelegator are the
+	// steward clauses (design D25): an owner of the home project of an
+	// artifact owned by an agent (artifact.steward there), and the user who
+	// delegated to that agent and holds a role that reads in the home
+	// project. See Stewardship.
+	AuthorityStewardProjectOwner = "steward_project_owner"
+	AuthorityStewardDelegator    = "steward_delegator"
 )
+
+// isSteward reports whether authority is a steward clause. A steward may
+// share within bounds: no admin grant, no move (design D25).
+func isSteward(authority string) bool {
+	return authority == AuthorityStewardProjectOwner || authority == AuthorityStewardDelegator
+}
 
 // Actor is who makes a change the store records in artifact_event, and by
 // what authority. Every store write that changes an artifact's lifetime,
@@ -60,7 +79,65 @@ type Actor struct {
 	Kind      string
 	Ref       string
 	Authority string
+	// Expect, when set, is the artifact state Authority was decided
+	// against. The store checks it under the artifact's lock and refuses
+	// the write with ErrStewardPrecondition when the artifact has moved or
+	// changed owner since. The service sets it for every steward authority
+	// (callerActor) and leaves it zero for the owner and admin grantees,
+	// whose authority does not depend on the home or owner (design 4.5).
+	Expect Expect
 }
+
+// Expect is the precondition of a store write made under a steward
+// authority: the artifact's home scope, owner kind and owner ref when the
+// authority was decided. The zero value checks nothing.
+type Expect struct {
+	ScopeRef  string
+	OwnerKind string
+	OwnerRef  string
+}
+
+// set reports whether e asks for a check.
+func (e Expect) set() bool { return e != Expect{} }
+
+// expectFor returns the precondition of a steward write on a.
+func expectFor(a *Artifact) Expect {
+	return Expect{ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef}
+}
+
+// stewardActor reports whether actor acts under a steward authority.
+func stewardActor(actor *Actor) bool { return actor != nil && isSteward(actor.Authority) }
+
+// checkExpect checks, inside tx and after the artifact's lock is taken,
+// that the artifact still matches actor's Expect. It answers
+// ErrStewardPrecondition on a mismatch, and nil when the actor carries no
+// Expect. A steward actor without one is refused (errNoExpect): a steward
+// write never commits unchecked.
+func (s *sqlStore) checkExpect(ctx context.Context, tx *sql.Tx, artifactID string, actor *Actor) error {
+	if actor == nil {
+		return nil
+	}
+	if !actor.Expect.set() {
+		if stewardActor(actor) {
+			return errNoExpect
+		}
+		return nil
+	}
+	var scope, ownerKind, ownerRef string
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind, owner_ref FROM artifact WHERE id = ?`),
+		artifactID).Scan(&scope, &ownerKind, &ownerRef); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("artifacts: read home and owner: %w", err)
+	}
+	if (Expect{ScopeRef: scope, OwnerKind: ownerKind, OwnerRef: ownerRef}) != actor.Expect {
+		return ErrStewardPrecondition
+	}
+	return nil
+}
+
+var errNoExpect = errors.New("artifacts: a steward write needs the state its authority was decided against")
 
 func (a *Actor) valid() bool {
 	return a != nil && a.Kind != "" && a.Ref != "" && a.Authority != ""
@@ -182,6 +259,15 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 		q += ` AND scope_ref = ?`
 		args = append(args, opts.ScopeRef)
 	}
+	if stewardActor(opts.Actor) && !opts.Actor.Expect.set() {
+		return DeleteResult{}, errNoExpect
+	}
+	if e := opts.Actor.Expect; e.set() {
+		// The steward precondition (design 4.5), in the same conditional
+		// update that deletes, so it is checked under the row's lock.
+		q += ` AND scope_ref = ? AND owner_kind = ? AND owner_ref = ?`
+		args = append(args, e.ScopeRef, e.OwnerKind, e.OwnerRef)
+	}
 	r, err := tx.ExecContext(ctx, s.rebind(q), args...)
 	if err != nil {
 		return DeleteResult{}, fmt.Errorf("artifacts: delete artifact: %w", err)
@@ -191,6 +277,16 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 		return DeleteResult{}, fmt.Errorf("artifacts: delete artifact: %w", err)
 	}
 	if n != 1 {
+		if opts.Actor.Expect.set() {
+			var live int
+			if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact WHERE id = ? AND deleted_at IS NULL`),
+				artifactID).Scan(&live); err != nil {
+				return DeleteResult{}, fmt.Errorf("artifacts: delete artifact: %w", err)
+			}
+			if live > 0 {
+				return DeleteResult{}, ErrStewardPrecondition
+			}
+		}
 		return DeleteResult{}, ErrNotFound
 	}
 	var res DeleteResult

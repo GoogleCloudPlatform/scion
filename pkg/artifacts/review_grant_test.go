@@ -235,7 +235,7 @@ func TestReviewGrantNeverReplacesGrant(t *testing.T) {
 		t.Run(perm, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
 			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
-				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false); err != nil {
+				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false, testActor); err != nil {
 				t.Fatal(err)
 			}
 			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)),
@@ -271,13 +271,13 @@ type movingReviewStore struct {
 	to string
 }
 
-func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string, actor *Actor) (bool, error) {
 	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
 		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
 			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
 		return false, err
 	}
-	return m.Store.PutReviewGrant(ctx, g, max, home)
+	return m.Store.PutReviewGrant(ctx, g, max, home, actor)
 }
 
 // TestReviewGrantHomeUnderLock: authority checked against the old home
@@ -340,12 +340,12 @@ type deletingReviewStore struct {
 	db *sql.DB
 }
 
-func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string, actor *Actor) (bool, error) {
 	s := d.Store.(*sqlStore)
 	if _, err := d.db.ExecContext(ctx, s.rebind("UPDATE artifact SET deleted_at = ? WHERE id = ?"), s.timeArg(time.Now()), g.ArtifactID); err != nil {
 		return false, err
 	}
-	return d.Store.PutReviewGrant(ctx, g, max, home)
+	return d.Store.PutReviewGrant(ctx, g, max, home, actor)
 }
 
 // TestReviewGrantArtifactDeletedMeanwhile: an artifact deleted between the
@@ -412,7 +412,7 @@ func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
 // after the handler's checks.
 type replacingReviewStore struct{ Store }
 
-func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string) (bool, error) {
+func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string, *Actor) (bool, error) {
 	return false, ErrReviewReplacesAccess
 }
 
@@ -477,7 +477,7 @@ func TestReviewGrantSubjectCannotReadDespiteOtherGrants(t *testing.T) {
 		{"another user holds a read grant", func(f *fixture, id string) { f.grantPrincipal(id, reviewer) }},
 		{"subject holds a review grant only", func(f *fixture, id string) {
 			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
-				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false); err != nil {
+				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false, testActor); err != nil {
 				t.Fatal(err)
 			}
 		}},

@@ -23,9 +23,12 @@ import (
 )
 
 // CreateLink implements Store.
-func (s *sqlStore) CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time) error {
+func (s *sqlStore) CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time, actor *Actor) error {
 	if g == nil || g.SubjectKind != SubjectLink || g.Permission != GrantRead || g.ExpiresAt == nil || g.SubjectRef == "" {
 		return errors.New("artifacts: CreateLink needs a read link grant with an expiry and a token hash")
+	}
+	if !actor.valid() {
+		return errNoActor
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -46,6 +49,9 @@ func (s *sqlStore) CreateLink(ctx context.Context, g *Grant, maxLinks int, now t
 		}
 		return ErrNotFound
 	}
+	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
+		return err
+	}
 	at := s.timeArg(now)
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
 		WHERE artifact_id = ? AND subject_kind = ? AND expires_at <= ?`), g.ArtifactID, SubjectLink, at); err != nil {
@@ -65,6 +71,13 @@ func (s *sqlStore) CreateLink(ctx context.Context, g *Grant, maxLinks int, now t
 		g.ID, g.ArtifactID, g.SubjectKind, g.SubjectRef, g.Permission, s.nullTimeArg(g.ExpiresAt),
 		nullString(g.CreatedByRef), s.timeArg(g.CreatedAt)); err != nil {
 		return fmt.Errorf("artifacts: insert link: %w", err)
+	}
+	// The event names the link by its id and expiry: never the token, which
+	// is not stored, nor its hash.
+	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventLinkCreated, actor, now, map[string]any{
+		"linkId": g.ID, "expiresAt": g.ExpiresAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano),
+	}); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("artifacts: commit link: %w", err)
@@ -143,6 +156,9 @@ func (s *sqlStore) RevokeLink(ctx context.Context, artifactID, linkID string, ac
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return err
+	}
+	if err := s.checkExpect(ctx, tx, artifactID, actor); err != nil {
 		return err
 	}
 	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant

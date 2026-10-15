@@ -43,17 +43,17 @@ func (s *sqlStore) lockLiveArtifact(ctx context.Context, tx *sql.Tx, artifactID 
 }
 
 // PutGrant implements Store.
-func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (bool, error) {
-	return s.putGrant(ctx, g, maxGrants, crossScope, "")
+func (s *sqlStore) PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (bool, error) {
+	return s.putGrant(ctx, g, maxGrants, crossScope, "", actor)
 }
 
 // PutReviewGrant implements Store.
-func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (bool, error) {
+func (s *sqlStore) PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (bool, error) {
 	if g == nil || g.SubjectKind != SubjectPrincipal || !strings.HasPrefix(g.SubjectRef, PrincipalKindUser+":") ||
 		g.Permission != GrantReview || home == "" {
 		return false, errors.New("artifacts: PutReviewGrant needs a user principal grant with review permission and a home scope")
 	}
-	return s.putGrant(ctx, g, maxGrants, false, home)
+	return s.putGrant(ctx, g, maxGrants, false, home, actor)
 }
 
 // validGrantPermission reports whether p is a permission a principal or
@@ -78,10 +78,16 @@ func reviewSubjectOK(p, kind, ref string) bool {
 // review grant never replaces a read, write or admin grant on either path:
 // the subject's one principal row would lose the read the review counts
 // with.
-func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string) (bool, error) {
+func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, reviewHome string, actor *Actor) (bool, error) {
 	if g == nil || (g.SubjectKind != SubjectPrincipal && g.SubjectKind != SubjectScope) || g.SubjectRef == "" ||
 		!validGrantPermission(g.Permission) || !reviewSubjectOK(g.Permission, g.SubjectKind, g.SubjectRef) {
 		return false, errors.New("artifacts: PutGrant needs a principal or scope grant with a permission (review: a user principal only)")
+	}
+	if !actor.valid() {
+		return false, errNoActor
+	}
+	if stewardActor(actor) && g.Permission == GrantAdmin {
+		return false, ErrStewardActionNotAllowed
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -99,6 +105,11 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		if home != reviewHome || ownerKind != PrincipalKindAgent {
 			return false, ErrReviewGrantRefused
 		}
+	}
+	// The review path checks its own home and owner first, so its refusal
+	// stays ErrReviewGrantRefused.
+	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
+		return false, err
 	}
 	if g.SubjectKind == SubjectScope {
 		var home string
@@ -126,8 +137,16 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		if g.Permission == GrantReview && perm != GrantReview {
 			return false, ErrReviewReplacesAccess
 		}
-		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
-			return false, fmt.Errorf("artifacts: update grant: %w", err)
+		if perm != g.Permission {
+			if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), g.Permission, id); err != nil {
+				return false, fmt.Errorf("artifacts: update grant: %w", err)
+			}
+			if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantChanged, actor, time.Now(), map[string]any{
+				"grantId": id, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef,
+				"oldPermission": perm, "newPermission": g.Permission,
+			}); err != nil {
+				return false, err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return false, fmt.Errorf("artifacts: commit grant: %w", err)
@@ -146,6 +165,11 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		return false, ErrTooManyGrants
 	}
 	if err := s.insertGrant(ctx, tx, g); err != nil {
+		return false, err
+	}
+	if err := s.insertEvent(ctx, tx, g.ArtifactID, EventGrantCreated, actor, time.Now(), map[string]any{
+		"grantId": g.ID, "subjectKind": g.SubjectKind, "subjectRef": g.SubjectRef, "permission": g.Permission,
+	}); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -176,6 +200,9 @@ func (s *sqlStore) DeleteGrant(ctx context.Context, artifactID, grantID string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return err
+	}
+	if err := s.checkExpect(ctx, tx, artifactID, actor); err != nil {
 		return err
 	}
 	var home int
@@ -230,6 +257,9 @@ func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u Arti
 	if (u.HomeGrant != nil || u.SetExpiry) && !u.Actor.valid() {
 		return nil, errNoActor
 	}
+	if u.HomeGrant != nil && stewardActor(u.Actor) {
+		return nil, ErrStewardActionNotAllowed
+	}
 	now := time.Now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -237,6 +267,9 @@ func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u Arti
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return nil, err
+	}
+	if err := s.checkExpect(ctx, tx, artifactID, u.Actor); err != nil {
 		return nil, err
 	}
 	if u.HomeGrant != nil {

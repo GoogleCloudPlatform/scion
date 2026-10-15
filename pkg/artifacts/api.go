@@ -71,6 +71,16 @@ type ArtifactResponse struct {
 	// CanManage, on a GET of the artifact or of one of its versions, is
 	// true when the caller may share and change it (see canAdminister).
 	CanManage bool `json:"canManage,omitempty"`
+	// CanShare, on a GET of the artifact or of one of its versions, is true
+	// when the caller may share it: CanManage, or a steward of an artifact
+	// owned by an agent (design D25), who may give view, review and edit
+	// grants, create share links, change the expiry and delete, but not
+	// give admin or move it.
+	CanShare bool `json:"canShare,omitempty"`
+	// ShareAuthority, when the caller is a steward and CanManage is false,
+	// names the steward clause: "project_owner" (an owner of the home
+	// project) or "delegator" (the user who delegated to the owning agent).
+	ShareAuthority string `json:"shareAuthority,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
 	// true when the caller may publish new versions of it of any kind
 	// (edit, upload or review; see canWriteErr): the decision POST

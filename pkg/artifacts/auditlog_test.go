@@ -253,7 +253,7 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 		authority string
 	}{
 		{delegator, reviewerID, logAuthorityStewardDelegator},
-		{projAdmin, memberID, logAuthorityStewardProjectOwner},
+		{projAdmin, memberID, reviewGrantProjectAdminAuthority},
 	} {
 		f.host.mu.Lock()
 		f.host.calls = nil
@@ -749,7 +749,8 @@ type noClauseHost struct {
 }
 
 // TestDecisionLogReviewGrantUnnamedClause: on a host that does not name the
-// clause, a review grant is logged without an authority, and the
+// clause, a review grant is logged (and recorded) with the authority
+// reviewGrantUnnamedAuthority, and the
 // host is asked once (MayGrantReview), never a second question.
 func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
@@ -763,7 +764,7 @@ func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
 	}
 	entries, _ := c.take(t)
 	checkEntry(t, "unnamed clause", one(t, "unnamed clause", entries), "INFO", map[string]any{
-		logKeyAction: logActionGrantCreated, logKeyAuthority: nil, logKeyPrincipalID: delegator.ref,
+		logKeyAction: logActionGrantCreated, logKeyAuthority: reviewGrantUnnamedAuthority, logKeyPrincipalID: delegator.ref,
 	})
 	f.host.mu.Lock()
 	defer f.host.mu.Unlock()

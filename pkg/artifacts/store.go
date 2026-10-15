@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -56,6 +57,21 @@ var ErrReviewReplacesAccess = errors.New("artifacts: a review grant cannot repla
 // ErrCrossScopeDisabled is returned by PutGrant for a scope grant to a
 // scope other than the artifact's home while sharing across scopes is off.
 var ErrCrossScopeDisabled = errors.New("artifacts: sharing with other scopes is off")
+
+// ErrStewardPrecondition is returned by a store write made under a steward
+// authority (Actor.Expect set) when, under the artifact's lock, its home
+// or owner no longer matches the state the authority was decided against
+// (a concurrent move or ownership transfer). It wraps ErrNotFound, so a
+// caller that maps ErrNotFound to 404 answers it the same way, as for a
+// concurrent delete; nothing is written.
+var ErrStewardPrecondition = fmt.Errorf("%w: the artifact's home or owner changed", ErrNotFound)
+
+// ErrStewardActionNotAllowed is returned by a store write made under a
+// steward authority that a steward may never make: an admin grant
+// (PutGrant) or a move (UpdateArtifact). The service refuses both before
+// the store is asked; the store refuses them again so no other path can
+// make them.
+var ErrStewardActionNotAllowed = errors.New("artifacts: a steward may not give admin or move an artifact")
 
 // ErrTooManyPending is returned by CreateVersion when an artifact already
 // has the maximum number of pending versions.
@@ -365,7 +381,9 @@ type Store interface {
 	// before now, and it refuses with ErrTooManyLinks when maxLinks
 	// unexpired links remain. It returns ErrNotFound when the artifact is
 	// absent or deleted.
-	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time) error
+	// It records a link_created event by actor (required) in the same
+	// transaction, with the link id and expiry, never the token or its hash.
+	CreateLink(ctx context.Context, g *Grant, maxLinks int, now time.Time, actor *Actor) error
 
 	// ResolveLink returns the link grant whose subject ref is tokenHash
 	// together with its artifact, in one query, provided that at now the
@@ -394,7 +412,12 @@ type Store interface {
 	// refuses with ErrTooManyGrants when adding would exceed maxGrants
 	// principal and scope grants, and returns ErrNotFound when the artifact
 	// is absent or deleted.
-	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool) (created bool, err error)
+	// In the same transaction it records, by actor (required), a
+	// grant_created event, or a grant_changed event with the old and new
+	// permission when an existing grant's permission changes (none when
+	// it already had g's permission). An actor with a steward authority
+	// may not give admin (ErrStewardActionNotAllowed).
+	PutGrant(ctx context.Context, g *Grant, maxGrants int, crossScope bool, actor *Actor) (created bool, err error)
 
 	// PutReviewGrant is PutGrant for a review grant (design D24): g must
 	// be a review grant to a user principal. Under the artifact's lock it
@@ -403,7 +426,8 @@ type Store interface {
 	// PutGrant it refuses with ErrReviewReplacesAccess when the user already
 	// holds a principal grant other than review on it (a read, write or
 	// admin grant is never replaced this way).
-	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string) (created bool, err error)
+	// It records its events like PutGrant.
+	PutReviewGrant(ctx context.Context, g *Grant, maxGrants int, home string, actor *Actor) (created bool, err error)
 
 	// DeleteGrant deletes principal or scope grant grantID of artifact
 	// artifactID. It returns ErrNotFound when there is no such grant, and
