@@ -21,7 +21,7 @@ provisioner:
   interface_version: 1
   lib: vendored
   command: ["python3", "/home/scion/.scion/harness/provision.py"]
-  timeout: 30s
+  timeout: 60s
   lifecycle_events:
     - pre-start
   required_image_tools:
@@ -74,6 +74,7 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP not implemented; entries demoted to global" }
   resume: { support: "partial", reason: "Interactive slash command only, no CLI flag" }
+  agent_plugins: { support: "partial", reason: "Skills install natively via muse plugins install; muse <=1.4.9 keeps Agent Plugins MCP servers inactive" }
 
 no_auth:
   behavior: drop-to-shell

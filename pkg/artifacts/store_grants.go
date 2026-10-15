@@ -91,6 +91,9 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
 		return false, err
 	}
+	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
+		return false, err
+	}
 	if reviewHome != "" {
 		var home, ownerKind string
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
@@ -121,9 +124,8 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
-		if reviewHome != "" && perm != GrantReview {
-			return false, ErrReviewGrantRefused
-		}
+		// PutReviewGrant's grant is always a review grant, so this refuses
+		// it too.
 		if g.Permission == GrantReview && perm != GrantReview {
 			return false, ErrReviewReplacesAccess
 		}
@@ -240,6 +242,9 @@ func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u Arti
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
 		return nil, err
 	}
+	if err := s.refuseAttachmentTx(ctx, tx, artifactID); err != nil {
+		return nil, err
+	}
 	if u.HomeGrant != nil {
 		if err := s.moveArtifact(ctx, tx, artifactID, u.HomeGrant, u.MaxGrants, u.Actor, now); err != nil {
 			return nil, err
@@ -338,40 +343,40 @@ func (s *sqlStore) moveArtifact(ctx context.Context, tx *sql.Tx, artifactID stri
 }
 
 // SweepExpired implements Store.
-func (s *sqlStore) SweepExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+func (s *sqlStore) SweepExpired(ctx context.Context, now time.Time, limit int) ([]ArtifactRef, error) {
 	if limit <= 0 {
-		return 0, nil
+		return nil, nil
 	}
 	at := s.timeArg(now)
-	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id FROM artifact
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id, scope_ref FROM artifact
 		WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?
 		ORDER BY expires_at LIMIT `+strconv.Itoa(limit)), at)
 	if err != nil {
-		return 0, fmt.Errorf("artifacts: find expired: %w", err)
+		return nil, fmt.Errorf("artifacts: find expired: %w", err)
 	}
-	var ids []string
+	var found []ArtifactRef
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var ref ArtifactRef
+		if err := rows.Scan(&ref.ID, &ref.ScopeRef); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("artifacts: scan expired: %w", err)
+			return nil, fmt.Errorf("artifacts: scan expired: %w", err)
 		}
-		ids = append(ids, id)
+		found = append(found, ref)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("artifacts: find expired: %w", err)
+		return nil, fmt.Errorf("artifacts: find expired: %w", err)
 	}
-	swept := 0
-	for _, id := range ids {
-		_, err := s.DeleteArtifact(ctx, id, DeleteOptions{Actor: &retentionActor, ExpiredAt: &now, Now: now})
+	var swept []ArtifactRef
+	for _, ref := range found {
+		_, err := s.DeleteArtifact(ctx, ref.ID, DeleteOptions{Actor: &retentionActor, ExpiredAt: &now, Now: now})
 		switch {
 		case errors.Is(err, ErrNotFound):
 			// Deleted meanwhile, or its expiry moved since it was found.
 		case err != nil:
 			return swept, err
 		default:
-			swept++
+			swept = append(swept, ref)
 		}
 	}
 	return swept, nil

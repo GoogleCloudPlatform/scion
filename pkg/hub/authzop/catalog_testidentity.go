@@ -108,7 +108,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.webcode.issue",
 		Domain:      "testidentity",
-		Description: "Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available",
+		Description: "Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/web-login-code", Method: "POST"},
 		},
@@ -120,7 +120,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
+			Description: "Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
@@ -133,6 +133,8 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentityWeb_Mint"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_RefusedWithoutSetting"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_MintNeedsTheKindsIssuerChecks"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeForOwnIdentity"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_RevokedAfterAuthMintsNothing"},
@@ -142,7 +144,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.delete",
 		Domain:      "testidentity",
-		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven",
+		Description: "Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}", Method: "DELETE"},
 		},
@@ -154,7 +156,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: the same 200 empty report for any ID the caller may not purge)",
+			Description: "Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: an admin-kind identity too, and the same 200 empty report for any ID the caller may not purge); test identities of every kind are refused as callers",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
@@ -205,7 +207,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.admin.revokeall",
 		Domain:      "testidentity",
-		Description: "Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session",
+		Description: "Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin/revoke-all", Method: "POST"},
 		},
@@ -231,6 +233,32 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestAdmin_RevokeAll"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_RevokeAllEndsLiveSession"},
+		},
+		Bearer: SessionOnly(ReasonCredentialManagement),
+	},
+	{
+		ID:          "testidentity.admin.residue",
+		Domain:      "testidentity",
+		Description: "Read the residue report of an admin-kind test identity, live or purged: the grants and resources stamped with it, and its changes to rows without its stamp, for a human super-admin session",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin/{id}/residue", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue_admin",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only a human caller holding an active super-admin binding, on an interactive session; only admin-kind identities are reported",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestTestAdminA3_ResidueRoute"},
 		},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},

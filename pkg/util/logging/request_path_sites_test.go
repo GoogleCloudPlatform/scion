@@ -56,6 +56,7 @@ type requestPathSite struct {
 
 var requestPathSites = []requestPathSite{
 	{"service.go", "Service.ServeHTTP", "URL.EscapedPath", 1, "routing: the artifact service splits the escaped path into route segments"},
+	{"auditlog.go", "routeTemplate", "URL.EscapedPath", 1, "classification only: maps the path to a constant route template for the artifact decision log; no path segment is logged"},
 	{"read.go", "serveFile", "URL(bare)", 1, "not a request URL: the signed object-store URL a file read redirects to"},
 	{"admin_allow_list.go", "Server.handleAdminAllowListByEmail", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"admin_invites.go", "Server.handleAdminInviteByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
@@ -132,9 +133,9 @@ var requestPathSites = []requestPathSite{
 	{"storage_helpers.go", "rewriteLocalDownloadURLs", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"storage_helpers.go", "rewriteLocalUploadURLs", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"suspended_page.go", "WebServer.suspendedUserMiddleware", "URL.Path", 1, "comparison: lets the suspended page and its assets through"},
-	{"template_blobs.go", "Server.generateTemplateDownloadURLs", "URL(bare)", 1, "not a request URL: a signed storage URL field"},
-	{"template_blobs.go", "Server.generateTemplateUploadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
-	{"template_blobs.go", "rewriteLocalTemplateDownloadURLs", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
+	{"template_blobs.go", "Server.generateBlobRowDownloadURLs", "URL(bare)", 1, "not a request URL: a signed storage URL field"},
+	{"template_blobs.go", "generateStagingUploadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
+	{"template_blobs.go", "rewriteLocalBlobDownloadURLs", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"template_handlers.go", "Server.handleTemplateByIDV2", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.Path", 1, "comparison: confines a workload delegation token to the test identity issuance routes (not logged)"},
 	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.RawPath", 1, "comparison: refuses an escaped path for the workload delegation route check (not logged)"},

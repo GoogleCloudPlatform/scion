@@ -255,9 +255,9 @@ func TestStoreSweepExpired(t *testing.T) {
 		if err := st.CreateLink(ctx, linkGrant(expired.ID, LinkTokenHash("e"), future), 5, now.Add(-2*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		n, err := st.SweepExpired(ctx, now, 10)
-		if err != nil || n != 1 {
-			t.Fatalf("SweepExpired: %d %v", n, err)
+		ids, err := st.SweepExpired(ctx, now, 10)
+		if err != nil || len(ids) != 1 || ids[0] != (ArtifactRef{ID: expired.ID, ScopeRef: expired.ScopeRef}) {
+			t.Fatalf("SweepExpired: %v %v", ids, err)
 		}
 		if _, err := st.GetArtifact(ctx, expired.ID); !errors.Is(err, ErrNotFound) {
 			t.Errorf("expired artifact still live: %v", err)
@@ -270,8 +270,8 @@ func TestStoreSweepExpired(t *testing.T) {
 				t.Errorf("unexpired artifact swept: %v", err)
 			}
 		}
-		if n, _ := st.SweepExpired(ctx, now, 10); n != 0 {
-			t.Errorf("second sweep: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 10); len(ids) != 0 {
+			t.Errorf("second sweep: %d", len(ids))
 		}
 		// The limit bounds one pass.
 		for range 3 {
@@ -280,11 +280,11 @@ func TestStoreSweepExpired(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if n, _ := st.SweepExpired(ctx, now, 2); n != 2 {
-			t.Errorf("limited sweep: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 2); len(ids) != 2 {
+			t.Errorf("limited sweep: %d", len(ids))
 		}
-		if n, _ := st.SweepExpired(ctx, now, 0); n != 0 {
-			t.Errorf("zero limit: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 0); len(ids) != 0 {
+			t.Errorf("zero limit: %d", len(ids))
 		}
 	})
 }
@@ -438,21 +438,21 @@ func TestStorePutReviewGrant(t *testing.T) {
 			SubjectRef: "user:read", Permission: GrantRead, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:read") != GrantRead {
+		if _, err := st.PutReviewGrant(ctx, review("user:read"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:read") != GrantRead {
 			t.Errorf("replace read: %v %q", err, permOf("user:read"))
 		}
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:adm", Permission: GrantAdmin, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:adm"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:adm") != GrantAdmin {
+		if _, err := st.PutReviewGrant(ctx, review("user:adm"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:adm") != GrantAdmin {
 			t.Errorf("lower admin: %v %q", err, permOf("user:adm"))
 		}
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 			SubjectRef: "user:wr", Permission: GrantWrite, CreatedAt: time.Now()}, 10, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewGrant(ctx, review("user:wr"), 10, "project-1"); !errors.Is(err, ErrReviewGrantRefused) || permOf("user:wr") != GrantWrite {
+		if _, err := st.PutReviewGrant(ctx, review("user:wr"), 10, "project-1"); !errors.Is(err, ErrReviewReplacesAccess) || permOf("user:wr") != GrantWrite {
 			t.Errorf("lower write: %v %q", err, permOf("user:wr"))
 		}
 		// Authority checked for another home does not apply.

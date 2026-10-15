@@ -238,6 +238,7 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, nil, false
 	}
 	if authority == "" {
+		s.logAdminRefusal(r, logActionAdminister, a)
 		s.writeAdminForbidden(w, r)
 		return b, nil, nil, false
 	}
@@ -246,7 +247,12 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 
 // adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused.
+// artifact and every refusal, and never why this caller was refused. One
+// narrow exception (ptone/scion#5119): a caller that holds review-grant
+// authority on an artifact owned by an agent, asking for a well-formed
+// review grant, learns when the user cannot read the artifact
+// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
+// grant (CodeReviewReplacesAccess); see putReviewGrant.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
 	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 
@@ -327,7 +333,7 @@ func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, _, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -371,6 +377,9 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		Permission: GrantRead, ExpiresAt: &exp, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	switch err := b.store.CreateLink(r.Context(), g, MaxLinksPerArtifact, now); {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyLinks):
 		writeError(w, http.StatusConflict, "too_many_links",
 			"the artifact already has "+strconv.Itoa(MaxLinksPerArtifact)+" active share links; revoke one first")
@@ -383,6 +392,7 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not create the link")
 		return
 	}
+	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
 		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
@@ -462,6 +472,7 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		slog.ErrorContext(r.Context(), "artifacts: revoke link failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not revoke the link")
 	default:
+		s.logLink(r, a, logActionLinkRevoked, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

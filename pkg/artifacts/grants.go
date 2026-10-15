@@ -61,6 +61,24 @@ import (
 // because the user holds a principal read, write or admin grant.
 const CodeReviewReplacesAccess = "review_replaces_access"
 
+// reviewReplacesAccessMessage is the text of a CodeReviewReplacesAccess
+// refusal, on the manager path (handlePutGrant, with 400) and the review
+// path (putReviewGrant, with 403).
+const reviewReplacesAccessMessage = "a review grant cannot replace a user's read, write or admin grant"
+
+// CodeReviewSubjectCannotRead is the error code of a review grant refused
+// on the review path (putReviewGrant) because the user cannot read the
+// artifact through the home project or a grant to one of their projects
+// (ptone/scion#5119). Only a caller already proven to hold review-grant
+// authority gets it.
+const CodeReviewSubjectCannotRead = "review_subject_cannot_read"
+
+// reviewSubjectCannotReadMessage is the text of a
+// CodeReviewSubjectCannotRead refusal. The hub knows the user only by id,
+// so it does not name them.
+const reviewSubjectCannotReadMessage = "This user cannot read this artifact. Review access is only for people who can already read it " +
+	"(members of its home project, or of a project it is shared with)."
+
 // MaxGrantsPerArtifact caps the principal and scope grants of one
 // artifact, the home project's included.
 const MaxGrantsPerArtifact = 100
@@ -254,19 +272,21 @@ func (s *Service) handleListGrants(w http.ResponseWriter, r *http.Request, id st
 // created the grant and 200 when it changed an existing grant's
 // permission. A caller that can read the artifact but not administer it
 // may still give review access to an agent-owned artifact
-// (putReviewGrant); every other request from it answers the same 403.
+// (putReviewGrant); every other request from it answers the same 403,
+// apart from the refusals putReviewGrant names for a caller with that
+// authority.
 func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	allowed, err := s.canAdminister(r.Context(), b, a)
+	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return
 	}
-	if !allowed {
+	if authority == "" {
 		s.putReviewGrant(w, r, b, a)
 		return
 	}
@@ -293,6 +313,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if req.SubjectKind == SubjectScope && !home && !s.crossScopeAllowed(r.Context()) {
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
@@ -311,12 +332,15 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
 		return
 	case errors.Is(err, ErrReviewReplacesAccess):
-		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess,
-			"a review grant cannot replace a user's read, write or admin grant")
+		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
+		return
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
 		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
@@ -334,6 +358,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	if created {
 		status = http.StatusCreated
 	}
+	s.logGrantPut(r, a, g, created, authority)
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
 }
 
@@ -348,15 +373,31 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // review is never replaced, so the grant never takes away the read it
 // counts with. The owning agent itself, like every agent,
 // is refused (sharing is user-only). The caller's credential must permit
-// artifact.manage in the home scope, as for an administrator. Every
-// refusal, a malformed body and a subject that cannot read included, is
-// the 403 a non-administrator gets today, so the request says nothing
-// about why. The store re-checks the home and owner under the artifact's
-// lock and never replaces an existing read, write or admin grant.
+// artifact.manage in the home scope, as for an administrator.
+//
+// A caller that fails reviewGrantSubject (no review-grant authority, or a
+// malformed body) gets the 403 a non-administrator gets, so the request
+// says nothing about why. Only a caller that passed it, and so holds
+// review-grant authority, learns why its well-formed grant was refused
+// (ptone/scion#5119): code CodeReviewSubjectCannotRead when the user
+// cannot read the artifact, and code CodeReviewReplacesAccess when the
+// user holds a principal read, write or admin grant. A refusal by the
+// store's re-check of the home and owner under the artifact's lock keeps
+// the uniform 403. Every 403 here is logged once (logReviewGrantRefusal).
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
+	var clause string // the review clause that allowed the grant, for the decision log
+	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
 	ctx := r.Context()
-	subject, ok := s.reviewGrantSubject(r, a)
-	if !ok {
+	subject, refusal := s.reviewGrantSubject(r, a)
+	if refusal != "" {
+		s.logReviewGrantRefusal(ctx, a, refusal, subject)
+		s.writeAdminForbidden(w, r)
+		return
+	}
+	if _, ok := s.host.(ReviewSubjectAuthority); !ok {
+		// Without the subject check nobody passes it (fail closed), but
+		// saying the user cannot read would not be true: the uniform 403.
+		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	}
@@ -367,7 +408,21 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		return
 	}
 	if !readable {
-		s.writeAdminForbidden(w, r)
+		// The read check leaves the user's own principal grant out, so a
+		// user whose only read is a read grant lands here too: name the
+		// grant, not the read.
+		held, err := s.reviewSubjectHoldsAccess(ctx, b, a, subject)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: review grant: list grants failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
+			return
+		}
+		if held {
+			s.refuseReviewReplacesAccess(w, r, a, subject)
+			return
+		}
+		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
+		writeError(w, http.StatusForbidden, CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
 		return
 	}
 	kind, ref, _, _ := s.host.Principal(ctx)
@@ -377,10 +432,17 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	}
 	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef)
 	switch {
-	case errors.Is(err, ErrReviewGrantRefused), errors.Is(err, ErrReviewReplacesAccess):
-		// Both refusals give the uniform 403, whichever store check runs
-		// first.
+	case errors.Is(err, ErrReviewReplacesAccess):
+		s.refuseReviewReplacesAccess(w, r, a, subject)
+		return
+	case errors.Is(err, ErrReviewGrantRefused):
+		// The home or owner changed since the caller's authority was
+		// checked: the uniform 403.
+		s.logReviewGrantRefusal(ctx, a, reviewRefusalStoreRefused, subject)
 		s.writeAdminForbidden(w, r)
+		return
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
 		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
@@ -394,11 +456,35 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
+	s.logGrantPut(r, a, g, created, reviewGrantLogAuthority(clause))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
+}
+
+// refuseReviewReplacesAccess logs and answers putReviewGrant's refusal of
+// a user who holds a principal read, write or admin grant on a.
+func (s *Service) refuseReviewReplacesAccess(w http.ResponseWriter, r *http.Request, a *Artifact, subject string) {
+	s.logReviewGrantRefusal(r.Context(), a, reviewRefusalExistingAccess, subject)
+	writeError(w, http.StatusForbidden, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
+}
+
+// reviewSubjectHoldsAccess reports whether the user principal subject
+// holds a principal grant other than review on a, one a review grant
+// would replace.
+func (s *Service) reviewSubjectHoldsAccess(ctx context.Context, b backend, a *Artifact, subject string) (bool, error) {
+	gs, err := b.store.ListGrants(ctx, a.ID)
+	if err != nil {
+		return false, err
+	}
+	for _, g := range gs {
+		if g.SubjectKind == SubjectPrincipal && g.SubjectRef == subject && g.Permission != GrantReview {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // reviewGrantCaller reports whether the caller of ctx is one that
@@ -419,10 +505,20 @@ func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 // reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
 // lets the caller of ctx give review access on a (the delegating user of
 // a's owning agent, the project owners and admins of a's home project, and
-// super-admins). A host without the authority answers no.
+// super-admins). A host without the authority answers no. A host with
+// ReviewGrantClauser is asked that instead, and the clause is kept for the
+// decision log when ctx carries a reviewClauseNote (putReviewGrant).
 func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
-	authority, ok := s.host.(ReviewGrantAuthority)
-	return ok && authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef)
+	clause := reviewClauseUnnamed
+	if clauser, ok := s.host.(ReviewGrantClauser); ok {
+		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef)
+	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+		clause = ""
+	}
+	if note, ok := ctx.Value(reviewClauseNote{}).(*string); ok {
+		*note = clause
+	}
+	return clause != ""
 }
 
 // mayGrantReview is the caller half of the review-grant decision (design
@@ -436,41 +532,45 @@ func (s *Service) mayGrantReview(ctx context.Context, a *Artifact) bool {
 }
 
 // reviewGrantSubject decides putReviewGrant's request: it returns the user
-// principal ref to give a review grant when every condition holds,
-// cheapest first and the host's authority last, and ok=false otherwise:
+// principal ref to give a review grant and an empty refusal when every
+// condition holds, cheapest first and the host's authority last, and the
+// refusal reason otherwise:
 //   - the caller passes reviewGrantCaller (a is owned by an agent; the
 //     caller is a user whose credential permits artifact.manage in a's
-//     home scope);
-//   - the body is exactly a principal review grant to a user;
-//   - the caller passes reviewGrantAuthorized.
+//     home scope), else reviewRefusalCaller;
+//   - the body is exactly a principal review grant to a user, else
+//     reviewRefusalBody;
+//   - the caller passes reviewGrantAuthorized, else reviewRefusalCaller.
 //
-// Without the body checks this is mayGrantReview.
-func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (string, bool) {
+// With a refusal, subject is the well-formed user ref the body named when
+// the body checks passed, and empty otherwise. Without the body checks
+// this is mayGrantReview.
+func (s *Service) reviewGrantSubject(r *http.Request, a *Artifact) (subject string, refusal reviewGrantRefusal) {
 	ctx := r.Context()
 	if !s.reviewGrantCaller(ctx, a) {
-		return "", false
+		return "", reviewRefusalCaller
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxGrantRequestBytes+1))
 	if err != nil || len(body) > maxGrantRequestBytes {
-		return "", false
+		return "", reviewRefusalBody
 	}
 	var req GrantRequest
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil || dec.More() {
-		return "", false
+		return "", reviewRefusalBody
 	}
 	if req.SubjectKind != SubjectPrincipal || req.Permission != GrantReview {
-		return "", false
+		return "", reviewRefusalBody
 	}
 	pk, id, found := strings.Cut(req.SubjectRef, ":")
 	if !found || pk != PrincipalKindUser || !validSubjectID(id) {
-		return "", false
+		return "", reviewRefusalBody
 	}
 	if !s.reviewGrantAuthorized(ctx, a) {
-		return "", false
+		return req.SubjectRef, reviewRefusalCaller
 	}
-	return req.SubjectRef, true
+	return req.SubjectRef, ""
 }
 
 // handleDeleteGrant implements DELETE /{id}/grants/{grantId}.
@@ -483,6 +583,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 	if !ok {
 		return
 	}
+	removed := s.grantForLog(r, b, a, grantID)
 	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
@@ -492,6 +593,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		slog.ErrorContext(r.Context(), "artifacts: delete grant failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not remove the grant")
 	default:
+		s.logGrantRemoved(r, a, removed, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -537,10 +639,12 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if !canCreateIn(ctx, s.host, scope) {
+			s.logRefusal(r, logActionMove, logReasonNotAuthorizedInScope, a)
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}
 		if !s.crossScopeAllowed(ctx) {
+			s.logRefusal(r, logActionMove, logReasonCrossProjectDisabled, a)
 			writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 				"moving artifacts to other projects is turned off on this hub")
 			return
@@ -561,6 +665,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 		if !s.patchStored(w, r, err) {
 			return
 		}
+		s.logPatch(r, a, updated, u)
 	}
 	resp := PatchArtifactResponse{Artifact: artifactInfo(updated)}
 	if updated.ExpiresAt != nil {
@@ -592,6 +697,8 @@ func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error)
 		return true
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the owner already has an artifact with this key in that project")
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")

@@ -411,6 +411,12 @@ type ServerConfig struct {
 	// EnableTestIdentities and TestAdminGate differ from what the level
 	// grants. The zero value is off.
 	TestMode TestModeConfig
+	// TestAdminWebSessions is the admin-kind web session setting
+	// (server.hub.test_identities.admin_web_sessions, ptone/scion#4240
+	// phase WS4) cmd validated at startup. New refuses it unless the level
+	// is admin or super-admin and its hub id equals HubID
+	// (test_admin_web_sessions.go). The zero value is off.
+	TestAdminWebSessions TestAdminWebSessionsConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -1660,6 +1666,10 @@ type Server struct {
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
 	conduit atomic.Pointer[conduitRuntime]
+	// conduitStartFailure is set when the in-process relay failed to start
+	// (SetConduitRelayStartFailure): the setting key that caused it, or ""
+	// when the cause was not one setting. nil: no failure recorded.
+	conduitStartFailure atomic.Pointer[string]
 	// conduitExternal is the hub's conduit runtime in external relay mode
 	// (conduit_external.go): routing to separate relays, no relay of its
 	// own. At most one of conduit and conduitExternal is set.
@@ -1832,6 +1842,9 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
+	// artifactAttachmentRetirer keeps the attachment retirement's position
+	// between passes of the artifact maintenance loop (its only user).
+	artifactAttachmentRetirer artifacts.AttachmentRetirer
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -1918,6 +1931,10 @@ type Server struct {
 	// testMode is the immutable resolved --test-mode level captured by New
 	// (test_mode.go).
 	testMode testModeState
+
+	// testAdminWeb is the immutable admin-kind web session switch captured
+	// by New (test_admin_web_sessions.go).
+	testAdminWeb testAdminWebState
 
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
@@ -2048,6 +2065,9 @@ type Server struct {
 
 	// Dedicated message logger for message audit trail (nil = uses messageLog fallback)
 	dedicatedMessageLog *slog.Logger
+
+	// Dedicated artifact decision logger (nil = entries are discarded)
+	artifactDecisionLog *slog.Logger
 
 	// missingAgents and lifecycleOps back the heartbeat missing-container
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
@@ -2290,6 +2310,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The switches must be exactly what the resolved --test-mode grants,
 	// and the member preconditions it carries must hold.
 	if err := ValidateTestModeConfig(cfg); err != nil {
+		return nil, err
+	}
+	// Admin-kind web sessions (WS4): only at an admin level, bound to this
+	// hub's id.
+	if err := validateTestAdminWebSessionsConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Workload issuer allowlist and issuer audience (X2): refuse a
@@ -2683,6 +2708,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
 	}
 	srv.testMode = newTestModeState(testModeCfg)
+	// Admin-kind web sessions (WS4) need the test admin audit sink, which
+	// records every session-originated admin request.
+	if cfg.TestAdminWebSessions.requested() && (srv.testAdminAudit == nil || srv.testAdminAudit.out == nil) {
+		return nil, ErrTestAdminWebSessionsRequiresAuditSink
+	}
+	srv.testAdminWeb = testAdminWebState{on: cfg.TestAdminWebSessions.requested()}
+	srv.logTestAdminWebSessionState()
 	// One startup line through the test admin audit sink for any level but
 	// off: the gate-start banner for the admin levels (it carries the level
 	// and preconditions too), the test-mode line for member.
@@ -3926,6 +3958,16 @@ func (s *Server) SetMessageLogger(l *slog.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dedicatedMessageLog = l
+}
+
+// SetArtifactLogger sets the dedicated artifact decision logger, the
+// "scion-artifacts" log stream (ptone/scion#5120). The artifact service and
+// the artifact maintenance pass write to it; until it is set their entries
+// are discarded.
+func (s *Server) SetArtifactLogger(l *slog.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.artifactDecisionLog = l
 }
 
 // SetChannelRegistry sets the notification channel registry for external delivery.
@@ -5429,7 +5471,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			MetadataMode: store.GCPMetadataModePassthrough,
 		}
 		if agent.RuntimeBrokerID != "" {
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
 			if agentHasAssignModeIdentity(agent) {
@@ -5502,8 +5544,9 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 					// granted it.
 					RequireLocalRuntime: true,
 				}
+				// The mode follows the pinned profile's type, as on every passthrough surface.
 				if agent.RuntimeBrokerID != "" {
-					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
 						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 					}
 					if agentHasAssignModeIdentity(agent) {
@@ -7083,6 +7126,7 @@ func (s *Server) registerRoutes() {
 	// unless the test admin gate is on; the gate runs before the guard.
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
@@ -7172,6 +7216,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Grant shaping (ptone/scion#4240, admin tier A3): records the
+	// request's grant actor and, for a test identity with an admin role,
+	// the shaping the store applies to every grant it writes.
+	h = s.grantShapingMiddleware(h)
 
 	// Test admin audit (ptone/scion#4240): runs right after authentication,
 	// so every request an admin-kind test identity makes is written to the
