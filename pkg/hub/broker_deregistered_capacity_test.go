@@ -19,7 +19,8 @@
 // the broker row is confirmed gone, the sweep releases reservations only on
 // a scope confirmed deleted by a point lookup and a conditional write, and a
 // broker registered again under the same ID gets its running agents'
-// reservations back on its first heartbeat.
+// reservations back at its registration (the join, the co-located flat and
+// embedded provider registrations; erratum E-45-1).
 
 package hub
 
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -390,7 +392,7 @@ func runningHeartbeat(t *testing.T, srv *Server, brokerID string, a *store.Agent
 
 // A broker deregistered (its reservations released by the sweep) and then
 // registered again under the same ID gets its still-running agents'
-// reservations back on its first heartbeat, before any sweep. Driven
+// reservations back at its join, before any heartbeat or sweep. Driven
 // through the real register, join and heartbeat endpoints.
 func TestReRegistered_BackfillRestoresRunningAgents(t *testing.T) {
 	srv, s := testServer(t)
@@ -567,6 +569,8 @@ func TestJoinBackfill_PendingLost_SweepRestores(t *testing.T) {
 
 	other, _ := testServerWithStore(t, f.s)
 	require.False(t, backfillPending(other, f.brokerID), "the other replica holds nothing pending")
+	runningHeartbeat(t, other, f.brokerID, a)
+	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "a heartbeat on the other replica does not retry it")
 	other.ReconcileStaleBrokerQuotaReservations(context.Background())
 	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the hourly sweep restored it")
 }
@@ -587,7 +591,6 @@ func TestReRegistered_JoinOnOneReplica_HeartbeatOnAnother(t *testing.T) {
 
 	rec := doRequest(t, srvA, http.MethodDelete, "/api/v1/runtime-brokers/"+id, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
-	time.Sleep(1100 * time.Millisecond)
 	registerBrokerWithID(t, srvA, id, "rereg-xr")
 	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
 	require.NotNil(t, held, "restored at the join on replica A")
@@ -598,4 +601,57 @@ func TestReRegistered_JoinOnOneReplica_HeartbeatOnAnother(t *testing.T) {
 	again := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
 	require.NotNil(t, again, "kept across replicas")
 	assert.Equal(t, held.ID, again.ID)
+}
+
+// The co-located flat registration (registerEmbeddedFlat) re-creating a
+// deregistered broker's row gets its still-running agents' reservations back
+// before it returns, with no heartbeat or sweep (erratum E-45-1: every
+// registration path).
+func TestReRegistered_EmbeddedFlat_RestoresRunningAgents(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	id := uuid.NewString()
+	target := &api.RuntimeTargetDescriptor{ID: tid("rt-flat-rereg"), Type: "docker", DisplayName: "Docker"}
+	_, err := registerEmbeddedFlatForTest(t, srv, id, "flat-rereg", target)
+	require.NoError(t, err)
+	project := &store.Project{ID: tid("proj-flat-rereg"), Name: "Flat Rereg", Slug: "flat-rereg"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	a := &store.Agent{ID: tid("agent-flat-rereg"), Slug: "flat-rereg-agent", Name: "flat-rereg-agent", ProjectID: project.ID, RuntimeBrokerID: id, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.DeleteRuntimeBroker(ctx, id))
+	require.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+
+	_, err = registerEmbeddedFlatForTest(t, srv, id, "flat-rereg", target)
+	require.NoError(t, err)
+	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, held, "restored at the embedded flat registration, before any heartbeat or sweep")
+	assert.Equal(t, id, held.ScopeID)
+}
+
+// The embedded provider registration (POST /api/v1/projects/register with a
+// broker) re-creating a deregistered broker's row under its ID gets its
+// still-running agents' reservations back before it answers.
+func TestReRegistered_EmbeddedProvider_RestoresRunningAgents(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := newHubMemberUser(t, s, "rereg-provider-user")
+	id := uuid.NewString()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: id, Name: "provider-rereg", Slug: "provider-rereg", Status: store.BrokerStatusOnline, CreatedBy: user.ID}))
+	project := &store.Project{ID: tid("proj-provider-rereg"), Name: "Provider Rereg", Slug: "provider-rereg-agents"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	a := &store.Agent{ID: tid("agent-provider-rereg"), Slug: "provider-rereg-agent", Name: "provider-rereg-agent", ProjectID: project.ID, RuntimeBrokerID: id, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.DeleteRuntimeBroker(ctx, id))
+
+	rec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:   "provider-rereg-project",
+		Broker: &RegisterProjectBrokerInfo{ID: id, Name: "provider-rereg", Version: "1.0.0"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	created, err := s.GetRuntimeBroker(ctx, id)
+	require.NoError(t, err, "the registration re-created the row under its ID")
+	require.Equal(t, id, created.ID)
+	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, held, "restored at the embedded provider registration, before any heartbeat or sweep")
+	assert.Equal(t, id, held.ScopeID)
 }

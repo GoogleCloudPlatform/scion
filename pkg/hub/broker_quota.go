@@ -952,11 +952,11 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 	return skipped == 0
 }
 
-// brokerBackfillWarnInterval bounds the WARN for a broker whose join-time
-// backfill keeps skipping agents: it is logged on the first skip, then at most
-// once per interval per broker on this replica (each attempt also leaves a
-// debug record with the cause). A variable for tests.
-var brokerBackfillWarnInterval = 15 * time.Minute
+// brokerBackfillWarnInterval bounds the WARN for a broker whose
+// registration backfill keeps skipping agents: it is logged on the first
+// skip, then at most once per interval per broker on this replica (each
+// attempt also leaves a debug record with the cause).
+const brokerBackfillWarnInterval = 15 * time.Minute
 
 // brokerBackfillRetry is a broker whose join-time backfill skipped an agent
 // on this replica: its heartbeats retry the backfill until it runs to the
@@ -966,16 +966,20 @@ type brokerBackfillRetry struct {
 	lastWarn time.Time
 }
 
-// backfillBrokerOnJoin records, when a Runtime Broker completes its join (its
-// row is written; called before the join answers), the reservations of the
-// agents it still runs (backfillBrokerReservations), so a broker registered
-// again under the same ID after a deregistration released its reservations
-// gets them back before its first heartbeat and before the hourly sweep. The
-// writes go to the shared store, so every replica sees them. If an agent is
-// skipped (a reservation read or write failed), the broker is kept pending on
-// this replica and its heartbeats retry (retryBrokerBackfill); a new join
-// starts afresh. Accepted gap: if this replica goes away while the broker is
-// pending, the hourly sweep's backfill is the backstop.
+// backfillBrokerOnJoin records, when a Runtime Broker's row is written by a
+// registration path, the reservations of the agents it still runs
+// (backfillBrokerReservations), so a broker registered again under the same ID
+// after a deregistration released its reservations gets them back before its
+// first heartbeat and before the hourly sweep. Every registration path calls
+// it after the row is written and before it reports success: the broker join
+// (handleBrokerJoin), the co-located flat registration (registerEmbeddedFlat),
+// the embedded provider registration (handleProjectRegister's embedded
+// path) and the co-located broker at startup (BackfillBrokerOnRegistration).
+// The writes go to the shared store, so every replica sees them. If an agent
+// is skipped (a reservation read or write failed), the broker is kept pending
+// on this replica and its heartbeats retry (retryBrokerBackfill); a new
+// registration starts afresh. Accepted gap: if this replica goes away while
+// the broker is pending, the hourly sweep's backfill is the backstop.
 func (s *Server) backfillBrokerOnJoin(ctx context.Context, brokerID string) {
 	if s.quotaService == nil || brokerID == "" {
 		return
@@ -984,7 +988,15 @@ func (s *Server) backfillBrokerOnJoin(ctx context.Context, brokerID string) {
 	s.runBrokerBackfill(ctx, brokerID)
 }
 
-// retryBrokerBackfill retries the join-time backfill of brokerID from its
+// BackfillBrokerOnRegistration runs the registration backfill
+// (backfillBrokerOnJoin) for a broker registered outside the Hub's handlers:
+// the co-located broker at server startup. It is idempotent and bounded to
+// brokerID's agents, so the caller runs it on every startup.
+func (s *Server) BackfillBrokerOnRegistration(ctx context.Context, brokerID string) {
+	s.backfillBrokerOnJoin(ctx, brokerID)
+}
+
+// retryBrokerBackfill retries the registration backfill of brokerID from its
 // heartbeat, only if that backfill is pending on this replica. Otherwise it
 // returns without a store read: a heartbeat that needs nothing reads nothing.
 func (s *Server) retryBrokerBackfill(ctx context.Context, brokerID string) {
