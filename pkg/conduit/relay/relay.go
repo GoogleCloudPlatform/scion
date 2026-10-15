@@ -218,6 +218,15 @@ type Config struct {
 	// session with CloseUnauthenticated. It covers a principal removed
 	// between the caller's pre-admission check and registration.
 	Revalidate func(ctx context.Context, p Principal) error
+	// OnBrokerIncarnationFlap, when set, is called when a broker session
+	// is admitted with an incarnation this relay admitted for the broker
+	// within BrokerIncarnationFlapWindow, after another one
+	// (broker_incarnation.go). Diagnostic only.
+	OnBrokerIncarnationFlap func(brokerID, incarnation string)
+	// OnBrokerSessionsSuperseded, when set, is called with the number of
+	// local sessions of a broker closed with 4409 superseded_incarnation
+	// because a newer incarnation of the broker was admitted here.
+	OnBrokerSessionsSuperseded func(brokerID string, closed int)
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -295,6 +304,10 @@ type Relay struct {
 	// under mu when the drain begins and read by drainOptions.
 	shutdownCap    time.Duration
 	shutdownCapSet bool
+
+	// brokerIncs remembers the incarnations admitted per broker, for the
+	// flap report (broker_incarnation.go).
+	brokerIncs brokerIncarnations
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -712,6 +725,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.goAway(e, r.drainOptions(e))
 	default:
 		r.revalidate(ctx, e)
+		r.admittedBroker(e)
 	}
 
 	<-ls.Done()
