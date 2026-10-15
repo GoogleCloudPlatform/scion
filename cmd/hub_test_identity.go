@@ -91,6 +91,12 @@ Examples:
   # Delete a test identity when the run is done
   scion hub test-identity delete <id>
 
+  # On a hub with --test-mode=admin: a test identity with the hub-admin
+  # role, its residue report, and the emergency stop (human super-admin)
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin journey" --out ./admin.token
+  scion hub test-identity residue <id>
+  scion hub test-identity revoke-all --reason "INC-123" --dry-run
+
   # With a target-hub profile: issue into the run cache, mint a web-login
   # code for the identity, then tear the run down
   scion --hub-profile t1 hub test-identity issue --as owner --run r1
@@ -111,9 +117,18 @@ email, role and expiry are printed.
 outlives the identity. --lifetime is the identity lifetime (default 1h on
 the hub, at most 8h).
 
+With --admin-role hub-admin or super-admin, the identity holds the real
+hub-admin or super-admin role, on a hub started with --test-mode=admin (or
+super-admin for the super-admin role). The issuer must be a live human
+super-admin. --purpose (8 to 200 characters) and --out are required, --role
+does not apply, and the token is never re-issued. Lifetimes: hub-admin
+token 15m (at most 30m), identity 1h; super-admin token 10m (at most 15m),
+identity 30m. Not available in agent mode or with a hub profile.
+
 Examples:
   scion hub test-identity issue --out ./fixture.token
-  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token`,
+  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin settings journey" --out ./hub-admin.token`,
 	Args: cobra.NoArgs,
 	RunE: runHubTestIdentityIssue,
 }
@@ -282,6 +297,11 @@ type testIdentityTokenOptions struct {
 }
 
 func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
+	// --admin-role (admin tier A4) is checked first: it never runs with a
+	// profile or in agent mode (hub_test_identity_admin.go).
+	if cmd.Flags().Changed("admin-role") {
+		return runHubTestIdentityAdminIssue(cmd)
+	}
 	if hubProfileSelected() {
 		return runProfileTestIdentityIssue(cmd)
 	}
