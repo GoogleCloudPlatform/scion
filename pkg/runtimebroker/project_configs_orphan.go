@@ -70,3 +70,15 @@ func orphanProjectConfigDir(globalDir, slug, projectID string) (string, error) {
 	}
 	return dir, nil
 }
+
+// removeProjectConfigs removes a project delete's project-configs entry
+// (removeProjectConfigsSubtree, or the test seam projectConfigsRemove).
+func (s *Server) removeProjectConfigs(globalDir, path string) error {
+	s.mu.RLock()
+	fn := s.projectConfigsRemove
+	s.mu.RUnlock()
+	if fn != nil {
+		return fn(globalDir, path)
+	}
+	return removeProjectConfigsSubtree(globalDir, path)
+}

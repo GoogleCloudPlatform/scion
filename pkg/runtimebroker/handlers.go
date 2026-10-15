@@ -7064,7 +7064,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 			return
 		}
 		if dir != "" {
-			if err := removeProjectConfigsSubtree(globalDir, dir); err != nil {
+			if err := s.removeProjectConfigs(globalDir, dir); err != nil {
 				s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "project_id", requestedID, "path", dir)
 				return
 			}
@@ -7134,7 +7134,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		// A failure fails the delete: the project directory is gone, so a
 		// repeated delete removes the entry by its canonical name
 		// (orphanProjectConfigDir) and then succeeds.
-		if err := removeProjectConfigsSubtree(globalDir, configDir); err != nil {
+		if err := s.removeProjectConfigs(globalDir, configDir); err != nil {
 			s.writeRuntimeOpError(w, r.Context(), opRemoveProjectConfigDir, err, "project_slug", slug, "path", configDir)
 			return
 		}
