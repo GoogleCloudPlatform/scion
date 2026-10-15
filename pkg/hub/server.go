@@ -2061,6 +2061,9 @@ type Server struct {
 	// Dedicated message logger for message audit trail (nil = uses messageLog fallback)
 	dedicatedMessageLog *slog.Logger
 
+	// Dedicated artifact decision logger (nil = entries are discarded)
+	artifactDecisionLog *slog.Logger
+
 	// missingAgents and lifecycleOps back the heartbeat missing-container
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
 	missingAgents missingAgentTracker
@@ -3944,6 +3947,16 @@ func (s *Server) SetMessageLogger(l *slog.Logger) {
 	s.dedicatedMessageLog = l
 }
 
+// SetArtifactLogger sets the dedicated artifact decision logger, the
+// "scion-artifacts" log stream (ptone/scion#5120). The artifact service and
+// the artifact maintenance pass write to it; until it is set their entries
+// are discarded.
+func (s *Server) SetArtifactLogger(l *slog.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.artifactDecisionLog = l
+}
+
 // SetChannelRegistry sets the notification channel registry for external delivery.
 // When set, user notifications are also dispatched to configured external channels
 // (webhook, Slack, etc.) in addition to the standard SSE pipeline.
@@ -5445,7 +5458,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 			MetadataMode: store.GCPMetadataModePassthrough,
 		}
 		if agent.RuntimeBrokerID != "" {
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
 				return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 			}
 			if agentHasAssignModeIdentity(agent) {
@@ -5518,8 +5531,9 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 					// granted it.
 					RequireLocalRuntime: true,
 				}
+				// The mode follows the pinned profile's type, as on every passthrough surface.
 				if agent.RuntimeBrokerID != "" {
-					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+					if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, project); err != nil {
 						return "", fmt.Errorf("failed to configure GCP identity for sandbox runtime: %w", err)
 					}
 					if agentHasAssignModeIdentity(agent) {

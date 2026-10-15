@@ -255,9 +255,9 @@ func TestStoreSweepExpired(t *testing.T) {
 		if err := st.CreateLink(ctx, linkGrant(expired.ID, LinkTokenHash("e"), future), 5, now.Add(-2*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		n, err := st.SweepExpired(ctx, now, 10)
-		if err != nil || n != 1 {
-			t.Fatalf("SweepExpired: %d %v", n, err)
+		ids, err := st.SweepExpired(ctx, now, 10)
+		if err != nil || len(ids) != 1 || ids[0] != (ArtifactRef{ID: expired.ID, ScopeRef: expired.ScopeRef}) {
+			t.Fatalf("SweepExpired: %v %v", ids, err)
 		}
 		if _, err := st.GetArtifact(ctx, expired.ID); !errors.Is(err, ErrNotFound) {
 			t.Errorf("expired artifact still live: %v", err)
@@ -270,8 +270,8 @@ func TestStoreSweepExpired(t *testing.T) {
 				t.Errorf("unexpired artifact swept: %v", err)
 			}
 		}
-		if n, _ := st.SweepExpired(ctx, now, 10); n != 0 {
-			t.Errorf("second sweep: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 10); len(ids) != 0 {
+			t.Errorf("second sweep: %d", len(ids))
 		}
 		// The limit bounds one pass.
 		for range 3 {
@@ -280,11 +280,11 @@ func TestStoreSweepExpired(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if n, _ := st.SweepExpired(ctx, now, 2); n != 2 {
-			t.Errorf("limited sweep: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 2); len(ids) != 2 {
+			t.Errorf("limited sweep: %d", len(ids))
 		}
-		if n, _ := st.SweepExpired(ctx, now, 0); n != 0 {
-			t.Errorf("zero limit: %d", n)
+		if ids, _ := st.SweepExpired(ctx, now, 0); len(ids) != 0 {
+			t.Errorf("zero limit: %d", len(ids))
 		}
 	})
 }

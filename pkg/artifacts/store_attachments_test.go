@@ -428,9 +428,9 @@ func TestStoreReconcilerSkipsAttachments(t *testing.T) {
 			t.Errorf("CountLiveOwners = %d, %v; want 0", n, err)
 		}
 		owned := seedOwned(t, st, PrincipalKindUser, "user-gone")
-		n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "user-gone"}, true, time.Now(), 10)
-		if err != nil || n != 1 {
-			t.Fatalf("SetOwnerOrphaned = %d, %v; want 1 (the project artifact only)", n, err)
+		ids, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "user-gone"}, true, time.Now(), 10)
+		if err != nil || len(ids) != 1 {
+			t.Fatalf("SetOwnerOrphaned = %d, %v; want 1 (the project artifact only)", len(ids), err)
 		}
 		for _, a := range []*Artifact{up, sent} {
 			got, err := st.GetAttachment(ctx, a.ID)
