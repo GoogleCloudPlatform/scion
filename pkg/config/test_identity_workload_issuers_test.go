@@ -83,3 +83,33 @@ func TestTestIdentityWorkloadIssuers_LoadFromSettingsFile(t *testing.T) {
 		t.Fatalf("default workload issuers = %+v, want nil", got)
 	}
 }
+
+// WS4: server.hub.test_identities.admin_web_sessions loads from the
+// settings file into HubServerConfig.TestIdentities (next to the workload
+// issuers), is empty by default, and survives the versioned round trip.
+func TestTestIdentityAdminWebSessions_LoadFromSettingsFile(t *testing.T) {
+	yaml := "schema_version: \"1\"\nserver:\n  hub:\n    test_identities:\n      admin_web_sessions: hub-ws4-a\n"
+	scionDir, _ := writeConfigPathFixture(t, yaml, "schema_version: \"1\"\n")
+	gc, err := LoadGlobalConfig(scionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gc.Hub.TestIdentityAdminWebSessions(); got != "hub-ws4-a" {
+		t.Fatalf("admin web sessions = %q, want hub-ws4-a", got)
+	}
+	if got := gc.Hub.TestIdentityWorkloadIssuers(); got != nil {
+		t.Fatalf("workload issuers = %+v, want nil", got)
+	}
+
+	scionDir, _ = writeConfigPathFixture(t, "schema_version: \"1\"\n", "schema_version: \"1\"\n")
+	gc, err = LoadGlobalConfig(scionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := gc.Hub.TestIdentityAdminWebSessions(); got != "" {
+		t.Fatalf("default admin web sessions = %q, want empty", got)
+	}
+	if TestIdentityAdminWebSessionsKey != "server.hub.test_identities.admin_web_sessions" {
+		t.Fatalf("key = %q", TestIdentityAdminWebSessionsKey)
+	}
+}

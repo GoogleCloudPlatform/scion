@@ -181,12 +181,18 @@ func (s *Server) authorizeTokenConversation(w http.ResponseWriter, r *http.Reque
 		return false
 	}
 	if !ok {
-		resourceType, action := selfPermissionResourceAction(permissionID)
-		logAuthzDenial(r, token, Resource{Type: resourceType}, action, "conversation is outside the token boundary or its peer agent is not readable")
-		writeForbiddenStructured(w, "", resourceType, action)
+		writeTokenConversationRefusal(w, r, token, permissionID)
 		return false
 	}
 	return true
+}
+
+// writeTokenConversationRefusal writes the 403 for a token refused
+// permissionID on a conversation and logs the denial.
+func writeTokenConversationRefusal(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, permissionID string) {
+	resourceType, action := selfPermissionResourceAction(permissionID)
+	logAuthzDenial(r, token, Resource{Type: resourceType}, action, "conversation is outside the token boundary or its peer agent is not readable")
+	writeForbiddenStructured(w, "", resourceType, action)
 }
 
 // requireInboxCredential classifies the request credential and writes 403

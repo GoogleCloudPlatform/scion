@@ -87,6 +87,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
 	svc.SetReviewNotifier(s.notifyArtifactReview)
+	svc.SetLogger(s.artifactLog)
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
 	trusted := parseTrustedProxies(s.config.TrustedProxies)
@@ -103,6 +104,14 @@ func (s *Server) artifactRefResolver() *artifacts.Service {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetBackendProvider(s.artifactBackend)
 	return svc
+}
+
+// artifactLog returns the artifact decision logger set with
+// SetArtifactLogger, or nil (entries discarded) when none is set.
+func (s *Server) artifactLog() *slog.Logger {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.artifactDecisionLog
 }
 
 // attachmentService returns the artifact service over this server's
@@ -184,7 +193,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	}
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)
-	n, err = st.SweepExpired(ctx, now, artifactReapBatch)
+	n, err = artifacts.SweepExpired(ctx, st, now, artifactReapBatch, s.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)
 		return
@@ -215,7 +224,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 // cascade, which run no lifecycle hooks. A checker error is logged once
 // with the number of owners left unprocessed; the next pass retries.
 func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store, now time.Time) {
-	res, err := artifacts.ReconcileOwners(ctx, st, newArtifactHost(s), now)
+	res, err := artifacts.ReconcileOwners(ctx, st, newArtifactHost(s), now, s.artifactLog())
 	var cerr *artifacts.CheckerError
 	switch {
 	case errors.As(err, &cerr):

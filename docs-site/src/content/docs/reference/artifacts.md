@@ -361,3 +361,55 @@ Each discarded entry has only four fields: `seq`, `state` (`failed`), `reason` a
 | `discarded` | The version was discarded before reasons were recorded. |
 
 `scion artifact versions` lists discarded versions among the ready ones by number, and the artifact page's History tab shows consecutive discarded versions as one collapsed row.
+
+## Decision log
+
+The Hub writes one structured entry per artifact decision to a dedicated log, `scion-artifacts` (ptone/scion#5120). With direct Cloud Logging (`SCION_CLOUD_LOGGING=true`) it is a separate Cloud Logging log that shares the client and circuit breaker of the request and message logs. Without Cloud Logging the entries go to stdout, like the message log. The request log keeps its redacted artifact paths. The decision log is where an operator finds which artifact a request touched and why it was refused.
+
+**Levels.** Lifecycle decisions are logged at `INFO`. Authorization refusals on management and write routes are logged at `WARN`. A refused `POST /api/v1/artifacts/{id}/grants` from a caller who may read the artifact but not administer it (it is answered by the review-grant path, whatever grant it asks for) is logged at `WARN` with action `share` and one of the `review_` reasons; when the request named a well-formed user, that user is the entry's subject. A read answered with the `404` of a missing artifact, or of one the caller cannot read, is logged at `DEBUG` only, so it costs nothing at the default level. Successful reads are not logged. Entries follow the server log level (`SCION_LOG_LEVEL`).
+
+**Actions.** One entry is written per decision:
+
+| `action` | When |
+|---|---|
+| `published` | A single-file publish created an artifact and its ready version 1. |
+| `created` | A manifest publish created an artifact with a pending version 1. |
+| `version_created` | A pending version was added to an artifact. |
+| `version_finalized` | A version was made ready. |
+| `version_failed` | A publish, a new or added version, or a finalize could not be recorded (`outcome` `error`, `reason` `store_error`), or a review was discarded (`outcome` `refused`, `reason` one of the [discarded version codes](#discarded-versions)). |
+| `grant_created`, `grant_changed`, `grant_removed` | A principal or scope grant was added, had its permission changed, or was removed. This covers grants made by administrators and review grants. |
+| `link_created`, `link_revoked` | A share link was created or revoked. |
+| `moved` | The artifact moved to another home project. |
+| `expiry_set`, `expiry_cleared` | The expiry was set or cleared. |
+| `deleted` | The artifact was deleted by a user or by the expiry sweep. |
+| `orphaned`, `unorphaned` | The owner liveness pass marked an artifact whose owner is gone, or cleared the mark. |
+| `owner_pass`, `retention_pass` | A summary of one owner liveness pass or one expiry sweep. They carry `owners_checked`, `orphaned_count` and `unorphaned_count`, or `count`. Each summary is written only when the pass changed something or failed. |
+| `read`, `administer`, `write`, `create`, `delete`, `move`, `share` | What a refused request attempted. `route` names the request. |
+
+**Fields.** Each entry carries the fields that apply to it:
+
+| Field | Meaning |
+|---|---|
+| `artifact_id` | The artifact. It comes from the parsed route, never from the raw path. |
+| `version_seq` | The version number. |
+| `project_id` | The artifact's home project. For a move, the home it moved from. For a refused publish, the requested target project, only when it has a project id's shape (letters, digits, `-` or `_`, at most 64 bytes); otherwise it is left out. For an expiry deletion, the home the sweep found it in. A summary entry has none. |
+| `route` | The method and route template, for example `POST /api/v1/artifacts/{id}/grants`. It never contains a path segment. The share-link route appears as `/api/v1/artifacts/shared/{token}`. |
+| `outcome` | `allowed`, `refused` or `error`. |
+| `reason` | Why a request was refused or failed. It is always a fixed code, never free text: `not_found`, `hidden`, `unauthenticated`, `credential_not_permitted`, `agent_cannot_administer`, `not_owner_or_admin_grant`, `not_owner_admin_grant_or_project_admin`, `no_write_access`, `expired`, `review_only`, `not_version_publisher`, `not_authorized_in_scope`, `cross_project_sharing_disabled`, `store_error`, `principal_check_failed`, a discarded version code, or, for a refused review grant, `review_caller` (the caller may not give review access), `review_body` (the request is not exactly a review grant to a user), `review_subject_unreadable` (the user cannot read the artifact), `review_existing_access` (the user holds a read, write or admin grant) or `review_store_refused` (the artifact's home or owner changed meanwhile). |
+| `principal_kind`, `principal_id` | Who made the decision: `user` or `agent` and its id, or `system` and `retention` or `reconciler` for the maintenance pass. |
+| `authority` | Why the caller was allowed: `owner`, `admin_grant`, `custodian_project_admin` (deleting as an administrator of the home project), `steward_project_owner` (a review grant given by an owner or administrator of the home project, or a super-admin), `steward_delegator` (a review grant given as the owning agent's delegating user; see [Grants](#grants)), or `retention` and `reconciler` for the maintenance pass. A review grant on a hub that does not report which of the two steward clauses applied has no authority. A version written through a grant has no authority either; its `permission` is `write` or `review` instead. |
+| `subject_kind`, `subject_ref` | A grant's subject: `principal` with `user:<id>` or `agent:<id>`, or `scope` with a project id. A share link is logged with `subject_kind` `link` and no `subject_ref`. |
+| `permission` | The grant's permission, or the grant a version was written through. |
+| `owner_kind`, `orphaned` | The artifact owner's kind, and whether the artifact is marked as having a deleted owner. |
+| `request_id` | The id of the request log line (`scion_request_log`) of the same request. Maintenance entries have none. |
+
+With Cloud Logging, `artifact_id`, `project_id`, `action`, `outcome`, `reason`, `principal_kind` and `principal_id` are also labels.
+
+**Never logged.** No entry contains a share link's token, the token's hash or the link's id, or any other path segment of the link routes. No entry contains an artifact's title, a version note, file names or contents, or any credential. Artifact ids and grantee ids do appear. Anyone with read access to the log can see them, as with the message log. The Hub diagnostics log API (`GET /api/v1/admin/diagnostics/logs`) classifies entries from this log as the `artifacts` source and accepts `source=artifacts`. The diagnostics log viewer in the web UI shows them under its `ART` source toggle.
+
+Example query:
+
+```
+logName="projects/YOUR_PROJECT/logs/scion-artifacts"
+labels.artifact_id="ARTIFACT_ID"
+```
