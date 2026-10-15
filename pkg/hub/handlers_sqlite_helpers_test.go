@@ -561,6 +561,11 @@ type reincarnateTestDispatcher struct {
 	// ImageRegistryFor, as the HTTP dispatcher reports the registry it
 	// rewrites images to.
 	imageRegistry string
+	// imageRegistryByBroker, when set, answers ImageRegistryFor per broker
+	// instead of imageRegistry; registryCalls records each (broker,
+	// profile) asked for.
+	imageRegistryByBroker map[string]string
+	registryCalls         [][2]string
 
 	// reprovisionEcho and startEcho, when set, run on a successful dispatch
 	// against the dispatched agent's AppliedConfig, simulating the broker
@@ -5168,9 +5173,13 @@ func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentApp
 	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
-func (d *reincarnateTestDispatcher) ImageRegistryFor(string, string) string {
+func (d *reincarnateTestDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.registryCalls = append(d.registryCalls, [2]string{brokerID, profile})
+	if d.imageRegistryByBroker != nil {
+		return d.imageRegistryByBroker[brokerID]
+	}
 	return d.imageRegistry
 }
 

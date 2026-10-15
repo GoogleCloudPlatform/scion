@@ -600,12 +600,12 @@ func ValidateSharedDirSize(size string) error {
 //
 // A profile-level entry for gsaEmail takes precedence over a runtime-level
 // entry for the same gsaEmail — the same profile-overrides precedence
-// ResolveImageRegistry already applies, here evaluated per map key instead of
+// SettingsImageRegistry already applies, here evaluated per map key instead of
 // as a whole-value override, since this setting is a map rather than a
 // scalar. A profile with no entry for gsaEmail (including an empty-string
 // value, treated as unset) falls through to the runtime-level entry, rather
 // than that GSA having no mapping at all. profileName "" resolves to
-// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// vs.ActiveProfile, matching ResolveRuntime and SettingsImageRegistry. If
 // ResolveRuntime cannot resolve profileName's runtime (unknown profile or
 // runtime), this returns false, the same as no mapping being found — callers
 // that need to distinguish "no mapping" from "settings error" should call

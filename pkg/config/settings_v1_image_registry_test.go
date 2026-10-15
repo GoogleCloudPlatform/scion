@@ -125,7 +125,7 @@ func TestRewriteImageRegistry(t *testing.T) {
 	}
 }
 
-func TestResolveImageRegistry(t *testing.T) {
+func TestSettingsImageRegistry(t *testing.T) {
 	tests := []struct {
 		name        string
 		settings    *VersionedSettings
@@ -201,7 +201,7 @@ func TestResolveImageRegistry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.settings.ResolveImageRegistry(tt.profileName)
+			got := tt.settings.SettingsImageRegistry(tt.profileName)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -239,7 +239,7 @@ func TestImageRegistryYAMLRoundTrip(t *testing.T) {
 	assert.Empty(t, roundTripped.Profiles["local"].ImageRegistry)
 }
 
-func TestResolveImageRegistry_Configured(t *testing.T) {
+func TestSettingsImageRegistry_Configured(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings *VersionedSettings
@@ -285,7 +285,7 @@ func TestResolveImageRegistry_Configured(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.settings.ResolveImageRegistry(tt.profile) != ""
+			got := tt.settings.SettingsImageRegistry(tt.profile) != ""
 			assert.Equal(t, tt.want, got)
 		})
 	}

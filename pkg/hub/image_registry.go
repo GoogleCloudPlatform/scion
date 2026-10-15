@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 	"strings"
@@ -82,8 +83,7 @@ func (o *OperationalSettings) imageRegistryFileTier() config.ImageRegistryFileTi
 // managed values, the file tier and the profile catalog in effect (the
 // names the co-located broker's profiles map resolves against). The hub
 // resolves with these and feeds the same values to the co-located broker's
-// settings overlay, so both sides agree. ActiveProfile is left empty; the
-// hub fills it per dispatch.
+// settings overlay, so both sides agree.
 func (o *OperationalSettings) ImageRegistryHubInputs() config.ImageRegistryHubInputs {
 	top, profiles := o.managedImageRegistries()
 	catalog := make([]string, 0)
@@ -161,11 +161,14 @@ const imageRegistryLookupTimeout = 5 * time.Second
 //
 //   - A flat target is not rewritten: the broker rewrites the bare image
 //     with its own layers, so explicit and template images agree.
-//   - An empty profile resolves to the broker's default profile: for the
-//     co-located broker, the one its live settings select
-//     (config.EffectiveDefaultProfile over the active_profile it loads);
-//     for any other, the default profile it registered. When the
-//     co-located settings cannot be loaded, nothing is rewritten.
+//   - Nor is an agent with no saved profile on the co-located broker: the
+//     broker selects its default profile from its own live settings
+//     (SCION_ACTIVE_PROFILE, project settings, the overlay), which the hub
+//     does not copy, so the broker rewrites.
+//   - For any other broker, an empty profile resolves to the default
+//     profile it registered.
+//   - A broker row that cannot be read (other than not found) is not
+//     rewritten either: the broker rewrites with its own layers.
 func (s *Server) dispatchImageRegistryFor(brokerID, profile string) string {
 	r, ok := s.dispatchImageRegistryResolved(brokerID, profile)
 	if !ok {
@@ -177,17 +180,26 @@ func (s *Server) dispatchImageRegistryFor(brokerID, profile string) string {
 // dispatchImageRegistryResolved is dispatchImageRegistryFor with the
 // source; ok is false when the hub does not rewrite.
 func (s *Server) dispatchImageRegistryResolved(brokerID, profile string) (config.ResolvedImageRegistry, bool) {
+	if profile == "" && brokerID != "" && brokerID == s.LegacyColocatedBrokerID() {
+		return config.ResolvedImageRegistry{}, false
+	}
 	nodeEnv := ""
 	var broker *store.RuntimeBroker
 	if brokerID != "" && s.store != nil {
+		// The dispatcher's provider carries no context; the read is bounded.
 		ctx, cancel := context.WithTimeout(context.Background(), imageRegistryLookupTimeout)
 		b, err := s.store.GetRuntimeBroker(ctx, brokerID)
 		cancel()
-		if err == nil && b != nil {
+		switch {
+		case err == nil && b != nil:
 			broker = b
 			if b.Capabilities != nil {
 				nodeEnv = b.Capabilities.NodeImageRegistry
 			}
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Warn("image_registry: cannot read the target broker; the broker rewrites the image", "broker_id", brokerID, "error", err)
+			return config.ResolvedImageRegistry{}, false
 		}
 	}
 	if broker != nil && broker.RuntimeTarget != nil {
@@ -199,19 +211,8 @@ func (s *Server) dispatchImageRegistryResolved(brokerID, profile string) (config
 		return config.ResolveImageRegistryLayers(config.ImageRegistryLayers{NodeEnv: nodeEnv, File: fileImageRegistryWithoutOps()}), true
 	}
 	in := ops.ImageRegistryHubInputs()
-	if profile == "" {
-		switch {
-		case brokerID != "" && brokerID == s.LegacyColocatedBrokerID():
-			vs, _, err := config.LoadGlobalSettings()
-			if err != nil || vs == nil {
-				slog.Warn("image_registry: cannot load the co-located broker's settings; the broker rewrites the image", "error", err)
-				return config.ResolvedImageRegistry{}, false
-			}
-			in.ActiveProfile = vs.ActiveProfile
-			profile = config.EffectiveDefaultProfile(in.ActiveProfile, in.Catalog)
-		case broker != nil:
-			profile = broker.DefaultProfile
-		}
+	if profile == "" && broker != nil {
+		profile = broker.DefaultProfile
 	}
 	return config.ResolveImageRegistryLayers(in.Layers(profile, nodeEnv)), true
 }

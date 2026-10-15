@@ -27,6 +27,7 @@ import (
 // itself (also written at in-process registration) and the registration
 // capability names carry no TemplateTiers and are unchanged.
 func TestHeartbeatCapabilities_StaticSetPlusTemplateTiers(t *testing.T) {
+	t.Setenv("SCION_IMAGE_REGISTRY", "") // the static set below carries no node registry
 	client := &mockRuntimeBrokerService{}
 	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
 	if err := svc.ForceHeartbeat(context.Background()); err != nil {

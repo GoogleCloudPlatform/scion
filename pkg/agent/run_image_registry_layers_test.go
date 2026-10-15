@@ -97,19 +97,29 @@ func TestStart_ImageRegistryLayers(t *testing.T) {
 	}
 }
 
-// TestStart_ImageRegistryIgnoresStaleOverlayActiveProfile: an agent with
-// no profile resolves its registry through the broker's live
-// active_profile, never the hub's ActiveProfile copy in the overlay feed.
-func TestStart_ImageRegistryIgnoresStaleOverlayActiveProfile(t *testing.T) {
-	t.Setenv(config.EnvImageRegistry, "")
-	projectScionDir := imagePrecedenceFixture(t, "", registryLayerSettings)
-	installRegistryOverlay(t, config.ImageRegistryHubInputs{
-		ManagedProfiles: map[string]string{"staging": "db-staging.example", "other": "db-other.example"},
-		Catalog:         []string{"other", "staging"},
-		ActiveProfile:   "other",
-	})
-	got, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
-	if got.Image != "db-staging.example/file-default:latest" {
-		t.Fatalf("image = %q, want the live active profile's (staging) registry", got.Image)
+// TestStart_ImageRegistryEmptyProfileUsesLiveActiveProfile: an agent with
+// no profile on the co-located broker resolves its registry through the
+// broker's live active_profile, SCION_ACTIVE_PROFILE included. The hub
+// leaves this case to the broker (ptone/scion#3916).
+func TestStart_ImageRegistryEmptyProfileUsesLiveActiveProfile(t *testing.T) {
+	for _, tc := range []struct{ name, envActive, want string }{
+		{"file active_profile", "", "db-staging.example/file-default:latest"},
+		{"SCION_ACTIVE_PROFILE", "other", "db-other.example/file-default:latest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.EnvImageRegistry, "")
+			projectScionDir := imagePrecedenceFixture(t, "", registryLayerSettings)
+			if tc.envActive != "" {
+				t.Setenv("SCION_ACTIVE_PROFILE", tc.envActive)
+			}
+			installRegistryOverlay(t, config.ImageRegistryHubInputs{
+				ManagedProfiles: map[string]string{"staging": "db-staging.example", "other": "db-other.example"},
+				Catalog:         []string{"other", "staging"},
+			})
+			got, _ := startCapturingRun(t, api.StartOptions{Name: "test-agent", ProjectPath: projectScionDir})
+			if got.Image != tc.want {
+				t.Fatalf("image = %q, want %q", got.Image, tc.want)
+			}
+		})
 	}
 }

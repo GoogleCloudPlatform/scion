@@ -273,7 +273,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Agent defaults
 	resp.DefaultTemplate = snap.DefaultTemplate
 	resp.DefaultHarnessConfig = snap.DefaultHarnessConfig
-	resp.ImageRegistry = snap.ImageRegistry
+	// image_registry is not the snapshot value (a seeded row holds another
+	// replica's bootstrap under HA): applyRunningValuesForUnsetKeys sets it
+	// from shownImageRegistry.
 	resp.DefaultMaxTurns = snap.DefaultMaxTurns
 	resp.DefaultMaxModelCalls = snap.DefaultMaxModelCalls
 	resp.DefaultMaxDuration = snap.DefaultMaxDuration

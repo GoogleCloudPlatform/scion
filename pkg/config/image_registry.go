@@ -160,10 +160,6 @@ type ImageRegistryHubInputs struct {
 	// resolves against (the stored catalog, or the file's when none is
 	// stored).
 	Catalog []string
-	// ActiveProfile is active_profile as the broker loads it. Only the hub
-	// reads it, filled for each dispatch; the broker resolves an empty
-	// profile through its own live settings, never this copy.
-	ActiveProfile string
 }
 
 // Clone returns a deep copy of in.
@@ -247,11 +243,12 @@ func (vs *VersionedSettings) ImageRegistryLayers(profileName, nodeEnv string) Im
 	return l
 }
 
-// ResolveImageRegistry returns the image_registry for profileName ("" =
-// the active profile) from the hub database and settings-file layers only,
-// without a node env. A caller that runs or builds agent images resolves
+// SettingsImageRegistry returns the image_registry for profileName ("" =
+// the active profile) from the settings layers only (hub database and
+// settings file), WITHOUT the node env. It is not the agent image
+// registry: a caller that runs or builds agent images resolves
 // ImageRegistryLayers with ImageRegistryFromEnv instead.
-func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
+func (vs *VersionedSettings) SettingsImageRegistry(profileName string) string {
 	return ResolveImageRegistryLayers(vs.ImageRegistryLayers(profileName, "")).Value
 }
 

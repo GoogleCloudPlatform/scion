@@ -947,7 +947,8 @@ digest), the registry rewrite, the pull policy or the profile override:
   request's inline config doesn't set the field.
 - `profile`: the settings profile the agent was provisioned with. Only this profile is used to look
   up the profile `harness_overrides` image and pull policy (and the settings-tier values that
-  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
+  lookup folds in) and the profile layers of the `image_registry` rewrite (see
+  [Image registry order](#image-registry-order) for the full order), on every start and restart,
   local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
   then applies, as for any settings lookup without a profile. Broker start/restart also classify

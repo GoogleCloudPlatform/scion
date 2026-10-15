@@ -48,7 +48,7 @@ func imageRegistryConfiguredEnvOrFile(projectPath string) bool {
 		slog.Debug("Failed to load settings while checking image registry", "error", err)
 		return false
 	}
-	return vs != nil && vs.ResolveImageRegistry("") != ""
+	return vs != nil && vs.SettingsImageRegistry("") != ""
 }
 
 // maintenanceOnlyRegistrySet reports whether SCION_MAINTENANCE_IMAGE_REGISTRY
@@ -150,10 +150,23 @@ func managedImageRegistryConfigured(ctx context.Context, s store.HubSettingStore
 	return false
 }
 
+// bootstrapImageRegistryConfigured reports whether the hub's file tier
+// (its bootstrap merge for configPath: defaults < SCION_SEED_* <
+// settings.yaml < SCION_SERVER_*) gives the co-located broker a registry:
+// the top-level value, or the value of activeProfile. The co-located
+// broker resolves with this tier through the settings overlay, so a
+// registry set only through SCION_SERVER_IMAGEREGISTRY or
+// SCION_SEED_IMAGEREGISTRY counts.
+func bootstrapImageRegistryConfigured(configPath, activeProfile string) bool {
+	tier := config.ImageRegistryFileTierFromKoanf(config.LoadBootstrapKoanfWithConfigPath(configPath))
+	return tier.Top != "" || (activeProfile != "" && tier.Profiles[activeProfile] != "")
+}
+
 // colocatedActiveProfile returns active_profile as the co-located broker
-// loads it ("" when the settings cannot be loaded).
+// loads it for an agent with no project (settings file plus
+// SCION_ACTIVE_PROFILE; "" when the settings cannot be loaded).
 func colocatedActiveProfile() string {
-	vs, _, err := config.LoadGlobalSettings()
+	vs, _, err := config.LoadEffectiveSettings("")
 	if err != nil || vs == nil {
 		return ""
 	}

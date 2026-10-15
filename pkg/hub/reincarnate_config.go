@@ -65,7 +65,17 @@ import (
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
 // which wraps errWorkspaceContentTimeout).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
-	return s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, nil)
+	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
+}
+
+// imageRegistryResolver returns the registry the hub rewrites an agent's
+// explicit image to for the new generation's profile ("" = no rewrite). It
+// is bound to the broker the new generation runs on (ptone/scion#3916).
+type imageRegistryResolver func(profile string) string
+
+// fixedImageRegistry is an imageRegistryResolver that ignores the profile.
+func fixedImageRegistry(registry string) imageRegistryResolver {
+	return func(string) string { return registry }
 }
 
 // buildPatchedAppliedConfig is buildFreshAppliedConfig with an optional,
@@ -75,7 +85,10 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 // they take the explicit-input slot and the new generation keeps them; its
 // Role and GCPIdentity replace the kept values. A nil patch is exactly
 // buildFreshAppliedConfig. agent.AppliedConfig is never mutated.
-func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
+//
+// resolveRegistry is called once the new generation's profile is settled,
+// so the stored image is rewritten for that profile and the target broker.
+func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolveRegistry imageRegistryResolver, patch *reincarnatePatch) (*store.AgentAppliedConfig, []string, error) {
 	old := agent.AppliedConfig
 	if old == nil {
 		return nil, nil, fmt.Errorf("agent %s has no applied config", agent.ID)
@@ -337,8 +350,9 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// Store the image in the form the broker actually runs: the dispatcher
 	// rewrites every image to its registry at send time and the broker echoes
 	// that form back. RewriteImageRegistry is a no-op for an empty registry
-	// and for an already-qualified name.
-	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
+	// and for an already-qualified name. The registry is the one for the
+	// new generation's profile on the broker it runs on.
+	fresh.Image = config.RewriteImageRegistry(fresh.Image, resolveRegistry(fresh.Profile))
 
 	// deriveAgentConfig's timezone capture already stripped TZ from the
 	// fresh env copies; strip again so no step after it can leave one.
@@ -415,10 +429,27 @@ func agentImageRegistryTarget(agent *store.Agent) (brokerID, profile string) {
 // agent's images to (for its broker and profile), or "" when it does not
 // rewrite them.
 func dispatchImageRegistry(dispatcher AgentDispatcher, agent *store.Agent) string {
+	brokerID, profile := agentImageRegistryTarget(agent)
+	return dispatchImageRegistryForTarget(dispatcher, brokerID, profile)
+}
+
+// dispatchImageRegistryForTarget is dispatchImageRegistry for an explicit
+// broker and profile.
+func dispatchImageRegistryForTarget(dispatcher AgentDispatcher, brokerID, profile string) string {
 	if p, ok := dispatcher.(imageRegistryProvider); ok {
-		return p.ImageRegistryFor(agentImageRegistryTarget(agent))
+		return p.ImageRegistryFor(brokerID, profile)
 	}
 	return ""
+}
+
+// reincarnateImageRegistry returns the resolver for a reincarnation's new
+// generation on brokerID: the target broker of a move, or the agent's own
+// broker in place (ptone/scion#3916). The source broker's or the old
+// profile's registry is never used.
+func reincarnateImageRegistry(dispatcher AgentDispatcher, brokerID string) imageRegistryResolver {
+	return func(profile string) string {
+		return dispatchImageRegistryForTarget(dispatcher, brokerID, profile)
+	}
 }
 
 // legacyCreateInputsFromAppliedConfig reconstructs a best-effort

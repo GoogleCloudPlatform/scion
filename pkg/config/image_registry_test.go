@@ -317,25 +317,21 @@ func TestVersionedSettings_ImageRegistryLayers(t *testing.T) {
 
 // TestSettingsOverlay_ImageRegistryInputs pins the overlay feed: it
 // activates the overlay with no catalog section, it is not gated on the
-// env, and it does not keep the hub's ActiveProfile copy, so the broker
-// resolves an empty profile through its own live settings.
+// env, and an empty profile resolves through the settings' own live
+// active profile.
 func TestSettingsOverlay_ImageRegistryInputs(t *testing.T) {
 	t.Setenv(EnvImageRegistry, "env.example")
 	o := NewSettingsOverlay()
 	o.UpdateImageRegistryInputs(ImageRegistryHubInputs{
 		ManagedProfiles: map[string]string{"stale": "db-stale", "live": "db-live"},
 		Catalog:         []string{"live", "stale"},
-		ActiveProfile:   "stale",
 	})
 	vs := &VersionedSettings{ActiveProfile: "live", Profiles: map[string]V1ProfileConfig{"live": {}, "stale": {}}}
 	o.Apply(vs)
 	if vs.imageRegistryHub == nil {
 		t.Fatal("inputs not applied without a catalog section")
 	}
-	if vs.imageRegistryHub.ActiveProfile != "" {
-		t.Fatalf("overlay kept the hub's ActiveProfile copy %q", vs.imageRegistryHub.ActiveProfile)
-	}
-	if got := vs.ResolveImageRegistry(""); got != "db-live" {
+	if got := vs.SettingsImageRegistry(""); got != "db-live" {
 		t.Fatalf("empty profile resolved %q, want the live active profile's db-live", got)
 	}
 }

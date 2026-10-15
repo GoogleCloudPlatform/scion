@@ -120,13 +120,12 @@ func (o *SettingsOverlay) Update(
 // and activates the overlay. The hub computes them with the accessor it
 // resolves dispatches with (ptone/scion#3916), and calls this whether or not
 // any catalog section is stored, so a managed endpoints value applies with
-// no stored catalog. ActiveProfile is not kept: the broker resolves an
-// empty profile through its own live settings.
+// no stored catalog. An empty profile resolves through the broker's own
+// live settings (vs.ActiveProfile).
 func (o *SettingsOverlay) UpdateImageRegistryInputs(in ImageRegistryHubInputs) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	c := in.Clone()
-	c.ActiveProfile = ""
 	o.imageRegistry = &c
 	o.active = true
 }

@@ -145,3 +145,21 @@ func writeHomeSettingsYAML(t *testing.T, home, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestBootstrapImageRegistryConfigured: the deferred workstation check
+// counts the hub's file tier, including SCION_SERVER_IMAGEREGISTRY and
+// SCION_SEED_IMAGEREGISTRY, which only the bootstrap merge reads.
+func TestBootstrapImageRegistryConfigured(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeHomeSettingsYAML(t, home, "schema_version: \"1\"\nprofiles:\n  k8s:\n    image_registry: k8s.example\n")
+	t.Setenv("SCION_SERVER_IMAGEREGISTRY", "")
+	t.Setenv("SCION_SEED_IMAGEREGISTRY", "")
+	assert.False(t, bootstrapImageRegistryConfigured("", "staging"))
+	assert.True(t, bootstrapImageRegistryConfigured("", "k8s"), "the active profile's file value")
+	t.Setenv("SCION_SERVER_IMAGEREGISTRY", "server.example")
+	assert.True(t, bootstrapImageRegistryConfigured("", "staging"))
+	t.Setenv("SCION_SERVER_IMAGEREGISTRY", "")
+	t.Setenv("SCION_SEED_IMAGEREGISTRY", "seed.example")
+	assert.True(t, bootstrapImageRegistryConfigured("", "staging"))
+}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -173,17 +175,20 @@ func TestWarnShadowedImageRegistries(t *testing.T) {
 // --- Dispatch resolution ---
 
 // colocatedBrokerLayers resolves image_registry the way the co-located
-// broker does: its live settings, with the overlay fed as installation
-// feeds it.
+// broker's run.go does: config.LoadEffectiveSettings (settings files,
+// SCION_* env, the global overlay) with the overlay installed and fed as
+// installation feeds it. The working directory must hold no project.
 func colocatedBrokerLayers(t *testing.T, ops *OperationalSettings, profile, nodeEnv string) config.ResolvedImageRegistry {
 	t.Helper()
 	overlay := config.NewSettingsOverlay()
 	snap := ops.Snapshot()
 	overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
 	overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())
-	vs, _, err := config.LoadGlobalSettings()
+	prev := config.GetGlobalSettingsOverlay()
+	config.SetGlobalSettingsOverlay(overlay)
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+	vs, _, err := config.LoadEffectiveSettings("")
 	require.NoError(t, err)
-	overlay.Apply(vs)
 	return config.ResolveImageRegistryLayers(vs.ImageRegistryLayers(profile, nodeEnv))
 }
 
@@ -196,8 +201,10 @@ func writeTestGlobalSettings(t *testing.T, content string) {
 }
 
 // TestImageRegistry_HubBrokerParity: for the same inputs, the co-located
-// broker (via the overlay) and the hub's dispatch resolution give the same
-// value and source.
+// broker (via the overlay and its real settings loader) and the hub's
+// dispatch resolution give the same value and source. For an agent with no
+// profile the hub does not rewrite at all, and the broker resolves with
+// its own live active profile.
 func TestImageRegistry_HubBrokerParity(t *testing.T) {
 	const fileSettings = `schema_version: "1"
 active_profile: staging
@@ -269,7 +276,8 @@ profiles:
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tempSettingsHome(t)
+			// tempSettingsHome returns <home>/.scion/settings.yaml.
+			t.Chdir(filepath.Dir(filepath.Dir(tempSettingsHome(t))))
 			writeTestGlobalSettings(t, fileSettings)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
@@ -290,9 +298,13 @@ profiles:
 			srv.SetEmbeddedBrokerID("colocated")
 
 			hub, ok := srv.dispatchImageRegistryResolved("colocated", tc.profile)
-			require.True(t, ok)
+			if tc.profile == "" {
+				assert.False(t, ok, "the hub leaves an agent with no profile to the co-located broker")
+			} else {
+				require.True(t, ok)
+				assert.Equal(t, tc.want, hub, "hub")
+			}
 			broker := colocatedBrokerLayers(t, ops, tc.profile, "")
-			assert.Equal(t, tc.want, hub, "hub")
 			assert.Equal(t, tc.want, broker, "co-located broker")
 		})
 	}
@@ -647,4 +659,44 @@ func TestImageRegistry_WithoutOperationalSettingsReadsFile(t *testing.T) {
 	srv := &Server{maintenance: NewMaintenanceState(false, "")}
 	assert.Equal(t, "file.example", srv.resolveImageRegistry())
 	assert.Equal(t, "file.example", srv.dispatchImageRegistryFor("", "p"), "no profile layers without operational settings")
+}
+
+// brokerReadStore answers GetRuntimeBroker with err; nothing else is used.
+type brokerReadStore struct {
+	store.Store
+	err error
+}
+
+func (b brokerReadStore) GetRuntimeBroker(context.Context, string) (*store.RuntimeBroker, error) {
+	return nil, b.err
+}
+
+// A broker row that cannot be read is left to the broker (no hub rewrite);
+// a broker that does not exist has no node env and is rewritten with the
+// hub's layers.
+func TestDispatchImageRegistry_BrokerReadError(t *testing.T) {
+	srv, _, ops := newTestDBServerWithStore(t, brokerReadStore{err: errors.New("database unavailable")})
+	setTestImageRegistryFileTier(t, ops, "file.example", nil)
+	_, ok := srv.dispatchImageRegistryResolved("broker-1", "k8s")
+	assert.False(t, ok, "a read error leaves the rewrite to the broker")
+	assert.Equal(t, "", srv.dispatchImageRegistryFor("broker-1", "k8s"))
+
+	srv, _, ops = newTestDBServerWithStore(t, brokerReadStore{err: store.ErrNotFound})
+	setTestImageRegistryFileTier(t, ops, "file.example", nil)
+	r, ok := srv.dispatchImageRegistryResolved("broker-1", "k8s")
+	assert.True(t, ok)
+	assert.Equal(t, config.ResolvedImageRegistry{Value: "file.example", Source: config.ImageRegistrySourceFile}, r)
+}
+
+// The co-located broker with no saved profile is left to the broker: it
+// picks its default profile from its own live settings.
+func TestDispatchImageRegistry_ColocatedEmptyProfileNotRewritten(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	setTestImageRegistryFileTier(t, ops, "file.example", nil)
+	srv.SetEmbeddedBrokerID("colocated")
+	_, ok := srv.dispatchImageRegistryResolved("colocated", "")
+	assert.False(t, ok)
+	r, ok := srv.dispatchImageRegistryResolved("colocated", "k8s")
+	assert.True(t, ok, "a saved profile is still rewritten by the hub")
+	assert.Equal(t, "file.example", r.Value)
 }

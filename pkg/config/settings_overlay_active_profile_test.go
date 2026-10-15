@@ -389,8 +389,8 @@ func TestSettingsOverlay_FlatInstanceViewIsolatedFromOverlay(t *testing.T) {
 			}
 
 			// Non-profile overlay values stay shared, on their own rungs.
-			if got := view.ResolveImageRegistry(""); got != "registry.example/stored" {
-				t.Errorf("ResolveImageRegistry = %q, want the overlay's file-tier top-level value", got)
+			if got := view.SettingsImageRegistry(""); got != "registry.example/stored" {
+				t.Errorf("SettingsImageRegistry = %q, want the overlay's file-tier top-level value", got)
 			}
 			if _, ok := view.HarnessConfigs["claude"]; !ok {
 				t.Errorf("HarnessConfigs = %v, want the overlay's entries", view.HarnessConfigs)

@@ -283,7 +283,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		switch {
 		case disableBroker && enableHub:
+			// Off until step 8b decides, so the checks before it (the
+			// port check included) treat the broker as not started, as
+			// they did before the deferral; 8b re-checks its port if it
+			// turns the broker back on.
 			registryDecisionDeferred = true
+			cfg.RuntimeBroker.Enabled = false
 		case disableBroker:
 			disableWorkstationBrokerForRegistry(cfg)
 		}
@@ -374,11 +379,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 8b. Complete the deferred workstation registry decision (step 4b):
-	// a saved hub value keeps the broker; otherwise it is not started.
+	// a saved hub value, or a hub file-tier value (SCION_SERVER_* /
+	// SCION_SEED_*), keeps the broker; otherwise it is not started.
 	if registryDecisionDeferred {
 		settingStore, _ := s.(store.HubSettingStore)
-		if managedImageRegistryConfigured(ctx, settingStore, colocatedActiveProfile()) {
+		active := colocatedActiveProfile()
+		if managedImageRegistryConfigured(ctx, settingStore, active) || bootstrapImageRegistryConfigured(serverConfigPath, active) {
 			registryFromHubDB = true
+			cfg.RuntimeBroker.Enabled = true
+			if err := checkBrokerPort(cfg); err != nil {
+				return err
+			}
 		} else {
 			disableWorkstationBrokerForRegistry(cfg)
 		}
@@ -1652,12 +1663,8 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 		}
 	}
 	if cfg.RuntimeBroker.Enabled {
-		status := checkPort(cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
-		if status.inUse {
-			if status.isScionServer {
-				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.RuntimeBroker.Port)
-			}
-			return fmt.Errorf("runtime broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
+		if err := checkBrokerPort(cfg); err != nil {
+			return err
 		}
 	}
 	if enableWeb {
@@ -1672,6 +1679,18 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			}
 			return fmt.Errorf("web frontend port %d is already in use by another process", webPort)
 		}
+	}
+	return nil
+}
+
+// checkBrokerPort checks that the runtime broker's port is free.
+func checkBrokerPort(cfg *config.GlobalConfig) error {
+	status := checkPort(cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	if status.inUse {
+		if status.isScionServer {
+			return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.RuntimeBroker.Port)
+		}
+		return fmt.Errorf("runtime broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
 	}
 	return nil
 }

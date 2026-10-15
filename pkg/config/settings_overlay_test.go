@@ -92,7 +92,7 @@ func TestSettingsOverlay_Update_Apply(t *testing.T) {
 		t.Errorf("expected profile runtime 'cloudrun', got %q", p.Runtime)
 	}
 
-	if got := vs.ResolveImageRegistry("none"); got != "us-docker.pkg.dev/my-project/scion" {
+	if got := vs.SettingsImageRegistry("none"); got != "us-docker.pkg.dev/my-project/scion" {
 		t.Errorf("expected the overlay's hub image_registry, got %q", got)
 	}
 }
