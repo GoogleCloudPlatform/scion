@@ -60,7 +60,7 @@ func TestDisplayAgents_ProvisionedOnlyLabel(t *testing.T) {
 		{Name: "run-agent", Template: "default", Phase: "running", ProvisionedOnly: true},
 	}
 	var err error
-	out := captureStdout(t, func() { err = displayAgents(agents, false, true) })
+	out := captureStdout(t, func() { err = displayAgents(agents, false) })
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	// Header and three rows; the start hint goes to stderr.
@@ -116,14 +116,14 @@ func TestDisplayAgents_ProvisionedOnlyHint(t *testing.T) {
 
 	agents := []api.AgentInfo{{Name: "po-agent", Phase: "created", ProvisionedOnly: true}}
 	var err error
-	stdout, stderr := captureStdoutStderr(t, func() { err = displayAgents(agents, false, false) })
+	stdout, stderr := captureStdoutStderr(t, func() { err = displayAgents(agents, false) })
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "created (not started)")
 	assert.NotContains(t, stdout, "scion start")
 	assert.Equal(t, "Agent 'po-agent' is provisioned but not started. Run 'scion start po-agent' to start it.", strings.TrimSpace(stderr))
 
 	outputFormat = "json"
-	stdout, stderr = captureStdoutStderr(t, func() { err = displayAgents(agents, false, false) })
+	stdout, stderr = captureStdoutStderr(t, func() { err = displayAgents(agents, false) })
 	require.NoError(t, err)
 	assert.NotContains(t, stdout+stderr, "scion start")
 }

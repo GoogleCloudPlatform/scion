@@ -1377,6 +1377,14 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the harness-config's files
+	// (ptone/scion#4219): "" (legacy) stores each file at
+	// <StoragePath>/<path>; HarnessConfigLayoutBlobs stores each file once,
+	// by content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's
+	// harness-config commit path changes it; CreateHarnessConfig and
+	// UpdateHarnessConfigContent write it and UpdateHarnessConfig never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
@@ -1404,6 +1412,13 @@ type HarnessConfig struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// HarnessConfigLayoutBlobs is the content-addressed harness-config storage
+// layout (HarnessConfig.Layout). It is the same layout as
+// TemplateLayoutBlobs: every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4219).
+const HarnessConfigLayoutBlobs = TemplateLayoutBlobs
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
@@ -1590,6 +1605,10 @@ type ExpiredTestFixtureQuery struct {
 	AfterID        string
 	// Limit caps the rows returned when positive.
 	Limit int
+	// IncludeAdminKinds also selects the admin-kind test identities
+	// (test_hub_admin, test_super_admin; admin tier A3), which always
+	// carry an expiry as well. False selects test_fixture rows only.
+	IncludeAdminKinds bool
 }
 
 // FixtureRootedResources is what Store.ListFixtureRootedResources found for
@@ -1909,6 +1928,11 @@ type InviteCode struct {
 	CreatedBy  string    `json:"createdBy"`
 	Note       string    `json:"note"`
 	Created    time.Time `json:"created"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // InviteCodePrefix distinguishes invite codes from other token types.
@@ -1976,6 +2000,11 @@ type BrokerJoinToken struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
 	CreatedBy string    `json:"createdBy"` // User ID who created the token
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // BrokerStatus constants
@@ -2346,6 +2375,15 @@ type GroupMember struct {
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`
+	// ExpiresAt bounds the membership: past it the membership confers
+	// nothing and is not read. Nil is unbounded. Grant shaping forces it
+	// for a membership an admin-kind test identity adds.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // GroupMemberType constants
@@ -3613,6 +3651,11 @@ type RoleDefinition struct {
 	// the seeded project-visitor role. CreateRoleDefinition stores nil
 	// as true. Read it through ConfersProjectMembership.
 	ConfersMembership *bool `json:"confersMembership,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ConfersProjectMembership reports whether a binding of rd makes its
@@ -3637,6 +3680,11 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.
@@ -4451,10 +4499,13 @@ type MutationAuditFilter struct {
 	TargetType         string
 	TargetID           string
 	CorrelationID      string
-	Since              time.Time
-	Until              time.Time
-	Limit              int
-	Offset             int
+	// ExecutorID, when set, keeps only records whose executor_id equals
+	// it (for example a test identity purge's test_identity:<id>).
+	ExecutorID string
+	Since      time.Time
+	Until      time.Time
+	Limit      int
+	Offset     int
 }
 
 // =============================================================================

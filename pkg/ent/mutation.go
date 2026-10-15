@@ -25813,6 +25813,7 @@ type BrokerJoinTokenMutation struct {
 	expires_at    *time.Time
 	created_by    *string
 	created       *time.Time
+	issuance_id   *string
 	clearedFields map[string]struct{}
 	done          bool
 	oldValue      func(context.Context) (*BrokerJoinToken, error)
@@ -26067,6 +26068,55 @@ func (m *BrokerJoinTokenMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (m *BrokerJoinTokenMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *BrokerJoinTokenMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the BrokerJoinToken entity.
+// If the BrokerJoinToken object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *BrokerJoinTokenMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *BrokerJoinTokenMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[brokerjointoken.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *BrokerJoinTokenMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[brokerjointoken.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *BrokerJoinTokenMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, brokerjointoken.FieldIssuanceID)
+}
+
 // Where appends a list predicates to the BrokerJoinTokenMutation builder.
 func (m *BrokerJoinTokenMutation) Where(ps ...predicate.BrokerJoinToken) {
 	m.predicates = append(m.predicates, ps...)
@@ -26101,7 +26151,7 @@ func (m *BrokerJoinTokenMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *BrokerJoinTokenMutation) Fields() []string {
-	fields := make([]string, 0, 4)
+	fields := make([]string, 0, 5)
 	if m.token_hash != nil {
 		fields = append(fields, brokerjointoken.FieldTokenHash)
 	}
@@ -26113,6 +26163,9 @@ func (m *BrokerJoinTokenMutation) Fields() []string {
 	}
 	if m.created != nil {
 		fields = append(fields, brokerjointoken.FieldCreated)
+	}
+	if m.issuance_id != nil {
+		fields = append(fields, brokerjointoken.FieldIssuanceID)
 	}
 	return fields
 }
@@ -26130,6 +26183,8 @@ func (m *BrokerJoinTokenMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case brokerjointoken.FieldCreated:
 		return m.Created()
+	case brokerjointoken.FieldIssuanceID:
+		return m.IssuanceID()
 	}
 	return nil, false
 }
@@ -26147,6 +26202,8 @@ func (m *BrokerJoinTokenMutation) OldField(ctx context.Context, name string) (en
 		return m.OldCreatedBy(ctx)
 	case brokerjointoken.FieldCreated:
 		return m.OldCreated(ctx)
+	case brokerjointoken.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
 	}
 	return nil, fmt.Errorf("unknown BrokerJoinToken field %s", name)
 }
@@ -26184,6 +26241,13 @@ func (m *BrokerJoinTokenMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreated(v)
 		return nil
+	case brokerjointoken.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown BrokerJoinToken field %s", name)
 }
@@ -26213,7 +26277,11 @@ func (m *BrokerJoinTokenMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *BrokerJoinTokenMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(brokerjointoken.FieldIssuanceID) {
+		fields = append(fields, brokerjointoken.FieldIssuanceID)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -26226,6 +26294,11 @@ func (m *BrokerJoinTokenMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *BrokerJoinTokenMutation) ClearField(name string) error {
+	switch name {
+	case brokerjointoken.FieldIssuanceID:
+		m.ClearIssuanceID()
+		return nil
+	}
 	return fmt.Errorf("unknown BrokerJoinToken nullable field %s", name)
 }
 
@@ -26244,6 +26317,9 @@ func (m *BrokerJoinTokenMutation) ResetField(name string) error {
 		return nil
 	case brokerjointoken.FieldCreated:
 		m.ResetCreated()
+		return nil
+	case brokerjointoken.FieldIssuanceID:
+		m.ResetIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown BrokerJoinToken field %s", name)
@@ -43101,6 +43177,8 @@ type GroupMembershipMutation struct {
 	role          *groupmembership.Role
 	added_by      *string
 	added_at      *time.Time
+	expires_at    *time.Time
+	issuance_id   *string
 	clearedFields map[string]struct{}
 	group         *uuid.UUID
 	clearedgroup  bool
@@ -43472,6 +43550,104 @@ func (m *GroupMembershipMutation) ResetAgentID() {
 	delete(m.clearedFields, groupmembership.FieldAgentID)
 }
 
+// SetExpiresAt sets the "expires_at" field.
+func (m *GroupMembershipMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *GroupMembershipMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the GroupMembership entity.
+// If the GroupMembership object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMembershipMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *GroupMembershipMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[groupmembership.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *GroupMembershipMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[groupmembership.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *GroupMembershipMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, groupmembership.FieldExpiresAt)
+}
+
+// SetIssuanceID sets the "issuance_id" field.
+func (m *GroupMembershipMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *GroupMembershipMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the GroupMembership entity.
+// If the GroupMembership object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *GroupMembershipMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *GroupMembershipMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[groupmembership.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *GroupMembershipMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[groupmembership.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *GroupMembershipMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, groupmembership.FieldIssuanceID)
+}
+
 // ClearGroup clears the "group" edge to the Group entity.
 func (m *GroupMembershipMutation) ClearGroup() {
 	m.clearedgroup = true
@@ -43587,7 +43763,7 @@ func (m *GroupMembershipMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *GroupMembershipMutation) Fields() []string {
-	fields := make([]string, 0, 6)
+	fields := make([]string, 0, 8)
 	if m.role != nil {
 		fields = append(fields, groupmembership.FieldRole)
 	}
@@ -43605,6 +43781,12 @@ func (m *GroupMembershipMutation) Fields() []string {
 	}
 	if m.agent != nil {
 		fields = append(fields, groupmembership.FieldAgentID)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, groupmembership.FieldExpiresAt)
+	}
+	if m.issuance_id != nil {
+		fields = append(fields, groupmembership.FieldIssuanceID)
 	}
 	return fields
 }
@@ -43626,6 +43808,10 @@ func (m *GroupMembershipMutation) Field(name string) (ent.Value, bool) {
 		return m.UserID()
 	case groupmembership.FieldAgentID:
 		return m.AgentID()
+	case groupmembership.FieldExpiresAt:
+		return m.ExpiresAt()
+	case groupmembership.FieldIssuanceID:
+		return m.IssuanceID()
 	}
 	return nil, false
 }
@@ -43647,6 +43833,10 @@ func (m *GroupMembershipMutation) OldField(ctx context.Context, name string) (en
 		return m.OldUserID(ctx)
 	case groupmembership.FieldAgentID:
 		return m.OldAgentID(ctx)
+	case groupmembership.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case groupmembership.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
 	}
 	return nil, fmt.Errorf("unknown GroupMembership field %s", name)
 }
@@ -43698,6 +43888,20 @@ func (m *GroupMembershipMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAgentID(v)
 		return nil
+	case groupmembership.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case groupmembership.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown GroupMembership field %s", name)
 }
@@ -43737,6 +43941,12 @@ func (m *GroupMembershipMutation) ClearedFields() []string {
 	if m.FieldCleared(groupmembership.FieldAgentID) {
 		fields = append(fields, groupmembership.FieldAgentID)
 	}
+	if m.FieldCleared(groupmembership.FieldExpiresAt) {
+		fields = append(fields, groupmembership.FieldExpiresAt)
+	}
+	if m.FieldCleared(groupmembership.FieldIssuanceID) {
+		fields = append(fields, groupmembership.FieldIssuanceID)
+	}
 	return fields
 }
 
@@ -43759,6 +43969,12 @@ func (m *GroupMembershipMutation) ClearField(name string) error {
 		return nil
 	case groupmembership.FieldAgentID:
 		m.ClearAgentID()
+		return nil
+	case groupmembership.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	case groupmembership.FieldIssuanceID:
+		m.ClearIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown GroupMembership nullable field %s", name)
@@ -43785,6 +44001,12 @@ func (m *GroupMembershipMutation) ResetField(name string) error {
 		return nil
 	case groupmembership.FieldAgentID:
 		m.ResetAgentID()
+		return nil
+	case groupmembership.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case groupmembership.FieldIssuanceID:
+		m.ResetIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown GroupMembership field %s", name)
@@ -43918,6 +44140,7 @@ type HarnessConfigMutation struct {
 	storage_uri             *string
 	storage_bucket          *string
 	storage_path            *string
+	layout                  *string
 	files                   *string
 	status                  *harnessconfig.Status
 	image_status            *harnessconfig.ImageStatus
@@ -44575,6 +44798,55 @@ func (m *HarnessConfigMutation) ResetStoragePath() {
 	delete(m.clearedFields, harnessconfig.FieldStoragePath)
 }
 
+// SetLayout sets the "layout" field.
+func (m *HarnessConfigMutation) SetLayout(s string) {
+	m.layout = &s
+}
+
+// Layout returns the value of the "layout" field in the mutation.
+func (m *HarnessConfigMutation) Layout() (r string, exists bool) {
+	v := m.layout
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLayout returns the old "layout" field's value of the HarnessConfig entity.
+// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HarnessConfigMutation) OldLayout(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLayout is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLayout requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLayout: %w", err)
+	}
+	return oldValue.Layout, nil
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (m *HarnessConfigMutation) ClearLayout() {
+	m.layout = nil
+	m.clearedFields[harnessconfig.FieldLayout] = struct{}{}
+}
+
+// LayoutCleared returns if the "layout" field was cleared in this mutation.
+func (m *HarnessConfigMutation) LayoutCleared() bool {
+	_, ok := m.clearedFields[harnessconfig.FieldLayout]
+	return ok
+}
+
+// ResetLayout resets all changes to the "layout" field.
+func (m *HarnessConfigMutation) ResetLayout() {
+	m.layout = nil
+	delete(m.clearedFields, harnessconfig.FieldLayout)
+}
+
 // SetFiles sets the "files" field.
 func (m *HarnessConfigMutation) SetFiles(s string) {
 	m.files = &s
@@ -45096,7 +45368,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -45132,6 +45404,9 @@ func (m *HarnessConfigMutation) Fields() []string {
 	}
 	if m.storage_path != nil {
 		fields = append(fields, harnessconfig.FieldStoragePath)
+	}
+	if m.layout != nil {
+		fields = append(fields, harnessconfig.FieldLayout)
 	}
 	if m.files != nil {
 		fields = append(fields, harnessconfig.FieldFiles)
@@ -45198,6 +45473,8 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.StorageBucket()
 	case harnessconfig.FieldStoragePath:
 		return m.StoragePath()
+	case harnessconfig.FieldLayout:
+		return m.Layout()
 	case harnessconfig.FieldFiles:
 		return m.Files()
 	case harnessconfig.FieldStatus:
@@ -45253,6 +45530,8 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldStorageBucket(ctx)
 	case harnessconfig.FieldStoragePath:
 		return m.OldStoragePath(ctx)
+	case harnessconfig.FieldLayout:
+		return m.OldLayout(ctx)
 	case harnessconfig.FieldFiles:
 		return m.OldFiles(ctx)
 	case harnessconfig.FieldStatus:
@@ -45367,6 +45646,13 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStoragePath(v)
+		return nil
+	case harnessconfig.FieldLayout:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLayout(v)
 		return nil
 	case harnessconfig.FieldFiles:
 		v, ok := value.(string)
@@ -45499,6 +45785,9 @@ func (m *HarnessConfigMutation) ClearedFields() []string {
 	if m.FieldCleared(harnessconfig.FieldStoragePath) {
 		fields = append(fields, harnessconfig.FieldStoragePath)
 	}
+	if m.FieldCleared(harnessconfig.FieldLayout) {
+		fields = append(fields, harnessconfig.FieldLayout)
+	}
 	if m.FieldCleared(harnessconfig.FieldFiles) {
 		fields = append(fields, harnessconfig.FieldFiles)
 	}
@@ -45557,6 +45846,9 @@ func (m *HarnessConfigMutation) ClearField(name string) error {
 		return nil
 	case harnessconfig.FieldStoragePath:
 		m.ClearStoragePath()
+		return nil
+	case harnessconfig.FieldLayout:
+		m.ClearLayout()
 		return nil
 	case harnessconfig.FieldFiles:
 		m.ClearFiles()
@@ -45622,6 +45914,9 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldStoragePath:
 		m.ResetStoragePath()
+		return nil
+	case harnessconfig.FieldLayout:
+		m.ResetLayout()
 		return nil
 	case harnessconfig.FieldFiles:
 		m.ResetFiles()
@@ -48582,6 +48877,7 @@ type InviteCodeMutation struct {
 	created_by    *string
 	note          *string
 	created       *time.Time
+	issuance_id   *string
 	clearedFields map[string]struct{}
 	done          bool
 	oldValue      func(context.Context) (*InviteCode, error)
@@ -49056,6 +49352,55 @@ func (m *InviteCodeMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (m *InviteCodeMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *InviteCodeMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the InviteCode entity.
+// If the InviteCode object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *InviteCodeMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *InviteCodeMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[invitecode.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *InviteCodeMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[invitecode.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *InviteCodeMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, invitecode.FieldIssuanceID)
+}
+
 // Where appends a list predicates to the InviteCodeMutation builder.
 func (m *InviteCodeMutation) Where(ps ...predicate.InviteCode) {
 	m.predicates = append(m.predicates, ps...)
@@ -49090,7 +49435,7 @@ func (m *InviteCodeMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *InviteCodeMutation) Fields() []string {
-	fields := make([]string, 0, 9)
+	fields := make([]string, 0, 10)
 	if m.code_hash != nil {
 		fields = append(fields, invitecode.FieldCodeHash)
 	}
@@ -49118,6 +49463,9 @@ func (m *InviteCodeMutation) Fields() []string {
 	if m.created != nil {
 		fields = append(fields, invitecode.FieldCreated)
 	}
+	if m.issuance_id != nil {
+		fields = append(fields, invitecode.FieldIssuanceID)
+	}
 	return fields
 }
 
@@ -49144,6 +49492,8 @@ func (m *InviteCodeMutation) Field(name string) (ent.Value, bool) {
 		return m.Note()
 	case invitecode.FieldCreated:
 		return m.Created()
+	case invitecode.FieldIssuanceID:
+		return m.IssuanceID()
 	}
 	return nil, false
 }
@@ -49171,6 +49521,8 @@ func (m *InviteCodeMutation) OldField(ctx context.Context, name string) (ent.Val
 		return m.OldNote(ctx)
 	case invitecode.FieldCreated:
 		return m.OldCreated(ctx)
+	case invitecode.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
 	}
 	return nil, fmt.Errorf("unknown InviteCode field %s", name)
 }
@@ -49243,6 +49595,13 @@ func (m *InviteCodeMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCreated(v)
 		return nil
+	case invitecode.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown InviteCode field %s", name)
 }
@@ -49299,7 +49658,11 @@ func (m *InviteCodeMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *InviteCodeMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(invitecode.FieldIssuanceID) {
+		fields = append(fields, invitecode.FieldIssuanceID)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -49312,6 +49675,11 @@ func (m *InviteCodeMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *InviteCodeMutation) ClearField(name string) error {
+	switch name {
+	case invitecode.FieldIssuanceID:
+		m.ClearIssuanceID()
+		return nil
+	}
 	return fmt.Errorf("unknown InviteCode nullable field %s", name)
 }
 
@@ -49345,6 +49713,9 @@ func (m *InviteCodeMutation) ResetField(name string) error {
 		return nil
 	case invitecode.FieldCreated:
 		m.ResetCreated()
+		return nil
+	case invitecode.FieldIssuanceID:
+		m.ResetIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown InviteCode field %s", name)
@@ -67355,6 +67726,7 @@ type RoleBindingMutation struct {
 	created_by             *string
 	created                *time.Time
 	membership_kind        *string
+	issuance_id            *string
 	clearedFields          map[string]struct{}
 	role_definition        *uuid.UUID
 	clearedrole_definition bool
@@ -67892,6 +68264,55 @@ func (m *RoleBindingMutation) ResetMembershipKind() {
 	delete(m.clearedFields, rolebinding.FieldMembershipKind)
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (m *RoleBindingMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *RoleBindingMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the RoleBinding entity.
+// If the RoleBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleBindingMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *RoleBindingMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[rolebinding.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *RoleBindingMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[rolebinding.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *RoleBindingMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, rolebinding.FieldIssuanceID)
+}
+
 // ClearRoleDefinition clears the "role_definition" edge to the RoleDefinition entity.
 func (m *RoleBindingMutation) ClearRoleDefinition() {
 	m.clearedrole_definition = true
@@ -67953,7 +68374,7 @@ func (m *RoleBindingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleBindingMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 11)
 	if m.role_definition != nil {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
@@ -67984,6 +68405,9 @@ func (m *RoleBindingMutation) Fields() []string {
 	if m.membership_kind != nil {
 		fields = append(fields, rolebinding.FieldMembershipKind)
 	}
+	if m.issuance_id != nil {
+		fields = append(fields, rolebinding.FieldIssuanceID)
+	}
 	return fields
 }
 
@@ -68012,6 +68436,8 @@ func (m *RoleBindingMutation) Field(name string) (ent.Value, bool) {
 		return m.Created()
 	case rolebinding.FieldMembershipKind:
 		return m.MembershipKind()
+	case rolebinding.FieldIssuanceID:
+		return m.IssuanceID()
 	}
 	return nil, false
 }
@@ -68041,6 +68467,8 @@ func (m *RoleBindingMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldCreated(ctx)
 	case rolebinding.FieldMembershipKind:
 		return m.OldMembershipKind(ctx)
+	case rolebinding.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
 	}
 	return nil, fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -68120,6 +68548,13 @@ func (m *RoleBindingMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetMembershipKind(v)
 		return nil
+	case rolebinding.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -68165,6 +68600,9 @@ func (m *RoleBindingMutation) ClearedFields() []string {
 	if m.FieldCleared(rolebinding.FieldMembershipKind) {
 		fields = append(fields, rolebinding.FieldMembershipKind)
 	}
+	if m.FieldCleared(rolebinding.FieldIssuanceID) {
+		fields = append(fields, rolebinding.FieldIssuanceID)
+	}
 	return fields
 }
 
@@ -68193,6 +68631,9 @@ func (m *RoleBindingMutation) ClearField(name string) error {
 		return nil
 	case rolebinding.FieldMembershipKind:
 		m.ClearMembershipKind()
+		return nil
+	case rolebinding.FieldIssuanceID:
+		m.ClearIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding nullable field %s", name)
@@ -68231,6 +68672,9 @@ func (m *RoleBindingMutation) ResetField(name string) error {
 		return nil
 	case rolebinding.FieldMembershipKind:
 		m.ResetMembershipKind()
+		return nil
+	case rolebinding.FieldIssuanceID:
+		m.ResetIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)
@@ -68325,6 +68769,7 @@ type RoleDefinitionMutation struct {
 	confers_membership   *bool
 	created              *time.Time
 	updated              *time.Time
+	issuance_id          *string
 	clearedFields        map[string]struct{}
 	role_bindings        map[uuid.UUID]struct{}
 	removedrole_bindings map[uuid.UUID]struct{}
@@ -68768,6 +69213,55 @@ func (m *RoleDefinitionMutation) ResetUpdated() {
 	m.updated = nil
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (m *RoleDefinitionMutation) SetIssuanceID(s string) {
+	m.issuance_id = &s
+}
+
+// IssuanceID returns the value of the "issuance_id" field in the mutation.
+func (m *RoleDefinitionMutation) IssuanceID() (r string, exists bool) {
+	v := m.issuance_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuanceID returns the old "issuance_id" field's value of the RoleDefinition entity.
+// If the RoleDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleDefinitionMutation) OldIssuanceID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuanceID: %w", err)
+	}
+	return oldValue.IssuanceID, nil
+}
+
+// ClearIssuanceID clears the value of the "issuance_id" field.
+func (m *RoleDefinitionMutation) ClearIssuanceID() {
+	m.issuance_id = nil
+	m.clearedFields[roledefinition.FieldIssuanceID] = struct{}{}
+}
+
+// IssuanceIDCleared returns if the "issuance_id" field was cleared in this mutation.
+func (m *RoleDefinitionMutation) IssuanceIDCleared() bool {
+	_, ok := m.clearedFields[roledefinition.FieldIssuanceID]
+	return ok
+}
+
+// ResetIssuanceID resets all changes to the "issuance_id" field.
+func (m *RoleDefinitionMutation) ResetIssuanceID() {
+	m.issuance_id = nil
+	delete(m.clearedFields, roledefinition.FieldIssuanceID)
+}
+
 // AddRoleBindingIDs adds the "role_bindings" edge to the RoleBinding entity by ids.
 func (m *RoleDefinitionMutation) AddRoleBindingIDs(ids ...uuid.UUID) {
 	if m.role_bindings == nil {
@@ -68856,7 +69350,7 @@ func (m *RoleDefinitionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleDefinitionMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 9)
 	if m.name != nil {
 		fields = append(fields, roledefinition.FieldName)
 	}
@@ -68880,6 +69374,9 @@ func (m *RoleDefinitionMutation) Fields() []string {
 	}
 	if m.updated != nil {
 		fields = append(fields, roledefinition.FieldUpdated)
+	}
+	if m.issuance_id != nil {
+		fields = append(fields, roledefinition.FieldIssuanceID)
 	}
 	return fields
 }
@@ -68905,6 +69402,8 @@ func (m *RoleDefinitionMutation) Field(name string) (ent.Value, bool) {
 		return m.Created()
 	case roledefinition.FieldUpdated:
 		return m.Updated()
+	case roledefinition.FieldIssuanceID:
+		return m.IssuanceID()
 	}
 	return nil, false
 }
@@ -68930,6 +69429,8 @@ func (m *RoleDefinitionMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldCreated(ctx)
 	case roledefinition.FieldUpdated:
 		return m.OldUpdated(ctx)
+	case roledefinition.FieldIssuanceID:
+		return m.OldIssuanceID(ctx)
 	}
 	return nil, fmt.Errorf("unknown RoleDefinition field %s", name)
 }
@@ -68995,6 +69496,13 @@ func (m *RoleDefinitionMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetUpdated(v)
 		return nil
+	case roledefinition.FieldIssuanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuanceID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RoleDefinition field %s", name)
 }
@@ -69031,6 +69539,9 @@ func (m *RoleDefinitionMutation) ClearedFields() []string {
 	if m.FieldCleared(roledefinition.FieldPermissions) {
 		fields = append(fields, roledefinition.FieldPermissions)
 	}
+	if m.FieldCleared(roledefinition.FieldIssuanceID) {
+		fields = append(fields, roledefinition.FieldIssuanceID)
+	}
 	return fields
 }
 
@@ -69050,6 +69561,9 @@ func (m *RoleDefinitionMutation) ClearField(name string) error {
 		return nil
 	case roledefinition.FieldPermissions:
 		m.ClearPermissions()
+		return nil
+	case roledefinition.FieldIssuanceID:
+		m.ClearIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleDefinition nullable field %s", name)
@@ -69082,6 +69596,9 @@ func (m *RoleDefinitionMutation) ResetField(name string) error {
 		return nil
 	case roledefinition.FieldUpdated:
 		m.ResetUpdated()
+		return nil
+	case roledefinition.FieldIssuanceID:
+		m.ResetIssuanceID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleDefinition field %s", name)

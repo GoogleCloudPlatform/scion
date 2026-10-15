@@ -103,6 +103,34 @@ func (_c *GroupMembershipCreate) SetNillableAgentID(v *uuid.UUID) *GroupMembersh
 	return _c
 }
 
+// SetExpiresAt sets the "expires_at" field.
+func (_c *GroupMembershipCreate) SetExpiresAt(v time.Time) *GroupMembershipCreate {
+	_c.mutation.SetExpiresAt(v)
+	return _c
+}
+
+// SetNillableExpiresAt sets the "expires_at" field if the given value is not nil.
+func (_c *GroupMembershipCreate) SetNillableExpiresAt(v *time.Time) *GroupMembershipCreate {
+	if v != nil {
+		_c.SetExpiresAt(*v)
+	}
+	return _c
+}
+
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *GroupMembershipCreate) SetIssuanceID(v string) *GroupMembershipCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *GroupMembershipCreate) SetNillableIssuanceID(v *string) *GroupMembershipCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *GroupMembershipCreate) SetID(v uuid.UUID) *GroupMembershipCreate {
 	_c.mutation.SetID(v)
@@ -247,6 +275,14 @@ func (_c *GroupMembershipCreate) createSpec() (*GroupMembership, *sqlgraph.Creat
 	if value, ok := _c.mutation.AddedAt(); ok {
 		_spec.SetField(groupmembership.FieldAddedAt, field.TypeTime, value)
 		_node.AddedAt = value
+	}
+	if value, ok := _c.mutation.ExpiresAt(); ok {
+		_spec.SetField(groupmembership.FieldExpiresAt, field.TypeTime, value)
+		_node.ExpiresAt = &value
+	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(groupmembership.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
 	}
 	if nodes := _c.mutation.GroupIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -448,6 +484,12 @@ func (u *GroupMembershipUpsertOne) UpdateNewValues() *GroupMembershipUpsertOne {
 		}
 		if _, exists := u.create.mutation.AddedAt(); exists {
 			s.SetIgnore(groupmembership.FieldAddedAt)
+		}
+		if _, exists := u.create.mutation.ExpiresAt(); exists {
+			s.SetIgnore(groupmembership.FieldExpiresAt)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(groupmembership.FieldIssuanceID)
 		}
 	}))
 	return u
@@ -756,6 +798,12 @@ func (u *GroupMembershipUpsertBulk) UpdateNewValues() *GroupMembershipUpsertBulk
 			}
 			if _, exists := b.mutation.AddedAt(); exists {
 				s.SetIgnore(groupmembership.FieldAddedAt)
+			}
+			if _, exists := b.mutation.ExpiresAt(); exists {
+				s.SetIgnore(groupmembership.FieldExpiresAt)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(groupmembership.FieldIssuanceID)
 			}
 		}
 	}))

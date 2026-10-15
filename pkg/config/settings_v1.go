@@ -1393,28 +1393,6 @@ func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (strin
 	return "", ""
 }
 
-// RequireImageRegistry checks that image_registry is configured and returns an
-// actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(projectPath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(projectPath)
-	if err != nil {
-		// Can't load settings — let other code handle this error
-		return nil
-	}
-	if vs == nil {
-		return nil
-	}
-	if vs.IsImageRegistryConfigured(profileName) {
-		return nil
-	}
-	return fmt.Errorf("image_registry is not configured.\n\n" +
-		"Scion requires container images to run agents. To get started:\n\n" +
-		"  1. Build your images:  image-build/scripts/build-images.sh --registry <your-registry> --push\n" +
-		"     See image-build/README.md for detailed instructions.\n\n" +
-		"  2. Configure scion:   scion config set --global image_registry <your-registry>\n" +
-		"     Example:           scion config set --global image_registry ghcr.io/myorg")
-}
-
 // RewriteImageRegistry replaces the registry prefix of a container image reference
 // with newRegistry for any short-form (non-fully-qualified) image.
 // If newRegistry is empty, the original image is returned unchanged.

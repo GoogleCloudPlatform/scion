@@ -803,6 +803,7 @@ var (
 		{Name: "expires_at", Type: field.TypeTime},
 		{Name: "created_by", Type: field.TypeString},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// BrokerJoinTokensTable holds the schema information for the "broker_join_tokens" table.
 	BrokerJoinTokensTable = &schema.Table{
@@ -810,6 +811,11 @@ var (
 		Columns:    BrokerJoinTokensColumns,
 		PrimaryKey: []*schema.Column{BrokerJoinTokensColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "brokerjointoken_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerJoinTokensColumns[5]},
+			},
 			{
 				Name:    "brokerjointoken_expires_at",
 				Unique:  false,
@@ -1448,6 +1454,8 @@ var (
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"member", "admin", "owner"}, Default: "member"},
 		{Name: "added_by", Type: field.TypeString, Nullable: true},
 		{Name: "added_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "group_id", Type: field.TypeUUID},
 		{Name: "user_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
@@ -1460,33 +1468,38 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "group_memberships_groups_memberships",
-				Columns:    []*schema.Column{GroupMembershipsColumns[4]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[6]},
 				RefColumns: []*schema.Column{GroupsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
 			{
 				Symbol:     "group_memberships_users_user",
-				Columns:    []*schema.Column{GroupMembershipsColumns[5]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[7]},
 				RefColumns: []*schema.Column{UsersColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "group_memberships_agents_agent",
-				Columns:    []*schema.Column{GroupMembershipsColumns[6]},
+				Columns:    []*schema.Column{GroupMembershipsColumns[8]},
 				RefColumns: []*schema.Column{AgentsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
 			{
+				Name:    "groupmembership_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{GroupMembershipsColumns[5]},
+			},
+			{
 				Name:    "groupmembership_group_id_user_id",
 				Unique:  true,
-				Columns: []*schema.Column{GroupMembershipsColumns[4], GroupMembershipsColumns[5]},
+				Columns: []*schema.Column{GroupMembershipsColumns[6], GroupMembershipsColumns[7]},
 			},
 			{
 				Name:    "groupmembership_group_id_agent_id",
 				Unique:  true,
-				Columns: []*schema.Column{GroupMembershipsColumns[4], GroupMembershipsColumns[6]},
+				Columns: []*schema.Column{GroupMembershipsColumns[6], GroupMembershipsColumns[8]},
 			},
 		},
 	}
@@ -1505,6 +1518,7 @@ var (
 		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "layout", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "image_status", Type: field.TypeEnum, Enums: []string{"unknown", "valid", "invalid", "error"}, Default: "unknown"},
@@ -1536,7 +1550,7 @@ var (
 			{
 				Name:    "harnessconfig_status",
 				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[14]},
+				Columns: []*schema.Column{HarnessConfigsColumns[15]},
 			},
 			{
 				Name:    "harnessconfig_content_hash",
@@ -1651,6 +1665,7 @@ var (
 		{Name: "created_by", Type: field.TypeString},
 		{Name: "note", Type: field.TypeString, Default: ""},
 		{Name: "created", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// InviteCodesTable holds the schema information for the "invite_codes" table.
 	InviteCodesTable = &schema.Table{
@@ -1658,6 +1673,11 @@ var (
 		Columns:    InviteCodesColumns,
 		PrimaryKey: []*schema.Column{InviteCodesColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "invitecode_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{InviteCodesColumns[10]},
+			},
 			{
 				Name:    "invitecode_expires_at",
 				Unique:  false,
@@ -2298,6 +2318,7 @@ var (
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "membership_kind", Type: field.TypeString, Nullable: true},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "role_definition_id", Type: field.TypeUUID, Nullable: true},
 	}
 	// RoleBindingsTable holds the schema information for the "role_bindings" table.
@@ -2308,12 +2329,17 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[10]},
+				Columns:    []*schema.Column{RoleBindingsColumns[11]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
 		},
 		Indexes: []*schema.Index{
+			{
+				Name:    "rolebinding_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleBindingsColumns[10]},
+			},
 			{
 				Name:    "rolebinding_principal_type_principal_id",
 				Unique:  false,
@@ -2322,7 +2348,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[10]},
+				Columns: []*schema.Column{RoleBindingsColumns[11]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -2332,7 +2358,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[10], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[11], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}
@@ -2347,6 +2373,7 @@ var (
 		{Name: "confers_membership", Type: field.TypeBool, Default: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
+		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 	}
 	// RoleDefinitionsTable holds the schema information for the "role_definitions" table.
 	RoleDefinitionsTable = &schema.Table{
@@ -2354,6 +2381,11 @@ var (
 		Columns:    RoleDefinitionsColumns,
 		PrimaryKey: []*schema.Column{RoleDefinitionsColumns[0]},
 		Indexes: []*schema.Index{
+			{
+				Name:    "roledefinition_issuance_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleDefinitionsColumns[9]},
+			},
 			{
 				Name:    "roledefinition_name_scope_type",
 				Unique:  true,
