@@ -27,10 +27,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -593,20 +595,35 @@ func resolveAsUser(t *testing.T, srv *Server, user *store.User, req ResolveSkill
 }
 
 // newFixedStatusGitHub serves every GitHub API request with status and a body
-// holding body.
-func newFixedStatusGitHub(t *testing.T, status int, body string) *httptest.Server {
+// holding body, and counts the requests it serves.
+func newFixedStatusGitHub(t *testing.T, status int, body string) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
+	var calls atomic.Int64
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, &calls
+}
+
+// mustParseGitHubRef fails the test unless uri is a valid gh:// reference,
+// so that a test meant to reach a later branch cannot pass on the
+// invalid-URI path instead.
+func mustParseGitHubRef(t *testing.T, uri string) *agent.GitHubSkillRef {
+	t.Helper()
+	ref, err := agent.ParseGitHubSkillURI(uri)
+	if err != nil {
+		t.Fatalf("test reference %q is not a valid gh:// reference: %v", uri, err)
+	}
+	return ref
 }
 
 func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 	const marker = "zq-gh-detail-5079"
-	const uri = "gh://acme/private-repo/skills/s"
+	const uri = "gh://acme/private-repo/s"
+	mustParseGitHubRef(t, uri)
 	cases := []struct {
 		name    string
 		status  int
@@ -630,7 +647,7 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _, alice, _, project := setupSkillAuthzTest(t)
 			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
-			gh := newFixedStatusGitHub(t, tc.status, `{"message":"`+marker+`"}`)
+			gh, ghCalls := newFixedStatusGitHub(t, tc.status, `{"message":"`+marker+`"}`)
 			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
 			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
 			logs := captureJSONSlog(t)
@@ -656,15 +673,22 @@ func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
 			if rec["skill_uri"] != uri || rec["source"] != "github" || rec["status"] != float64(tc.status) {
 				t.Errorf("log record = %v, want skill_uri %q, source github, status %d", rec, uri, tc.status)
 			}
+			if ghCalls.Load() == 0 {
+				t.Errorf("the fake GitHub was not called; the resolution did not reach GitHub")
+			}
 		})
 	}
 }
 
 func TestSkillsResolve_GitHubForbiddenProjectReturnsFixedPhrase(t *testing.T) {
 	srv, _, _, bob, project := setupSkillAuthzTest(t)
+	gh, ghCalls := newFixedStatusGitHub(t, http.StatusInternalServerError, "unexpected")
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
 	logs := captureJSONSlog(t)
 
-	const uri = "gh://acme/private-repo/skills/s"
+	const uri = "gh://acme/private-repo/s"
+	mustParseGitHubRef(t, uri)
 	_, errs, ids := resolveAsUser(t, srv, bob, ResolveSkillsRequest{
 		Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
 	})
@@ -678,15 +702,25 @@ func TestSkillsResolve_GitHubForbiddenProjectReturnsFixedPhrase(t *testing.T) {
 		rec["error"] != "caller may not resolve GitHub skills for this project" {
 		t.Errorf("log record = %v", rec)
 	}
+	if n := ghCalls.Load(); n != 0 {
+		t.Errorf("the fake GitHub got %d requests; the project check must come first", n)
+	}
 }
 
 // A gh:// reference with a query is logged in its redacted form, and the
-// full error is withheld from the record.
+// full error is withheld from the record. The reference is a valid ?token=
+// reference, which the Hub declines before contacting GitHub.
 func TestSkillsResolve_GitHubRedactedReference(t *testing.T) {
 	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	gh, ghCalls := newFixedStatusGitHub(t, http.StatusInternalServerError, "unexpected")
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
 	logs := captureJSONSlog(t)
 
-	const uri = "gh://acme/private-repo/skills/s?token=ZQ_TOKEN_NAME"
+	const uri = "gh://acme/private-repo/s?token=ZQ_TOKEN_NAME"
+	if ref := mustParseGitHubRef(t, uri); ref.TokenSecretName != "ZQ_TOKEN_NAME" {
+		t.Fatalf("test reference token = %q, want ZQ_TOKEN_NAME", ref.TokenSecretName)
+	}
 	raw, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
 		Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
 	})
@@ -701,6 +735,12 @@ func TestSkillsResolve_GitHubRedactedReference(t *testing.T) {
 	rec := findResolveLog(t, logs(), id, "resolve_failed")
 	if rec["skill_uri"] != "(redacted URL)" || rec["error"] != "(resolver message withheld)" {
 		t.Errorf("log record = %v, want the reference redacted and the error withheld", rec)
+	}
+	if rec["status"] != float64(0) {
+		t.Errorf("log status = %v, want 0 (no GitHub response)", rec["status"])
+	}
+	if n := ghCalls.Load(); n != 0 {
+		t.Errorf("the fake GitHub got %d requests; a ?token= reference must be declined first", n)
 	}
 }
 
