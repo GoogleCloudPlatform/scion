@@ -65,8 +65,15 @@ func skillResolveCorrelationID(ctx context.Context) string {
 // logged in its redacted form, and detail is withheld from the log when
 // the reference is redacted (see agent.ResolverReasonForLog).
 func newSkillResolveError(ctx context.Context, source, uri, code string, status int, detail string, attrs ...any) *ResolveSkillError {
+	return newSkillResolveErrorAt(ctx, slog.LevelWarn, source, uri, code, status, detail, attrs...)
+}
+
+// newSkillResolveErrorAt is newSkillResolveError with the log record
+// written at level, for a failure that is a fault of the Hub itself (such
+// as its storage) rather than of the reference or its source.
+func newSkillResolveErrorAt(ctx context.Context, level slog.Level, source, uri, code string, status int, detail string, attrs ...any) *ResolveSkillError {
 	id := skillResolveCorrelationID(ctx)
-	slog.WarnContext(ctx, skillResolveFailureLogMsg, append(attrs,
+	slog.Log(ctx, level, skillResolveFailureLogMsg, append(attrs,
 		"correlation_id", id,
 		"source", source,
 		"skill_uri", agent.LoggedSkillRef(uri),

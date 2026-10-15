@@ -19,6 +19,7 @@ package hub
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -27,8 +28,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -717,5 +720,145 @@ func TestSkillsResolve_InvalidURIReturnsFixedPhrase(t *testing.T) {
 	rec := findResolveLog(t, logs(), id, "invalid_uri")
 	if got, _ := rec["error"].(string); !strings.Contains(got, "too many path segments") {
 		t.Errorf("log error = %q, want the parse error", got)
+	}
+}
+
+func TestSkillsResolve_RegistryErrorsReturnFixedPhrase(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	skill := createTestSkill(t, s, "zq-registry-skill", store.SkillScopeGlobal, "", alice.ID)
+	publishTestSkillVersion(t, s, skill)
+	logs := captureJSONSlog(t)
+
+	const (
+		missing    = "skill://scion/global/zq-does-not-exist"
+		badVersion = "skill://scion/global/zq-registry-skill@9.9.9"
+	)
+	_, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: missing}, {URI: badVersion}}, ProjectID: project.ID,
+	})
+	if len(errs) != 2 {
+		t.Fatalf("errors = %v, want 2", errs)
+	}
+	assertResolveError(t, errs[0], wantResolveError{uri: missing, code: "not_found", message: "skill not found"}, ids[0])
+	assertResolveError(t, errs[1], wantResolveError{uri: badVersion, code: "not_found", message: "skill not found"}, ids[1])
+
+	recs := logs()
+	wantLog := map[string]string{
+		missing:    `skill "zq-does-not-exist" not found in any scope`,
+		badVersion: `skill "zq-registry-skill" found but version "9.9.9" could not be resolved`,
+	}
+	for i, uri := range []string{missing, badVersion} {
+		var got []string
+		for _, r := range recs {
+			if r["msg"] == skillResolveLogMsg && r["correlation_id"] == ids[i] && r["skill_uri"] == uri {
+				if r["source"] != "registry" {
+					t.Errorf("log record = %v, want source registry", r)
+				}
+				text, _ := r["error"].(string)
+				got = append(got, text)
+			}
+		}
+		if len(got) != 1 || !strings.Contains(got[0], wantLog[uri]) {
+			t.Errorf("log errors for %s = %q, want one holding %q", uri, got, wantLog[uri])
+		}
+	}
+}
+
+// A storage failure is logged at ERROR with the skill name, version and
+// storage error as attributes of their own, also for a reference that is
+// redacted in the log (one that pins a version by content hash); the
+// response carries only the phrase.
+func TestSkillsResolve_RegistryStorageErrorReturnsFixedPhrase(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("ab", 32)
+	cases := []struct {
+		name     string
+		uri      string
+		redacted bool
+	}{
+		{name: "reference without a version", uri: "skill://scion/global/zq-stored-skill"},
+		{name: "content hash reference", uri: "skill://scion/global/zq-stored-skill@" + hash, redacted: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, alice, _, project := setupSkillAuthzTest(t)
+			srv.SetStorage(signErrStorage{newMockStorage("zq-bucket")})
+			skill := createTestSkill(t, s, "zq-stored-skill", store.SkillScopeGlobal, "", alice.ID)
+			if err := s.CreateSkillVersion(t.Context(), &store.SkillVersion{
+				ID:          api.NewUUID(),
+				SkillID:     skill.ID,
+				Version:     "1.0.0",
+				ContentHash: hash,
+				Status:      store.SkillVersionStatusPublished,
+				Files:       []store.TemplateFile{{Path: "SKILL.md", Size: 1, Hash: "sha256:f"}},
+				Created:     time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			logs := captureJSONSlog(t)
+
+			raw, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
+				Skills: []ResolveSkillRef{{URI: tc.uri}}, ProjectID: project.ID,
+			})
+			id := ids[0]
+			if len(errs) != 1 {
+				t.Fatalf("errors = %v, want 1", errs)
+			}
+			assertResolveError(t, errs[0], wantResolveError{uri: tc.uri, code: "storage_error", message: "skill files unavailable"}, id)
+			if strings.Contains(raw, "injected signed URL fault") {
+				t.Errorf("response holds the storage error: %s", raw)
+			}
+
+			rec := findResolveLog(t, logs(), id, "storage_error")
+			if rec["level"] != "ERROR" || rec["skill"] != "zq-stored-skill" || rec["version"] != "1.0.0" {
+				t.Errorf("log record = %v, want level ERROR, skill zq-stored-skill, version 1.0.0", rec)
+			}
+			if got, _ := rec["storage_error"].(string); !strings.Contains(got, "injected signed URL fault") {
+				t.Errorf("log storage_error = %q, want the storage error", got)
+			}
+			got, _ := rec["error"].(string)
+			if tc.redacted {
+				if rec["skill_uri"] != "(redacted URL)" || got != "(resolver message withheld)" {
+					t.Errorf("log record = %v, want the reference redacted and the error withheld", rec)
+				}
+			} else if !strings.Contains(got, "injected signed URL fault") {
+				t.Errorf("log error = %q, want the storage error", got)
+			}
+		})
+	}
+}
+
+// When there is no request id (for example dispatch outside a request),
+// each error carries a random correlation id, and the log record holds the
+// same id.
+func TestPreResolveAgentSkills_ErrorsCarryFallbackCorrelationID(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	logs := captureJSONSlog(t)
+
+	const uri = "skill://scion/global/zq-dispatch-missing"
+	resp := srv.preResolveAgentSkills(context.Background(), dispatchTestAgent(alice.ID, project.ID, uri))
+	if resp == nil {
+		t.Fatal("no pre-resolution response")
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Errors) != 1 {
+		t.Fatalf("errors = %s, want 1", b)
+	}
+	id, _ := wire.Errors[0]["correlationId"].(string)
+	if !randomCorrelationID.MatchString(id) {
+		t.Fatalf("correlationId = %q, want a random 16-hex id", id)
+	}
+	assertResolveError(t, wire.Errors[0], wantResolveError{uri: uri, code: "not_found", message: "skill not found"}, id)
+	rec := findResolveLog(t, logs(), id, "not_found")
+	if got, _ := rec["error"].(string); !strings.Contains(got, `skill "zq-dispatch-missing" not found in any scope`) {
+		t.Errorf("log error = %q", got)
 	}
 }

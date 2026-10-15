@@ -31,6 +31,10 @@ const (
 	SkillErrCodeInternalError = "internal_error"
 )
 
+// SkillErrCodeStorageError is the code of a Hub registry skill whose
+// stored files cannot be served.
+const SkillErrCodeStorageError = "storage_error"
+
 // skillResolutionPhrases is the fixed reason phrase for each skill
 // resolution error code. A code not listed gets
 // SkillResolutionDefaultPhrase.
@@ -47,6 +51,7 @@ var skillResolutionPhrases = map[string]string{
 	SkillErrCodeWrongRegistryType:   "unsupported skill registry type",
 	SkillErrCodeFederationError:     "skill registry request failed",
 	SkillErrCodeTrustViolation:      "skill content hash not trusted",
+	SkillErrCodeStorageError:        "skill files unavailable",
 }
 
 // SkillResolutionDefaultPhrase is the reason phrase for a skill resolution
