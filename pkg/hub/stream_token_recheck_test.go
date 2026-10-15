@@ -456,9 +456,8 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 
 	readOnlyCaller := &store.Agent{ID: tid("mls-ro-caller"), Slug: "mls-ro-caller", Name: "RO Caller", ProjectID: agent.ProjectID, Phase: "running", Created: time.Now(), Updated: time.Now()}
 	require.NoError(t, s.CreateAgent(ctx, readOnlyCaller))
-	// Signed through the token service with the read-only role's scopes:
-	// Server.GenerateAgentToken raises every role to full on a server with
-	// a dev token, as this test server has.
+	// The token carries exactly the read-only role's scopes, signed
+	// through the token service.
 	require.NotContains(t, ScopesForRole(AgentRoleReadOnly), ScopeAgentLifecycle)
 	readOnlyTok, err := srv.GetAgentTokenService().GenerateAgentToken(readOnlyCaller.ID, readOnlyCaller.ProjectID, ScopesForRole(AgentRoleReadOnly), nil)
 	require.NoError(t, err)
