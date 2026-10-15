@@ -637,6 +637,10 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	// Log successful join
 	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
+	// Record the reservations of the agents the broker still runs (a broker
+	// registered again under the same ID), now that its row is written and
+	// before the join answers (backfillBrokerOnJoin).
+	s.backfillBrokerOnJoin(r.Context(), req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }

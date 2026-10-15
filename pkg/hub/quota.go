@@ -60,10 +60,11 @@ type QuotaService struct {
 	// Server.SetQuotaCapacityMetrics.
 	capacityMetrics atomic.Pointer[OTelQuotaCapacityMetrics]
 
-	// brokerRowsBackfilled maps a Runtime Broker ID to the Created time of
-	// the broker row this replica last backfilled reservations for
-	// (Server.backfillRegisteredBrokerOnce).
-	brokerRowsBackfilled sync.Map
+	// brokerBackfillPending holds, per Runtime Broker ID, a
+	// *brokerBackfillRetry for a broker whose join-time backfill skipped an
+	// agent on this replica (Server.backfillBrokerOnJoin); its heartbeats
+	// retry it (Server.retryBrokerBackfill).
+	brokerBackfillPending sync.Map
 }
 
 // Sites of a reservation scope conflict, the site attribute of

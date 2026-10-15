@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -711,7 +712,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		n, c, _, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, func(agentID string) (string, bool, error) {
 			held, ok := heldBroker[agentID]
 			return held, ok, nil
-		}, func(held string) bool { return !listedBrokers[held] })
+		}, func(held string) bool { return !listedBrokers[held] }, false)
 		backfilled += n
 		conflicts += c
 		if err != nil {
@@ -853,7 +854,11 @@ func brokerBackfillHolds(agent *store.Agent) bool {
 // reservations recorded, of conflicts reported and of agents skipped
 // because their reservation could not be read or written; err is the agent
 // list's error.
-func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool) (backfilled, conflicts, skipped int, err error) {
+func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool, quiet bool) (backfilled, conflicts, skipped int, err error) {
+	skipLog := s.agentLifecycleLog.Warn
+	if quiet {
+		skipLog = s.agentLifecycleLog.Debug
+	}
 	agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: brokerID}, store.ListOptions{Limit: 10000})
 	if err != nil {
 		return 0, 0, 0, err
@@ -865,7 +870,7 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 		}
 		held, hasHeld, herr := heldBroker(agent.ID)
 		if herr != nil {
-			s.agentLifecycleLog.Warn("quota backfill: reading the agent's reservation failed",
+			skipLog("quota backfill: reading the agent's reservation failed",
 				"agent_id", agent.ID, "broker_id", brokerID, "error", herr)
 			skipped++
 			continue
@@ -888,7 +893,7 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 				conflicts++
 				continue
 			}
-			s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
+			skipLog("quota reconcile: failed to backfill reservation",
 				"agent_id", agent.ID, "broker_id", brokerID, "error", err)
 			skipped++
 			continue
@@ -915,7 +920,7 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 		if errors.Is(err, store.ErrNotFound) {
 			return true
 		}
-		s.agentLifecycleLog.Warn("quota backfill: failed to look up max_agents_per_broker limit definition",
+		s.agentLifecycleLog.Debug("quota backfill: failed to look up max_agents_per_broker limit definition",
 			"broker_id", brokerID, "error", err)
 		return false
 	}
@@ -930,49 +935,95 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 			return "", false, err
 		}
 	}
-	backfilled, conflicts, skipped, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true })
+	backfilled, conflicts, skipped, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true }, true)
 	if err != nil {
-		s.agentLifecycleLog.Warn("quota backfill: failed to list agents for broker", "broker_id", brokerID, "error", err)
+		s.agentLifecycleLog.Debug("quota backfill: failed to list agents for broker", "broker_id", brokerID, "error", err)
 		return false
 	}
-	if backfilled > 0 || conflicts > 0 || skipped > 0 {
+	if backfilled > 0 {
 		s.agentLifecycleLog.Info("quota backfill: recorded reservations of a Runtime Broker's agents",
 			"broker_id", brokerID, "backfilled", backfilled, "scope_conflicts", conflicts, "skipped", skipped)
+	} else if conflicts > 0 || skipped > 0 {
+		s.agentLifecycleLog.Debug("quota backfill: no reservation recorded for a Runtime Broker's agents",
+			"broker_id", brokerID, "scope_conflicts", conflicts, "skipped", skipped)
 	}
-	// A skipped agent is retried on the next heartbeat (the backfill is
-	// idempotent): the broker row is not recorded as done.
+	// A skipped agent is retried (the backfill is idempotent): the caller
+	// keeps the broker pending (runBrokerBackfill).
 	return skipped == 0
 }
 
-// backfillRegisteredBrokerOnce runs backfillBrokerReservations for broker
-// once per broker row identity on this replica: the first heartbeat this
-// replica handles for a row whose Created timestamp it has not backfilled.
-// A broker that was deregistered (its reservations released by the sweep)
-// and registered again under the same ID has a new row, so its still
-// running agents are re-reserved on its first heartbeat rather than at the
-// next hourly backfill. A Hub restart runs one idempotent backfill per
-// broker. Created is recorded only after a backfill that ran to the end, so
-// a failed one is retried on the next heartbeat.
-func (s *Server) backfillRegisteredBrokerOnce(ctx context.Context, broker *store.RuntimeBroker) {
-	if s.quotaService == nil || broker == nil {
+// brokerBackfillWarnInterval bounds the WARN for a broker whose join-time
+// backfill keeps skipping agents: it is logged on the first skip, then at most
+// once per interval per broker on this replica (each attempt also leaves a
+// debug record with the cause). A variable for tests.
+var brokerBackfillWarnInterval = 15 * time.Minute
+
+// brokerBackfillRetry is a broker whose join-time backfill skipped an agent
+// on this replica: its heartbeats retry the backfill until it runs to the
+// end.
+type brokerBackfillRetry struct {
+	mu       sync.Mutex
+	lastWarn time.Time
+}
+
+// backfillBrokerOnJoin records, when a Runtime Broker completes its join (its
+// row is written; called before the join answers), the reservations of the
+// agents it still runs (backfillBrokerReservations), so a broker registered
+// again under the same ID after a deregistration released its reservations
+// gets them back before its first heartbeat and before the hourly sweep. The
+// writes go to the shared store, so every replica sees them. If an agent is
+// skipped (a reservation read or write failed), the broker is kept pending on
+// this replica and its heartbeats retry (retryBrokerBackfill); a new join
+// starts afresh. Accepted gap: if this replica goes away while the broker is
+// pending, the hourly sweep's backfill is the backstop.
+func (s *Server) backfillBrokerOnJoin(ctx context.Context, brokerID string) {
+	if s.quotaService == nil || brokerID == "" {
 		return
 	}
-	if v, ok := s.quotaService.brokerRowsBackfilled.Load(broker.ID); ok {
-		if created, _ := v.(time.Time); created.Equal(broker.Created) {
-			return
-		}
+	s.quotaService.brokerBackfillPending.Delete(brokerID)
+	s.runBrokerBackfill(ctx, brokerID)
+}
+
+// retryBrokerBackfill retries the join-time backfill of brokerID from its
+// heartbeat, only if that backfill is pending on this replica. Otherwise it
+// returns without a store read: a heartbeat that needs nothing reads nothing.
+func (s *Server) retryBrokerBackfill(ctx context.Context, brokerID string) {
+	if s.quotaService == nil {
+		return
 	}
-	if s.backfillBrokerReservations(ctx, broker.ID) {
-		s.quotaService.brokerRowsBackfilled.Store(broker.ID, broker.Created)
+	if _, ok := s.quotaService.brokerBackfillPending.Load(brokerID); !ok {
+		return
+	}
+	s.runBrokerBackfill(ctx, brokerID)
+}
+
+// runBrokerBackfill runs backfillBrokerReservations for brokerID, clears the
+// pending entry when it ran to the end, and otherwise keeps the broker
+// pending, with a rate-limited WARN. The backfill is idempotent: an agent
+// already reserved on brokerID is not written again.
+func (s *Server) runBrokerBackfill(ctx context.Context, brokerID string) {
+	if s.backfillBrokerReservations(ctx, brokerID) {
+		s.quotaService.brokerBackfillPending.Delete(brokerID)
+		return
+	}
+	v, _ := s.quotaService.brokerBackfillPending.LoadOrStore(brokerID, &brokerBackfillRetry{})
+	retry := v.(*brokerBackfillRetry)
+	retry.mu.Lock()
+	warn := retry.lastWarn.IsZero() || time.Since(retry.lastWarn) >= brokerBackfillWarnInterval
+	if warn {
+		retry.lastWarn = time.Now()
+	}
+	retry.mu.Unlock()
+	if warn {
+		s.agentLifecycleLog.Warn("quota backfill: could not record every reservation of a Runtime Broker's agents; retrying on its heartbeats on this replica (the hourly sweep is the backstop)",
+			"broker_id", brokerID)
 	}
 }
 
-// forgetBrokerBackfill drops brokerID from this replica's record of
-// backfilled broker rows, when the broker is deregistered here. (A row
-// re-created under the same ID has a new Created anyway; this only keeps the
-// record from growing with deleted brokers.)
+// forgetBrokerBackfill drops brokerID's pending join-time backfill on this
+// replica, when the broker is deregistered here.
 func (s *Server) forgetBrokerBackfill(brokerID string) {
 	if s.quotaService != nil {
-		s.quotaService.brokerRowsBackfilled.Delete(brokerID)
+		s.quotaService.brokerBackfillPending.Delete(brokerID)
 	}
 }

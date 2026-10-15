@@ -419,11 +419,13 @@ func TestReRegistered_BackfillRestoresRunningAgents(t *testing.T) {
 	require.False(t, second.Created.Equal(first.Created), "the re-registered row has a new Created")
 	require.False(t, second.LastHeartbeat.IsZero(), "join set LastHeartbeat, so a LastHeartbeat.IsZero trigger would never fire")
 
-	runningHeartbeat(t, srv, id, a)
-
 	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
-	require.NotNil(t, held, "restored on the first heartbeat, before any sweep")
+	require.NotNil(t, held, "restored at the join, before any heartbeat or sweep")
 	assert.Equal(t, id, held.ScopeID)
+	runningHeartbeat(t, srv, id, a)
+	again := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, again)
+	assert.Equal(t, held.ID, again.ID, "the heartbeat writes nothing more")
 }
 
 // errReservationRead is returned by reservationReadFaultStore while armed.
@@ -443,10 +445,17 @@ func (r *reservationReadFaultStore) GetActiveReservation(ctx context.Context, li
 	return r.Store.GetActiveReservation(ctx, limitDefID, resourceID)
 }
 
-// A reservation read that fails during a broker's first-heartbeat backfill
-// does not mark the broker row as backfilled: the next heartbeat retries,
-// and the agent is counted then, not at the hourly pass.
-func TestFirstHeartbeatBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
+// backfillPending reports whether brokerID's join-time backfill is pending
+// on srv.
+func backfillPending(srv *Server, brokerID string) bool {
+	_, ok := srv.quotaService.brokerBackfillPending.Load(brokerID)
+	return ok
+}
+
+// A reservation read that fails during a broker's join-time backfill keeps
+// the broker pending on that replica: the next heartbeat retries, and the
+// agent is counted then, not at the hourly pass.
+func TestJoinBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
 	f := newReconcileFixture(t)
 	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationReadFaultStore {
 		return &reservationReadFaultStore{Store: inner, fault: fs}
@@ -455,12 +464,14 @@ func TestFirstHeartbeatBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
 	hook.agentID = a.ID
 	fault.Arm()
 
-	f.heartbeat(completeInventory(), a.Slug)
+	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
 	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the read failed: not backfilled")
+	require.True(t, backfillPending(f.srv, f.brokerID), "the broker stays pending")
 
 	hook.agentID = ""
 	f.heartbeat(completeInventory(), a.Slug)
 	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "retried on the next heartbeat")
+	assert.False(t, backfillPending(f.srv, f.brokerID), "cleared once the backfill ran to the end")
 }
 
 // reservationWriteFaultStore fails CreateUsageReservation for agentID while
@@ -478,22 +489,113 @@ func (r *reservationWriteFaultStore) CreateUsageReservation(ctx context.Context,
 	return r.Store.CreateUsageReservation(ctx, res)
 }
 
-// A reservation write that fails during a broker's first-heartbeat backfill
-// does not mark the broker row as backfilled either: the next heartbeat
-// retries.
-func TestFirstHeartbeatBackfill_WriteError_RetriedNextHeartbeat(t *testing.T) {
+// A reservation write that fails during a broker's join-time backfill keeps
+// the broker pending too: the next heartbeat retries. The retry is
+// idempotent: an agent already reserved at the join is not written again.
+func TestJoinBackfill_WriteError_RetriedNextHeartbeat(t *testing.T) {
 	f := newReconcileFixture(t)
 	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationWriteFaultStore {
 		return &reservationWriteFaultStore{Store: inner, fault: fs}
 	})
+	ok := f.addAgent("bf-write-ok", "running", "working")
 	a := f.addAgent("bf-write-retry", "running", "working")
 	hook.agentID = a.ID
 	fault.Arm()
 
-	f.heartbeat(completeInventory(), a.Slug)
+	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
 	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the write failed: not backfilled")
+	first := activeReservation(t, f.s, brokerLimitDefID(t, f.s), ok.ID)
+	require.NotNil(t, first, "the other agent was backfilled at the join")
+	require.True(t, backfillPending(f.srv, f.brokerID))
 
 	hook.agentID = ""
-	f.heartbeat(completeInventory(), a.Slug)
+	f.heartbeat(completeInventory(), ok.Slug, a.Slug)
 	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "retried on the next heartbeat")
+	again := activeReservation(t, f.s, brokerLimitDefID(t, f.s), ok.ID)
+	require.NotNil(t, again)
+	assert.Equal(t, first.ID, again.ID, "the retry does not write the other agent's reservation again")
+	assert.EqualValues(t, 2, brokerReservationCount(t, f.s, f.brokerID), "no double count")
+	assert.False(t, backfillPending(f.srv, f.brokerID))
+}
+
+// A heartbeat for a broker whose join-time backfill is not pending on this
+// replica backfills nothing: an agent missing its reservation is restored
+// by a join or by the hourly sweep, not by every heartbeat.
+func TestHeartbeat_NotPending_DoesNotBackfill(t *testing.T) {
+	f := newReconcileFixture(t)
+	a := f.addAgent("bf-not-pending", "running", "working")
+	require.False(t, backfillPending(f.srv, f.brokerID))
+
+	f.heartbeat(completeInventory(), a.Slug)
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "no join, no pending backfill: nothing written")
+}
+
+// Deregistering a broker clears its pending join-time backfill on this
+// replica.
+func TestJoinBackfill_DeleteClearsPending(t *testing.T) {
+	f := newReconcileFixture(t)
+	grantDevUserRuntimeBrokerAccess(t, f.s)
+	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationReadFaultStore {
+		return &reservationReadFaultStore{Store: inner, fault: fs}
+	})
+	a := f.addAgent("bf-delete", "running", "working")
+	hook.agentID = a.ID
+	fault.Arm()
+	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	require.True(t, backfillPending(f.srv, f.brokerID))
+
+	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/runtime-brokers/"+f.brokerID, nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.False(t, backfillPending(f.srv, f.brokerID), "the delete cleared the pending backfill")
+}
+
+// Accepted gap: a pending join-time backfill lives on one replica. If that
+// replica goes away (here: another Server on the same store, with nothing
+// pending), heartbeats elsewhere do not retry it, and the hourly sweep's
+// backfill restores the reservation.
+func TestJoinBackfill_PendingLost_SweepRestores(t *testing.T) {
+	f := newReconcileFixture(t)
+	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationReadFaultStore {
+		return &reservationReadFaultStore{Store: inner, fault: fs}
+	})
+	a := f.addAgent("bf-lost", "running", "working")
+	hook.agentID = a.ID
+	fault.Arm()
+	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	require.True(t, backfillPending(f.srv, f.brokerID))
+	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID))
+
+	other, _ := testServerWithStore(t, f.s)
+	require.False(t, backfillPending(other, f.brokerID), "the other replica holds nothing pending")
+	other.ReconcileStaleBrokerQuotaReservations(context.Background())
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the hourly sweep restored it")
+}
+
+// A broker that re-registers through one replica gets its agents'
+// reservations at the join; a heartbeat handled by another replica (nothing
+// pending there) keeps them and writes nothing.
+func TestReRegistered_JoinOnOneReplica_HeartbeatOnAnother(t *testing.T) {
+	srvA, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+	id := uuid.NewString()
+	registerBrokerWithID(t, srvA, id, "rereg-xr")
+	project := &store.Project{ID: tid("proj-rereg-xr"), Name: "Rereg XR", Slug: "rereg-xr"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	a := &store.Agent{ID: tid("agent-rereg-xr"), Slug: "rereg-xr-agent", Name: "rereg-xr-agent", ProjectID: project.ID, RuntimeBrokerID: id, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	rec := doRequest(t, srvA, http.MethodDelete, "/api/v1/runtime-brokers/"+id, nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	time.Sleep(1100 * time.Millisecond)
+	registerBrokerWithID(t, srvA, id, "rereg-xr")
+	held := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, held, "restored at the join on replica A")
+
+	srvB, _ := testServerWithStore(t, s)
+	require.False(t, backfillPending(srvB, id))
+	runningHeartbeat(t, srvB, id, a)
+	again := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, again, "kept across replicas")
+	assert.Equal(t, held.ID, again.ID)
 }
