@@ -63,7 +63,9 @@ func (s *Server) keepRecoveredReport(path string, jr *journalRecord, t journalTe
 		s.agentLifecycleLog.Warn("Launch recovery: the terminal report got no hub answer; retries given up and the record removed with no cleanup",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "instance_id", jr.InstanceID,
 			"attempts", attempts, "first_failed_at", first.UTC().Format(time.RFC3339))
-		removeLaunchMarkerIfMatches(jr.ProjectPath, jr.SharedWorkspace, jr.Slug, jr.LaunchID)
+		if jr.ProjectPath != "" {
+			removeLaunchMarkerIfMatches(jr.ProjectPath, jr.SharedWorkspace, jr.Slug, jr.LaunchID)
+		}
 		_ = os.Remove(path)
 		return
 	}
