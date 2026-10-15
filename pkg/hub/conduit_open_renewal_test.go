@@ -144,6 +144,7 @@ func (c *countingGrantKeyStore) arm(srv *Server) {
 type openSetup struct {
 	enforce  bool
 	scopeErr bool
+	allowAll bool
 	rec      *openRefusedRecorder
 	keys     *countingGrantKeyStore
 }
@@ -154,6 +155,9 @@ func (o *openSetup) mod(srv *Server) {
 	}
 	if o.scopeErr {
 		srv.conduitScopeOfTest = func(Identity) (*grant.Scope, error) { return nil, errConduitScope }
+	}
+	if o.allowAll {
+		allowAllConduitActions(srv)
 	}
 	o.rec = recordOpenRefusals(srv)
 	o.keys = countSigning(srv)
@@ -454,8 +458,24 @@ func TestConduitGrantRequestCallersSetOrigin(t *testing.T) {
 			}
 			return true
 		})
+		// Every mintConduitGrant selector must be the function of a call:
+		// a method value (m := s.mintConduitGrant, or passing it as a func)
+		// would hide a call site from this test.
+		called := map[*ast.SelectorExpr]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					called[sel] = true
+				}
+			}
+			return true
+		})
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "mintConduitGrant" && !called[x] {
+					t.Errorf("%s: mintConduitGrant is used as a value, not called", name)
+				}
 			case *ast.CallExpr:
 				sel, ok := x.Fun.(*ast.SelectorExpr)
 				if !ok || sel.Sel.Name != "mintConduitGrant" {
@@ -1050,4 +1070,33 @@ func TestMintConduitGrant_UnclassifiableDeniedBeforeMint(t *testing.T) {
 		})
 	}
 	assert.Zero(t, keys.reads.Load(), "nothing was signed")
+}
+
+// TestConduitOpen_RenewalUnsupportedPrincipal_Proxy (design v2.21.36
+// §3.5, end to end at the route): a federated user's port stream to a
+// stream_renewal.v2 agent under enforce is refused at resolution, by the
+// same check as a route that cannot renew, with 503 unavailable, reason
+// stream_renewal_unavailable; the metric carries the cause
+// renewal_principal_unsupported, nothing is signed and the app is never
+// reached.
+func TestConduitOpen_RenewalUnsupportedPrincipal_Proxy(t *testing.T) {
+	o := &openSetup{enforce: true, allowAll: true}
+	f := newConduitProxyFixtureServer(t, nil, o.mod)
+	f.startAgent(t)
+	federated := NewFederatedUserIdentity("https://issuer.example.com", "subject-1", "fed@example.com", "Fed", "member", nil)
+
+	o.keys.arm(f.srv)
+	conn, err := f.srv.openConduitPort(context.Background(), federated, f.launched, f.app.port)
+	assert.Nil(t, conn)
+	require.ErrorIs(t, err, errConduitStreamRenewalUnavailable)
+	rec := httptest.NewRecorder()
+	writeConduitProxyError(rec, httptest.NewRequest(http.MethodGet, "/", nil), f.launched.ID, err)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	var er ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&er))
+	requireRenewalUnavailableBody(t, er)
+	assert.Zero(t, o.keys.reads.Load(), "nothing was signed")
+	assert.Empty(t, f.app.got, "the app was not reached")
+	assert.Equal(t, []string{conduitRouteProxy + "/" + conduitReasonStreamRenewalUnavailable + "/" + conduitCauseRenewalPrincipalUnsupported}, o.rec.list())
+	assert.Empty(t, o.rec.unstampedList())
 }
