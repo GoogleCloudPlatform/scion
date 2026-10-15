@@ -42,14 +42,14 @@ func serveTestInfraStatus(t *testing.T, srv *Server) *httptest.ResponseRecorder 
 func TestTestInfraStatus_AllFalseOnNonTestHub(t *testing.T) {
 	rec := serveTestInfraStatus(t, &Server{})
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testAdminWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 func TestTestInfraStatus_MemberTierOn(t *testing.T) {
 	srv := &Server{testIdentities: newTestIdentityState(true)}
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 // TestTestInfraStatus_BodyGolden pins the body to exactly four booleans,
@@ -76,20 +76,20 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 			assert.True(t, isBool, "%s must be a bool, got %T", k, v)
 		}
 		sort.Strings(keys)
-		assert.Equal(t, []string{"testHubAdmin", "testIdentities", "testIdentityWebSessions", "testIdentityWebSessionsUnavailableReason", "testIssuerAudience", "testSuperAdmin"}, keys)
+		assert.Equal(t, []string{"testAdminWebSessions", "testHubAdmin", "testIdentities", "testIdentityWebSessions", "testIdentityWebSessionsUnavailableReason", "testIssuerAudience", "testSuperAdmin"}, keys)
 
-		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testIssuerAudience":""}`
+		want := `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testAdminWebSessions":false,"testIssuerAudience":""}`
 		if enabled {
-			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`
+			want = `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`
 		}
 		assert.Equal(t, want, strings.TrimSpace(rec.Body.String()), "exact body")
 	}
 
-	// The response type has exactly the four bool fields, the web session
+	// The response type has exactly the five bool fields, the web session
 	// unavailable reason and the issuer audience string, so a new field
 	// cannot be added without changing this test.
 	typ := reflect.TypeOf(TestInfraStatusResponse{})
-	require.Equal(t, 6, typ.NumField())
+	require.Equal(t, 7, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		want := reflect.Bool
 		if name := typ.Field(i).Name; name == "TestIssuerAudience" || name == "TestIdentityWebSessionsUnavailableReason" {
@@ -104,7 +104,7 @@ func TestTestInfraStatus_BodyGolden(t *testing.T) {
 func TestTestInfraStatus_IssuerAudienceFollowsTierAndAllowlist(t *testing.T) {
 	wi := &workloadIssuerAuthenticator{audience: testIssuerAudience("hub-a"), allowlist: map[string]string{"1": "member"}}
 	srv := &Server{testIdentities: newTestIdentityState(true), workloadIssuer: wi}
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":"scion-test-issuer:hub-a"}`,
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":"scion-test-issuer:hub-a"}`,
 		strings.TrimSpace(serveTestInfraStatus(t, srv).Body.String()))
 	srv = &Server{testIdentities: newTestIdentityState(false), workloadIssuer: wi}
 	assert.Empty(t, srv.testInfraGates().TestIssuerAudience, "member tier off")
@@ -133,7 +133,7 @@ func TestTestInfraStatus_AdminGatesFollowAdminTier(t *testing.T) {
 	assert.False(t, g.TestSuperAdmin, "super-admin kind off")
 	rec := serveTestInfraStatus(t, srv)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 
 	// The super-admin value reads its own kind (set directly here to pin
 	// the mapping; TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy
