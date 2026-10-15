@@ -1339,6 +1339,10 @@
               "type": "array",
               "description": "Workload subjects a human issuer may pin a test identity issuer delegation to. Each entry is a Google subject (a service account's unique id) and the highest tier a delegation to it may cover; only \"member\" is accepted in this release. Read once at startup.",
               "items": { "$ref": "#/$defs/serverTestIdentityWorkloadIssuer" }
+            },
+            "admin_web_sessions": {
+              "type": "string",
+              "description": "Turns on browser web sessions for the admin test identity kinds. The value is the hub id the setting is bound to and must equal this hub's resolved hub id; unset means off. Read once at startup. The hub refuses to start when it is set and --test-mode is not admin or super-admin (the test super-admin kind also needs super-admin), or when the value is another hub id. Admin web sessions are for systemd test hubs only: the Helm chart renders only --test-mode=member, so a Helm hub with this setting refuses to start."
             }
           },
           "additionalProperties": false
