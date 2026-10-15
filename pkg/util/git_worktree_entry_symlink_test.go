@@ -257,10 +257,41 @@ func TestRemoveWorktreeEntryIn_AncestorLinkOutsideIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := RemoveWorktreeEntryIn(repo, filepath.Join(agents, "a", "workspace")); err == nil || !strings.Contains(err.Error(), "outside the agent directory") {
+	if err := RemoveWorktreeEntryIn(repo, filepath.Join(agents, "a", "workspace")); err == nil || !strings.Contains(err.Error(), "other than the agent's own directory") {
 		t.Errorf("RemoveWorktreeEntryIn through a link outside the agent directory = %v, want it refused", err)
 	}
 	if list := worktreeEntries(t, repo); !strings.Contains(list, "branch refs/heads/elsewhere") {
 		t.Errorf("the entry of the worktree outside the agent directory should be kept; worktree list:\n%s", list)
+	}
+}
+
+// A link from one agent's directory to a sibling agent's directory under the
+// same bound is refused too: the resolved form would name the sibling's
+// worktree, whose entry must not be removed.
+func TestRemoveWorktreeEntryIn_SiblingAgentLinkIsRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	repo := setupGitRepo(t)
+	agents := filepath.Join(t.TempDir(), "agents")
+	siblingWs := filepath.Join(agents, "b", "workspace")
+	if err := os.MkdirAll(filepath.Dir(siblingWs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "worktree", "add", "-b", "b", siblingWs)
+	if err := os.RemoveAll(siblingWs); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(agents, "b"), filepath.Join(agents, "a")); err != nil {
+		t.Fatal(err)
+	}
+
+	own := filepath.Join(agents, "a", "workspace")
+	if _, state, err := resolveMissingPath(own); err != nil || state != resolvedOutside {
+		t.Errorf("link to a sibling agent's directory: state=%v err=%v, want outside and no error", state, err)
+	}
+	if err := RemoveWorktreeEntryIn(repo, own); err == nil {
+		t.Error("RemoveWorktreeEntryIn through a link to a sibling agent's directory: want it refused")
+	}
+	if list := worktreeEntries(t, repo); !strings.Contains(list, "branch refs/heads/b\n") {
+		t.Errorf("the sibling agent's entry should be kept; worktree list:\n%s", list)
 	}
 }

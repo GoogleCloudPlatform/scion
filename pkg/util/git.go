@@ -564,8 +564,12 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // "git worktree remove <path>" without --force, first with path as given
 // and, only if git does not know it, again with its existing ancestor's
 // symlinks resolved. "is not a working tree" after the last attempt means
-// git has no entry for path and is not an error. Any other failure is
-// returned; callers must not fall back to a repository-wide prune.
+// git has no entry for path and is not an error. Before any git call, a
+// path whose existing part resolves to anything other than the agent's own
+// path (a link below the directory holding the agent directories) is
+// refused with an error, since git would follow the same link. Any other
+// failure is returned; callers must not fall back to a repository-wide
+// prune.
 func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error)) error {
 	if path == "" {
 		return nil
@@ -586,7 +590,7 @@ func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx conte
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
 	if state == resolvedOutside {
-		return fmt.Errorf("worktree entry %s: resolves outside the agent directory; left alone", path)
+		return fmt.Errorf("worktree entry %s: resolves to a path other than the agent's own directory; left alone", path)
 	}
 	known, err := removeWorktreeEntryAt(ctx, newCmd, path)
 	if err != nil || known {
@@ -630,10 +634,12 @@ const (
 	// only match the path's text) or cannot be resolved (a dangling link,
 	// which git cannot follow either).
 	resolvedLiteralOnly resolveState = iota
-	// resolvedWithin: the resolved form lies within the bound.
+	// resolvedWithin: the resolved form keeps the path's own position under
+	// the bound.
 	resolvedWithin
-	// resolvedOutside: the existing part of the path resolves outside the
-	// bound; the path must not be used at all.
+	// resolvedOutside: the existing part of the path resolves somewhere
+	// else (outside the bound, or to another directory under it); the path
+	// must not be used at all.
 	resolvedOutside
 )
 
@@ -642,8 +648,11 @@ const (
 // the agent directory. The bound is path's grandparent, the directory that
 // holds the agent directories (agents/ for agents/<name>/workspace, the
 // shared checkout for worktrees/<name>); it must exist even when the agent's
-// own directory is already gone. An Lstat error other than "does not exist"
-// on the way up is returned.
+// own directory is already gone. Links on the bound or above it are
+// resolved, but no component below the bound may be a link: the resolved
+// form must name the agent's own path, never a sibling agent's directory or
+// anything outside. An Lstat error other than "does not exist" on the way up
+// is returned.
 func resolveMissingPath(path string) (resolved string, state resolveState, err error) {
 	clean := filepath.Clean(path)
 	bound := filepath.Dir(filepath.Dir(clean))
@@ -669,7 +678,13 @@ func resolveMissingPath(path string) (resolved string, state resolveState, err e
 	if err != nil {
 		return "", resolvedLiteralOnly, nil
 	}
-	if rel, err := filepath.Rel(resolvedBound, resolvedDir); err != nil || !filepath.IsLocal(rel) {
+	// The existing ancestor must keep its position under the bound once
+	// resolved: no component between the bound and the missing tail may be
+	// a link, so the resolved form names the agent's own path and never a
+	// sibling's or anything outside.
+	lexRel, lexErr := filepath.Rel(bound, dir)
+	rel, relErr := filepath.Rel(resolvedBound, resolvedDir)
+	if lexErr != nil || relErr != nil || rel != lexRel {
 		return "", resolvedOutside, nil
 	}
 	return filepath.Join(append([]string{resolvedDir}, tail...)...), resolvedWithin, nil
