@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -37,6 +38,8 @@ const skillResolveFailureLogMsg = "Skill resolve failed"
 // Sources of a skill resolve failure, for the log record.
 const (
 	skillResolveSourceFederation = "federation"
+	skillResolveSourceGitHub     = "github"
+	skillResolveSourceRegistry   = "registry"
 )
 
 // skillResolveCorrelationID returns the id that ties a skill resolve error
@@ -77,4 +80,14 @@ func newSkillResolveError(ctx context.Context, source, uri, code string, status 
 		Status:        status,
 		CorrelationID: id,
 	}
+}
+
+// ghErrorStatus returns the HTTP status of the GitHub response that failed
+// a gh:// resolution (see ghStatusError), or 0 when none is known.
+func ghErrorStatus(err error) int {
+	var se *ghStatusError
+	if errors.As(err, &se) {
+		return se.status
+	}
+	return 0
 }

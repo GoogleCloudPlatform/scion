@@ -23,12 +23,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
@@ -546,5 +548,174 @@ func TestSkillsResolve_FederationRedactedReference(t *testing.T) {
 		if strings.Contains(string(b), "zqpass") {
 			t.Errorf("log record holds the declared reference: %s", b)
 		}
+	}
+}
+
+// randomCorrelationID matches the random correlation id used when there is
+// no request id.
+var randomCorrelationID = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
+// resolveAsUser posts a batch resolve request as user through the Hub's
+// handler chain and returns the raw response text, its decoded errors and
+// the correlation id each error must carry: the X-Request-ID of the
+// response when there is one, else the error's own id, which must then be
+// a random id (the test server installs no request log middleware).
+func resolveAsUser(t *testing.T, srv *Server, user *store.User, req ResolveSkillsRequest) (string, []map[string]any, []string) {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/skills/resolve", req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Errors []map[string]any `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Errors) == 0 {
+		t.Fatalf("no errors in response %s", rec.Body.String())
+	}
+	reqID := rec.Header().Get("X-Request-ID")
+	ids := make([]string, len(resp.Errors))
+	for i, e := range resp.Errors {
+		ids[i] = reqID
+		if reqID == "" {
+			ids[i], _ = e["correlationId"].(string)
+			if !randomCorrelationID.MatchString(ids[i]) {
+				t.Fatalf("error %d correlationId = %q, want the request id or a random 16-hex id", i, ids[i])
+			}
+		}
+	}
+	return rec.Body.String(), resp.Errors, ids
+}
+
+// newFixedStatusGitHub serves every GitHub API request with status and a body
+// holding body.
+func newFixedStatusGitHub(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestSkillsResolve_GitHubErrorsReturnFixedPhrase(t *testing.T) {
+	const marker = "zq-gh-detail-5079"
+	const uri = "gh://acme/private-repo/skills/s"
+	cases := []struct {
+		name    string
+		status  int
+		want    wantResolveError
+		logText string
+	}{
+		{
+			name:    "GitHub reports not found",
+			status:  http.StatusNotFound,
+			want:    wantResolveError{code: "not_found", message: "skill not found", status: http.StatusNotFound},
+			logText: "GitHub API error 404 resolving private-repo@",
+		},
+		{
+			name:    "GitHub reports a server error",
+			status:  http.StatusInternalServerError,
+			want:    wantResolveError{code: "resolve_failed", message: "resolver error", status: http.StatusInternalServerError},
+			logText: "GitHub API error 500 resolving private-repo@",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, alice, _, project := setupSkillAuthzTest(t)
+			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+			gh := newFixedStatusGitHub(t, tc.status, `{"message":"`+marker+`"}`)
+			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+			logs := captureJSONSlog(t)
+
+			raw, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
+				Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
+			})
+			id := ids[0]
+			want := tc.want
+			want.uri = uri
+			if len(errs) != 1 {
+				t.Fatalf("errors = %v, want 1", errs)
+			}
+			assertResolveError(t, errs[0], want, id)
+			if strings.Contains(raw, marker) {
+				t.Errorf("response holds the upstream detail: %s", raw)
+			}
+			rec := findResolveLog(t, logs(), id, tc.want.code)
+			got, _ := rec["error"].(string)
+			if !strings.Contains(got, tc.logText) || !strings.Contains(got, marker) {
+				t.Errorf("log error = %q, want it to hold %q and the upstream body", got, tc.logText)
+			}
+			if rec["skill_uri"] != uri || rec["source"] != "github" || rec["status"] != float64(tc.status) {
+				t.Errorf("log record = %v, want skill_uri %q, source github, status %d", rec, uri, tc.status)
+			}
+		})
+	}
+}
+
+func TestSkillsResolve_GitHubForbiddenProjectReturnsFixedPhrase(t *testing.T) {
+	srv, _, _, bob, project := setupSkillAuthzTest(t)
+	logs := captureJSONSlog(t)
+
+	const uri = "gh://acme/private-repo/skills/s"
+	_, errs, ids := resolveAsUser(t, srv, bob, ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
+	})
+	id := ids[0]
+	if len(errs) != 1 {
+		t.Fatalf("errors = %v, want 1", errs)
+	}
+	assertResolveError(t, errs[0], wantResolveError{uri: uri, code: "forbidden", message: "access denied"}, id)
+	rec := findResolveLog(t, logs(), id, "forbidden")
+	if rec["skill_uri"] != uri || rec["source"] != "github" ||
+		rec["error"] != "caller may not resolve GitHub skills for this project" {
+		t.Errorf("log record = %v", rec)
+	}
+}
+
+// A gh:// reference with a query is logged in its redacted form, and the
+// full error is withheld from the record.
+func TestSkillsResolve_GitHubRedactedReference(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	logs := captureJSONSlog(t)
+
+	const uri = "gh://acme/private-repo/skills/s?token=ZQ_TOKEN_NAME"
+	raw, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
+	})
+	id := ids[0]
+	if len(errs) != 1 {
+		t.Fatalf("errors = %v, want 1", errs)
+	}
+	assertResolveError(t, errs[0], wantResolveError{uri: uri, code: "resolve_failed", message: "resolver error"}, id)
+	if strings.Count(raw, "ZQ_TOKEN_NAME") != 1 {
+		t.Errorf("response quotes the reference beyond its uri field: %s", raw)
+	}
+	rec := findResolveLog(t, logs(), id, "resolve_failed")
+	if rec["skill_uri"] != "(redacted URL)" || rec["error"] != "(resolver message withheld)" {
+		t.Errorf("log record = %v, want the reference redacted and the error withheld", rec)
+	}
+}
+
+func TestSkillsResolve_InvalidURIReturnsFixedPhrase(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+	logs := captureJSONSlog(t)
+
+	const uri = "skill://project/a/b/c"
+	_, errs, ids := resolveAsUser(t, srv, alice, ResolveSkillsRequest{
+		Skills: []ResolveSkillRef{{URI: uri}}, ProjectID: project.ID,
+	})
+	id := ids[0]
+	if len(errs) != 1 {
+		t.Fatalf("errors = %v, want 1", errs)
+	}
+	assertResolveError(t, errs[0], wantResolveError{uri: uri, code: "invalid_uri", message: "invalid skill URI"}, id)
+	rec := findResolveLog(t, logs(), id, "invalid_uri")
+	if got, _ := rec["error"].(string); !strings.Contains(got, "too many path segments") {
+		t.Errorf("log error = %q, want the parse error", got)
 	}
 }

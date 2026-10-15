@@ -1619,10 +1619,9 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
 			if !ghProjectAllowed {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
-					Message: "you do not have permission to resolve GitHub skills for this project",
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, agent.SkillErrCodeForbidden, 0,
+					"caller may not resolve GitHub skills for this project"))
 				continue
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
@@ -1634,9 +1633,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				} else if isGHNotFound(err) {
 					code = agent.SkillErrCodeNotFound
 				}
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: code, Message: err.Error(),
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, code, ghErrorStatus(err), err.Error()))
 			} else {
 				resolved = append(resolved, *ghResolved)
 			}
@@ -1645,9 +1643,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		uri, err := api.ParseSkillURI(skillRef.URI)
 		if err != nil {
-			resolveErrors = append(resolveErrors, ResolveSkillError{
-				URI: skillRef.URI, Code: "invalid_uri", Message: err.Error(),
-			})
+			resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceRegistry,
+				skillRef.URI, agent.SkillErrCodeInvalidURI, 0, err.Error()))
 			continue
 		}
 
