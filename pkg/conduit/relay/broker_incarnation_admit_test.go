@@ -18,8 +18,8 @@ package relay_test
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -60,21 +60,22 @@ func (ev *brokerIncarnationEvents) snapshot() (map[string]int, []string) {
 	return out, append([]string(nil), ev.flaps...)
 }
 
-// waitSuperseded waits until the superseded count reported for brokerID
-// is want. The relay reports the count after it closed the sessions, so a
-// test that saw a close waits for the report.
-func (ev *brokerIncarnationEvents) waitSuperseded(t *testing.T, brokerID string, want int) {
+// admissions returns a channel that receives the session id of every
+// broker session whose admission step on n has finished. Install it
+// before n serves sessions.
+func admissions(n *relaytest.Node) <-chan string {
+	ch := make(chan string, 64)
+	n.Relay.SetAfterBrokerAdmissionHookForTest(func(sessionID string) { ch <- sessionID })
+	return ch
+}
+
+// waitAdmission waits until the admission step of sessionID has finished.
+func waitAdmission(t *testing.T, ch <-chan string, sessionID string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
 	for {
-		superseded, _ := ev.snapshot()
-		if superseded[brokerID] == want {
+		if relaytest.Wait(t, ch, "admission step of "+sessionID) == sessionID {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("superseded = %v, want %s: %d", superseded, brokerID, want)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -99,37 +100,41 @@ func requireOpen(t *testing.T, ls conduit.LocalSession, what string) {
 
 // TestBrokerAdmissionClosesOlderIncarnation: admitting a broker session
 // with a new incarnation closes that broker's local sessions of the older
-// incarnation with 4409 superseded_incarnation and reports how many. The
-// broker's session on another relay (closed by its session re-check), a
-// session of another broker and the new session stay open.
+// incarnation with 4409 superseded_incarnation and reports how many, before
+// they close. The broker's session on another relay (closed by its session
+// re-check), a session of another broker and the new session stay open,
+// and another session of the current incarnation closes nothing.
 func TestBrokerAdmissionClosesOlderIncarnation(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	var evA, evB brokerIncarnationEvents
 	a := w.StartNode("relay-a", evA.hooks)
 	b := w.StartNode("relay-b", evB.hooks)
+	admittedA := admissions(a)
 	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
 	w.SetPrincipal("b2", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-2"})
 
 	old1, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
-	old2, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	old2, w2 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	remote, _ := b.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
-	other, _ := a.MustDial("b2", relaytest.BrokerHello("broker-2", "proc-1"), conduit.Config{})
+	other, wo := a.MustDial("b2", relaytest.BrokerHello("broker-2", "proc-1"), conduit.Config{})
+	waitAdmission(t, admittedA, w2.GetSessionId())
+	waitAdmission(t, admittedA, wo.GetSessionId())
 	if got, _ := evA.snapshot(); len(got) != 0 {
 		t.Fatalf("superseded before any new incarnation: %v", got)
 	}
 
-	cur, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
+	cur, wc := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
 	requireClosedWith(t, old1, relay.CloseSupersededIncarnation, "first older-incarnation session")
 	requireClosedWith(t, old2, relay.CloseSupersededIncarnation, "second older-incarnation session")
+	// The count is reported before the closes: it is already in.
+	superseded, flaps := evA.snapshot()
+	if len(superseded) != 1 || superseded["broker-1"] != 2 {
+		t.Fatalf("superseded = %v, want broker-1: 2", superseded)
+	}
+	waitAdmission(t, admittedA, wc.GetSessionId())
 	requireOpen(t, remote, "the older-incarnation session on another relay")
 	requireOpen(t, other, "another broker's session")
 	requireOpen(t, cur, "the new incarnation's session")
-
-	evA.waitSuperseded(t, "broker-1", 2)
-	superseded, flaps := evA.snapshot()
-	if len(superseded) != 1 {
-		t.Fatalf("superseded = %v, want only broker-1", superseded)
-	}
 	if len(flaps) != 0 {
 		t.Fatalf("flaps = %v, want none", flaps)
 	}
@@ -137,8 +142,8 @@ func TestBrokerAdmissionClosesOlderIncarnation(t *testing.T) {
 		t.Fatalf("relay-b reported %v; it admitted no new incarnation", got)
 	}
 
-	// Another session of the current incarnation closes nothing.
-	again, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
+	again, wa := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
+	waitAdmission(t, admittedA, wa.GetSessionId())
 	requireOpen(t, cur, "the current incarnation's earlier session")
 	requireOpen(t, again, "the current incarnation's new session")
 	if superseded, _ := evA.snapshot(); superseded["broker-1"] != 2 {
@@ -154,21 +159,70 @@ func TestBrokerIncarnationFlapReported(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	var ev brokerIncarnationEvents
 	a := w.StartNode("relay-a", ev.hooks)
+	admitted := admissions(a)
 	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
 
 	first, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
-	second, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
+	second, w2 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
 	requireClosedWith(t, first, relay.CloseSupersededIncarnation, "proc-1 session")
-	ev.waitSuperseded(t, "broker-1", 1)
-	if _, flaps := ev.snapshot(); len(flaps) != 0 {
-		t.Fatalf("flaps = %v after a first change, want none", flaps)
+	waitAdmission(t, admitted, w2.GetSessionId())
+	if superseded, flaps := ev.snapshot(); superseded["broker-1"] != 1 || len(flaps) != 0 {
+		t.Fatalf("after a first change: superseded %v, flaps %v; want broker-1: 1 and no flap", superseded, flaps)
 	}
 
-	back, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	back, wb := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
 	requireClosedWith(t, second, relay.CloseSupersededIncarnation, "proc-2 session")
+	waitAdmission(t, admitted, wb.GetSessionId())
 	requireOpen(t, back, "the returning proc-1 session")
-	ev.waitSuperseded(t, "broker-1", 2)
-	if _, flaps := ev.snapshot(); len(flaps) != 1 || flaps[0] != "broker-1/proc-1" {
+	superseded, flaps := ev.snapshot()
+	if len(flaps) != 1 || flaps[0] != "broker-1/proc-1" {
 		t.Fatalf("flaps = %v, want [broker-1/proc-1]", flaps)
+	}
+	if superseded["broker-1"] != 2 {
+		t.Fatalf("superseded = %v, want broker-1: 2", superseded)
+	}
+}
+
+// TestBrokerSupersededSessionClosedOnce: when the close path runs twice
+// for the same older-incarnation session before it ends (the second run
+// starts after the first marked the session, before it closed it), the
+// session is closed once with 4409 and counted once.
+func TestBrokerSupersededSessionClosedOnce(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	admitted := admissions(a)
+	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
+	old, wo := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	waitAdmission(t, admitted, wo.GetSessionId())
+
+	var reported atomic.Int64
+	report := func(n int) { reported.Add(int64(n)) }
+	closeOlder := func() int {
+		return a.Relay.CloseOlderIncarnationSessions(registry.PrincipalBroker, "broker-1", "proc-2", 1<<62,
+			relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason(), report)
+	}
+	second := -1
+	var nested atomic.Bool
+	a.Relay.SetBeforeIncarnationCloseHookForTest(func() {
+		if !nested.CompareAndSwap(false, true) {
+			return
+		}
+		requireOpen(t, old, "the session marked by the first run")
+		second = closeOlder()
+	})
+
+	first := closeOlder()
+	requireClosedWith(t, old, relay.CloseSupersededIncarnation, "the older-incarnation session")
+	if first != 1 || second != 0 {
+		t.Fatalf("closed by the first run %d and by the second %d, want 1 and 0", first, second)
+	}
+	if got := reported.Load(); got != 1 {
+		t.Fatalf("reported %d, want 1", got)
+	}
+	if again := closeOlder(); again != 0 {
+		t.Fatalf("a run after the session ended closed %d, want 0", again)
+	}
+	if got := reported.Load(); got != 1 {
+		t.Fatalf("reported %d after a run on the ended session, want 1", got)
 	}
 }

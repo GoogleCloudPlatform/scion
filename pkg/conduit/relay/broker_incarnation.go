@@ -92,9 +92,11 @@ func (b *brokerIncarnations) admit(id, inc string, now time.Time) bool {
 // CloseOlderIncarnationSessions closes, with code and reason, every open
 // local session of the principal whose endpoint incarnation is not inc and
 // whose connection epoch is below epoch. It returns the number it closed;
-// a session is closed and counted by at most one call. Rows are deleted as
-// each session ends.
-func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64, code uint32, reason string) int {
+// a session is closed and counted by at most one call. report, when set,
+// is called with that number (when it is not zero) before any session is
+// closed, so whoever observes a close also observes its count. Rows are
+// deleted as each session ends.
+func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64, code uint32, reason string, report func(closed int)) int {
 	r.mu.Lock()
 	var hit []*entry
 	for _, e := range r.sessions {
@@ -111,7 +113,14 @@ func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64,
 			hit = append(hit, e)
 		}
 	}
+	hook := r.testHookBeforeIncarnationClose
 	r.mu.Unlock()
+	if len(hit) > 0 && report != nil {
+		report(len(hit))
+	}
+	if hook != nil {
+		hook()
+	}
 	for _, e := range hit {
 		_ = e.sess.CloseWithCode(code, reason)
 	}
@@ -125,6 +134,12 @@ func (r *Relay) admittedBroker(e *entry) {
 	if rec.PrincipalKind != registry.PrincipalBroker || rec.EndpointIncarnation == "" {
 		return
 	}
+	r.mu.Lock()
+	h := r.testHookAfterBrokerAdmission
+	r.mu.Unlock()
+	if h != nil {
+		defer h(rec.SessionID)
+	}
 	select {
 	case <-e.sess.Done():
 		return
@@ -137,14 +152,12 @@ func (r *Relay) admittedBroker(e *entry) {
 			f(rec.PrincipalID, rec.EndpointIncarnation)
 		}
 	}
-	n := r.CloseOlderIncarnationSessions(registry.PrincipalBroker, rec.PrincipalID, rec.EndpointIncarnation, rec.ConnectionEpoch,
-		CloseSupersededIncarnation, SupersededIncarnationReason())
-	if n == 0 {
-		return
-	}
-	r.log.Info("Conduit: closed broker sessions of an older incarnation (4409 superseded_incarnation)",
-		"broker_id", rec.PrincipalID, "incarnation", rec.EndpointIncarnation, "closed", n)
-	if f := r.cfg.OnBrokerSessionsSuperseded; f != nil {
-		f(rec.PrincipalID, n)
-	}
+	r.CloseOlderIncarnationSessions(registry.PrincipalBroker, rec.PrincipalID, rec.EndpointIncarnation, rec.ConnectionEpoch,
+		CloseSupersededIncarnation, SupersededIncarnationReason(), func(n int) {
+			r.log.Info("Conduit: closing broker sessions of an older incarnation (4409 superseded_incarnation)",
+				"broker_id", rec.PrincipalID, "incarnation", rec.EndpointIncarnation, "closed", n)
+			if f := r.cfg.OnBrokerSessionsSuperseded; f != nil {
+				f(rec.PrincipalID, n)
+			}
+		})
 }

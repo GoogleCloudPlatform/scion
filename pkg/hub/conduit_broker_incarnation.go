@@ -111,8 +111,8 @@ func (s *Server) recordBrokerIncarnationFlap(brokerID, _ string) {
 // closeSupersededBrokerSessions is the in-process session re-check's
 // incarnation step for brokerID: it reads the broker's reference session
 // and closes this node's sessions of the broker with another incarnation
-// and a lower epoch with 4409. A read error closes nothing; the next
-// re-check tries again.
+// and a lower epoch with 4409, counting them before they close. A read
+// error closes nothing; the next re-check tries again.
 func (s *Server) closeSupersededBrokerSessions(ctx context.Context, brokerID string) {
 	rt := s.conduit.Load()
 	if rt == nil {
@@ -126,14 +126,12 @@ func (s *Server) closeSupersededBrokerSessions(ctx context.Context, brokerID str
 	if !ok {
 		return
 	}
-	n := rt.relay.CloseOlderIncarnationSessions(registry.PrincipalBroker, brokerID, ref.Incarnation, ref.ConnectionEpoch,
-		relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason())
-	if n == 0 {
-		return
-	}
-	slog.Info("Conduit: session re-check closed broker sessions of an older incarnation (4409 superseded_incarnation)",
-		"broker_id", brokerID, "incarnation", ref.Incarnation, "closed", n)
-	s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtRecheck, n)
+	rt.relay.CloseOlderIncarnationSessions(registry.PrincipalBroker, brokerID, ref.Incarnation, ref.ConnectionEpoch,
+		relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason(), func(n int) {
+			slog.Info("Conduit: session re-check closing broker sessions of an older incarnation (4409 superseded_incarnation)",
+				"broker_id", brokerID, "incarnation", ref.Incarnation, "closed", n)
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtRecheck, n)
+		})
 }
 
 // relayBrokerSessionSuperseded reports whether the relay-held broker

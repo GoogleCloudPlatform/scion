@@ -308,6 +308,12 @@ type Relay struct {
 	// brokerIncs remembers the incarnations admitted per broker, for the
 	// flap report (broker_incarnation.go).
 	brokerIncs brokerIncarnations
+	// testHookBeforeIncarnationClose runs in CloseOlderIncarnationSessions
+	// after the sessions were marked and counted, before they are closed
+	// (the close-once seam). testHookAfterBrokerAdmission runs when a
+	// broker session's admission step has finished, with its session id.
+	testHookBeforeIncarnationClose func()
+	testHookAfterBrokerAdmission   func(sessionID string)
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.

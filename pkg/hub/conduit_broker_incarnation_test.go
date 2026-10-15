@@ -80,8 +80,9 @@ func brokerIncarnationCounters(t *testing.T, s *Server) func(name, brokerID, pat
 // TestConduitBroker_NewIncarnationClosesOlderSessions: admitting a broker
 // session with a new incarnation closes the broker's older-incarnation
 // session on this node with 4409 superseded_incarnation, counted with the
-// broker's id (path admission). A return to the earlier incarnation is
-// admitted, closes the other one in turn and is counted as a flap.
+// broker's id (path admission) before the close. A return to the earlier
+// incarnation is admitted, closes the other one in turn and is counted as
+// a flap, also before the close.
 func TestConduitBroker_NewIncarnationClosesOlderSessions(t *testing.T) {
 	f := newBrokerConduitFixture(t, nil, nil)
 	count := brokerIncarnationCounters(t, f.srv)
@@ -92,18 +93,15 @@ func TestConduitBroker_NewIncarnationClosesOlderSessions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, relay.CloseSupersededIncarnation, waitSessionClosed(t, old), "%v", old.Err())
 	assertSessionOpen(t, cur)
-	require.Eventually(t, func() bool {
-		return count(brokerSupersededMetric, f.brokerID, brokerSupersededAtAdmission) == 1
-	}, 10*time.Second, 10*time.Millisecond, "one admission close counted for the broker")
+	// The relay reports the count before it closes the sessions.
+	assert.Equal(t, int64(1), count(brokerSupersededMetric, f.brokerID, brokerSupersededAtAdmission), "one admission close counted for the broker")
 	assert.Zero(t, count(brokerFlapMetric, f.brokerID, ""), "a first change is not a flap")
 
 	back, _, err := f.dial(t, "", "proc-1")
 	require.NoError(t, err)
 	assert.Equal(t, relay.CloseSupersededIncarnation, waitSessionClosed(t, cur), "%v", cur.Err())
 	assertSessionOpen(t, back)
-	require.Eventually(t, func() bool {
-		return count(brokerSupersededMetric, f.brokerID, brokerSupersededAtAdmission) == 2
-	}, 10*time.Second, 10*time.Millisecond, "the second admission close counted")
+	assert.Equal(t, int64(2), count(brokerSupersededMetric, f.brokerID, brokerSupersededAtAdmission), "the second admission close counted")
 	assert.Equal(t, int64(1), count(brokerFlapMetric, f.brokerID, ""), "the return is one flap")
 	assert.Zero(t, count(brokerSupersededMetric, f.brokerID, brokerSupersededAtRecheck))
 }
