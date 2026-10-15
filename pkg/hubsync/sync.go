@@ -232,6 +232,13 @@ type EnsureHubReadyOptions struct {
 	// in its hub list when the hub came from its current context, so the
 	// project keeps resolving to that hub after a hub switch.
 	RecordLink func(endpoint, hubProjectID, projectPath string, isGlobal bool)
+	// SkipProjectLink makes EnsureHubReady return a hub context without
+	// binding the project to the hub: no project_id is generated, nothing is
+	// linked or registered, and the broker's provider path is not updated.
+	// The checks that refuse an operation still run. The returned context
+	// has an empty ProjectID. The CLI sets it for global-scope uploads
+	// (--global), which never read a project ID.
+	SkipProjectLink bool
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
@@ -397,6 +404,15 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		return nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
+	// A project directory named with --project must exist. Without this
+	// check a missing directory is created below and registered as a new
+	// project named after its parent directory (ptone/scion#5217). Inside a
+	// hub-connected container nothing is written or registered, so the
+	// check does not apply there.
+	if err := checkExplicitProjectDir(projectPath, resolvedPath, isGlobal, opts.ExplicitProject); err != nil {
+		return nil, err
+	}
+
 	// Clean up stale broker credentials from project settings.
 	// These should only exist in global settings, not project-specific settings.
 	// Earlier versions incorrectly wrote them to project settings.
@@ -456,7 +472,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	if projectID == "" {
 		projectID = settings.ProjectID
 	}
-	if projectID == "" {
+	if projectID == "" && !opts.SkipProjectLink {
 		if hubContext {
 			// Inside a container without a project id env var — we can't
 			// generate and persist a project ID. The Hub client can still be
@@ -535,6 +551,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	// project state. Return the context directly.
 	if hubContext {
 		return hubCtx, nil
+	}
+
+	if opts.SkipProjectLink {
+		return skipProjectLink(ctx, hubCtx, opts, resolvedPath, isGlobal, settings)
 	}
 
 	// Check project registration
@@ -688,6 +708,46 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		finishAutoLink(hubCtx, opts.AutoConfirm)
 	}
 
+	return hubCtx, nil
+}
+
+// checkExplicitProjectDir refuses a project directory named with --project
+// (explicit is true) that does not exist. The global directory and
+// hub-connected contexts are exempt. projectPath is the value as given and
+// resolvedPath the directory it resolved to.
+func checkExplicitProjectDir(projectPath, resolvedPath string, isGlobal, explicit bool) error {
+	if !explicit || isGlobal || config.IsHubContext() {
+		return nil
+	}
+	if info, err := os.Stat(resolvedPath); err == nil && info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("project directory %q (from --project %q) does not exist; pass an existing project directory, or a hub project slug or ID", resolvedPath, projectPath)
+}
+
+// skipProjectLink finishes EnsureHubReady for SkipProjectLink: it returns
+// hubCtx with an empty ProjectID, without linking or registering the
+// project. A project linked to another hub is still refused on the hub
+// selected with 'scion use', as in the link path below, so a refusal never
+// becomes an upload to that hub.
+func skipProjectLink(ctx context.Context, hubCtx *HubContext, opts EnsureHubReadyOptions, resolvedPath string, isGlobal bool, settings *config.Settings) (*HubContext, error) {
+	if opts.HubFromContext && projectWasLinked(resolvedPath, isGlobal, settings) {
+		registered := false
+		if hubCtx.ProjectID != "" {
+			var err error
+			registered, err = isProjectRegistered(ctx, hubCtx)
+			if err != nil {
+				return nil, wrapHubError(hubCtx.Endpoint, err)
+			}
+		}
+		if !registered {
+			if UsesUserAccessToken(hubCtx.CredentialKind) {
+				return nil, ScopedTokenProjectNotFoundError(hubCtx.ProjectID)
+			}
+			return nil, errProjectLinkedElsewhere()
+		}
+	}
+	hubCtx.ProjectID = ""
 	return hubCtx, nil
 }
 
