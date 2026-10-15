@@ -2380,7 +2380,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[11]},
+				Columns:    []*schema.Column{RoleBindingsColumns[12]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -2389,7 +2389,7 @@ var (
 			{
 				Name:    "rolebinding_issuance_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[10]},
+				Columns: []*schema.Column{RoleBindingsColumns[11]},
 			},
 			{
 				Name:    "rolebinding_principal_type_principal_id",
@@ -2399,7 +2399,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[11]},
+				Columns: []*schema.Column{RoleBindingsColumns[12]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -2414,7 +2414,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[11], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[12], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}

@@ -69660,7 +69660,7 @@ func (m *RoleBindingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleBindingMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 12)
 	if m.role_definition != nil {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
