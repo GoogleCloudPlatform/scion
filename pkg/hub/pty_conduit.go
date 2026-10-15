@@ -582,6 +582,10 @@ func ptyAgentOpenError(err error) error {
 		return &StreamClosedError{Code: code, Reason: reason}
 	case errors.Is(err, errConduitForbidden):
 		return &StreamClosedError{Code: wsprotocol.ClosePTYForbidden, Reason: ptyCloseReasonForbidden}
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held): the internal error close.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYInternalError, Reason: wsprotocol.CloseReasonInternalError}
 	default:
 		return err
 	}

@@ -96,11 +96,13 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 // mintRelayTunnel mints the open grant for res, the target session the
 // router resolved, and builds the instruction to open the tunnel and the
 // success answer. A resolution that is not a relay-held session (external
-// relay mode resolves only to those; a nil session is refused the same way)
-// is refused as agent session unavailable, before anything is minted.
+// relay mode resolves only to those; a nil session is treated the same way)
+// is an internal invariant breaking: it is logged at Warn and answered 500
+// internal error (contracts §2), before anything is minted.
 func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.Logger, sessionID string, agent *store.Agent, kind string, params map[string]string, res router.Resolved) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
 	rs, ok := relayHeldSession(res)
 	if !ok {
+		log.Warn("Conduit tunnel: external relay mode resolved a target that is not a relay-held session")
 		return nil, nil, conduitTunnelOpenError(fmt.Errorf("tunnel target: %w", errConduitLeafNotRelayHeld))
 	}
 	// The grant binds the row Resolve picked: its session, connection

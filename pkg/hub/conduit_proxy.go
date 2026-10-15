@@ -465,6 +465,10 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit routing is unavailable", nil)
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held); logged at Warn where it is found.
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
 	case errors.As(err, &ce) && ce.Code == conduit.CloseRelayTimeout:
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Nothing is listening on the agent port", nil)
 	default:

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
@@ -42,6 +43,9 @@ func (s *Server) openConduitTargetStream(ctx context.Context, res router.Resolve
 	if s.conduitExternal.Load() != nil {
 		rs, ok := relayHeldSession(res)
 		if !ok {
+			// An internal invariant broke; callers answer 500 internal
+			// error (contracts §2) and nothing is used.
+			slog.Warn("Conduit: external relay mode resolved a target that is not a relay-held session")
 			return nil, nil, errConduitLeafNotRelayHeld
 		}
 		b, err := rs.OpenBridge(ctx, open)
@@ -69,8 +73,8 @@ func conduitLeafTarget(res router.Resolved, st conduit.Stream, b relay.Bridge) r
 
 // relayHeldSession returns the session res resolved to as one held by a
 // separate relay. A session of another type, no session, or a nil
-// *relay.RemoteSession reports false, so the caller refuses the stream as
-// unavailable instead of using the session.
+// *relay.RemoteSession reports false, so the caller answers an internal
+// error instead of using the session.
 func relayHeldSession(res router.Resolved) (*relay.RemoteSession, bool) {
 	rs, ok := res.Session.(*relay.RemoteSession)
 	return rs, ok && rs != nil

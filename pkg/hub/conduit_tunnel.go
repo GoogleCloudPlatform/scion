@@ -722,6 +722,11 @@ func conduitTunnelOpenError(err error) error {
 		}
 	}
 	switch {
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// External relay mode resolved to something other than a relay-held
+		// session: an internal invariant broke (contracts §2, tunnel RPC
+		// internal error), never a disconnected agent session.
+		return tunnelRefusal(tunnelInternal, "tunnel request failed")
 	case errors.Is(err, errConduitAuthzUnavailable):
 		return tunnelRefusal(tunnelStreamAuthzUnavailable, "authorization is temporarily unavailable")
 	case errors.Is(err, errConduitForbidden):

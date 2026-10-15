@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -28,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -44,8 +49,9 @@ func notRelayHeldSessions() map[string]conduit.Session {
 
 // TestOpenConduitTargetStream_NilRemoteSessionRefused: a hub-held leaf in
 // external relay mode refuses a resolution without a usable relay-held
-// session as not relay-held (agent session unavailable to its caller), and
-// never calls a method on a nil session.
+// session, never calls a method on a nil session, and every caller answers
+// it as an internal error: 500 internal_error for a tunnel and for the port
+// proxy, and the internal error close (1011) for a PTY.
 func TestOpenConduitTargetStream_NilRemoteSessionRefused(t *testing.T) {
 	s := &Server{}
 	s.conduitExternal.Store(&conduitExternalRuntime{})
@@ -60,19 +66,42 @@ func TestOpenConduitTargetStream_NilRemoteSessionRefused(t *testing.T) {
 			require.NotPanics(t, func() {
 				st, b, err = s.openConduitTargetStream(context.Background(), router.Resolved{Session: sess}, open)
 			})
-			assert.True(t, errors.Is(err, errConduitLeafNotRelayHeld), "%v", err)
+			require.True(t, errors.Is(err, errConduitLeafNotRelayHeld), "%v", err)
 			assert.Nil(t, st)
 			assert.Nil(t, b)
+
+			// Tunnel on a hub-held session (openTarget's mapping).
+			var te *conduitTunnelError
+			require.ErrorAs(t, conduitTunnelOpenError(err), &te)
+			resp := te.response()
+			assert.Equal(t, int32(http.StatusInternalServerError), resp.GetStatus())
+			assert.Contains(t, string(resp.GetBody()), ErrCodeInternalError)
+
+			// Port proxy.
+			rec := httptest.NewRecorder()
+			writeConduitProxyError(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/agent-1/ports/3000/proxy/", nil), "agent-1", err)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Contains(t, rec.Body.String(), ErrCodeInternalError)
+
+			// PTY.
+			var sc *StreamClosedError
+			require.ErrorAs(t, ptyAgentOpenError(err), &sc)
+			assert.Equal(t, wsprotocol.ClosePTYInternalError, sc.Code)
+			assert.Equal(t, wsprotocol.CloseReasonInternalError, sc.Reason)
 		})
 	}
 }
 
 // TestMintRelayTunnel_NilRemoteSessionRefused: a tunnel request from a
-// relay-held session whose resolution has no usable relay-held session is
-// refused as agent session unavailable (503), before any grant is minted,
-// and never calls a method on a nil session.
+// relay-held session whose resolution has no usable relay-held session gets
+// 500 internal_error before any grant is minted, and no method is called on
+// a nil session. hub.conduit is on, so without the check the typed-nil case
+// would go on into the mint and the instruction instead of being refused.
 func TestMintRelayTunnel_NilRemoteSessionRefused(t *testing.T) {
-	ts := newConduitTunnelSession(&Server{}, NewAuthenticatedUser("user-1", "user@conduit.test", "User", store.UserRoleMember, "api"), time.Time{})
+	srv := &Server{}
+	setConduitExperiment(t, srv, true)
+	require.True(t, srv.experimentEnabled(conduitExperiment))
+	ts := newConduitTunnelSession(srv, NewAuthenticatedUser("user-1", "user@conduit.test", "User", store.UserRoleMember, "api"), time.Time{})
 	agent := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
 	for name, sess := range notRelayHeldSessions() {
 		t.Run(name, func(t *testing.T) {
@@ -86,7 +115,10 @@ func TestMintRelayTunnel_NilRemoteSessionRefused(t *testing.T) {
 			})
 			var te *conduitTunnelError
 			require.ErrorAs(t, err, &te)
-			assert.Equal(t, tunnelSessionUnavailable, te.failure)
+			assert.Equal(t, tunnelInternal, te.failure)
+			answer := te.response()
+			assert.Equal(t, int32(http.StatusInternalServerError), answer.GetStatus())
+			assert.Contains(t, string(answer.GetBody()), ErrCodeInternalError)
 			assert.Nil(t, resp)
 			assert.Nil(t, open)
 		})
