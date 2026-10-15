@@ -61,6 +61,10 @@ func TestRunLaunch_UnansweredTerminalKeepsJournalRecord(t *testing.T) {
 			srv, rtb := newAsyncTestServer(t, mgr)
 			rtb.launchReportFunc = unansweredTerminals
 
+			projectDir := t.TempDir()
+			if err := writeLaunchMarker(projectDir, false, "agent-ua", "L-ua"); err != nil {
+				t.Fatal(err)
+			}
 			// A deadline 15 minutes ago leaves the terminal no TTL at all.
 			rec := newLaunchRecord("L-ua", "agent-id-ua", store.LaunchKindCreate, "", time.Now().Add(-15*time.Minute), func() {})
 			rec.journal = srv.launchJournal.admit(rec, journalRecord{Slug: "agent-ua", AgentName: "agent-ua", RuntimeIdentity: "mock"})
@@ -69,7 +73,7 @@ func TestRunLaunch_UnansweredTerminalKeepsJournalRecord(t *testing.T) {
 			}
 			srv.trackAsyncLaunch(rec)
 			srv.runLaunch(context.Background(), rec, launchCtx{
-				opts: api.StartOptions{Name: "agent-ua"},
+				opts: api.StartOptions{Name: "agent-ua", ProjectPath: projectDir},
 				mgr:  mgr,
 				key:  launchKey{Slug: "agent-ua"},
 			})
@@ -80,6 +84,11 @@ func TestRunLaunch_UnansweredTerminalKeepsJournalRecord(t *testing.T) {
 			jr := readJournalFileT(t, rec.journal.path)
 			if jr.State != "terminal_pending" || jr.Terminal == nil || jr.Terminal.Succeeded != c.succeeded {
 				t.Fatalf("an unanswered terminal did not keep its terminal_pending record: %+v", jr)
+			}
+			// The launch marker is kept too: a retried report that confirms
+			// clean-up must still pass the marker check before deleting files.
+			if !launchMarkerMatches(projectDir, false, "agent-ua", "L-ua") {
+				t.Fatal("the launch marker was removed although the terminal report got no answer")
 			}
 		})
 	}
@@ -166,6 +175,11 @@ func TestRecoverLaunches_UnansweredReportRetryBound(t *testing.T) {
 			rec.Terminal = &journalTerminal{ErrorCode: api.LaunchCodeBrokerRestarted, Message: launchRestartedMessage}
 			rec.ReportAttempts = c.attempts
 			rec.ReportFirstFailedAt = time.Now().Add(-c.firstAgo)
+			projectDir := t.TempDir()
+			rec.ProjectPath = projectDir
+			if err := writeLaunchMarker(projectDir, false, rec.Slug, rec.LaunchID); err != nil {
+				t.Fatal(err)
+			}
 			path := writeUnansweredRecord(t, srv, rec)
 
 			runRecovery(t, srv)
@@ -190,10 +204,16 @@ func TestRecoverLaunches_UnansweredReportRetryBound(t *testing.T) {
 				if jr.ReportAttempts != c.wantAttempts {
 					t.Fatalf("an unanswered retry below the bound was not kept with %d attempts: %+v", c.wantAttempts, jr)
 				}
+				if !launchMarkerMatches(projectDir, false, rec.Slug, rec.LaunchID) {
+					t.Fatal("the launch marker was removed while the record is kept for a retry")
+				}
 				return
 			}
 			if _, err := os.Stat(path); !os.IsNotExist(err) {
 				t.Fatalf("recovery did not give up at the bound: the record is still there (%v)", err)
+			}
+			if launchMarkerMatches(projectDir, false, rec.Slug, rec.LaunchID) {
+				t.Fatal("giving up left the launch marker behind")
 			}
 			given := false
 			for _, line := range retryLines {

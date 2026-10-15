@@ -144,9 +144,12 @@ func (s *Server) recoverInstance(id string) {
 // recoverLaunch sends one recovered launch's terminal under the instance ID
 // it was journalled with (design wave 3 §1 C-b: the hub fences reports by
 // that ID), cleans up on a confirming answer with the existing predicates,
-// and removes the record. With no definitive answer by its TTL, the record
-// is removed with no cleanup; `scion delete` removes what is left. If the
-// broker shuts down first, the record stays for the next boot.
+// and removes the record (or keeps it as cleanup_pending if the clean-up
+// fails, ptone/scion#5177). With no definitive answer by its TTL, the
+// record is kept for the next boot to resend, up to a bound, after which it
+// is removed with no cleanup and `scion delete` removes what is left
+// (ptone/scion#5186). If the broker shuts down first, the record stays for
+// the next boot.
 func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 	ctx := s.recoveryContext()
 	if ctx.Err() != nil {
