@@ -33,6 +33,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
@@ -409,6 +411,12 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Name:   "SCION_HOST_GID",
 		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
 	})
+	// sciontool init opens the startup listener on this port, which the
+	// container's startup probe below checks.
+	envVars = append(envVars, &runpb.EnvVar{
+		Name:   startuplistener.EnvPort,
+		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
+	})
 
 	// The template env fallback (ptone/scion#4524) is the LAST env step:
 	// only names no source above set (env-type secrets are already folded
@@ -499,6 +507,19 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Image:        cfg.Image,
 		Env:          envVars,
 		VolumeMounts: volumeMounts,
+		// The agent serves nothing, so without an explicit probe the
+		// platform's default TCP startup probe on 8080 never succeeds and
+		// the instance is restarted about every 4 minutes. Probe sciontool's
+		// startup listener instead: every 10s, up to 24 failures (a 240s
+		// budget, the same as the default probe's).
+		Ports: []*runpb.ContainerPort{{ContainerPort: startuplistener.Port}},
+		StartupProbe: &runpb.Probe{
+			PeriodSeconds:    10,
+			FailureThreshold: 24,
+			ProbeType: &runpb.Probe_TcpSocket{
+				TcpSocket: &runpb.TCPSocketAction{Port: startuplistener.Port},
+			},
+		},
 	}
 
 	if cfg.NoAuth || cfg.Harness != nil {

@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -586,6 +587,19 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
+	}
+
+	// Open the startup listener when the runtime asked for one (only the
+	// cloudrun Instances runtime does, for its TCP startup probe). This runs
+	// after the re-exec above so it opens once, and before the slower setup
+	// below so the probe sees the port early. A bind failure is logged and
+	// init carries on: the probe then fails and the platform restart makes
+	// the problem visible.
+	if ln, err := startuplistener.Start(os.Getenv); err != nil {
+		log.Error("%v", err)
+	} else if ln != nil {
+		log.Info("Startup listener open on port %s", os.Getenv(startuplistener.EnvPort))
+		defer func() { _ = ln.Close() }()
 	}
 
 	// Start telemetry pipeline if configured. This must happen after
