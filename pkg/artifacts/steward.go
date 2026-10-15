@@ -40,7 +40,7 @@ const CodeStewardActionNotAllowed = "steward_action_not_allowed"
 
 // stewardActionNotAllowedMessage is the text of a
 // CodeStewardActionNotAllowed refusal. The caller has passed the read and
-// authority checks, so naming the rule leaks nothing.
+// authority checks, so naming the rule reveals nothing.
 const stewardActionNotAllowedMessage = "as the agent's delegating user or an owner of its home project you can share this artifact " +
 	"but not give admin access or move it; ask a hub super-admin to transfer ownership to you for that"
 

@@ -57,7 +57,7 @@ func stewardWrites() []stewardWrite {
 			return st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash(uuid.NewString()), time.Now().Add(time.Hour)), 5, time.Now(), actor)
 		}},
 		{"DeleteGrant", func(t *testing.T, st Store, a *Artifact) string {
-			g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:victim",
+			g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:grantee",
 				Permission: GrantRead, CreatedAt: time.Now()}
 			if _, err := st.PutGrant(ctx, g, 10, true, testActor); err != nil {
 				t.Fatal(err)

@@ -46,7 +46,7 @@ var (
 // delegator), stAdminGrantee holds an admin grant, custodianP administers
 // project-1 (custodian only), and plainReader only reads. Each of them
 // reads project-1 and may publish in project-2 (the move target). A
-// principal grant to user:victim (admin) and one share link exist, so the
+// principal grant to user:grantee (admin) and one share link exist, so the
 // removal and lowering actions have a target.
 type stewardFixture struct {
 	*fixture
@@ -69,7 +69,7 @@ func newStewardFixture(t *testing.T) *stewardFixture {
 	ctx := context.Background()
 	for _, g := range []*Grant{
 		{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectPrincipal, SubjectRef: PrincipalRef(stAdminGrantee.kind, stAdminGrantee.ref), Permission: GrantAdmin, CreatedAt: time.Now()},
-		{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectPrincipal, SubjectRef: "user:victim", Permission: GrantAdmin, CreatedAt: time.Now()},
+		{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectPrincipal, SubjectRef: "user:grantee", Permission: GrantAdmin, CreatedAt: time.Now()},
 	} {
 		if _, err := f.store.PutGrant(ctx, g, MaxGrantsPerArtifact, true, testActor); err != nil {
 			t.Fatal(err)
@@ -124,13 +124,13 @@ func stewardActions() []stewardAction {
 		{"grant project write", put(SubjectScope, "project-3", GrantWrite)},
 		{"grant project admin", put(SubjectScope, "project-3", GrantAdmin)},
 		{"raise home to write", put(SubjectScope, "project-1", GrantWrite)},
-		{"lower admin grant to write", put(SubjectPrincipal, "user:victim", GrantWrite)},
-		{"raise to admin", put(SubjectPrincipal, "user:victim", GrantAdmin)},
+		{"lower admin grant to write", put(SubjectPrincipal, "user:grantee", GrantWrite)},
+		{"raise to admin", put(SubjectPrincipal, "user:grantee", GrantAdmin)},
 		{"list grants", func(f *stewardFixture, p principal) *httptest.ResponseRecorder {
 			return f.jsonDo(p, http.MethodGet, grantsPath(f.id), "")
 		}},
 		{"remove grant", func(f *stewardFixture, p principal) *httptest.ResponseRecorder {
-			return f.jsonDo(p, http.MethodDelete, grantsPath(f.id)+"/"+f.grantID("user:victim"), "")
+			return f.jsonDo(p, http.MethodDelete, grantsPath(f.id)+"/"+f.grantID("user:grantee"), "")
 		}},
 		{"create link", func(f *stewardFixture, p principal) *httptest.ResponseRecorder {
 			return f.jsonDo(p, http.MethodPost, linksPath(f.id), `{"ttlHours": 24}`)
