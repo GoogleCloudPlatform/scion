@@ -598,7 +598,7 @@ var projectOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleUpdateSelector_DoesNotAdmitAuthoring"}},
 		Bearer:           SessionOnly(ReasonGovernancePending),
 		DelegationDescription: "Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, " +
-			"cron expression or enablement, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) " +
+			"cron expression or enables the schedule, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) " +
 			"in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. " +
 			"A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
 			"after CanDelegate for that principal. A message schedule grants no authority. " +

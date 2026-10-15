@@ -34,12 +34,18 @@
 #     (.DeleteAgent(ctx, a, b, ...)). The store methods take exactly two
 #     arguments (ctx, id), so this skips the broker, hub client and dispatch
 #     methods of the same name without hiding a store call.
-# LIMITATIONS: the check is textual and line-oriented. It does not see a
-# call through a method expression with the receiver as an argument
-# (store.Store.DeleteAgent(st, ctx, id) is skipped as a three-argument call),
-# through reflection, or inside a /* */ block comment line (which is
-# counted). A two-argument method of the same name on an unrelated type is
-# counted and must be allowlisted with a comment saying so.
+# LIMITATIONS: the check is textual and line-oriented.
+#   - A call through a method expression with the receiver as an argument
+#     (store.Store.DeleteAgent(st, ctx, id)) is skipped as a three-argument
+#     call, and a call through reflection is not seen.
+#   - A reference on a /* */ block comment line is counted.
+#   - The trailing-comment strip cuts at the first whitespace followed by
+#     //, even inside a string literal, so a reference after such a string
+#     on the same line is not seen.
+#   - The enclosing function is taken from the last top-level func header;
+#     a column-one closing brace (or a one-line function) ends it.
+#   - A two-argument method of the same name on an unrelated type is counted
+#     and must be allowlisted with a comment saying so.
 #
 # Severity: SECURITY-GRADE (store delete contract)
 #   Missing rg:          exit 3 (nothing analysed; see hack/lib/require-tool.sh)
@@ -97,6 +103,8 @@ count_calls() {
             if (substr(s, 1, 1) == "(") { sub(/^\([^)]*\)[[:space:]]*/, "", s) }
             sub(/[[:space:](\[].*$/, "", s)
             fn = s
+            # A function written on one line ends on its own header line.
+            oneline = ($0 ~ /}[[:space:]]*$/)
           }
           /^[[:space:]]*\/\// { next }
           {
@@ -111,6 +119,9 @@ count_calls() {
               n[(fn == "" ? "-" : fn)]++
             }
           }
+          # gofmt puts the closing brace of a top-level function in column
+          # one; what follows is outside any function until the next header.
+          /^}/ || oneline { fn = ""; oneline = 0 }
           END { for (k in n) print file "|" k " " n[k] }
         ' "$root/$f"
       done | sort
@@ -265,6 +276,26 @@ EOF
 
   rc=0; scan "$dir/missing" "$dir/allow" fixture 2>/dev/null || rc=$?
   [[ $rc -eq 4 ]] || { echo "self-test FAIL: missing root: rc=$rc (want 4)" >&2; failed=1; }
+
+  # Function attribution: a generic header, a package-level reference after
+  # a function's closing brace and after a one-line function, and the
+  # documented method-expression skip.
+  local dir2="$work/fixture2"
+  mkdir -p "$dir2/pkg/store"
+  cat >"$dir2/pkg/store/g.go" <<'EOF'
+package store
+func Generic[T any](ctx context.Context, st Store) {
+	_ = st.DeleteAgent(ctx, id)
+	_ = Store.DeleteAgent(st, ctx, id)
+}
+var afterFunc = st.DeleteProject
+func oneLine() { _ = st.DeleteProject(ctx, id) }
+var afterOneLine = st.DeleteAgent
+EOF
+  printf 'pkg/store/g.go | Generic | 1\npkg/store/g.go | oneLine | 1\npkg/store/g.go | - | 2\n' >"$dir2/allow"
+  rc=0; out="$(scan "$dir2" "$dir2/allow" fixture 2>&1)" || rc=$?
+  [[ $rc -eq 0 ]] ||
+    { echo "self-test FAIL: function attribution: rc=$rc (want 0): $out" >&2; failed=1; }
 
   mkdir -p "$dir/empty/pkg/store"
   rc=0; scan "$dir/empty" "$dir/allow" fixture 2>/dev/null || rc=$?
