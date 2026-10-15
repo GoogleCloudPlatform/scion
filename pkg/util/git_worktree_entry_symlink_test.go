@@ -171,9 +171,9 @@ func TestResolveMissingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, ok, err := resolveMissingPath(filepath.Join(link, "a", "b"))
-	if err != nil || !ok {
-		t.Fatalf("resolveMissingPath: ok=%v err=%v", ok, err)
+	got, state, err := resolveMissingPath(filepath.Join(link, "a", "b"))
+	if err != nil || state != resolvedWithin {
+		t.Fatalf("resolveMissingPath: state=%v err=%v", state, err)
 	}
 	if want := filepath.Join(wantReal, "a", "b"); got != want {
 		t.Errorf("resolveMissingPath = %q, want %q", got, want)
@@ -183,8 +183,8 @@ func TestResolveMissingPath(t *testing.T) {
 	if err := os.Symlink(filepath.Join(base, "nowhere"), dangling); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := resolveMissingPath(filepath.Join(dangling, "a")); err != nil || ok {
-		t.Errorf("dangling link: ok=%v err=%v, want ok=false and no error", ok, err)
+	if _, state, err := resolveMissingPath(filepath.Join(dangling, "a")); err != nil || state != resolvedLiteralOnly {
+		t.Errorf("dangling link: state=%v err=%v, want literal only and no error", state, err)
 	}
 }
 
@@ -208,4 +208,59 @@ func TestCreateWorktree_BranchHeldByHiddenWorktree(t *testing.T) {
 		t.Errorf("error should name the holder and how to clear it; got: %v", err)
 	}
 	assertSiblingIntact(t, repo, sibling, restore)
+}
+
+// Resolution is kept within the agent directory: an ancestor that is a
+// symlink to a directory outside the bound (the worktree path's
+// grandparent) is not followed.
+func TestResolveMissingPath_KeepsResolutionWithinAgentDirectory(t *testing.T) {
+	base := t.TempDir()
+	agents := filepath.Join(base, "agents")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{agents, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(outside, filepath.Join(agents, "a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, state, err := resolveMissingPath(filepath.Join(agents, "a", "workspace")); err != nil || state != resolvedOutside {
+		t.Errorf("ancestor linked outside the agent directory: state=%v err=%v, want outside and no error", state, err)
+	}
+
+	// An ancestor above the bound is never resolved.
+	if _, state, err := resolveMissingPath(filepath.Join(base, "gone", "agents", "a", "workspace")); err != nil || state != resolvedLiteralOnly {
+		t.Errorf("existing ancestor above the bound: state=%v err=%v, want literal only and no error", state, err)
+	}
+}
+
+// RemoveWorktreeEntryIn does not remove the entry of a worktree outside the
+// agent directory reached through an ancestor symlink.
+func TestRemoveWorktreeEntryIn_AncestorLinkOutsideIsRefused(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	repo := setupGitRepo(t)
+	base := t.TempDir()
+	agents := filepath.Join(base, "agents")
+	outside := filepath.Join(base, "outside")
+	for _, d := range []string{agents, outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elsewhere := filepath.Join(outside, "workspace")
+	runGit(t, repo, "worktree", "add", "-b", "elsewhere", elsewhere)
+	if err := os.RemoveAll(elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(agents, "a")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveWorktreeEntryIn(repo, filepath.Join(agents, "a", "workspace")); err == nil || !strings.Contains(err.Error(), "outside the agent directory") {
+		t.Errorf("RemoveWorktreeEntryIn through a link outside the agent directory = %v, want it refused", err)
+	}
+	if list := worktreeEntries(t, repo); !strings.Contains(list, "branch refs/heads/elsewhere") {
+		t.Errorf("the entry of the worktree outside the agent directory should be kept; worktree list:\n%s", list)
+	}
 }
