@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -103,6 +104,14 @@ type conduitRPCGuard struct {
 // process, across sessions and hub connections.
 var conduitSeenRequests = newSeenOnce()
 
+// NewConduitBrokerRPCHandler returns the RPC handler for the broker
+// conduit sessions of the hub connection connectionName: requests reach
+// handlers only when the guard for brokerID, checking signatures with key,
+// accepts them.
+func NewConduitBrokerRPCHandler(handlers http.Handler, connectionName, brokerID string, key func() []byte, log *slog.Logger) conduit.RPCHandler {
+	return newGuardedConduitRPCHandler(handlers, connectionName, 0, log, newConduitRPCGuard(brokerID, key))
+}
+
 // newConduitRPCGuard returns the guard for brokerID, checking signatures
 // with key.
 func newConduitRPCGuard(brokerID string, key func() []byte) *conduitRPCGuard {
@@ -115,17 +124,46 @@ type conduitRPCRefusal struct {
 	message string
 }
 
+// conduitRPCChecker decides whether a request received on a broker
+// conduit session is served: nil to serve it, the refusal otherwise.
+type conduitRPCChecker interface {
+	check(ctx context.Context, req *wsprotocol.RequestEnvelope) *conduitRPCRefusal
+}
+
+var _ conduitRPCChecker = (*conduitRPCGuard)(nil)
+
+// canonicalRequestPath reports whether p is a request path in the exact
+// form the handlers route on: it starts with a slash, holds no question
+// mark, hash, percent sign or control character, and parses back to
+// itself under the broker's request host, with no user info and no
+// fragment. It returns the parsed URL (with query) when it is.
+func canonicalRequestPath(p, query string) (*url.URL, bool) {
+	if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "?#%") {
+		return nil, false
+	}
+	for i := 0; i < len(p); i++ {
+		if c := p[i]; c < 0x20 || c == 0x7f {
+			return nil, false
+		}
+	}
+	target := "http://runtime-broker" + p
+	if query != "" {
+		target += "?" + query
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Host != "runtime-broker" || u.User != nil || u.Fragment != "" || u.RawPath != "" || u.Path != p {
+		return nil, false
+	}
+	return u, true
+}
+
 // check returns nil when req, received on the session of ctx, may be
 // served, and the refusal otherwise.
 func (g *conduitRPCGuard) check(ctx context.Context, req *wsprotocol.RequestEnvelope) *conduitRPCRefusal {
-	target := "http://runtime-broker" + req.Path
-	if req.Query != "" {
-		target += "?" + req.Query
-	}
-	u, err := url.Parse(target)
-	// Only the exact canonical form is served: no percent-encoding, so the
-	// path checked is the path the handlers route on.
-	if err != nil || strings.Contains(req.Path, "%") || u.RawPath != "" || !conduitRPCAllowed(req.Method, u.Path) {
+	// Only the exact canonical form is served, so the path checked is the
+	// path the handlers route on.
+	u, ok := canonicalRequestPath(req.Path, req.Query)
+	if !ok || !conduitRPCAllowed(req.Method, u.Path) {
 		return &conduitRPCRefusal{http.StatusNotFound, "not found"}
 	}
 	unauth := func(msg string) *conduitRPCRefusal { return &conduitRPCRefusal{http.StatusUnauthorized, msg} }
@@ -195,8 +233,9 @@ func signedHeaderListed(list, name string) bool {
 	return false
 }
 
-// seenOnce remembers keys until their expiry. Expired keys are dropped on
-// each add, so it holds at most the keys of one acceptance window.
+// seenOnce remembers keys until their expiry: a key is refused while now
+// is not after its expiry. Expired keys are dropped on each add, so it
+// holds at most the keys of one acceptance window.
 type seenOnce struct {
 	mu   sync.Mutex
 	keys map[string]time.Time
@@ -209,7 +248,7 @@ func (s *seenOnce) add(key string, expiry, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, exp := range s.keys {
-		if !now.Before(exp) {
+		if now.After(exp) {
 			delete(s.keys, k)
 		}
 	}
