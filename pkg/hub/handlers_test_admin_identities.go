@@ -28,6 +28,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -932,7 +933,14 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 	if u.IssuanceID != nil && *u.IssuanceID != "" {
 		report := &TestIdentityPurgeReport{IdentityID: u.ID}
 		run := fixturePurgeRun{rootID: u.ID, user: u, issuanceID: *u.IssuanceID, trigger: testAdminRevokeMutation, actor: auditActor}
-		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: auditActor.CorrelationID, Trigger: testAdminRevokeMutation}
+		// The run ID every grant row of this revoke shares: the request's
+		// correlation ID, or a new one (a provenance basis without a run
+		// is refused, which would abort each grant delete).
+		runID := auditActor.CorrelationID
+		if runID == "" {
+			runID = api.NewUUID()
+		}
+		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: runID, Trigger: testAdminRevokeMutation}
 		if u.IssuedBy != nil {
 			run.issuerID, basis.IssuerID = *u.IssuedBy, *u.IssuedBy
 		}

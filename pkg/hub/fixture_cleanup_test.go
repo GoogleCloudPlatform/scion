@@ -1027,3 +1027,39 @@ func TestFixtureCleanup_DelegationCannotReachAdminKind(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, map[string]string{admin.ID: fixtureStateExpired}, fcIdentities(fcReport(t, rec)))
 }
+
+// Gate finding (series at 9bcbec4ca): revoke-all, whose request carries no
+// correlation ID here, still removes every issuance-stamped grant, and each
+// grant row carries a provenance_basis with a run ID (the revoke falls back
+// to a new run ID; a basis without one aborts the delete).
+func TestFixtureCleanup_RevokeAllGrantRowsCarryBasis(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "fc-ra-iss", store.SystemRoleSuperAdmin)
+	k := tsaIssue(t, srv, issuer, testAdminRoleHubAdmin)
+	row := a3Row(t, s, k.Identity.ID)
+	projectID := tiCreateProject(t, srv, k.AccessToken, "fc-ra-project")
+	grantee := taUser(t, s, "fc-ra-grantee", store.SystemRoleHubMember)
+	rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/projects/"+projectID+"/members",
+		addProjectMemberRequest{RoleDefinitionID: a3ProjectRoleID(t, s, store.ProjectRoleAdmin), PrincipalType: "user", PrincipalID: grantee.ID})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	stamped, _, err := s.ListIssuanceStampedGrants(ctx, *row.IssuanceID, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, stamped)
+
+	taRevokeAll(t, srv, issuer)
+	left, _, err := s.ListIssuanceStampedGrants(ctx, *row.IssuanceID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, left)
+	for _, g := range stamped {
+		rows := fpPurgeAudits(t, s, testAdminGrantPurgeMutation, g.ID)
+		require.Len(t, rows, 1, "grant %s", g.ID)
+		var b fixturePurgeBasis
+		require.NoError(t, json.Unmarshal([]byte(rows[0].ProvenanceBasis), &b), rows[0].ProvenanceBasis)
+		assert.Equal(t, k.Identity.ID, b.RootID)
+		assert.Equal(t, *row.IssuanceID, b.IssuanceID)
+		assert.Equal(t, testAdminRevokeMutation, b.Trigger)
+		assert.NotEmpty(t, b.RunID)
+		assert.Equal(t, b.RunID, rows[0].CorrelationID)
+	}
+}
