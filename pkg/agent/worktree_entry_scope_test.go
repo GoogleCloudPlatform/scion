@@ -98,6 +98,10 @@ func TestProvisionAgent_FailedFirstProvision_KeepsHiddenSibling(t *testing.T) {
 			agentName := "failed-first-agent"
 			scionDir, agentDir, _ := setupNoConfigAgentProjectIn(t, tmpDir, agentName)
 			projectDir := filepath.Dir(scionDir)
+			// Provisioning requires the agents directory to be ignored.
+			if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			setupGitRepo(t, projectDir)
 			sibling, restore := addHiddenSiblingWorktree(t, projectDir)
 			if err := os.RemoveAll(agentDir); err != nil {
