@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -196,13 +197,20 @@ func TestProfileReferences_HubAndPreflightInputsAgree(t *testing.T) {
 	// "": native-corrupt (no provenance) and the four undecodable configs.
 	// missing: native-missing, noprov, bad-json-placed, bad-type-placed.
 	// unreadable: native-corrupt, shared-unreadable.
-	assert.Equal(t, map[string]int{"local": 1, "remote": 1, "hubval": 2, "np": 1, "shprov": 1, "": 5}, hubRefs.Agents)
-	assert.Equal(t, map[string]int{"local": 1}, hubRefs.Projects)
-	assert.Equal(t, 4, hubRefs.AgentInfoMissing)
-	assert.Equal(t, 2, hubRefs.AgentInfoUnreadable)
+	if want := map[string]int{"local": 1, "remote": 1, "hubval": 2, "np": 1, "shprov": 1, "": 5}; !reflect.DeepEqual(hubRefs.Agents, want) {
+		t.Errorf("hub refs.Agents = %v, want %v", hubRefs.Agents, want)
+	}
+	if want := map[string]int{"local": 1}; !reflect.DeepEqual(hubRefs.Projects, want) {
+		t.Errorf("hub refs.Projects = %v, want %v", hubRefs.Projects, want)
+	}
+	if hubRefs.AgentInfoMissing != 4 || hubRefs.AgentInfoUnreadable != 2 {
+		t.Errorf("hub agent-info tallies: missing %d unreadable %d, want 4 and 2", hubRefs.AgentInfoMissing, hubRefs.AgentInfoUnreadable)
+	}
 	sums := map[string]int{}
 	for _, c := range counted {
 		sums[c.Profile]++
 	}
-	assert.Equal(t, preflightRefs.Agents, sums, "the counted agents must sum to refs.Agents")
+	if !reflect.DeepEqual(sums, preflightRefs.Agents) {
+		t.Errorf("the counted agents sum to %v, refs.Agents is %v", sums, preflightRefs.Agents)
+	}
 }
