@@ -286,7 +286,11 @@ func TestCloudRunRun_CreatesInstanceWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
+// TestCloudRunRun_NoSystemAnnotations checks that the built Instance carries
+// no run.googleapis.com/ annotation. The Instances API rejects system
+// annotations (including run.googleapis.com/restart-policy) with
+// INVALID_ARGUMENT, so any such key makes every create fail.
+func TestCloudRunRun_NoSystemAnnotations(t *testing.T) {
 	fake := &fakeInstancesClient{getErr: notFoundErr()}
 	rt := newFakeCloudRunRuntime(t, fake)
 
@@ -299,13 +303,13 @@ func TestCloudRunRun_RestartPolicyAlways(t *testing.T) {
 		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
 	}
 	inst := fake.createReqs[0].Instance
-	if inst.Annotations == nil {
-		t.Fatal("Instance.Annotations is nil, expected restart policy annotation")
+	if inst == nil {
+		t.Fatal("CreateInstance Instance is nil")
 	}
-	const wantKey = "run.googleapis.com/restart-policy"
-	const wantVal = "Always"
-	if got := inst.Annotations[wantKey]; got != wantVal {
-		t.Errorf("Instance.Annotations[%q] = %q, want %q", wantKey, got, wantVal)
+	for k, v := range inst.Annotations {
+		if strings.HasPrefix(k, "run.googleapis.com/") {
+			t.Errorf("Instance.Annotations has system annotation %q=%q; the Instances API rejects run.googleapis.com/ annotations", k, v)
+		}
 	}
 }
 

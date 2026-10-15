@@ -94,6 +94,10 @@ func deriveHMACPeerKey(secret []byte) ([]byte, error) {
 	return hkdf.Key(sha256.New, secret, nil, hmacPeerKeyInfo, 32)
 }
 
+// DefaultPeerMaxSkew is the default relay-peer timestamp window
+// (HMACPeerAuthConfig.MaxSkew).
+const DefaultPeerMaxSkew = 60 * time.Second
+
 // HMACPeerAuthConfig configures HMACPeerAuth.
 type HMACPeerAuthConfig struct {
 	// Secret is the secret every hub node shares (at least 16 bytes). The
@@ -168,8 +172,35 @@ func NewHMACPeerAuthFromSecret(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
 	return newHMACPeerAuthWithKey(cfg, key)
 }
 
+// hmacPeerSecretKeyInfo is the HKDF info label for the relay-peer HMAC key
+// derived from the dedicated relay-peer secret
+// (server.hub.conduit.peer_secret, design §3.9). It differs from
+// hmacPeerKeyInfo and from every
+// label used with the session secret, and the secret itself is independent
+// of the session secret: neither key can be derived from the other.
+const hmacPeerSecretKeyInfo = "scion conduit relay-peer secret hmac v1"
+
+// NewHMACPeerAuthFromPeerSecret returns an HMACPeerAuth keyed with the HKDF
+// derivation, under its own label, of the dedicated relay-peer secret
+// cfg.Secret. Separate relays and hubs in external-relay mode use it; they
+// never hold the session secret. The secret's strength rules (normalization,
+// minimum length, distinct octets) are config.ValidatePeerSecret's, which
+// every caller applies first; here an empty secret is refused.
+func NewHMACPeerAuthFromPeerSecret(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
+	if len(cfg.Secret) == 0 {
+		return nil, errors.New("conduit relay: empty relay-peer secret")
+	}
+	key, err := hkdf.Key(sha256.New, cfg.Secret, nil, hmacPeerSecretKeyInfo, 32)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Secret = nil // keep only the derived key
+	return newHMACPeerAuthWithKey(cfg, key)
+}
+
 // newHMACPeerAuthWithKey uses key as the MAC key as is (internal and
-// tests only; production goes through NewHMACPeerAuthFromSecret).
+// tests only; production goes through NewHMACPeerAuthFromSecret or
+// NewHMACPeerAuthFromPeerSecret).
 func newHMACPeerAuthWithKey(cfg HMACPeerAuthConfig, key []byte) (*HMACPeerAuth, error) {
 	if len(key) < 32 {
 		return nil, errors.New("conduit relay: relay-peer HMAC key must be at least 32 bytes")
@@ -178,7 +209,7 @@ func newHMACPeerAuthWithKey(cfg HMACPeerAuthConfig, key []byte) (*HMACPeerAuth, 
 		return nil, errors.New("conduit relay: relay-peer HMAC needs SelfID")
 	}
 	if cfg.MaxSkew <= 0 {
-		cfg.MaxSkew = 60 * time.Second
+		cfg.MaxSkew = DefaultPeerMaxSkew
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now

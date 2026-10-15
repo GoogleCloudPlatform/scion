@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
@@ -158,9 +159,9 @@ func classifySSHHubError(endpoint string, err error) *tunnelclient.Error {
 }
 
 // sshOneLine collapses s onto a single line for stderr output that lands in ssh
-// and editor logs.
+// and editor logs. URLs in s are shown without their user info.
 func sshOneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+	return strings.Join(strings.Fields(config.RedactURLsIn(s)), " ")
 }
 
 // resolveSSHProjectID returns the hub project id for a project slug or id.

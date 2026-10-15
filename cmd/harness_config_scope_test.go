@@ -47,6 +47,9 @@ type hcScopeRecorder struct {
 	// downloadHashes, when set, makes the download call report these
 	// path -> hash entries for an existing config (instead of "no files").
 	downloadHashes map[string]string
+	// finalizeConflicts makes the first finalizeConflicts finalize calls
+	// answer 409 harness_config_conflict (ptone/scion#4219).
+	finalizeConflicts int
 }
 
 func (r *hcScopeRecorder) key(scope, scopeID, name string) string {
@@ -130,6 +133,11 @@ func harnessConfigScopeHubHandler(t *testing.T, rec *hcScopeRecorder) http.Handl
 			var body hubclient.HarnessConfigFinalizeRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			rec.finalizeSourceURLs = append(rec.finalizeSourceURLs, body.SourceURL)
+			if rec.finalized <= rec.finalizeConflicts {
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":"harness_config_conflict","message":"harness config was changed by another commit; re-read it and retry"}}`))
+				return
+			}
 			id := filepath.Base(filepath.Dir(r.URL.Path))
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": id, "name": "codex", "harness": "codex", "status": "active", "contentHash": "sha256:abc",
