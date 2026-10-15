@@ -166,10 +166,8 @@ func TestHubStatusJSON_NoSettingsTokenFields(t *testing.T) {
 	assert.Equal(t, true, got["configured"])
 }
 
-// TestHubStatus_RedactsEndpointCredentials: a hub URL with credentials in
-// SCION_HUB_ENDPOINT (a password, or a user name alone, which may be a
-// token) is never printed by hub status: not on the Endpoint line, not in
-// the JSON, and not in the connection error, which quotes the URL.
+// TestHubStatus_RedactsEndpointCredentials: hub status shows a hub URL with
+// user info without it, in text and JSON.
 func TestHubStatus_RedactsEndpointCredentials(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	hostPort := strings.TrimPrefix(srv.URL, "http://")
