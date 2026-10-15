@@ -187,7 +187,7 @@ func TestCleanupPartialWorktree_RefusesPathOutsideWorktreesDir(t *testing.T) {
 	}
 	logs := captureLog(t)
 
-	for _, p := range []string{filepath.Join(base, "worktrees"), base, outside, filepath.Join(base, "worktrees", "..", "worktrees")} {
+	for _, p := range []string{filepath.Join(base, "worktrees"), base, outside, base + "/worktrees/../worktrees"} {
 		cleanupPartialWorktree(context.Background(), base, p, "agent-1")
 	}
 
