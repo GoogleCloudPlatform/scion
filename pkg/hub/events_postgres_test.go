@@ -826,3 +826,51 @@ func TestPostgresIntegration_ReconnectResubscribe(t *testing.T) {
 		t.Fatal("delivery did not resume after reconnect")
 	}
 }
+
+// TestPostgresEventPublisher_CloseDuringUnsubscribe: Close and an
+// unsubscribe of the same subscription running at the same time both
+// complete (ptone/scion#5190). The unsubscribe is held inside its
+// subscription's once until Close has reached the point where it closes the
+// subscriber channels, the order in which closing them under mu deadlocked
+// with the unsubscribe waiting for mu.
+func TestPostgresEventPublisher_CloseDuringUnsubscribe(t *testing.T) {
+	p := newTestPostgresPublisher(nil)
+	ch, unsub := p.Subscribe("project.G1.>")
+
+	inOnce, release := make(chan struct{}), make(chan struct{})
+	p.testHookInUnsubscribe = func() {
+		close(inOnce)
+		<-release
+	}
+	closing := make(chan struct{})
+	p.testHookBeforeCloseSubs = func() { close(closing) }
+
+	unsubDone := make(chan struct{})
+	go func() {
+		unsub()
+		close(unsubDone)
+	}()
+	waitClosed := func(c <-chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-c:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+	waitClosed(inOnce, "the unsubscribe to hold its once")
+
+	closeDone := make(chan struct{})
+	go func() {
+		p.Close()
+		close(closeDone)
+	}()
+	waitClosed(closing, "Close to reach the subscriber channels")
+	close(release)
+
+	waitClosed(unsubDone, "the unsubscribe to complete (deadlock with Close)")
+	waitClosed(closeDone, "Close to complete (deadlock with the unsubscribe)")
+	if _, open := <-ch; open {
+		t.Fatal("the subscriber channel is still open")
+	}
+}
