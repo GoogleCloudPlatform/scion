@@ -1157,13 +1157,26 @@ func TestBuildPod_PB1_PlacementValidation(t *testing.T) {
 // accepted by buildPod and copied to the pod spec unchanged.
 func TestBuildPod_PB1_AcceptsAPIServerValidPlacement(t *testing.T) {
 	rt, _, _ := newTestK8sRuntime()
+	// Length boundaries the API server accepts: a 253-character DNS
+	// subdomain (prefix and runtime class), a 63-character name part and
+	// a 63-character label value.
+	maxSubdomain := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." +
+		strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	maxName := strings.Repeat("n", 63)
+	maxValue := strings.Repeat("v", 63)
+	maxKey := maxSubdomain + "/" + maxName
+	if len(maxSubdomain) != 253 || len(maxName) != 63 || len(maxValue) != 63 {
+		t.Fatalf("boundary lengths: subdomain %d, name %d, value %d", len(maxSubdomain), len(maxName), len(maxValue))
+	}
 	k := &api.KubernetesConfig{
-		RuntimeClassName: "gvisor",
+		RuntimeClassName: maxSubdomain,
 		NodeSelector: map[string]string{
 			"pool":                          "agents",
 			"cloud.google.com/gke-nodepool": "scion-agents",
 			"node.kubernetes.io/instance":   "n2.standard-8",
 			"example.com/empty-value":       "",
+			maxKey:                          maxValue,
+			maxName:                         maxValue,
 		},
 		Tolerations: []api.K8sToleration{
 			{Operator: "Exists"},
@@ -1171,6 +1184,7 @@ func TestBuildPod_PB1_AcceptsAPIServerValidPlacement(t *testing.T) {
 			{Key: "dedicated", Value: "agents", Effect: "PreferNoSchedule"},
 			{Key: "nvidia.com/gpu", Operator: "Exists", Effect: "NoExecute"},
 			{Key: "scion-workload", Operator: "Equal", Value: "agents", Effect: ""},
+			{Key: maxKey, Operator: "Equal", Value: maxValue, Effect: "NoSchedule"},
 		},
 	}
 	pod, err := rt.buildPod("default", placementRunConfig(k))
@@ -1189,8 +1203,8 @@ func TestBuildPod_PB1_AcceptsAPIServerValidPlacement(t *testing.T) {
 			t.Fatalf("tolerations[%d] = %+v, want %+v", i, got, want)
 		}
 	}
-	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
-		t.Fatalf("runtime class = %v, want gvisor", pod.Spec.RuntimeClassName)
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != maxSubdomain {
+		t.Fatalf("runtime class = %v, want the 253-character name", pod.Spec.RuntimeClassName)
 	}
 }
 
