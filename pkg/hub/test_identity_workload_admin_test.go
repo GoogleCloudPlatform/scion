@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -300,6 +301,131 @@ func TestWorkloadAdminDelegation_InTransactionGrantorRecheck(t *testing.T) {
 	assert.ErrorIs(t, inTx(testSuper.Identity.ID, permissionTestIdentityIssueAdmin), errTestAdminIssuerNotLive, "a test super-admin is not a human grantor")
 }
 
+// x4LockHookStore runs a hook, once and only when armed, inside the
+// issuance transaction right after LockTestFixtureIssuance: after the auth
+// arm and testAdminIssuer accepted the request, before the handler's
+// in-transaction re-checks. The hook writes through the transaction, so a
+// refusal rolls its change back with the rest.
+type x4LockHookStore struct {
+	store.Store
+	hook *x4LockHook
+}
+
+type x4LockHook struct {
+	armed atomic.Bool
+	fn    func(ctx context.Context, tx store.Store) error
+}
+
+func (s *x4LockHookStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&x4LockHookTx{Store: tx, hook: s.hook})
+	})
+}
+
+type x4LockHookTx struct {
+	store.Store
+	hook *x4LockHook
+}
+
+func (s *x4LockHookTx) LockTestFixtureIssuance(ctx context.Context) error {
+	if err := s.Store.LockTestFixtureIssuance(ctx); err != nil {
+		return err
+	}
+	if s.hook.armed.CompareAndSwap(true, false) && s.hook.fn != nil {
+		return s.hook.fn(ctx, s.Store)
+	}
+	return nil
+}
+
+// The handler wires both in-transaction re-checks: a grantor demoted, or a
+// delegation revoked, inside the issuance transaction (after the request
+// passed the auth arm and every check outside the transaction) mints
+// nothing. Without recheckTestAdminDelegationGrantor or
+// recheckWorkloadDelegation in the transaction, these mints would succeed.
+func TestWorkloadAdminDelegation_InTransactionRechecksWired(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		reason string
+		change func(t *testing.T, grantor *store.User, delegationID string) func(ctx context.Context, tx store.Store) error
+	}{
+		{
+			name:   "grantor demoted inside the transaction",
+			reason: testAdminReasonNotLiveAdmin,
+			change: func(t *testing.T, grantor *store.User, _ string) func(ctx context.Context, tx store.Store) error {
+				return func(ctx context.Context, tx store.Store) error {
+					rd, err := tx.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+					if err != nil {
+						return err
+					}
+					bindings, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, grantor.ID)
+					if err != nil {
+						return err
+					}
+					n := 0
+					for _, b := range bindings {
+						if b.ScopeType == store.RoleScopeSystem && b.RoleDefinitionID == rd.ID {
+							if err := tx.DeleteRoleBinding(ctx, b.ID); err != nil {
+								return err
+							}
+							n++
+						}
+					}
+					assert.Positive(t, n, "the grantor's super-admin binding was removed")
+					return nil
+				}
+			},
+		},
+		{
+			name: "delegation revoked inside the transaction",
+			change: func(t *testing.T, grantor *store.User, delegationID string) func(ctx context.Context, tx store.Store) error {
+				return func(ctx context.Context, tx store.Store) error {
+					changed, err := tx.RevokeTestIdentityDelegation(ctx, delegationID, grantor.ID, time.Now())
+					assert.True(t, changed, "the delegation was revoked")
+					return err
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, buf := taServer(t)
+			hook := &x4LockHook{}
+			installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *x4LockHookStore {
+				return &x4LockHookStore{Store: inner, hook: hook}
+			})
+			e := setupX4(t, srv, s, buf, false)
+			grantor := taUser(t, e.s, "x4-wired-grantor", store.SystemRoleSuperAdmin)
+			d := e.delegateScope(t, grantor, testIdentityDelegationAdminScope, nil)
+
+			// Positive control: the unarmed hook changes nothing.
+			rec := e.mintAdmin(t, d.ID, testAdminRoleHubAdmin)
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+			admins, users := e.liveAdmins(t, ""), e.userCount(t)
+			audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testAdminIssueMutation})
+			require.NoError(t, err)
+			lines := len(tsaSinkLines(e.sink, testAdminAuditEventIssue))
+
+			hook.fn = tc.change(t, grantor, d.ID)
+			hook.armed.Store(true)
+			rec = e.mintAdmin(t, d.ID, testAdminRoleHubAdmin)
+			assert.False(t, hook.armed.Load(), "the hook ran inside the issuance transaction")
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			keys := x4JSONKeys(t, rec.Body.Bytes())
+			assert.NotContains(t, keys, "accessToken")
+			if tc.reason != "" {
+				assert.Equal(t, tc.reason, taReason(t, rec))
+			}
+			assert.Equal(t, admins, e.liveAdmins(t, ""), "no admin-kind identity")
+			assert.Equal(t, users, e.userCount(t), "no user row")
+			after, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testAdminIssueMutation})
+			require.NoError(t, err)
+			assert.Len(t, after, len(audits), "no issuance audit")
+			assert.Len(t, tsaSinkLines(e.sink, testAdminAuditEventIssue), lines, "no issuance sink line")
+		})
+	}
+}
+
 // --- B3 (X4 AC3): caps --------------------------------------------------------
 
 // Per-delegation and hub-wide caps, sequentially: a super-admin
@@ -481,6 +607,7 @@ func TestWorkloadAdminDelegation_IssuanceSinkLineAndAudit(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		resp := taDecode(t, rec)
 		assert.Equal(t, tc.kind, resp.Identity.Kind)
+		assert.Equal(t, d.ID, resp.Identity.IssuerDelegationID, "the response view names the delegation")
 		assert.NotEmpty(t, resp.AccessToken)
 
 		row, err := e.s.GetUser(ctx, resp.Identity.ID)

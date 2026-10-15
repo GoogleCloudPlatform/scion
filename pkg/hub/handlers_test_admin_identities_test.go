@@ -1069,7 +1069,7 @@ func TestTestAdmin_CapsAtomic(t *testing.T) {
 	}
 	assert.Equal(t, testAdminPerIssuerCap, created)
 
-	// Several issuers, parallel: the hub holds exactly two.
+	// Several issuers, parallel: the hub holds exactly testAdminHubCap.
 	issuers := make([]*store.User, 4)
 	for i := range issuers {
 		issuers[i] = taUser(t, s, "ta-cap-hub-"+string(rune('a'+i)), store.SystemRoleSuperAdmin)

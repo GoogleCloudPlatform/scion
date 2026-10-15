@@ -1693,9 +1693,10 @@ func TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities(t *tes
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// The member-tier rule of workloadWebCodeAdmitted on its own: the store
-// never holds an admin-kind row with a delegation id, so the handler test
-// above cannot reach this branch with one.
+// The member-tier rule of workloadWebCodeAdmitted on its own: an admin-kind
+// row with a delegation id comes only from an admin-scope delegation
+// (phase X4), which testIdentityCaller refuses before this check, so the
+// handler test above cannot reach this branch with one.
 func TestWorkloadWebCodeAdmitted(t *testing.T) {
 	ctx := context.Background()
 	did := "d-1"

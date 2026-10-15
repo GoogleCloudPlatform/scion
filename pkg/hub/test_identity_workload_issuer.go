@@ -58,7 +58,7 @@ import (
 // bindings intersected with the delegation's frozen scope, at every request.
 // An admin-kind mint also re-checks, inside its transaction, that the
 // grantor is still a live super-admin holding the scope's capability
-// (DEC-3 C1, canIssueTestAdminOn).
+// (DEC-3 C1, recheckTestAdminDelegationGrantor).
 // The request credential context carries CredentialKindWorkloadDelegation,
 // which testIdentityCaller admits and the mutation audit records.
 

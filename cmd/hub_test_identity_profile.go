@@ -132,7 +132,7 @@ func init() {
 	hubTestIdentityDelegateCmd.AddCommand(hubTestIdentityDelegateCreateCmd, hubTestIdentityDelegateListCmd, hubTestIdentityDelegateRevokeCmd)
 	f := hubTestIdentityDelegateCreateCmd.Flags()
 	f.StringVar(&delegateWorkloadSub, "workload-sub", "", "Numeric unique id of the workload identity (the target's issuer service account)")
-	f.DurationVar(&delegateTTL, "ttl", 0, "Delegation lifetime, e.g. 8h (default: the hub's, 8h; at most 7 days)")
+	f.DurationVar(&delegateTTL, "ttl", 0, "Delegation lifetime, e.g. 2h (default: the scope's: member 8h, hub-admin 4h, super-admin 1h; at most 7 days, 8h and 2h)")
 	f.StringVar(&delegateScope, "scope", delegateScopeMember, "Delegated scope: member, hub-admin or super-admin")
 	f.IntVar(&delegateMemberCap, "member-cap", 0, "Live test identities a member delegation may hold at once, 1-5 (default: 5)")
 	f.IntVar(&delegateAdminCap, "admin-cap", 0, "Live admin identities an admin delegation may hold at once: hub-admin 1-2, super-admin 1 (default: the maximum)")

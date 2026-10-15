@@ -796,7 +796,9 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 	var token string
 	var expiresIn int64
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		// The member tier's issuance lock serializes both tiers' counts.
+		// The member tier's issuance lock serializes both tiers' counts. On
+		// SQLite it is a no-op: the parallel-mint guarantee rides SQLite's
+		// single writer. On Postgres it is pg_advisory_xact_lock.
 		if err := tx.LockTestFixtureIssuance(ctx); err != nil {
 			return err
 		}
