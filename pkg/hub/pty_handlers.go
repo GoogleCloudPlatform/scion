@@ -237,10 +237,10 @@ type PTYSession struct {
 	credentialCheck func(context.Context) bool
 }
 
-// errPTYCredentialEnded ends a PTY session whose credential no longer
-// authorizes it. The client receives 4401 authz_expired, the code and
-// reason of a conduit stream whose authorization no longer holds.
-var errPTYCredentialEnded = errors.New("pty: the credential no longer authorizes this session")
+// errPTYCredentialEnded ends a PTY session whose credential stops
+// authorizing it. The client receives 4401 authz_expired, the code and
+// reason of a conduit stream whose authorization fails a re-check.
+var errPTYCredentialEnded = errors.New("pty: the credential does not authorize this session")
 
 // ptyTokenCredentialCheck returns the credential check of a PTY session
 // opened by the request in ctx on agent: for a user access token, the token
