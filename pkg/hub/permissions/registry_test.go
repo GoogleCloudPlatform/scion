@@ -102,6 +102,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"inbox:read":                      {"inbox.read"},
 	"inbox:write":                     {"inbox.write"},
 	"project:clone":                   {"project.clone"},
+	"project:list":                    {"project.list"},
 	"project:manage":                  {"project.manage"},
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
