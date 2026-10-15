@@ -265,9 +265,9 @@ func (s *Service) callerActor(ctx context.Context, a *Artifact, authority string
 }
 
 // adminArtifact loads an artifact the caller may administer
-// (adminAuthorityWith: the owner, an admin grantee or a steward). An artifact the caller cannot read answers 404 like a
-// missing one (the read check runs first); one it can read but not
-// administer answers 403.
+// (adminAuthorityWith: the owner, an admin grantee or a steward). An
+// artifact the caller cannot read answers 404 like a missing one (the read
+// check runs first); one it can read but not administer answers 403.
 //
 // actor is the caller, with the authority it administers the artifact by,
 // for the events the change records.
