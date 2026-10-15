@@ -22,10 +22,8 @@ import (
 	"net/http"
 	"time"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/envelope"
@@ -225,7 +223,7 @@ func (t *routedBrokerTunnel) tunnel(ctx context.Context, brokerID string, req *w
 	if req.Headers == nil {
 		req.Headers = make(map[string]string)
 	}
-	otel.GetTextMapPropagator().Inject(ctx, propagation.MapCarrier(req.Headers))
+	addTraceHeaders(ctx, req.Headers)
 	rpc := envelope.RequestToRPC(req)
 	if err := rpcTooLarge(req, rpc); err != nil {
 		return nil, fmt.Errorf("%w: %w", errBrokerNotRouted, err)
