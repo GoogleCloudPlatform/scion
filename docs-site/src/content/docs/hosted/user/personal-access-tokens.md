@@ -357,7 +357,9 @@ scion hub token list
 ```
 
 Revoke a token — it stops working for authentication but remains visible in listings as
-revoked:
+revoked. Log and message streams and terminal sessions opened with the token end within
+about 15 seconds of the token being revoked or expiring, of its user being suspended, or of
+the user losing the permission the stream needs:
 
 ```bash
 scion hub token revoke <token-id>
