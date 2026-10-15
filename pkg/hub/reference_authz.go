@@ -83,10 +83,13 @@ func sameConversation(msg *store.Message, threadKey, convID string) bool {
 	return convID != "" && msg.ConversationID == convID
 }
 
-// attachmentUsableIn reports whether an attachment may be sent in a
-// conversation. The rule follows the conversation kind, not a resolved
-// project (an agent DM resolves to the agent's project, but files uploaded
-// in a direct message carry no project):
+// attachmentUsableIn reports whether an attachment of the AttachmentStore
+// may be sent in a conversation. (An attachment stored as an artifact is
+// usable only as an unsent upload of the sender: artifacts.Service
+// UsableAttachment, then BindAttachment under the row lock.) The rule
+// follows the conversation kind, not a resolved project (an agent DM
+// resolves to the agent's project, but files uploaded in a direct message
+// carry no project):
 //
 //   - direct message: a file the sender uploaded in a direct message
 //     (no project, uploaded by userID)

@@ -39,7 +39,6 @@ import (
 // messageTestState captures and restores package-level vars for test isolation.
 type messageTestState struct {
 	projectPath  string
-	noHub        bool
 	bcastChanged bool
 	allChanged   bool
 	bodyFile     string
@@ -49,7 +48,6 @@ type messageTestState struct {
 func saveMessageTestState() messageTestState {
 	return messageTestState{
 		projectPath:  projectPath,
-		noHub:        noHub,
 		bcastChanged: messageCmd.Flags().Lookup("broadcast").Changed,
 		allChanged:   messageCmd.Flags().Lookup("all").Changed,
 		bodyFile:     msgBodyFile,
@@ -59,7 +57,6 @@ func saveMessageTestState() messageTestState {
 
 func (s messageTestState) restore() {
 	projectPath = s.projectPath
-	noHub = s.noHub
 	messageCmd.Flags().Lookup("broadcast").Changed = s.bcastChanged
 	messageCmd.Flags().Lookup("all").Changed = s.allChanged
 	msgBodyFile = s.bodyFile

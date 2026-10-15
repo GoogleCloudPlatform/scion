@@ -36,7 +36,6 @@ func setupSelfDeleteViaHub(t *testing.T, name, id, ownProjectID string) (string,
 	setCurrentAgentEnv(t, name, name, id, ownProjectID)
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	noHub = false
 	preserveBranch = true
 	deleteStopped = false
 	deleteForce = false

@@ -350,8 +350,9 @@ func TestLaunchStore_S2_BeginLaunchInvalidPhase(t *testing.T) {
 }
 
 // TestLaunchStore_S2_BeginLaunchRejectsNonCreateKind proves BeginLaunch's
-// kind must be store.LaunchKindCreate in P1a; start and restart are P6 and
-// must be rejected, not silently accepted and stored.
+// kind must be store.LaunchKindCreate; start and restart go through
+// BeginStartLaunch and must be rejected here, not silently accepted and
+// stored.
 func TestLaunchStore_S2_BeginLaunchRejectsNonCreateKind(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

@@ -304,29 +304,6 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 	return uploaded, written, nil
 }
 
-// reconcileResourceStorage deletes objects under storagePath that are not in the
-// keep set, so files removed from a resource don't linger in storage after a
-// re-sync. List/delete failures are logged and skipped (best-effort), matching
-// the template reconcile behavior this consolidates. name is included in warn
-// messages to identify the resource.
-func reconcileResourceStorage(ctx context.Context, stor storage.Storage, storagePath, name string, keep map[string]struct{}, log *slog.Logger, label string) {
-	listResult, err := stor.List(ctx, storage.ListOptions{Prefix: storagePath + "/"})
-	if err != nil {
-		log.Warn(label+": failed to list storage for reconcile",
-			"resource", name, "prefix", storagePath, "error", err)
-		return
-	}
-	for _, obj := range listResult.Objects {
-		if _, keepObj := keep[obj.Name]; keepObj {
-			continue
-		}
-		if err := stor.Delete(ctx, obj.Name); err != nil {
-			log.Warn(label+": failed to delete stale object",
-				"resource", name, "object", obj.Name, "error", err)
-		}
-	}
-}
-
 // legacyFallbackPath returns the legacy un-namespaced storage path for fallback
 // reads, or "" if legacy fallback is disabled on this server.
 func (s *Server) legacyFallbackPath(path string) string {
