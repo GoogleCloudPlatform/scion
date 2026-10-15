@@ -582,18 +582,104 @@ func jsonFieldNames(typ reflect.Type) []string {
 }
 
 // A plain delete of a test identity with an admin role gets the hub's 404
-// (only a purge or revoke-all removes one). The command still succeeds, so
-// a teardown can run twice, but its notice names --purge and revoke-all
-// instead of claiming there is nothing to do; it sends no purge itself.
+// (only a purge removes one). On the plain human path the command still
+// succeeds, so a teardown can run twice, and its notice names
+// "delete <id> --purge" (never revoke-all, a hub-wide action); it sends no
+// purge itself. The shared deleteTestIdentity (also the profile alias path)
+// prints no admin hint.
 func TestHubTestIdentityDelete_AdminKind404PointsToPurge(t *testing.T) {
-	hub := &tiCLIHub{deleteStatus: http.StatusNotFound, deleteBody: `{"error":{"code":"not_found","message":"test identity not found"}}`}
+	notFound := `{"error":{"code":"not_found","message":"test identity not found"}}`
+	hub := &tiCLIHub{deleteStatus: http.StatusNotFound, deleteBody: notFound}
 	var stdout, stderr bytes.Buffer
-	require.NoError(t, deleteTestIdentity(context.Background(), &stdout, &stderr, hub.client(t).TestIdentities(), "ta-1"))
+	require.NoError(t, deleteTestIdentityWithHint(context.Background(), &stdout, &stderr, hub.client(t).TestIdentities(), "ta-1", true))
 	assert.Empty(t, stdout.String())
-	assert.NotContains(t, stderr.String(), "nothing to do")
-	assert.Contains(t, stderr.String(), "nothing was deleted")
-	assert.Contains(t, stderr.String(), `"scion hub test-identity delete ta-1 --purge"`)
-	assert.Contains(t, stderr.String(), `"scion hub test-identity revoke-all"`)
+	assert.Equal(t, "Notice: test identity ta-1 was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n"+
+		"A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete ta-1 --purge\".\n", stderr.String())
+	assert.NotContains(t, stderr.String(), "revoke-all")
 	require.Len(t, hub.queries, 1)
 	assert.Equal(t, "", hub.queries[0], "a plain delete sends no purge")
+
+	// The shared helper, as the profile alias path calls it: no hint.
+	shared := &tiCLIHub{deleteStatus: http.StatusNotFound, deleteBody: notFound}
+	stderr.Reset()
+	require.NoError(t, deleteTestIdentity(context.Background(), &stdout, &stderr, shared.client(t).TestIdentities(), "fx-1"))
+	assert.NotContains(t, stderr.String(), "admin role")
+	assert.NotContains(t, stderr.String(), "--purge")
+}
+
+// The hint applies only on the human path without a hub profile.
+func TestHubTestIdentityDelete_AdminHintContexts(t *testing.T) {
+	t.Run("human without profile", func(t *testing.T) {
+		profileGateEnv(t, "")
+		t.Setenv("SCION_CLI_MODE", "human")
+		assert.True(t, testAdminDeleteHintApplies())
+	})
+	t.Run("agent mode", func(t *testing.T) {
+		profileGateEnv(t, "")
+		t.Setenv("SCION_CLI_MODE", "agent")
+		assert.False(t, testAdminDeleteHintApplies())
+	})
+	t.Run("hub profile", func(t *testing.T) {
+		profileGateEnv(t, "t1")
+		t.Setenv("SCION_CLI_MODE", "human")
+		assert.False(t, testAdminDeleteHintApplies())
+	})
+}
+
+// O1: issue dispatches --admin-role before the profile path, so with a hub
+// profile selected issue --admin-role is refused, never silently issued as
+// a member identity through the profile.
+func TestHubTestIdentityIssue_AdminRoleDispatchedBeforeProfile(t *testing.T) {
+	profileGateEnv(t, "t1")
+	t.Setenv("SCION_CLI_MODE", "human")
+	c := &cobra.Command{Use: "issue"}
+	c.Flags().String("role", "member", "")
+	c.Flags().String("admin-role", "", "")
+	require.NoError(t, c.Flags().Set("admin-role", "hub-admin"))
+	err := runHubTestIdentityIssue(c, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issue --admin-role is not available with a hub profile")
+}
+
+// O2: when the token cannot be written after issuance, the file is
+// removed, stderr names the identity and the purge path (no re-issue
+// exists), and the token appears nowhere.
+func TestHubTestIdentityAdminIssue_WriteFailureAfterIssue(t *testing.T) {
+	orig := testAdminTokenWrite
+	t.Cleanup(func() { testAdminTokenWrite = orig })
+	testAdminTokenWrite = func(f *tokenFile, token string) error {
+		_ = f.f.Close() // the real write then fails on the closed file
+		return f.write(token)
+	}
+	hub := &tiAdminHub{}
+	out := filepath.Join(t.TempDir(), "admin.token")
+	var stdout, stderr bytes.Buffer
+	err := issueTestAdminIdentity(context.Background(), &stdout, &stderr, hub.client(t).TestIdentities(), testAdminIssueOptions{
+		AdminRole: "hub-admin", Purpose: "admin journey", Out: out,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write --out")
+	assert.Equal(t, "Test identity ta-1 was issued, but its token could not be written. Its token cannot be re-issued; remove it with \"scion hub test-identity delete ta-1 --purge\".\n", stderr.String())
+	assert.Empty(t, stdout.String())
+	assertNoAdminToken(t, stdout.String(), stderr.String(), err.Error())
+	_, statErr := os.Stat(out)
+	assert.True(t, os.IsNotExist(statErr), "no partial token file is left")
+}
+
+// O3: a revoke-all that fails partway (500 or 503) says that some
+// identities may already be revoked and that running it again is safe; it
+// is not mistaken for a refusal.
+func TestHubTestIdentityRevokeAll_PartialFailureHint(t *testing.T) {
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusInternalServerError} {
+		hub := &tiAdminHub{status: status, errBody: `{"error":{"code":"unavailable","message":"test admin audit is unavailable"}}`}
+		var stdout bytes.Buffer
+		err := revokeAllTestAdminIdentities(context.Background(), &stdout, hub.client(t), testAdminRevokeAllOptions{Reason: "INC-1"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "some identities may already be revoked")
+		assert.Contains(t, err.Error(), "--dry-run")
+		assert.False(t, errors.Is(err, errTestAdminSuperAdminRequired))
+		assert.False(t, errors.Is(err, errTestAdminTierOff))
+		assert.Equal(t, []string{"POST /api/v1/test-identities/admin/revoke-all"}, hub.seen(), "sent once, not retried")
+		assert.Empty(t, stdout.String())
+	}
 }

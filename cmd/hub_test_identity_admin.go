@@ -228,13 +228,17 @@ func issueTestAdminIdentity(ctx context.Context, out, errOut io.Writer, svc hubc
 		}
 		return fmt.Errorf("failed to issue a test identity with the %s role: %w", role, err)
 	}
-	if err := file.write(resp.AccessToken); err != nil {
+	if err := testAdminTokenWrite(file, resp.AccessToken); err != nil {
 		// Admin identities have no re-issue: the identity must be revoked.
 		_, _ = fmt.Fprintf(errOut, "Test identity %s was issued, but its token could not be written. Its token cannot be re-issued; remove it with \"scion hub test-identity delete %s --purge\".\n", resp.Identity.ID, resp.Identity.ID)
 		return fmt.Errorf("failed to write --out %s: %w", file.path, err)
 	}
 	return printTestAdminIdentityToken(out, resp, file.path, opts.JSON)
 }
+
+// testAdminTokenWrite writes the issued token to its file. It is a
+// variable only so a test can make the write fail after issuance.
+var testAdminTokenWrite = func(f *tokenFile, token string) error { return f.write(token) }
 
 // testAdminIdentityOutput is the --json output of issue --admin-role. It
 // has no token field.
@@ -343,7 +347,13 @@ func revokeAllTestAdminIdentities(ctx context.Context, out io.Writer, client hub
 	}
 	resp, err := client.TestIdentities().RevokeAllAdmin(ctx)
 	if err != nil {
-		return testAdminRefusal("revoke-all", err, true)
+		if apiclient.IsForbiddenError(err) || apiclient.IsUnauthorizedError(err) || apiclient.IsNotFoundError(err) {
+			return testAdminRefusal("revoke-all", err, true)
+		}
+		// The hub revokes one identity at a time, so a failure (for example
+		// 503 when its audit sink cannot be written) can come after some
+		// were already revoked. Running it again is safe.
+		return fmt.Errorf("revoke-all failed: %w; some identities may already be revoked: check with \"scion hub test-identity revoke-all --reason ... --dry-run\" and run revoke-all again (it is safe to repeat)", err)
 	}
 	if opts.JSON {
 		enc := json.NewEncoder(out)

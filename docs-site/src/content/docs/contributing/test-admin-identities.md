@@ -60,7 +60,7 @@ scion hub test-identity issue --admin-role hub-admin \
   | `super-admin` | default 10m, at most 15m | default and at most 30m |
 
 - The token is never re-issued. If it is lost, remove the identity with `scion hub test-identity delete <id> --purge` and issue a new one.
-- A plain `scion hub test-identity delete <id>` does not remove an identity with an admin role: the hub answers it as not found, and the CLI's notice points to `--purge` or `revoke-all`.
+- A plain `scion hub test-identity delete <id>` does not remove an identity with an admin role: the hub answers it as not found, and the CLI's notice points to `delete <id> --purge`.
 
 The hub also limits issuance:
 
@@ -116,7 +116,7 @@ Follow these steps:
    scion hub test-identity revoke-all --reason "INC-123 stop test admins"
    ```
 
-   `--reason` is required. It is printed with the result as **your own record only**: the hub does not receive or store the reason. The hub's audit records who revoked each identity and when. Keep the reason in your incident or runbook log. The output lists every identity and its outcome (`deleted` or `suspended`). `--json` prints the same facts.
+   `--reason` is required. It is printed with the result as **your own record only**: the hub does not receive or store the reason. The hub's audit records who revoked each identity and when. Keep the reason in your incident or runbook log. The output lists every identity and its outcome (`deleted` or `suspended`). `--json` prints the same facts. If the command fails partway (for example `503` when the hub cannot write its test admin audit), some identities may already be revoked: check with `--dry-run` and run it again. It is safe to repeat.
 
 3. **Clean up what is left.** For each suspended identity, check `scion hub test-identity residue <id>`, then run `scion hub test-identity delete <id> --purge`.
 

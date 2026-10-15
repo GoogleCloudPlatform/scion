@@ -404,7 +404,15 @@ func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
-	return deleteTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+	return deleteTestIdentityWithHint(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0], testAdminDeleteHintApplies())
+}
+
+// testAdminDeleteHintApplies reports whether a plain delete's 404 notice
+// names the admin-role purge path: only on the human path without a hub
+// profile (delegation-issued identities are member or viewer, and agents
+// never manage admin-role identities).
+func testAdminDeleteHintApplies() bool {
+	return !hubProfileSelected() && resolveMode() != ModeAgent
 }
 
 // purgeTestIdentity purges a test identity and prints the hub's report.
@@ -745,11 +753,16 @@ func listTestIdentities(ctx context.Context, out io.Writer, svc hubclient.TestId
 
 // deleteTestIdentity deletes a test identity. A 404 (it no longer exists,
 // or it is not one of the caller's) succeeds with a notice, so a teardown
-// step can run more than once. The hub also answers 404 to a plain delete
-// of a test identity with an admin role (those are removed only by a purge
-// or revoke-all), and the CLI cannot tell the cases apart, so the notice
-// names that path instead of claiming there is nothing to do.
+// step can run more than once.
 func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
+	return deleteTestIdentityWithHint(ctx, out, errOut, svc, id, false)
+}
+
+// deleteTestIdentityWithHint is deleteTestIdentity; with adminHint, a 404
+// notice also says that a test identity with an admin role is removed only
+// by a purge. The hub answers a plain delete of one with 404, and the CLI
+// cannot tell that from a missing identity.
+func deleteTestIdentityWithHint(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string, adminHint bool) error {
 	err := svc.Delete(ctx, id)
 	if err == nil {
 		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", id)
@@ -757,7 +770,9 @@ func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclien
 	}
 	if apiclient.IsNotFoundError(err) {
 		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n", id)
-		_, _ = fmt.Fprintf(errOut, "A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete %s --purge\" or \"scion hub test-identity revoke-all\".\n", id)
+		if adminHint {
+			_, _ = fmt.Fprintf(errOut, "A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete %s --purge\".\n", id)
+		}
 		return nil
 	}
 	if agents, projects, ok := hubclient.TestIdentityDeleteConflict(err); ok && (len(agents) > 0 || len(projects) > 0) {
