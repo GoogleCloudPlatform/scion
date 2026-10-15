@@ -6,6 +6,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
@@ -27,7 +29,7 @@ var (
 	profile        string
 	outputFormat   string
 	hubEndpoint    string // Hub API endpoint override
-	noHub          bool   // Disable Hub integration for this invocation
+	noHub          bool   // Removed --no-hub flag (hidden; any use fails with errNoHubRemoved)
 	autoConfirm    bool   // Auto-confirm prompts (--yes flag)
 	nonInteractive bool   // Full non-interactive mode (implies --yes, errors on ambiguous prompts)
 	autoHelp       = true // Default to true, updated in PersistentPreRunE
@@ -118,6 +120,14 @@ return an error instead of blocking.`,
 		mode := resolveMode()
 		configureDebugOutput(mode, debugMode)
 
+		// --no-hub was removed with local-only mode. The flag stays,
+		// hidden, for one release so that old scripts get this guidance
+		// instead of an unknown-flag error. It is checked before the
+		// hub-profile gate, so every use gets the same guidance.
+		if noHub {
+			return errNoHubRemoved
+		}
+
 		// Target-hub profiles (ptone/scion#4240): refuse commands outside
 		// the profile allow-list, and apply the agent-mode target rule.
 		if err := checkHubProfileGate(cmd, mode); err != nil {
@@ -199,6 +209,10 @@ return an error instead of blocking.`,
 					autoConfirm = true
 				}
 			}
+
+			if projectPath == "" {
+				printShadowNotice(cmd)
+			}
 		}
 
 		// Agent mode implies non-interactive: prompts that require stdin
@@ -209,35 +223,9 @@ return an error instead of blocking.`,
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
 		}
 
-		// Check image_registry is configured for commands that need it.
-		// Skip for config commands (users need those to set the registry).
-		// Skip for hub-dispatched work: the broker that runs the agent
-		// resolves images, so the local registry setting is not needed.
-		requiresRegistry := requiresProject
-		if commandInSubtree(cmd, "config") {
-			requiresRegistry = false
-		}
-		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
-			requiresRegistry = false
-		}
-		if requiresRegistry && isHubDispatchInvocation(projectPath) {
-			requiresRegistry = false
-		}
-		// Shadow projects never launch containers locally — skip registry check.
-		if requiresRegistry {
-			if isShadowProject() {
-				requiresRegistry = false
-			}
-		}
-		if requiresRegistry {
-			if err := config.RequireImageRegistry(projectPath, profile); err != nil {
-				return err
-			}
-		}
-
 		// Check for dev auth usage and warn if Hub is enabled
 		if !hubOnly {
-			printDevAuthWarningIfNeeded(projectPath)
+			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
 		}
 
 		// Hand the normalized root flag values to the command (see
@@ -309,6 +297,14 @@ func Execute() {
 		rootCmd.Long = ""
 	}
 
+	// "<group> <unknown> --help" is an unknown command, not the group's
+	// help (ptone/scion#4579). Checked after the mode restrictions, so a
+	// subcommand the mode removed is unknown too.
+	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
+		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
+		os.Exit(1)
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil && topLevelName(cmd) == "ssh" {
 		// scion ssh follows the ssh convention: any failure before the
@@ -339,6 +335,7 @@ func Execute() {
 var plainErrorCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh-config": true,
+	"vscode":     true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
@@ -346,7 +343,7 @@ var plainErrorCommands = map[string]bool{
 // ANSI escape sequence is removed, including any carried in the error text
 // itself, so piped stderr stays plain.
 func formatCLIError(f *os.File, err error) string {
-	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
+	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %s%s\n\n", util.BgRed, util.White, util.Bold, config.RedactURLsIn(err.Error()), util.Reset))
 }
 
 // configureDebugOutput sets up CLI debug output for one invocation. An
@@ -478,7 +475,9 @@ func init() {
 
 	// Hub integration flags
 	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
-	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
+	_ = rootCmd.RegisterFlagCompletionFunc("hub", completeHubNames)
+	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Removed: local-only mode no longer exists; scion always uses a hub")
+	_ = rootCmd.PersistentFlags().MarkHidden("no-hub")
 
 	// Confirmation and non-interactive flags
 	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
@@ -554,42 +553,8 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 `)
 }
 
-// GetHubEndpoint returns the effective Hub endpoint based on flags, settings,
-// and environment variables.
-// Returns empty string if Hub is disabled or not configured.
-func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
-	if noHub {
-		return ""
-	}
-	if hubEndpoint != "" {
-		return hubEndpoint
-	}
-	if settings != nil {
-		if ep := settings.GetHubEndpoint(); ep != "" {
-			return ep
-		}
-	}
-	// Fall back to env vars — covers the case where settings loading didn't
-	// populate the Hub struct (e.g., inside a hub-connected container where
-	// the project path resolves to a synthetic/empty directory).
-	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
-		return ep
-	}
-	if ep := os.Getenv("SCION_HUB_URL"); ep != "" {
-		return ep
-	}
-	return ""
-}
-
-// IsHubEnabled returns true if Hub integration is enabled for this invocation.
-func IsHubEnabled() bool {
-	return !noHub
-}
-
-// IsNoHub returns true if Hub integration is explicitly disabled for this invocation.
-func IsNoHub() bool {
-	return noHub
-}
+// errNoHubRemoved is returned for any use of the removed --no-hub flag.
+var errNoHubRemoved = fmt.Errorf("--no-hub was removed together with local-only mode; scion always uses a hub. See %s", hubsync.LocalModeRemovalDocsURL)
 
 // IsAutoConfirm returns true if prompts should be auto-confirmed.
 func IsAutoConfirm() bool {
@@ -603,42 +568,43 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
+// printDevAuthWarningIfNeeded checks if dev auth is being used with a hub and
+// prints a warning on stderr (the command's error writer), never on stdout,
+// so it cannot mix into JSON or other machine-read output.
 // This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(projectPath string) {
-	// Skip if --no-hub flag is set
-	if noHub {
-		return
-	}
-
-	// Try to load settings to check if Hub is enabled
+func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		// If we can't load settings, skip the warning
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override).
-	// A hub selected with 'scion use' is in hubEndpoint too and counts the
-	// same way: a project from the current context is resolved on that hub
-	// without hub.enabled, so dev auth is really in use.
-	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
-	if !hubEnabled {
+	// No hub selected: nothing to warn about.
+	if !hubConfigured() {
 		return
 	}
 
-	// Check if explicit auth is configured in settings
-	if settings.Hub != nil {
-		if settings.Hub.Token != "" || settings.Hub.APIKey != "" || settings.Hub.BrokerToken != "" {
-			// Explicit auth configured, not using dev auth
-			return
-		}
+	// Explicit auth: a token from the environment, or the broker's own
+	// token. Tokens in settings files are not read.
+	if os.Getenv("SCION_HUB_TOKEN") != "" || os.Getenv("SCION_HUB_API_KEY") != "" {
+		return
+	}
+	if settings.Hub != nil && settings.Hub.BrokerToken != "" {
+		return
 	}
 
 	// Check if OAuth credentials are available (from scion hub auth login)
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint != "" && credentials.IsAuthenticated(endpoint) {
 		// OAuth credentials available, not using dev auth
+		return
+	}
+
+	// The local workstation server on loopback is reached with its dev token
+	// by design (it is the default hub of every workstation), so the banner
+	// would show on every command without telling the user anything. It
+	// stays for every other hub.
+	if isLocalWorkstationEndpoint(endpoint) {
 		return
 	}
 
@@ -660,8 +626,14 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
-		util.Bold, util.Yellow, util.Reset)))
+	banner := fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+		util.Bold, util.Yellow, util.Reset)
+	if f, ok := stderr.(*os.File); ok {
+		banner = util.ColorFor(f, banner)
+	} else {
+		banner = util.StripANSI(banner)
+	}
+	_, _ = fmt.Fprint(stderr, banner)
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent
@@ -715,7 +687,7 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 
 	reason := "no Hub endpoint is configured"
 	if endpoint != "" {
-		reason = fmt.Sprintf("the Hub endpoint (%s) points to localhost, which is not reachable from inside this container", endpoint)
+		reason = fmt.Sprintf("the Hub endpoint (%s) points to localhost, which is not reachable from inside this container", config.RedactURL(endpoint))
 	}
 
 	return fmt.Errorf(
@@ -761,33 +733,6 @@ func usesWorktrees(cmd *cobra.Command) bool {
 		return true
 	}
 	return false
-}
-
-// isShadowProject returns true if the current directory is inside a shadowed
-// project (a directory linked to a hub project purely for CLI routing, with no
-// local workspace or broker involvement). It reads the .scion marker file from
-// the project root discovered via FindProjectRoot.
-func isShadowProject() bool {
-	root, found := config.FindProjectRoot()
-	if !found {
-		return false
-	}
-	// The marker file is the .scion regular file in the workspace directory,
-	// not the resolved external config path. Walk up from cwd to find it.
-	markerPath := config.FindProjectMarkerPath()
-	if markerPath == "" {
-		// Fallback: if root itself looks like an external config, we can't
-		// directly read the workspace marker. Check versioned settings instead.
-		if vs, err := config.LoadVersionedSettings(root); err == nil && vs != nil {
-			return vs.ProjectType == string(config.ProjectTypeShadow)
-		}
-		return false
-	}
-	marker, err := config.ReadProjectMarker(markerPath)
-	if err != nil {
-		return false
-	}
-	return marker.IsShadow()
 }
 
 // isLocalEndpoint returns true if the given endpoint URL points to a local address

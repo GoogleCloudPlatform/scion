@@ -17,9 +17,11 @@
 package artifacts
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -114,9 +116,10 @@ func TestReviewGrantAllowed(t *testing.T) {
 	}
 }
 
-// TestReviewGrantDenied: every other caller or request gets exactly the
-// 403 a non-administrator got before review grants existed, and nothing
-// is written.
+// TestReviewGrantDenied: a caller without review-grant authority, or a
+// request that is not exactly a review grant to a user, gets exactly the
+// 403 a non-administrator of its kind gets (an agent gets the agent text,
+// ptone/scion#4576), whatever the subject, and nothing is written.
 func TestReviewGrantDenied(t *testing.T) {
 	ok := reviewBody(SubjectPrincipal, reviewerID, GrantReview)
 	for _, tc := range []struct {
@@ -137,8 +140,13 @@ func TestReviewGrantDenied(t *testing.T) {
 		{"credential lacks manage", delegator, ok, func(f *fixture, id string) { f.host.deny(delegator, "project-1", PermissionManage) }},
 		{"admin grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantAdmin), nil},
 		{"write grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantWrite), nil},
-		{"subject cannot read yet", delegator, reviewBody(SubjectPrincipal, "user:stranger", GrantReview), nil},
-		{"subject reads only another project", delegator, reviewBody(SubjectPrincipal, PrincipalRef(otherProj.kind, otherProj.ref), GrantReview), nil},
+		// Without review-grant authority, a subject that cannot read or
+		// already holds a grant does not change the answer.
+		{"member naming a non-reader", member, reviewBody(SubjectPrincipal, "user:stranger", GrantReview), nil},
+		{"revoked delegation naming a non-reader", delegator, reviewBody(SubjectPrincipal, "user:stranger", GrantReview), func(f *fixture, id string) {
+			f.host.revokeReview(delegator, agentA.ref, "project-1")
+		}},
+		{"member naming a grant holder", member, ok, func(f *fixture, id string) { f.grantPrincipal(id, reviewer) }},
 		{"read grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantRead), nil},
 		{"grant to an agent", delegator, reviewBody(SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantReview), nil},
 		{"grant to a scope", projAdmin, reviewBody(SubjectScope, "project-2", GrantReview), func(f *fixture, id string) { f.host.crossScope = true }},
@@ -151,8 +159,13 @@ func TestReviewGrantDenied(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, id := newReviewGrantFixture(t)
-			// The baseline: a reader that is not an administrator.
-			want := response(f.postGrantBody(member, id, "junk"))
+			// The baseline: a reader of the caller's kind that is not an
+			// administrator. agentB is one before any setup.
+			baseline := member
+			if tc.caller.kind == PrincipalKindAgent {
+				baseline = agentB
+			}
+			want := response(f.postGrantBody(baseline, id, "junk"))
 			if tc.setup != nil {
 				tc.setup(f, id)
 			}
@@ -212,10 +225,11 @@ func TestReviewGrantUserOwnedUnchanged(t *testing.T) {
 }
 
 // TestReviewGrantNeverReplacesGrant: a user who already holds a read, write
-// or admin grant keeps it; the review grant is refused with the same 403
-// as every other refusal, so the granter learns nothing about the
-// existing grant. (reviewer also reads through the home project, so the
-// refusal comes from the existing grant, not the subject check.)
+// or admin grant keeps it; the review grant is refused with 403 and code
+// review_replaces_access, since the caller holds review-grant authority
+// (ptone/scion#5119). (reviewer also reads through the home project, so
+// the refusal comes from the store's check of the existing grant, not the
+// subject check.)
 func TestReviewGrantNeverReplacesGrant(t *testing.T) {
 	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
 		t.Run(perm, func(t *testing.T) {
@@ -224,10 +238,8 @@ func TestReviewGrantNeverReplacesGrant(t *testing.T) {
 				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false); err != nil {
 				t.Fatal(err)
 			}
-			want := response(f.postGrantBody(member, id, "junk"))
-			if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
-				t.Errorf("lowering %s: %s", perm, got)
-			}
+			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)),
+				CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 			if g := f.grantOf(id, reviewerID); g == nil || g.Permission != perm {
 				t.Errorf("%s grant changed: %+v", perm, g)
 			}
@@ -374,19 +386,18 @@ func TestAdminForbiddenCopy(t *testing.T) {
 // TestReviewGrantKeepsPrincipalRead: a user whose only read is a principal
 // read grant (no home-project membership) cannot receive a review grant
 // through the review-access path. That grant would take the row of the
-// read grant, and with it the read. The request gets the same 403 as
-// every other refusal, and the user keeps the read grant and can still
-// read the artifact.
+// read grant, and with it the read. The request is refused with code
+// review_replaces_access (the existing grant, not review_subject_cannot_read:
+// the user can read), and the user keeps the read grant and can still read
+// the artifact.
 func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
 	outsider := principal{PrincipalKindUser, "user-granted", ""}
 	f.grantPrincipal(id, outsider)
 	ref := PrincipalRef(outsider.kind, outsider.ref)
-	want := response(f.postGrantBody(member, id, "junk"))
 	for _, granter := range []principal{delegator, projAdmin} {
-		if got := response(f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, ref, GrantReview))); got != want {
-			t.Errorf("%s: review over the only read grant:\n%s\nwant\n%s", granter.ref, got, want)
-		}
+		wantRefusal(t, f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, ref, GrantReview)),
+			CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 	}
 	if g := f.grantOf(id, ref); g == nil || g.Permission != GrantRead {
 		t.Errorf("read grant changed: %+v", g)
@@ -397,21 +408,184 @@ func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
 }
 
 // replacingReviewStore answers PutReviewGrant with ErrReviewReplacesAccess,
-// as the store would if its checks ran in another order.
+// as the store does when the user gained a read, write or admin grant
+// after the handler's checks.
 type replacingReviewStore struct{ Store }
 
 func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string) (bool, error) {
 	return false, ErrReviewReplacesAccess
 }
 
-// TestReviewGrantReplaceRefusalIsUniform: on the review-access path, a
-// store refusal for an existing grant answers the same 403 as every other
-// refusal, whichever store error reports it.
-func TestReviewGrantReplaceRefusalIsUniform(t *testing.T) {
+// TestReviewGrantStoreReplaceRefusal: on the review-access path, the
+// store's refusal for an existing grant answers 403 with code
+// review_replaces_access.
+func TestReviewGrantStoreReplaceRefusal(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
-	want := response(f.postGrantBody(member, id, "junk"))
 	f.svc.SetStore(replacingReviewStore{f.store})
-	if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
-		t.Errorf("replace refusal:\n%s\nwant\n%s", got, want)
+	wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)),
+		CodeReviewReplacesAccess, reviewReplacesAccessMessage)
+}
+
+// wantRefusal checks that rec is a 403 with code and message.
+func wantRefusal(t *testing.T, rec *httptest.ResponseRecorder, code, message string) {
+	t.Helper()
+	var e errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("%d %s: %v", rec.Code, rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusForbidden || e.Error.Code != code || e.Error.Message != message {
+		t.Errorf("got %d %q %q, want 403 %q %q", rec.Code, e.Error.Code, e.Error.Message, code, message)
+	}
+}
+
+// TestReviewGrantSubjectCannotRead: a caller with review-grant authority
+// granting review to a user who cannot read the artifact gets 403 with
+// code review_subject_cannot_read and text saying who review access is for
+// (ptone/scion#5119), and nothing is written.
+func TestReviewGrantSubjectCannotRead(t *testing.T) {
+	for _, granter := range []principal{delegator, projAdmin} {
+		for _, subject := range []string{"user:stranger", PrincipalRef(otherProj.kind, otherProj.ref)} {
+			t.Run(granter.ref+"/"+subject, func(t *testing.T) {
+				f, id := newReviewGrantFixture(t)
+				before, _ := f.store.ListGrants(context.Background(), id)
+				rec := f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, subject, GrantReview))
+				wantRefusal(t, rec, CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
+				for _, want := range []string{"cannot read this artifact", "only for people who can already read it"} {
+					if !strings.Contains(rec.Body.String(), want) {
+						t.Errorf("message lacks %q: %s", want, rec.Body.String())
+					}
+				}
+				after, _ := f.store.ListGrants(context.Background(), id)
+				if len(after) != len(before) {
+					t.Errorf("grants %d → %d", len(before), len(after))
+				}
+			})
+		}
+	}
+}
+
+// TestReviewGrantSubjectCannotReadDespiteOtherGrants: a non-reader is told it
+// cannot read even when the artifact holds principal grants that a review
+// grant would not replace: another user's read grant (the refusal must not
+// hint at it), or the subject's own review grant (which is no read).
+func TestReviewGrantSubjectCannotReadDespiteOtherGrants(t *testing.T) {
+	const stranger = "user:stranger"
+	for _, tc := range []struct {
+		name  string
+		setup func(f *fixture, id string)
+	}{
+		{"another user holds a read grant", func(f *fixture, id string) { f.grantPrincipal(id, reviewer) }},
+		{"subject holds a review grant only", func(f *fixture, id string) {
+			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
+				SubjectKind: SubjectPrincipal, SubjectRef: stranger, Permission: GrantReview, CreatedAt: time.Now()}, 100, false); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			tc.setup(f, id)
+			records := captureRefusalLogs(t)
+			wantRefusal(t, f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, stranger, GrantReview)),
+				CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
+			if got := records(); len(got) != 1 || got[0]["reason"] != "subject_unreadable" || got[0]["grantee"] != stranger {
+				t.Errorf("refusal records: %v", got)
+			}
+		})
+	}
+}
+
+// TestReviewGrantRefusalLogged: every 403 on the review-access path logs
+// exactly one record with its reason, the artifact id and, when the body
+// named a well-formed user, the grantee; a granted request logs none.
+func TestReviewGrantRefusalLogged(t *testing.T) {
+	stranger := "user:stranger"
+	for _, tc := range []struct {
+		name    string
+		caller  principal
+		body    string
+		setup   func(f *fixture, id string)
+		reason  string // "" for no refusal record
+		grantee string
+		status  int
+	}{
+		{"no authority", member, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "caller", reviewerID, http.StatusForbidden},
+		{"agent caller", agentA, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "caller", "", http.StatusForbidden},
+		{"credential lacks manage", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
+			func(f *fixture, id string) { f.host.deny(delegator, "project-1", PermissionManage) }, "caller", "", http.StatusForbidden},
+		{"malformed body", delegator, "junk", nil, "body", "", http.StatusForbidden},
+		{"read permission", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantRead), nil, "body", "", http.StatusForbidden},
+		{"subject cannot read", delegator, reviewBody(SubjectPrincipal, stranger, GrantReview), nil, "subject_unreadable", stranger, http.StatusForbidden},
+		{"subject holds a read grant only", delegator, reviewBody(SubjectPrincipal, "user:user-granted", GrantReview),
+			func(f *fixture, id string) { f.grantPrincipal(id, principal{PrincipalKindUser, "user-granted", ""}) },
+			"existing_access", "user:user-granted", http.StatusForbidden},
+		{"store: existing grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
+			func(f *fixture, id string) { f.svc.SetStore(replacingReviewStore{f.store}) }, "existing_access", reviewerID, http.StatusForbidden},
+		{"store: moved meanwhile", projAdmin, reviewBody(SubjectPrincipal, reviewerID, GrantReview),
+			func(f *fixture, id string) { f.svc.SetStore(&movingReviewStore{Store: f.store, to: "project-3"}) }, "store_refused", reviewerID, http.StatusForbidden},
+		{"granted", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantReview), nil, "", "", http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			if tc.setup != nil {
+				tc.setup(f, id)
+			}
+			records := captureRefusalLogs(t)
+			rec := f.postGrantBody(tc.caller, id, tc.body)
+			if rec.Code != tc.status {
+				t.Fatalf("status %d, want %d: %s", rec.Code, tc.status, rec.Body.String())
+			}
+			got := records()
+			if tc.reason == "" {
+				if len(got) != 0 {
+					t.Errorf("refusal records for a granted request: %v", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("refusal records: %v, want exactly one", got)
+			}
+			r := got[0]
+			if r["level"] != "WARN" || r["reason"] != tc.reason || r["artifact_id"] != id {
+				t.Errorf("record %v, want reason %q artifact_id %q", r, tc.reason, id)
+			}
+			if g, ok := r["grantee"]; tc.grantee == "" && ok || tc.grantee != "" && g != tc.grantee {
+				t.Errorf("grantee %v, want %q", g, tc.grantee)
+			}
+			for k := range r {
+				switch k {
+				case "time", "level", "msg", "reason", "artifact_id", "grantee":
+				default:
+					t.Errorf("unexpected log key %q", k)
+				}
+			}
+		})
+	}
+}
+
+// captureRefusalLogs sends the default slog logger to a JSON buffer for the
+// rest of the test and returns a function listing the review-grant refusal
+// records written so far.
+func captureRefusalLogs(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return func() []map[string]any {
+		var out []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				t.Fatalf("log line %q: %v", line, err)
+			}
+			if m["msg"] == "artifacts: review grant refused" {
+				out = append(out, m)
+			}
+		}
+		return out
 	}
 }

@@ -35,6 +35,14 @@ provisioner:
 config_dir: .hermes
 skills_dir: .hermes/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: AGENTS.md
 system_prompt_mode: prepend_to_instructions
 
@@ -70,6 +78,7 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Not yet implemented" }
   resume: { support: "yes" }
+  agent_plugins: { support: "no", reason: "The Agent Plugins adapter is not in the hermes-agent release the image installs; not yet supported" }
 
 no_auth:
   behavior: drop-to-shell

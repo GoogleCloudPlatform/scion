@@ -67,8 +67,8 @@ The command refuses to run if this host already has credentials for the hub
 connection, or if its settings already name a different broker ID, unless
 --force is given. With --force those credentials and settings are replaced.
 
-The Hub endpoint is resolved as for 'register': SCION_HUB_ENDPOINT, hub.endpoint
-in settings, or --hub.
+The Hub is resolved as for every hub command: --hub, SCION_HUB_ENDPOINT, the
+hub of a linked project directory, or the current hub ('scion use --hub <name>').
 
 This command will:
 1. Check whether the local broker server is running (a warning only, so the
@@ -236,9 +236,12 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured; configure via SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or --hub flag")
+		return errHubNotConfigured
+	}
+	if err := checkBrokerHubURL(endpoint); err != nil {
+		return err
 	}
 
 	// The broker server does not have to be running yet: a provisioning
@@ -308,7 +311,7 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 
 	persistBrokerHubSettings(os.Stderr, globalDir, endpoint, joined.BrokerID, hubName)
 
-	fmt.Printf("Broker %s joined hub %s; credentials saved to %s\n", joined.BrokerID, endpoint, multiStore.Dir())
+	fmt.Printf("Broker %s joined hub %s; credentials saved to %s\n", joined.BrokerID, config.RedactURL(endpoint), multiStore.Dir())
 	return nil
 }
 
@@ -403,7 +406,7 @@ func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubNam
 		_, _ = fmt.Fprintf(w, "Warning: failed to save broker ID: %v\n", err)
 	}
 	if endpoint != "" && apiclient.ResolveDevToken() != "" {
-		slog.Debug("Not saving server.broker.hub_endpoint: this host runs a co-located workstation hub", "endpoint", endpoint)
+		slog.Debug("Not saving server.broker.hub_endpoint: this host runs a co-located workstation hub", "endpoint", config.RedactURL(endpoint))
 	} else if endpoint != "" {
 		if err := saveBrokerHubEndpointIfUnset(globalDir, endpoint); err != nil {
 			_, _ = fmt.Fprintf(w, "Warning: failed to save hub endpoint to global settings: %v\n", err)
@@ -413,6 +416,16 @@ func persistBrokerHubSettings(w io.Writer, globalDir, endpoint, brokerID, hubNam
 	if err := config.UpdateSetting(globalDir, "hub_connections."+hubName+".endpoint", endpoint, true); err != nil {
 		_, _ = fmt.Fprintf(w, "Warning: failed to save hub connection to settings: %v\n", err)
 	}
+}
+
+// checkBrokerHubURL applies the hub list's rule (config.ValidateHubURL)
+// to the hub URL of a broker registration, before anything is sent or
+// saved.
+func checkBrokerHubURL(endpoint string) error {
+	if err := config.ValidateHubURL(endpoint); err != nil {
+		return fmt.Errorf("%w; pass a plain http(s) hub URL (no user info, query or fragment)", err)
+	}
+	return nil
 }
 
 // brokerHubEndpointSettingPath is server.broker.hub_endpoint, the hub a

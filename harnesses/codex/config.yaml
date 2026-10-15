@@ -26,7 +26,7 @@ provisioner:
   interface_version: 1
   lib: vendored
   command: ["python3", "/home/scion/.scion/harness/provision.py"]
-  timeout: 30s
+  timeout: 60s
   lifecycle_events:
     - pre-start
   required_image_tools:
@@ -34,6 +34,14 @@ provisioner:
 config_dir: .codex
 skills_dir: .codex/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .codex/AGENTS.md
 system_prompt_mode: prepend_to_instructions
 # Default model for agents started without an explicit --model. Resolved
@@ -93,6 +101,7 @@ capabilities:
     sse: { support: "partial", reason: "Codex maps SSE to its single HTTP server type (url + http_headers)" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.codex/mcp_servers.json) is not implemented yet; project entries are demoted to global" }
+  agent_plugins: { support: "partial", reason: "Native install via local marketplace; Codex skips sse MCP servers" }
 no_auth:
   behavior: drop-to-shell
   command: codex login --device-auth

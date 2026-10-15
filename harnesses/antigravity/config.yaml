@@ -17,6 +17,14 @@ provisioner:
 config_dir: .gemini/antigravity-cli
 skills_dir: .gemini/antigravity-cli/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: GEMINI.md
 system_prompt_mode: prepend_to_instructions
@@ -33,8 +41,8 @@ env_template:
 model_aliases:
   small: "Gemini 3.1 Flash Lite"
   medium: "Gemini 3.8 Flash (Medium)"
-  large: "Gemini 3.1 Pro (Low)"
-  extra-large: "Gemini 3.1 Pro (Low)"
+  large: "Gemini 4 Argon (Medium)"
+  extra-large: "Gemini 4 Argon (High)"
 
 # SCION_THINKING_LEVEL (0-100) -> `agy --effort <value>` in agy-wrapper.sh.
 # Applied by scion_harness.resolve_thinking in provision.py. Each level maps
@@ -71,6 +79,7 @@ capabilities:
     auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
     oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
     vertex_ai: { support: "yes", reason: "GCP mode via ADC (GOOGLE_APPLICATION_CREDENTIALS) + GOOGLE_CLOUD_PROJECT, requires AGY CLI >= 1.1.10" }
+  agent_plugins: { support: "no", reason: "Antigravity plugins need a generated manifest and mcp_config.json shim; not yet supported" }
 
 no_auth:
   behavior: drop-to-shell

@@ -1,0 +1,17 @@
+# A docker instance that sets Kubernetes-only runtime_target fields is
+# refused at strict load, one error per field.
+schema_version: "1"
+server:
+  broker:
+    instances:
+      - key: docker
+        name: docker
+        runtime_target:
+          type: docker
+          gke: true
+          priority_class_name: high
+          shared_dir_storage_class: rwx
+          shared_dir_size: 40Gi
+          safe_to_evict: false
+          home_storage_backend: local
+          home_storage_leaf: pod

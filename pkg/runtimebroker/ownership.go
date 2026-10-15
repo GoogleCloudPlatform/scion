@@ -999,15 +999,17 @@ func chainCheckpoint(first, second func(context.Context, string) error) func(con
 
 // installOwnedStart wires a flat start's ownership mirror into opts: the
 // observer and a checkpoint that refuses further creates after a mirroring
-// failure (chained before any checkpoint already set).
-func (s *Server) installOwnedStart(opts *api.StartOptions, projectID, agentID string) {
+// failure (chained before any checkpoint already set). It returns the
+// installed mirror, or nil when none was installed.
+func (s *Server) installOwnedStart(opts *api.StartOptions, projectID, agentID string) *ownedStart {
 	if s.ownership == nil || opts.RunID == "" {
-		return
+		return nil
 	}
 	o := &ownedStart{store: s.ownership, projectID: projectID, agentID: agentID, runID: opts.RunID}
 	s.ownedStarts.Store(opts.RunID, o)
 	opts.ObserveResourceCreated = o.observe
 	opts.Checkpoint = chainCheckpoint(o.checkpoint, opts.Checkpoint)
+	return o
 }
 
 // completeOwnedStart finishes a flat start's ownership mirror after
@@ -1061,6 +1063,15 @@ func (s *Server) completeOwnedStart(ctx context.Context, mgr agent.Manager, runI
 func (s *Server) releaseOwnedStart(runID string) {
 	if runID != "" {
 		s.ownedStarts.Delete(runID)
+	}
+}
+
+// releaseOwnedMirror drops the ownership mirror o for runID only if it is
+// still the one installed for that run: a later start that installed its
+// own mirror under the same run ID keeps it. A nil o is a no-op.
+func (s *Server) releaseOwnedMirror(runID string, o *ownedStart) {
+	if runID != "" && o != nil {
+		s.ownedStarts.CompareAndDelete(runID, o)
 	}
 }
 

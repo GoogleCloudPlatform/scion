@@ -73,8 +73,8 @@ def env_vars(**values: str | None):
 ANTIGRAVITY_MODEL_ALIASES = {
     "small": "Gemini 3.1 Flash Lite",
     "medium": "Gemini 3.8 Flash (Medium)",
-    "large": "Gemini 3.1 Pro (Low)",
-    "extra-large": "Gemini 3.1 Pro (Low)",
+    "large": "Gemini 4 Argon (Medium)",
+    "extra-large": "Gemini 4 Argon (High)",
 }
 
 
@@ -182,6 +182,32 @@ class AntigravityProvisionTest(unittest.TestCase):
         self.assertEqual(env["SCION_USAGE_SOURCE"], "hooks")
 
 
+class VertexLocationPrecedenceTest(unittest.TestCase):
+    """GOOGLE_CLOUD_LOCATION wins over GOOGLE_CLOUD_REGION (ptone/scion#4719)."""
+
+    def _location(self, env: dict[str, str]) -> tuple[str, list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = os.path.join(tmp, ".scion", "harness")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            clear = {"GOOGLE_CLOUD_LOCATION": "", "GOOGLE_CLOUD_REGION": "", "CLOUD_ML_REGION": ""}
+            with unittest.mock.patch.dict(os.environ, {**clear, **env}):
+                ctx = scion_harness.ProvisionContext("antigravity", {"harness_bundle_dir": bundle})
+                warnings: list[str] = []
+                ctx.warn = warnings.append
+                return provision._resolve_location(ctx), warnings
+
+    def test_both_differ_location_wins_with_warning(self) -> None:
+        location, warnings = self._location({"GOOGLE_CLOUD_LOCATION": "europe-west4", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(location, "europe-west4")
+        self.assertEqual(len(warnings), 1)
+
+    def test_region_alone(self) -> None:
+        self.assertEqual(self._location({"GOOGLE_CLOUD_REGION": "us-central1"}), ("us-central1", []))
+
+    def test_cloud_ml_region_not_read(self) -> None:
+        self.assertEqual(self._location({"CLOUD_ML_REGION": "europe-west4"}), ("", []))
+
+
 class ExplicitOAuthTokenTest(unittest.TestCase):
     # config.yaml declares oauth-token as the AGY_TOKEN file; the provisioner
     # also takes AGY_TOKEN from the env. An explicit oauth-token must be
@@ -260,7 +286,21 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.1 Pro (Low)")
+        self.assertEqual(model, "Gemini 4 Argon (Medium)")
+
+    def test_scion_model_unset_uses_harness_config_model_extra_large(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="extra-large")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
+
+    def test_scion_model_unset_uses_harness_config_model_xl_shorthand(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="xl")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
 
     def test_agy_model_env_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -300,7 +340,7 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.1 Pro (Low)")
+        self.assertEqual(model, "Gemini 4 Argon (Medium)")
 
     def test_agy_model_wins_over_flash_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -585,7 +625,7 @@ class ProvisionModelWiringTest(unittest.TestCase):
         # "Gemini 3.8 Flash (Medium)", the same string the "medium" alias
         # resolves to, so a mutant that falls all the way back to FLASH_MODEL
         # would coincidentally match and go undetected. "large" resolves to
-        # "Gemini 3.1 Pro (Low)", which differs from FLASH_MODEL, so the
+        # "Gemini 4 Argon (Medium)", which differs from FLASH_MODEL, so the
         # wiring mutant (reverting this call site to main's raw expression)
         # is actually caught here -- confirmed by hand.
         with tempfile.TemporaryDirectory() as tmp:
@@ -601,7 +641,7 @@ class ProvisionModelWiringTest(unittest.TestCase):
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "Gemini 3.1 Pro (Low)")
+        self.assertEqual(settings["model"], "Gemini 4 Argon (Medium)")
 
 
 

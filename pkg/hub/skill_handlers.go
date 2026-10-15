@@ -127,10 +127,17 @@ type ResolvedSkillResponse struct {
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
+// Message is the fixed reason phrase for Code (see
+// agent.SkillResolutionPhrase). Status is the HTTP status of the upstream
+// response that failed the resolution, when one is known. CorrelationID
+// ties the error to the server-side log record that holds the full error
+// (see newSkillResolveError).
 type ResolveSkillError struct {
-	URI     string `json:"uri"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	URI           string `json:"uri"`
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	Status        int    `json:"status,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // UpdateSkillRequest is the request body for updating a skill.
@@ -598,6 +605,13 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ScopeID = userIdent.ID()
+		// A user-scope skill is a new record in the caller's user scope: a
+		// user access token needs skill:create on a hub boundary.
+		decision := s.authzService.CheckAccess(ctx, userIdent, skillUserScopeResource(userIdent), ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in your user scope", nil)
+			return
+		}
 	}
 
 	slug := api.Slugify(req.Name)
@@ -1605,10 +1619,9 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		// GitHub skill resolution: gh:// URIs are handled by the Hub's GitHub resolution cache
 		if strings.HasPrefix(skillRef.URI, "gh://") {
 			if !ghProjectAllowed {
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
-					Message: "you do not have permission to resolve GitHub skills for this project",
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, agent.SkillErrCodeForbidden, 0,
+					"caller may not resolve GitHub skills for this project"))
 				continue
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
@@ -1620,9 +1633,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				} else if isGHNotFound(err) {
 					code = agent.SkillErrCodeNotFound
 				}
-				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: code, Message: err.Error(),
-				})
+				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
+					skillRef.URI, code, ghErrorStatus(err), err.Error()))
 			} else {
 				resolved = append(resolved, *ghResolved)
 			}
@@ -1631,9 +1643,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 		uri, err := api.ParseSkillURI(skillRef.URI)
 		if err != nil {
-			resolveErrors = append(resolveErrors, ResolveSkillError{
-				URI: skillRef.URI, Code: "invalid_uri", Message: err.Error(),
-			})
+			resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceRegistry,
+				skillRef.URI, agent.SkillErrCodeInvalidURI, 0, err.Error()))
 			continue
 		}
 
@@ -1826,6 +1837,16 @@ func skillScopeResource(scope, scopeID string) Resource {
 	if scope == store.SkillScopeUser {
 		r.ScopeUserID = scopeID
 	}
+	return r
+}
+
+// skillUserScopeResource builds the "skill" Resource for a new skill in
+// the caller's own user scope. Like templateUserScopeResource, it takes the
+// authenticated UserIdentity, so the owner and scope user always name the
+// caller and never a request field.
+func skillUserScopeResource(userIdent UserIdentity) Resource {
+	r := skillScopeResource(store.SkillScopeUser, userIdent.ID())
+	r.OwnerID = userIdent.ID()
 	return r
 }
 

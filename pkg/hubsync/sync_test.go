@@ -119,7 +119,6 @@ hub:
 	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		SkipSync:    true,
 		AutoConfirm: true,
 	})
 	if err != nil {
@@ -188,7 +187,6 @@ hub:
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm:      true,
-		SkipSync:         true,
 		EndpointOverride: server.URL,
 	})
 	if err != nil {
@@ -202,7 +200,7 @@ hub:
 	}
 }
 
-func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
+func TestEnsureHubReady_GlobalFallbackWithoutEndpoint(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
@@ -210,8 +208,9 @@ func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
-	// When projectPath="" and the resolution falls back to global with hub NOT
-	// enabled, EnsureHubReady should return (nil, nil) - same behavior as before.
+	// When projectPath="" falls back to global and no endpoint is
+	// configured, EnsureHubReady returns the not-configured error. A stale
+	// hub.enabled=false changes nothing: there is no local-only mode.
 
 	tmpHome := t.TempDir()
 	globalDir := filepath.Join(tmpHome, ".scion")
@@ -237,14 +236,13 @@ func TestEnsureHubReady_GlobalFallbackWithHubDisabled(t *testing.T) {
 	defer func() { _ = os.Chdir(origDir) }()
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
-		SkipSync:    true,
 		AutoConfirm: true,
 	})
-	if err != nil {
-		t.Fatalf("EnsureHubReady returned error: %v", err)
+	if !errors.Is(err, ErrHubNotConfigured) {
+		t.Fatalf("EnsureHubReady error = %v, want ErrHubNotConfigured", err)
 	}
 	if hubCtx != nil {
-		t.Error("EnsureHubReady should return nil when hub is not enabled")
+		t.Error("EnsureHubReady returned a hub context with an error")
 	}
 }
 
@@ -372,7 +370,6 @@ func TestEnsureHubReady_HubContextSkipsSyncAndRegistration(t *testing.T) {
 
 	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{
 		AutoConfirm: true,
-		// Intentionally NOT setting SkipSync — should be forced by hub context
 	})
 	if err != nil {
 		t.Fatalf("EnsureHubReady returned error: %v", err)
@@ -2552,9 +2549,10 @@ func TestHubCheckHint(t *testing.T) {
 	}
 }
 
-// setupGlobalHubProject points HOME at a temporary global project that is
-// hub-enabled with the given project ID and the server's endpoint, clears
-// the hub and credential environment, and changes into HOME.
+// setupGlobalHubProject points HOME at a temporary global project with the
+// given project ID, clears the hub and credential environment, and changes
+// into HOME. The settings name the endpoint too, which EnsureHubReady does
+// not read: callers pass it as EndpointOverride.
 func setupGlobalHubProject(t *testing.T, projectID, endpoint string) {
 	t.Helper()
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
@@ -2606,7 +2604,7 @@ func TestEnsureHubReady_ScopedTokenWithoutProjectRead(t *testing.T) {
 
 	// Auto-confirm on, as under --yes: the registration path would proceed
 	// without asking, so only the scoped-token check can stop it.
-	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, SkipSync: true})
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, EndpointOverride: server.URL})
 	if !errors.Is(err, ErrScopedTokenProjectNotFound) {
 		t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
 	}
@@ -2657,7 +2655,7 @@ func TestEnsureHubReady_NonInteractiveAmbiguousProject(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "test-dev-token")
 
 	// --non-interactive implies --yes, so AutoConfirm is set as well.
-	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, NonInteractive: true, SkipSync: true})
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, NonInteractive: true, EndpointOverride: server.URL})
 	if !errors.Is(err, ErrAmbiguousProject) {
 		t.Fatalf("error = %v, want ErrAmbiguousProject", err)
 	}

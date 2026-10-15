@@ -34,6 +34,30 @@ func isUserTemplateOwner(t *store.Template, uid string) bool {
 		(t.OwnerID == uid || t.ScopeID == uid)
 }
 
+// authorizeUserTemplates checks action on the caller's user-scope
+// templates (templateUserScopeResource), before any record is read. A
+// user access token needs the template selector for the action
+// (template:read, template:create, template:update or template:delete) on
+// a hub boundary. Every other caller reads its own templates without a
+// further check, and a write is checked as the owner of its own user
+// scope. It writes 403 on denial.
+func (s *Server) authorizeUserTemplates(w http.ResponseWriter, r *http.Request, userIdent UserIdentity, action Action) bool {
+	if action == ActionRead && !isUserAccessTokenRequest(r, userIdent) {
+		return true
+	}
+	return s.authorize(w, r, templateUserScopeResource(userIdent), action)
+}
+
+// isUserAccessTokenRequest reports whether the request uses a user
+// access token: the identity is a token identity, or the credential record
+// names a user access token.
+func isUserAccessTokenRequest(r *http.Request, userIdent UserIdentity) bool {
+	if _, isToken := userIdent.(*ScopedUserIdentity); isToken {
+		return true
+	}
+	return GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT
+}
+
 // handleUserMeTemplates routes GET/POST on /api/v1/users/me/templates.
 func (s *Server) handleUserMeTemplates(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -95,6 +119,10 @@ func (s *Server) listUserTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
+		return
+	}
+
 	filter := store.TemplateFilter{
 		Scope:   store.TemplateScopeUser,
 		ScopeID: userIdent.ID(),
@@ -144,10 +172,16 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionCreate) {
+		return
+	}
 
 	var req CreateTemplateRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
 		return
 	}
 
@@ -182,7 +216,6 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        store.TemplateScopeUser,
 		ScopeID:      userIdent.ID(),
 		OwnerID:      userIdent.ID(),
@@ -239,6 +272,9 @@ func (s *Server) getUserTemplate(w http.ResponseWriter, r *http.Request, id stri
 		Unauthorized(w)
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -267,6 +303,9 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -280,34 +319,20 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
-	// Preserve immutable fields
-	template.ID = existing.ID
-	template.Scope = store.TemplateScopeUser
-	template.ScopeID = userIdent.ID()
-	template.OwnerID = userIdent.ID()
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
-	template.UpdatedBy = userIdent.ID()
-	// Preserve system-managed fields that must not be zeroed by client input
-	template.StoragePath = existing.StoragePath
-	template.StorageBucket = existing.StorageBucket
-	template.StorageURI = existing.StorageURI
-	template.Layout = existing.Layout
-	template.Files = existing.Files
-	template.ContentHash = existing.ContentHash
-	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
-	// Harness and DefaultHarnessConfig are derived from the files too. The
-	// store's UpdateTemplate does not write any content column
-	// (ptone/scion#4221); pinning them here keeps the response truthful.
-	template.Harness = existing.Harness
-	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
-	template.Status = existing.Status
+	// A PUT replaces only the metadata; every other field, including
+	// BaseTemplate, SourceURL and ProjectID, keeps its stored value
+	// (applyTemplateMetadataUpdate). Ownership was verified above, so the
+	// stored scope, scope ID and owner are the caller's.
+	template := applyTemplateMetadataUpdate(existing, &req, userIdent.ID())
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)
 	}
@@ -333,6 +358,9 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	if !requireProfileWriter(w, r) {
+		return
+	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionDelete) {
 		return
 	}
 
@@ -381,6 +409,9 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -415,6 +446,9 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -444,6 +478,9 @@ func (s *Server) handleUserTemplateDownload(w http.ResponseWriter, r *http.Reque
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
 		return
 	}
 

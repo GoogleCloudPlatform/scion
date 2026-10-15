@@ -92,8 +92,12 @@ interface Server {
   clamped: boolean;
   /** When set, POST /grants answers the 403 of a refused request. */
   refuseGrant?: boolean;
+  /** When set, POST /grants answers the 403 of a review grantee who cannot read the artifact. */
+  refuseSubject?: boolean;
   /** When set, POST /grants answers the 409 of an artifact at its grant limit. */
   grantsFull?: boolean;
+  /** The hub's link lifetimes GET /links reports; absent like an older hub. */
+  lifetimes?: { defaultTtlHours: number; maxTtlHours: number };
   /** When set, link creation waits until the test calls release(). */
   holdCreate?: boolean;
   release?: () => void;
@@ -124,7 +128,8 @@ function mockServer(init: Partial<Server> = {}): Server {
       const method = opts?.method ?? 'GET';
       const body = typeof opts?.body === 'string' ? JSON.parse(opts.body) : undefined;
       s.calls.push({ method, url, body });
-      if (url === `${BASE}/links` && method === 'GET') return json({ links: s.links });
+      if (url === `${BASE}/links` && method === 'GET')
+        return json({ links: s.links, ...s.lifetimes });
       if (url === `${BASE}/links` && method === 'POST') {
         const l = link('l-new', (body as { ttlHours: number }).ttlHours / 24);
         const answer = (): Promise<Response> =>
@@ -159,6 +164,18 @@ function mockServer(init: Partial<Server> = {}): Server {
               },
             },
             409
+          );
+        }
+        if (s.refuseSubject) {
+          return json(
+            {
+              error: {
+                code: 'review_subject_cannot_read',
+                message:
+                  'This user cannot read this artifact. Review access is only for people who can already read it (members of its home project, or of a project it is shared with).',
+              },
+            },
+            403
           );
         }
         if (s.refuseGrant) {
@@ -201,6 +218,11 @@ function mockServer(init: Partial<Server> = {}): Server {
     })
   );
   return s;
+}
+
+/** The values of a select's options, in order. */
+function optionValues(select: Element): Array<string | null> {
+  return Array.from(select.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'));
 }
 
 async function settle(el: ScionArtifactShareDialog): Promise<void> {
@@ -333,12 +355,14 @@ describe('share dialog', () => {
     expect(grants[2].querySelector('sl-select')).toBeNull();
     expect(button(el, 'Remove', grants[2])).not.toBeNull();
     const menus = $$(el, 'sl-select[aria-label="Permission"]');
-    expect(menus).toHaveLength(2); // the Add row and Priya's grant
+    expect(menus).toHaveLength(3); // the Add row, the home grant and Priya's grant
     for (const select of menus) {
       const values = Array.from(select.querySelectorAll('sl-option')).map((o) =>
         o.getAttribute('value')
       );
-      expect(values).toEqual(['read', 'write', 'admin']);
+      // The home grant offers read or write (ptone/scion#4582); the rest add admin.
+      const isHome = grants[0].contains(select);
+      expect(values).toEqual(isHome ? ['read', 'write'] : ['read', 'write', 'admin']);
     }
   });
 
@@ -347,6 +371,26 @@ describe('share dialog', () => {
     const el = await mount();
     expect($(el, 'table')).toBeNull();
     expect(el.shadowRoot!.textContent).toContain('No active links.');
+  });
+
+  it('offers the hub link lifetimes up to its maximum and preselects its default (ptone/scion#4585)', async () => {
+    const s = mockServer({ lifetimes: { defaultTtlHours: 48, maxTtlHours: 240 } });
+    const el = await mount();
+    const ttl = $(el, '#ttl') as HTMLElement & { value: string };
+    expect(optionValues(ttl)).toEqual(['24', '48', '168', '240']);
+    expect(ttl.value).toBe('48');
+    button(el, 'Create link').click();
+    await settle(el);
+    const post = s.calls.find((c) => c.method === 'POST' && c.url === `${BASE}/links`)!;
+    expect(post.body).toEqual({ ttlHours: 48 });
+  });
+
+  it('keeps the preset link lifetimes when the hub does not report its own', async () => {
+    mockServer();
+    const el = await mount();
+    const ttl = $(el, '#ttl') as HTMLElement & { value: string };
+    expect(optionValues(ttl)).toEqual(['24', '168', '720']);
+    expect(ttl.value).toBe('168');
   });
 
   it('creates a link with the chosen lifetime and shows it only once', async () => {
@@ -525,6 +569,62 @@ describe('share dialog', () => {
     expect($$(el, '.grant')).toHaveLength(1);
   });
 
+  it('offers read or write, never admin, on the home project grant, and raises it to write', async () => {
+    const s = mockServer({ grants: [HOME, PRIYA] });
+    const el = await mount();
+    const home = $$(el, '.grant')[0];
+    const select = home.querySelector('sl-select') as (HTMLElement & { value: string }) | null;
+    expect(select).not.toBeNull();
+    expect(select!.value).toBe('read');
+    expect(
+      Array.from(select!.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'))
+    ).toEqual(['read', 'write']);
+    expect(home.querySelector('sl-button')).toBeNull();
+    choose(select!, 'write');
+    await settle(el);
+    const post = s.calls.find((c) => c.method === 'POST' && c.url === `${BASE}/grants`)!;
+    expect(post.body).toEqual({ subjectKind: 'scope', subjectRef: 'proj-1', permission: 'write' });
+  });
+
+  it('locks a grant to another project while cross-project sharing is off, keeping Remove', async () => {
+    const platform: ArtifactGrant = {
+      id: 'g-platform',
+      subjectKind: 'scope',
+      subjectRef: 'proj-2',
+      permission: 'read',
+      createdAt: '2026-10-03T12:00:00Z',
+    };
+    const s = mockServer({ cross: false, grants: [HOME, platform] });
+    const el = await mount();
+    const row = $$(el, '.grant')[1];
+    expect(row.querySelector('sl-select')!.hasAttribute('disabled')).toBe(true);
+    expect(row.textContent).toContain(
+      'Cross-project sharing is off: this grant can be removed but not changed'
+    );
+    const remove = button(el, 'Remove', row);
+    expect(remove.hasAttribute('disabled')).toBe(false);
+    remove.click();
+    await settle(el);
+    expect(
+      s.calls.some((c) => c.method === 'DELETE' && c.url === `${BASE}/grants/g-platform`)
+    ).toBe(true);
+  });
+
+  it('lets a grant to another project change while cross-project sharing is on', async () => {
+    const platform: ArtifactGrant = {
+      id: 'g-platform',
+      subjectKind: 'scope',
+      subjectRef: 'proj-2',
+      permission: 'read',
+      createdAt: '2026-10-03T12:00:00Z',
+    };
+    mockServer({ cross: true, grants: [HOME, platform] });
+    const el = await mount();
+    const row = $$(el, '.grant')[1];
+    expect(row.querySelector('sl-select')!.hasAttribute('disabled')).toBe(false);
+    expect(row.textContent).not.toContain('can be removed but not changed');
+  });
+
   it('warns what a shorter expiry cuts and saves it', async () => {
     const s = mockServer({ links: [link('l-1', 7), link('l-2', 2)], grants: [HOME, PRIYA] });
     const el = await mount();
@@ -590,6 +690,9 @@ describe('share dialog', () => {
       expect(text).toContain(
         'Give a person who can already read “Draft plan” review access. They will be able to publish reviews of it, and nothing else.'
       );
+      expect(text).toContain(
+        'Review access is only for people who can already read this artifact: members of its home project, or of a project it is shared with.'
+      );
       expect(text).toContain('Permission: Can review');
       expect(text).not.toContain('read it');
       expect($(el, '#links-heading')).toBeNull();
@@ -639,6 +742,20 @@ describe('share dialog', () => {
       await settle(el);
       expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
         'You can view this artifact but not share it'
+      );
+      expect($$(el, '.granted')).toEqual([]);
+    });
+
+    it('shows the hub message when the person cannot read the artifact', async () => {
+      mockServer({ refuseSubject: true });
+      const el = await mount(agentOwned(), 'review');
+      await searchFor(el, 're');
+      $$(el, '.suggestions button')[0].click();
+      await settle(el);
+      button(el, 'Add').click();
+      await settle(el);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'This user cannot read this artifact. Review access is only for people who can already read it'
       );
       expect($$(el, '.granted')).toEqual([]);
     });

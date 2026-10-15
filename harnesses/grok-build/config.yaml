@@ -30,6 +30,15 @@ provisioner:
 config_dir: .grok
 skills_dir: .grok/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: hook
+  settle: 1.5s
+  timeout: 90s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .grok/AGENTS.md
 system_prompt_file: .grok/system-prompt.md
 system_prompt_mode: native
@@ -71,6 +80,7 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP not implemented; entries demoted to global" }
+  agent_plugins: { support: "no", reason: "Native Agent Plugins install is not yet supported for this harness" }
 
 no_auth:
   behavior: drop-to-shell

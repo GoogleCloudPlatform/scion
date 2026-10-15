@@ -25,7 +25,7 @@ func TestPhaseIsValid(t *testing.T) {
 		phase Phase
 		want  bool
 	}{
-		// All 9 valid phases.
+		// All 10 valid phases.
 		{PhaseCreated, true},
 		{PhaseProvisioning, true},
 		{PhaseCloning, true},
@@ -35,6 +35,7 @@ func TestPhaseIsValid(t *testing.T) {
 		{PhaseStopping, true},
 		{PhaseStopped, true},
 		{PhaseError, true},
+		{PhaseHalted, true},
 		// Legacy values that should NOT be valid.
 		{"pending", false},
 		{"deleted", false},
@@ -464,8 +465,8 @@ func TestJSONOmitempty(t *testing.T) {
 
 func TestPhasesEnumeration(t *testing.T) {
 	phases := Phases()
-	if len(phases) != 9 {
-		t.Fatalf("Phases() returned %d items, want 9", len(phases))
+	if len(phases) != 10 {
+		t.Fatalf("Phases() returned %d items, want 10", len(phases))
 	}
 
 	// Verify all returned phases are valid.
@@ -497,6 +498,7 @@ func TestPhaseOrdinal(t *testing.T) {
 		{PhaseStopping, 0},
 		{PhaseStopped, 0},
 		{PhaseError, 0},
+		{PhaseHalted, 0},
 	}
 	for _, tt := range tests {
 		if got := tt.phase.Ordinal(); got != tt.ordinal {
@@ -522,7 +524,7 @@ func TestPhaseIsActivePhase(t *testing.T) {
 		}
 	}
 
-	notActive := []Phase{PhaseSuspended, PhaseStopping, PhaseStopped, PhaseError}
+	notActive := []Phase{PhaseSuspended, PhaseStopping, PhaseStopped, PhaseError, PhaseHalted}
 	for _, p := range notActive {
 		if p.IsActivePhase() {
 			t.Errorf("Phase(%q).IsActivePhase() = true, want false", p)
@@ -665,5 +667,23 @@ func TestInitializingDisplay(t *testing.T) {
 func TestReadyTiming(t *testing.T) {
 	if ReadySettleSession != 8*time.Second || ReadyDeadline != 90*time.Second {
 		t.Errorf("readiness timing changed: settle=%s deadline=%s", ReadySettleSession, ReadyDeadline)
+	}
+}
+
+func TestExitReasonLabel(t *testing.T) {
+	cases := map[ExitReason]string{
+		ExitReasonPreempted:        "preempted",
+		ExitReasonEvicted:          "evicted",
+		ExitReasonOOMKilled:        "out of memory",
+		ExitReasonContainerMissing: "container lost",
+		ExitReasonCrashed:          "crashed",
+		ExitReasonLimitsExceeded:   "limits exceeded",
+		"":                         "unknown",
+		"something-else":           "unknown",
+	}
+	for r, want := range cases {
+		if got := r.Label(); got != want {
+			t.Errorf("ExitReason(%q).Label() = %q, want %q", r, got, want)
+		}
 	}
 }

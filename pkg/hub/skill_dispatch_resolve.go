@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -73,16 +73,19 @@ func (s *Server) resolveRegistrySkillRef(
 	projectID, userID, baseURL string,
 ) (*ResolvedSkillResponse, *ResolveSkillError) {
 	if uri == nil {
-		return nil, &ResolveSkillError{URI: rawURI, Code: "invalid_uri", Message: "invalid skill URI"}
+		return nil, newSkillResolveError(ctx, skillResolveSourceRegistry, rawURI,
+			agent.SkillErrCodeInvalidURI, 0, "skill URI did not parse")
 	}
 	expandScopeAliases(uri, projectID, userID)
 
 	skill, sv, err := s.resolveSkill(ctx, identity, uri, projectID)
 	if err != nil {
-		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: err.Error()}
+		return nil, newSkillResolveError(ctx, skillResolveSourceRegistry, rawURI,
+			agent.SkillErrCodeNotFound, 0, err.Error())
 	}
 	if skill == nil || sv == nil {
-		return nil, &ResolveSkillError{URI: rawURI, Code: "not_found", Message: "skill not found"}
+		return nil, newSkillResolveError(ctx, skillResolveSourceRegistry, rawURI,
+			agent.SkillErrCodeNotFound, 0, "skill not found")
 	}
 
 	entry := &ResolvedSkillResponse{
@@ -104,12 +107,16 @@ func (s *Server) resolveRegistrySkillRef(
 		versionPath := skill.StoragePath + "/" + sv.Version
 		downloadURLs, _, _, dlErr := generateDownloadURLs(ctx, stor, versionPath, s.legacyFallbackPath(versionPath), sv.Files)
 		if dlErr != nil {
-			slog.ErrorContext(ctx, "failed to generate download URLs for skill version",
-				"skill", skill.Name, "version", sv.Version, "error", dlErr)
-			return nil, &ResolveSkillError{
-				URI: rawURI, Code: "storage_error",
-				Message: fmt.Sprintf("skill %s version %s has storage files missing — re-sync the skill", skill.Name, sv.Version),
-			}
+			// A storage failure is a fault of the Hub: logged at ERROR, with
+			// the skill, version and storage error as attributes of their
+			// own, so they stay in the record when the reference is redacted
+			// (they come from the store, not from the reference).
+			return nil, newSkillResolveErrorAt(ctx, slog.LevelError, skillResolveSourceRegistry, rawURI,
+				agent.SkillErrCodeStorageError, 0,
+				fmt.Sprintf("skill %s version %s has storage files missing — re-sync the skill: %v", skill.Name, sv.Version, dlErr),
+				"skill", skill.Name,
+				"version", sv.Version,
+				"storage_error", agent.RedactURLsInText(dlErr.Error()))
 		}
 		if stor.Provider() == storage.ProviderLocal {
 			if baseURL != "" {
@@ -192,40 +199,17 @@ func (s *Server) dispatchSkillRefs(ctx context.Context, agent *store.Agent) []ap
 	return refs
 }
 
-// templateSkillRefs reads the skills declared in a Hub template's
-// scion-agent.yaml (or scion-agent.json). Best-effort: any failure yields no
-// refs, and the broker resolves whatever the Hub did not cover.
+// templateSkillRefs returns the skills declared in a Hub template's
+// scion-agent.yaml (or scion-agent.json), from the template's job config
+// (its stripped AgentConfig snapshot, derived once when the row has none;
+// ptone/scion#4222) rather than from storage. Best-effort: any failure
+// yields no refs, and the broker resolves whatever the Hub did not cover.
 func (s *Server) templateSkillRefs(ctx context.Context, templateID string) []api.SkillReference {
-	tmpl, err := s.store.GetTemplate(ctx, templateID)
-	if err != nil || tmpl == nil {
+	jc := s.templateJobConfigByID(ctx, templateID)
+	if jc == nil {
 		return nil
 	}
-	stor := s.GetStorage()
-	if stor == nil || tmpl.StoragePath == "" {
-		return nil
-	}
-	for _, name := range []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"} {
-		entry, found := templateFileByPath(tmpl.Files, name)
-		if !found {
-			continue
-		}
-		data, err := readDispatchTemplateFile(ctx, stor, templateObjectPath(tmpl, entry))
-		if err != nil {
-			if !errors.Is(err, storage.ErrNotFound) {
-				slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to read template config",
-					"template_id", templateID, "file", name, "error", err)
-			}
-			return nil
-		}
-		cfg, err := config.ParseScionAgentConfig(name, data)
-		if err != nil {
-			slog.WarnContext(ctx, "dispatch skill pre-resolution: failed to parse template config",
-				"template_id", templateID, "file", name, "error", err)
-			return nil
-		}
-		return cfg.Skills
-	}
-	return nil
+	return jc.Skills
 }
 
 // readDispatchTemplateFile downloads a template file, reading at most
@@ -269,6 +253,12 @@ func (s *Server) creatorIdentityForAgent(ctx context.Context, agent *store.Agent
 		}
 		role, additionalScopes := agentRoleAndScopes(creator)
 		scopes := append(ScopesForRole(role), additionalScopes...)
+		// The scopes an agent rooted at an admin-kind test identity is
+		// issued (admin tier A3); a root lookup error resolves no creator.
+		scopes, err := s.authzService.clampTestAdminRootedScopes(ctx, creator, scopes)
+		if err != nil {
+			return nil
+		}
 		return &agentIdentityWrapper{&AgentTokenClaims{
 			Claims:    jwt.Claims{Subject: creator.ID},
 			ProjectID: creator.ProjectID,

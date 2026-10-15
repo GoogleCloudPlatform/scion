@@ -49,6 +49,18 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The pref row is the caller's own record: a token needs inbox:read to
+	// read it and inbox:write to write it, for the agent's project, on top
+	// of agent:read on the agent.
+	permissionID := permInboxRead
+	if r.Method == http.MethodPut {
+		permissionID = permInboxWrite
+	}
+	token, ok := s.requireChatSelector(w, r, permissionID)
+	if !ok {
+		return
+	}
+
 	// Read webChatStore under a read lock to avoid a data race with
 	// SetWebChatStore, which writes under a write lock.
 	s.mu.RLock()
@@ -79,6 +91,9 @@ func (s *Server) handleChatPrefs(w http.ResponseWriter, r *http.Request) {
 	decision := s.authzService.CheckAccess(ctx, user, res, ActionRead)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+		return
+	}
+	if !s.authorizeChatTokenProject(w, r, token, permissionID, agent.ProjectID, chatRefuseForbidden) {
 		return
 	}
 

@@ -340,9 +340,11 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 				t.Errorf("cfg.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPolicy)
 			}
 
-			// The "created" response (ProvisionOnly dispatch path) reads the
-			// persisted scion-agent.json directly, so the same values must
-			// round-trip through disk.
+			// The image and pull policy are environment values: returned for
+			// the "created" response above, but never persisted to
+			// scion-agent.json, where they would outrank a later settings
+			// change (ptone/scion#4561). This test has no inline config, so
+			// nothing is persisted.
 			agentScionJSON := filepath.Join(projectScionDir, "agents", agentName, "scion-agent.json")
 			data, err := os.ReadFile(agentScionJSON)
 			if err != nil {
@@ -352,15 +354,11 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			if err := json.Unmarshal(data, &persisted); err != nil {
 				t.Fatal(err)
 			}
-			if persisted.Image != tt.wantImage {
-				t.Errorf("persisted image = %q, want %q", persisted.Image, tt.wantImage)
+			if persisted.Image != "" {
+				t.Errorf("persisted image = %q, want none", persisted.Image)
 			}
-			persistedPolicy := ""
 			if persisted.Kubernetes != nil {
-				persistedPolicy = persisted.Kubernetes.ImagePullPolicy
-			}
-			if persistedPolicy != tt.wantPolicy {
-				t.Errorf("persisted imagePullPolicy = %q, want %q", persistedPolicy, tt.wantPolicy)
+				t.Errorf("persisted kubernetes = %+v, want none", persisted.Kubernetes)
 			}
 		})
 	}

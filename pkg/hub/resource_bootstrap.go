@@ -185,8 +185,12 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 			continue
 		}
 
+		// Status is a content column (ptone/scion#4219): it is written
+		// through the compare-and-swap with the row as read, so a
+		// concurrent commit is never reverted; a lost race is logged and
+		// skipped (the next startup retries).
 		hc.Status = store.HarnessConfigStatusArchived
-		if err := s.store.UpdateHarnessConfig(ctx, &hc); err != nil {
+		if err := s.store.UpdateHarnessConfigContent(ctx, &hc, harnessConfigCommitPrecondition(&hc)); err != nil {
 			s.resourceLog.Warn("failed to archive obsolete bundled harness-config",
 				"name", hc.Name, "id", hc.ID, "error", err)
 			continue

@@ -47,45 +47,59 @@ type ChannelConfig struct {
 // notifications to all matching channels. Channel dispatch is fire-and-forget;
 // delivery failures are logged but do not block the notification pipeline.
 type ChannelRegistry struct {
-	channels []NotificationChannel
-	configs  []ChannelConfig
-	log      *slog.Logger
+	entries []channelEntry
+	log     *slog.Logger
+}
+
+// channelEntry pairs a built channel with the config it was built from, so
+// that skipping an invalid config cannot pair a channel with another
+// channel's filter.
+type channelEntry struct {
+	channel NotificationChannel
+	config  ChannelConfig
 }
 
 // NewChannelRegistry creates a ChannelRegistry from a list of channel configurations.
 // Each config is used to instantiate the appropriate channel implementation.
 // Invalid or unknown channel types are logged and skipped.
 func NewChannelRegistry(configs []ChannelConfig, log *slog.Logger) *ChannelRegistry {
-	r := &ChannelRegistry{
-		configs: configs,
-		log:     log,
-	}
+	r, _ := newChannelRegistry(configs, log)
+	return r
+}
+
+// newChannelRegistry is NewChannelRegistry that also returns the indexes
+// of the configs it skipped, in order (ptone/scion#4466).
+func newChannelRegistry(configs []ChannelConfig, log *slog.Logger) (*ChannelRegistry, []int) {
+	r := &ChannelRegistry{log: log}
+	var skipped []int
 
 	for i, cfg := range configs {
 		ch, err := newChannelFromConfig(cfg)
 		if err != nil {
 			log.Warn("Skipping invalid notification channel",
 				"index", i, "type", cfg.Type, "error", err)
+			skipped = append(skipped, i)
 			continue
 		}
 		if err := ch.Validate(); err != nil {
 			log.Warn("Skipping notification channel with invalid config",
 				"index", i, "type", cfg.Type, "error", err)
+			skipped = append(skipped, i)
 			continue
 		}
-		r.channels = append(r.channels, ch)
+		r.entries = append(r.entries, channelEntry{channel: ch, config: cfg})
 		log.Info("Notification channel registered", "type", cfg.Type)
 	}
 
-	return r
+	return r, skipped
 }
 
 // Dispatch sends a structured message to all registered channels whose
 // filters match the message. Delivery is fire-and-forget with logging.
 func (r *ChannelRegistry) Dispatch(ctx context.Context, msg *messages.StructuredMessage) {
-	for i, ch := range r.channels {
-		cfg := r.configs[i]
-		if !r.matchesFilter(cfg, msg) {
+	for _, e := range r.entries {
+		ch := e.channel
+		if !r.matchesFilter(e.config, msg) {
 			continue
 		}
 		if err := ch.Deliver(ctx, msg); err != nil {
@@ -101,7 +115,7 @@ func (r *ChannelRegistry) Dispatch(ctx context.Context, msg *messages.Structured
 
 // Len returns the number of registered channels.
 func (r *ChannelRegistry) Len() int {
-	return len(r.channels)
+	return len(r.entries)
 }
 
 // matchesFilter checks whether a message passes the channel's filter criteria.

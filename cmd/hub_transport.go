@@ -20,15 +20,13 @@ import (
 )
 
 // hubTransportSettings returns the transport-layer auth settings (IAP,
-// Cloud Run invoker) for reaching the hub at endpoint. The transport of
-// that hub's entry in the hub list wins; otherwise hub.transport from
-// settings applies. It returns nil when neither is set.
-func hubTransportSettings(settings *config.Settings, endpoint string) *transportauth.TransportSettings {
+// Cloud Run invoker) for reaching the hub at endpoint: the transport of
+// that hub's entry in the hub list, or nil. hub.transport in settings is
+// not read. The environment (SCION_TRANSPORT_*) still wins over the
+// result in transportauth.FromSettings.
+func hubTransportSettings(endpoint string) *transportauth.TransportSettings {
 	if t := hubEntryTransport(endpoint); t != nil {
 		return &transportauth.TransportSettings{Mode: t.Mode, Audience: t.Audience}
-	}
-	if settings != nil && settings.Hub != nil && settings.Hub.Transport != nil {
-		return &transportauth.TransportSettings{Mode: settings.Hub.Transport.Mode, Audience: settings.Hub.Transport.Audience}
 	}
 	return nil
 }

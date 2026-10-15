@@ -190,12 +190,16 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 	ac.NoAuth = req.NoAuth
 
 	if req.Config != nil {
+		// cleared_fields is hub bookkeeping for clears made after creation
+		// (nextClearedFields); a new agent starts with none, whatever the
+		// request carries (ptone/scion#3906).
+		req.Config.ClearedFields = nil
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later
-		// AppliedConfig.Env writer (the template-env fill, the project
-		// auto-expose tier, the post-dispatch resolved-env merge) leak into
-		// InlineConfig.Env, which holds the requester's explicit keys only.
+		// AppliedConfig.Env writer (the project auto-expose tier, the
+		// post-dispatch resolved-env merge) leak into InlineConfig.Env,
+		// which holds the requester's explicit keys only.
 		ac.Env = maps.Clone(req.Config.Env)
 		ac.Model = req.Config.Model
 		ac.ThinkingLevel = req.Config.ThinkingLevel
@@ -401,8 +405,13 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //
 // Per-field precedence differs by field, because of where each tier is
 // applied:
-//   - Model: request > project > hub > template. Project and hub run here,
-//     BEFORE resolveDerivedConfig's template fill.
+//   - Model: request > project > template > hub (ptone/scion#4222). The
+//     template rung (from the template's AgentConfig snapshot) runs here,
+//     after applyProjectDefaults and before applyHubAgentDefaults, so the
+//     hub default fills only when the template and the project both leave
+//     the model unset.
+//   - ThinkingLevel: request > project > template > hub (ptone/scion#4223),
+//     with its template rung placed exactly like the model rung.
 //   - HarnessConfig: request > project > template > hub. The template rung
 //     also runs here, but BEFORE applyHubAgentDefaults, so the hub-wide
 //     default only fills a slot that request, project, AND template all
@@ -445,10 +454,36 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
 	}
 
+	// Template model and thinking-level rungs — after the request and
+	// project tiers, before the hub default (ptone/scion#4222): request >
+	// project > template > hub. The model is a job key read from the
+	// template's job config (its stripped AgentConfig snapshot).
+	//
+	// Thinking level is a job key too and takes the same rung
+	// (ptone/scion#4223), so the hub default_thinking_level fills only when
+	// the request, the project and the template all leave it unset.
+	if agent.AppliedConfig.Model == "" || agent.AppliedConfig.ThinkingLevel == nil {
+		if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil {
+			if agent.AppliedConfig.Model == "" && jc.Model != "" {
+				agent.AppliedConfig.Model = jc.Model
+			}
+			if agent.AppliedConfig.ThinkingLevel == nil && jc.ThinkingLevel != nil {
+				level := *jc.ThinkingLevel
+				agent.AppliedConfig.ThinkingLevel = &level
+			}
+		}
+	}
+
+	// No broker gets more than the requester's telemetry on/off
+	// (dispatchTelemetry); say so when the request set more.
+	s.warnRequesterTelemetryDropped(ctx, agent)
+
 	// Hub operational agent_defaults — strictly between applyProjectDefaults
-	// and populateAgentConfig. See applyHubAgentDefaults for why that
-	// placement is the whole point: running it before the template rung
-	// above would let the hub default beat the template for HarnessConfig.
+	// (and the template model and thinking-level rungs) and
+	// populateAgentConfig. See
+	// applyHubAgentDefaults for why that placement is the whole point:
+	// running it before the template rungs above would let the hub default
+	// beat the template for HarnessConfig, Model and ThinkingLevel.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
@@ -457,8 +492,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 }
 
 // resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:
-// for most fields (Image, Model, Env entries, HarnessConfigID/Hash,
-// ProjectPreStartHookID/Script, template-derived InlineConfig.Telemetry) it
+// for most fields (HarnessConfigID/Hash, ProjectPreStartHookID/Script) it
 // only writes a slot on agent.AppliedConfig that is still empty, and leaves
 // an already-populated slot alone. Calling it on an agent's EXISTING
 // (already-derived) AppliedConfig therefore keeps every stale value from
@@ -485,14 +519,13 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // For context, not as a substitute for reusing deriveAgentConfig: the
 // resulting per-field precedence differs by field, because of *where* each
-// tier is applied. Model is request > project > hub > template, because the
-// project and hub tiers (applyProjectDefaults, then applyHubAgentDefaults)
-// run before this function's template fill. HarnessConfig is
-// request > project > template > hub, because deriveAgentConfig fills the
-// harness-config rung (request > project annotation > template) before
-// applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
-// default_harness_config only applies when the request, the project
-// annotation and the template all left the slot empty.
+// tier is applied. Model and ThinkingLevel are request > project >
+// template > hub, all four applied by deriveAgentConfig before this function
+// runs. HarnessConfig is request > project > template > hub, because
+// deriveAgentConfig fills the harness-config rung (request > project
+// annotation > template) before applyProjectDefaults/applyHubAgentDefaults
+// run — so the hub-wide default_harness_config only applies when the
+// request, the project annotation and the template all left the slot empty.
 // applyHubAgentDefaults reports whether it supplied HarnessConfig via its
 // bool return; it does not set the ctx flag itself — the caller does that by
 // wrapping ctx with withHubDefaultHarnessConfig, and this function reads
@@ -510,9 +543,6 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
 //     "" to "none" based on a live credential check, and, once written, that
 //     result is indistinguishable from an explicit --harness-auth none.
-//   - The project's TelemetryEnabled annotation, when set to a valid bool,
-//     overwrites InlineConfig.Telemetry.Enabled, even when the requester set
-//     it inline.
 //   - InlineConfig.Skills is always rewritten by mergeInjectedSkills, and it
 //     is neither fill-if-empty nor additive: whatever is already in Skills
 //     on entry is relabeled Scope="template" (highest precedence), merged
@@ -534,20 +564,18 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
-// — template/hub/project telemetry defaults, the resolved Model alias, and
-// InlineConfig.Skills (see above). The create path's config builder,
-// buildAppliedConfig, sets AppliedConfig.InlineConfig to req.Config itself,
-// so every InlineConfig write listed above also mutates the request.
-// InlineConfig.Telemetry can also be aliased, by this function's own
-// template-telemetry fill, to resolvedTemplate.Config.Telemetry, so the
-// project TelemetryEnabled write above can mutate the template object through
-// that shared pointer. A caller that needs the original explicit request
+// — the resolved Model alias and InlineConfig.Skills (see above). It no
+// longer writes InlineConfig.Telemetry: hub and project telemetry are
+// resolved per dispatch (dispatchTelemetry, ptone/scion#4222). The create
+// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
+// to req.Config itself, so every InlineConfig write listed above also
+// mutates the request. A caller that needs the original explicit request
 // inputs (reincarnate does) must capture them before this runs, not read them
 // back out of InlineConfig afterward.
 //
 // InlineConfig.Env is the exception: nothing here writes it. AppliedConfig.Env
-// is a separate map (buildAppliedConfig clones it), so the template-env merge
-// and the SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
+// is a separate map (buildAppliedConfig clones it), so the
+// SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
 // AppliedConfig.Env only, and InlineConfig.Env keeps the requester's explicit
 // keys.
 //
@@ -580,41 +608,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			}
 		}
 
-		// Merge template-level config values as defaults into AppliedConfig.
-		// These act as pre-populated defaults for the advanced config form and
-		// ensure the hub agent record reflects the effective configuration.
-		// Explicit request values (already set) take precedence.
-		if resolvedTemplate.Image != "" && agent.AppliedConfig.Image == "" {
-			agent.AppliedConfig.Image = resolvedTemplate.Image
-		}
-		if resolvedTemplate.Config != nil {
-			if resolvedTemplate.Config.Image != "" && agent.AppliedConfig.Image == "" {
-				agent.AppliedConfig.Image = resolvedTemplate.Config.Image
-			}
-			if resolvedTemplate.Config.Model != "" && agent.AppliedConfig.Model == "" {
-				agent.AppliedConfig.Model = resolvedTemplate.Config.Model
-			}
-			// Merge template env vars as defaults (don't overwrite explicit config env)
-			if len(resolvedTemplate.Config.Env) > 0 {
-				if agent.AppliedConfig.Env == nil {
-					agent.AppliedConfig.Env = make(map[string]string)
-				}
-				for k, v := range resolvedTemplate.Config.Env {
-					if _, exists := agent.AppliedConfig.Env[k]; !exists {
-						agent.AppliedConfig.Env[k] = v
-					}
-				}
-			}
-			// Merge template telemetry config as default (don't overwrite explicit inline telemetry)
-			if resolvedTemplate.Config.Telemetry != nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-					agent.AppliedConfig.InlineConfig.Telemetry = resolvedTemplate.Config.Telemetry
-				}
-			}
-		}
+		// The template's job keys are not copied here. Its model is filled
+		// by deriveAgentConfig's template rung, from the AgentConfig
+		// snapshot. Its image, env and telemetry are not copied at all, for
+		// any broker (ptone/scion#4222): image and telemetry are
+		// environment keys a template cannot set (ptone/scion#4524), and
+		// the template's own env reaches the agent from its file on the
+		// broker, ranked by the environment-variable order.
 	}
 
 	// Populate harness config ID and hash for broker hydration.
@@ -809,42 +809,13 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		}
 	}
 
-	// Merge hub-level telemetry config as lowest-priority default.
-	// Only applies when no per-agent or template telemetry config is set.
-	s.mu.RLock()
-	hubTelemetry := s.config.TelemetryConfig
-	s.mu.RUnlock()
-	if hubTelemetry != nil {
-		if agent.AppliedConfig.InlineConfig == nil {
-			agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-		}
-		if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-			// Deep copy to avoid sharing the pointer with the server config.
-			copied := *hubTelemetry
-			agent.AppliedConfig.InlineConfig.Telemetry = &copied
-		}
-	}
+	// Telemetry is not written here (ptone/scion#4222). The hub telemetry
+	// default and the project's TelemetryEnabled policy are resolved at each
+	// dispatch from their live sources (dispatchTelemetry), so the agent
+	// record keeps only the requester's own telemetry.
 
-	// Apply project-level TelemetryEnabled override. This takes effect regardless
-	// of where the telemetry config came from (inline, template, or hub), so
-	// project admins can enable/disable telemetry for all agents in the project.
-	if project != nil && project.Annotations != nil {
-		if val, ok := project.Annotations[projectSettingTelemetryEnabled]; ok {
-			if b, err := strconv.ParseBool(val); err == nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Telemetry == nil {
-					agent.AppliedConfig.InlineConfig.Telemetry = &api.TelemetryConfig{}
-				}
-				agent.AppliedConfig.InlineConfig.Telemetry.Enabled = &b
-			}
-		}
-	}
-
-	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
-	// template-env fill above so the project tier can overwrite a template
-	// value. The hub default is never written here; see resolveAutoExposeEnv.
+	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. The hub default
+	// is never written here; see resolveAutoExposeEnv.
 	// Explicit keys come from explicitEnvOf.
 	if agent.AppliedConfig != nil {
 		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnvOf(agent.AppliedConfig))
@@ -856,8 +827,8 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 
 	// Writer (a) of ExplicitTimezone, run unconditionally and last so that
 	// creates with or without a template or harness config are covered: a
-	// create-time TZ (request config.env, else the hub template merged
-	// above, else the hub harness config) becomes the agent's pin, and TZ
+	// create-time TZ (request config.env, else the hub harness config; a
+	// template cannot set TZ, ptone/scion#4524) becomes the agent's pin, and TZ
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)
@@ -870,15 +841,18 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 //     CreateInputs.InlineConfig.Env). That value is already in ac.Env, so
 //     nothing is written.
 //  2. project annotation scion.io/auto-expose-ports-enabled: written into
-//     ac.Env, overwriting a template-derived value.
-//  3. template env, already merged into ac.Env by the template-env fill, is
-//     left as is; harness-config env applies at the broker below it.
-//  4. hub AutoExposePortsDefault: never written to the agent record. The
+//     ac.Env.
+//  3. hub AutoExposePortsDefault: never written to the agent record. The
 //     dispatcher sends it in api.HubAgentDefaults and the broker's
-//     buildAgentEnv applies it only when no higher tier set the key.
+//     buildAgentEnv applies it only when no higher tier set the key;
+//     harness-config env applies at the broker too.
 //
-// explicit must be the request snapshot, not ac.Env, so a template-derived
-// value is never mistaken for an explicit one. Neither InlineConfig.Env nor
+// A template is not a tier: SCION_* is a reserved key a template cannot set
+// (ptone/scion#4524), and the hub does not copy template env into the agent
+// (ptone/scion#4222).
+//
+// explicit must be the request snapshot, not ac.Env, so a derived value is
+// never mistaken for an explicit one. Neither InlineConfig.Env nor
 // CreateInputs is written: the resolved value is derived, not explicit.
 func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, explicit map[string]string) {
 	if ac == nil {
@@ -1133,7 +1107,7 @@ func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, 
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
 		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", NotificationStatusHalted},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
 	}
@@ -1161,7 +1135,7 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	if force && phase == string(state.PhaseError) {
 		return true, true
 	}
-	return phase == string(state.PhaseStopped), false
+	return phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted), false
 }
 
 // existingAgentBranch is the branch handleExistingAgent takes for a request,
@@ -1183,7 +1157,7 @@ func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgent
 	switch {
 	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
 		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
@@ -1490,8 +1464,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -1520,12 +1492,13 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Branch 2: Agent is running/stopped/error.
-	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
+	// Branch 2: Agent is running/stopped/error/halted.
+	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
 			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError)) {
+			existingAgent.Phase == string(state.PhaseError) ||
+			existingAgent.Phase == string(state.PhaseHalted)) {
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
 		if resumeInPlace {
@@ -1632,8 +1605,6 @@ func (s *Server) handleExistingAgent(
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
-				case isContainerNameConflict(err):
-					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayBrokerRefusal(w, err):
@@ -1667,6 +1638,14 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		// Flat placement pre-check on the agent being replaced, before its
+		// stop intent: the recreate deletes it on its Runtime Broker.
+		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored
+		}
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
@@ -1674,6 +1653,18 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The agent's saved placement is inconsistent, and the
+				// dispatcher's placement backstop sent nothing
+				// (requirePinnedPlacement): as for a run mismatch,
+				// removing the row could leave a running workload with no
+				// row, so the recreate is refused with the placement 409,
+				// and cleanupMode=force does not override it.
+				if refusal, ok := placementRefusalOf(err); ok {
+					s.agentLifecycleLog.Warn("Env-gather recreate: agent placement is inconsistent; not removing the agent",
+						"agent_id", existingAgent.ID, "code", refusal.Code, "cleanup_mode", cleanupMode)
+					writeError(w, refusal.Status, refusal.Code, refusal.Message, refusal.Details)
+					return existingAgentErrored
+				}
 				// The broker holds a different run of the agent than the
 				// row records and deleted nothing (ptone/scion#3080):
 				// removing the row would leave that run with no row.
@@ -1848,8 +1839,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -2083,7 +2072,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				Status:     broker.Status,
 				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
-			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+			// linkProjectProvider also retains the project's activeProfile
+			// built-in before this request dispatches (ptone/scion#5113).
+			if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
 				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())

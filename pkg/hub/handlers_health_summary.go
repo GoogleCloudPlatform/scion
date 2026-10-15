@@ -116,17 +116,23 @@ type HealthSummaryHub struct {
 	// by check name and instance label. Never null.
 	UnhealthyChecks []HealthSummaryHubCheck `json:"unhealthy_checks"`
 	// TestIdentitiesEnabled is true when this hub instance runs with
-	// --enable-test-identities (hub-issued test identities). Read-only: it
-	// reports the startup flag and nothing can change it at runtime.
+	// --test-mode=member or above (hub-issued test identities). Read-only:
+	// it reports the startup setting and nothing can change it at runtime.
 	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
 	// TestAdminIdentitiesEnabled is true when this hub instance runs with
-	// the test admin tier on (--enable-test-admin-identities, validated at
-	// startup). Read-only, like TestIdentitiesEnabled.
+	// the test admin tier on (--test-mode=admin, validated at startup).
+	// Read-only, like TestIdentitiesEnabled.
 	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
 	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
-	// kind is on (--enable-test-super-admin-identities). This binary
-	// refuses that flag at startup, so it is always false here.
+	// kind is on (--test-mode=super-admin, which starts only when the
+	// test-admin policy classification is complete). Read-only.
 	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
+	// TestMode is the resolved --test-mode level: off, member, admin or
+	// super-admin. The three booleans above are derived from it.
+	TestMode string `json:"test_mode"`
+	// TestModePreconditions names the preconditions that admitted
+	// TestMode. Empty (never null) when the level is off.
+	TestModePreconditions []string `json:"test_mode_preconditions"`
 	// LiveTestAdminIdentities is the number of live admin-kind test
 	// identities. Null when the count could not be read.
 	LiveTestAdminIdentities *int `json:"live_test_admin_identities"`
@@ -135,6 +141,17 @@ type HealthSummaryHub struct {
 	// same value as testIdentityWebSessions in GET
 	// /api/v1/test-infra/status). Read-only.
 	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
+	// TestIdentityWebSessionsUnavailableReason names why test identity web
+	// sessions are unavailable while the member tier is on (WS2; the same
+	// value as testIdentityWebSessionsUnavailableReason in GET
+	// /api/v1/test-infra/status), or "" when they are available or the
+	// member tier is off. Read-only.
+	TestIdentityWebSessionsUnavailableReason string `json:"test_identity_web_sessions_unavailable_reason"`
+	// TestAdminWebSessionsEnabled is true when admin-kind test identities
+	// may hold web sessions on this instance (ptone/scion#4240, WS4; the
+	// same value as testAdminWebSessions in GET /api/v1/test-infra/status).
+	// Read-only.
+	TestAdminWebSessionsEnabled bool `json:"test_admin_web_sessions_enabled"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -211,9 +228,9 @@ type HealthBrokerStorage struct {
 type HealthSummaryAgents struct {
 	// Total is the number of non-deleted agents.
 	Total int `json:"total"`
-	// Active is Total minus agents in phase stopped or error.
+	// Active is Total minus agents in phase stopped, error or halted.
 	Active int `json:"active"`
-	// Errored is the number of agents in phase error or with activity
+	// Errored is the number of agents in phase error or halted, or with activity
 	// crashed, each agent once, stopped agents excluded.
 	Errored int `json:"errored"`
 	// Considered is the number of non-deleted agents not in phase stopped.
@@ -351,7 +368,11 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
 	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
 	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
+	hubSummary.TestMode = string(s.TestModeLevel())
+	hubSummary.TestModePreconditions = s.testModePreconditions()
 	hubSummary.TestIdentityWebSessionsEnabled, _ = s.testIdentityWebSessionGate()
+	hubSummary.TestIdentityWebSessionsUnavailableReason = s.testIdentityWebSessionsUnavailableReason()
+	hubSummary.TestAdminWebSessionsEnabled = s.testAdminWebSessionsAvailable()
 	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
 		slog.Error("health summary: failed to count live test admin identities", "error", err)
 	} else {
@@ -412,7 +433,7 @@ func (s *Server) healthSummaryDispatch(ctx context.Context, now time.Time) (*Hea
 func (s *Server) healthSummaryAgents(ctx context.Context, agg *store.AgentHealthAggregate) HealthSummaryAgents {
 	out := HealthSummaryAgents{
 		Total:      agg.Total,
-		Active:     agg.Total - agg.ByPhase[string(state.PhaseStopped)] - agg.ByPhase[string(state.PhaseError)],
+		Active:     agg.Total - agg.ByPhase[string(state.PhaseStopped)] - agg.ByPhase[string(state.PhaseError)] - agg.ByPhase[string(state.PhaseHalted)],
 		Errored:    agg.Errored,
 		Considered: agg.Considered,
 		ByPhase:    orderedPhaseCounts(agg.ByPhase),

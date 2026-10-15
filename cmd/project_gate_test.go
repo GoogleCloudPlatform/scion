@@ -177,12 +177,10 @@ func TestConfigSetLocalOutsideProjectStillFails(t *testing.T) {
 }
 
 // setupProjectWithoutRegistry is setupNoProjectPreRun plus a project in the
-// working directory and noHub cleared, so a registry-checked command reaches
-// the image_registry check with no registry configured.
+// working directory, no hub selected and no image_registry configured.
 func setupProjectWithoutRegistry(t *testing.T) (home string) {
 	t.Helper()
 	setupNoProjectPreRun(t)
-	noHub = false
 	origHubEndpoint := hubEndpoint
 	t.Cleanup(func() { hubEndpoint = origHubEndpoint })
 	hubEndpoint = ""
@@ -211,58 +209,63 @@ func writeGateGlobalSettings(t *testing.T, home, content string) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(content), 0o644))
 }
 
-// TestRegistryCheckSkippedForHubDispatch covers ptone/scion#3318: the
-// image_registry check is skipped for hub-dispatched work whether the hub
-// endpoint comes from --hub, settings or the environment.
-func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
+// TestRootPreRunDoesNotRequireImageRegistry covers ptone/scion#3318. The
+// root pre-run used to require image_registry for project commands unless
+// the work went to a hub. That check was removed with local mode: the CLI
+// never starts containers itself, and the broker and server keep their own
+// registry checks. No variant of hub selection, including none at all,
+// needs a registry before the command runs.
+func TestRootPreRunDoesNotRequireImageRegistry(t *testing.T) {
 	newListCmd := func() *cobra.Command { return &cobra.Command{Use: "list"} }
 
-	t.Run("baseline: local work needs a registry", func(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home string)
+	}{
+		{"no hub endpoint", func(t *testing.T, home string) {}},
+		{"endpoint from --hub flag", func(t *testing.T, home string) {
+			writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n")
+			hubEndpoint = "https://hub.example.test"
+		}},
+		{"endpoint from settings", func(t *testing.T, home string) {
+			writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
+		}},
+		{"the current hub", func(t *testing.T, home string) {
+			saveTestContext(t, "https://hub.example.test", "")
+		}},
+		{"endpoint from environment", func(t *testing.T, home string) {
+			t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.test")
+		}},
+		{"hub project slug for --project", func(t *testing.T, home string) {
+			projectPath = "my-hub-project"
+		}},
+		{"--hub flag alone", func(t *testing.T, home string) {
+			hubEndpoint = "https://hub.example.test"
+		}},
+		{"stale hub.enabled=false with a current hub", func(t *testing.T, home string) {
+			writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: false\n")
+			saveTestContext(t, "https://hub.example.test", "")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := setupProjectWithoutRegistry(t)
+			tc.setup(t, home)
+			assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
+		})
+	}
+
+	// With no hub and no registry, 'scion list' reaches the hub check and
+	// reports that no hub is selected, not a missing registry.
+	t.Run("list with no hub and no registry", func(t *testing.T) {
 		setupProjectWithoutRegistry(t)
-		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
+		restoreAllSilenceUsage(t)
+		rootCmd.SetArgs([]string{"list"})
+		t.Cleanup(func() { rootCmd.SetArgs(nil) })
+		err := rootCmd.Execute()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "image_registry is not configured")
-	})
-
-	t.Run("endpoint from --hub flag", func(t *testing.T) {
-		home := setupProjectWithoutRegistry(t)
-		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n")
-		hubEndpoint = "https://hub.example.test"
-		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
-	})
-
-	t.Run("endpoint from settings", func(t *testing.T) {
-		home := setupProjectWithoutRegistry(t)
-		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
-		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
-	})
-
-	t.Run("endpoint from environment", func(t *testing.T) {
-		setupProjectWithoutRegistry(t)
-		t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.test")
-		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
-	})
-
-	t.Run("hub project slug for --project", func(t *testing.T) {
-		setupProjectWithoutRegistry(t)
-		projectPath = "my-hub-project"
-		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
-	})
-
-	t.Run("--hub flag without hub enabled is still local", func(t *testing.T) {
-		setupProjectWithoutRegistry(t)
-		hubEndpoint = "https://hub.example.test"
-		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "image_registry is not configured")
-	})
-
-	t.Run("--no-hub keeps the check", func(t *testing.T) {
-		home := setupProjectWithoutRegistry(t)
-		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
-		noHub = true
-		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "image_registry is not configured")
+		assert.ErrorIs(t, err, errHubNotConfigured)
+		assert.Contains(t, err.Error(), "No hub selected.")
+		assert.NotContains(t, err.Error(), "image_registry")
 	})
 }

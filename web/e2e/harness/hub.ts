@@ -68,8 +68,9 @@ export interface StartHubOptions {
   /** Pass --enable-test-login (and the fixed --session-secret). Default true. */
   testLogin?: boolean;
   /**
-   * Start a member-level test hub: --enable-test-identities, a random hub
-   * id, the test infrastructure marker written by
+   * Start a member-level test hub: --test-mode=member:<hub id> with a random
+   * hub id, server.hub.class: test (SCION_SERVER_HUB_CLASS), the test
+   * infrastructure marker written by
    * `scion server test-infra mark` into the temp database before start, and
    * a private HOME and SCION_*-free environment under the temp dir.
    * Default false.
@@ -79,18 +80,116 @@ export interface StartHubOptions {
   build?: boolean;
   /** State file shared with stopHub. Default: the main suite's. */
   stateFile?: string;
+  /**
+   * Extra environment of the hub process, e.g. supported configuration
+   * such as SCION_SERVER_HUB_ASYNCAGENTLAUNCH=true or SCION_IMAGE_REGISTRY.
+   * Applied over the harness environment (also over the SCION_*-free
+   * environment of a member-level test hub). Keys the harness owns
+   * (HARNESS_OWNED_ENV) are refused.
+   */
+  env?: Record<string, string>;
+  /**
+   * Run the co-located runtime broker in the same process
+   * (--enable-runtime-broker on a free loopback port, --auto-provide), so a
+   * hub-managed project created on this hub gets it as its provider.
+   * Requires testIdentities (the broker writes under the private HOME).
+   * The broker runs containers only where a container runtime works; it
+   * registers either way. Default false.
+   */
+  runtimeBroker?: boolean;
+  /** Hub binary to run. Default: build/scion. For the harness's own tests. */
+  binary?: string;
+}
+
+/**
+ * Environment keys the harness sets itself; StartHubOptions.env may not
+ * set them.
+ */
+export const HARNESS_OWNED_ENV: readonly string[] = [
+  'HOME',
+  'SCION_CLI_MODE',
+  'SCION_SERVER_HUB_HUBID',
+  'SCION_SERVER_HUB_CLASS',
+  'SCION_SERVER_RUNTIMEBROKER_HOST',
+];
+
+/**
+ * Prefixes of environment keys StartHubOptions.env may not set either: the
+ * test mode and test identity settings stay with the harness (the
+ * --test-mode flag and the marker).
+ */
+export const HARNESS_OWNED_ENV_PREFIXES: readonly string[] = [
+  'SCION_SERVER_HUB_TEST',
+  'SCION_SERVER_TEST',
+];
+
+/** Whether StartHubOptions.env may not set key. */
+export function isHarnessOwnedEnv(key: string): boolean {
+  const upper = key.toUpperCase();
+  return (
+    HARNESS_OWNED_ENV.includes(upper) ||
+    HARNESS_OWNED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
+  );
+}
+
+/** Throws if extra sets a harness-owned key. */
+function checkExtraEnv(extra: Record<string, string>): void {
+  const owned = Object.keys(extra).filter(isHarnessOwnedEnv);
+  if (owned.length > 0) {
+    throw new Error(`startHub: env may not set harness-owned keys: ${owned.join(', ')}`);
+  }
 }
 
 /** Acknowledgement flag of `scion server test-infra mark`. */
 const TEST_INFRA_MARK_ACK = '--i-understand-this-hub-can-mint-super-admins';
 
-/** The dev token pattern, for capture and for redaction in logs. */
-const DEV_TOKEN_PATTERN = /SCION_DEV_TOKEN=(scion_dev_[0-9a-f]+)/;
+/**
+ * The hub prints the dev token file path, not the token value:
+ * `export SCION_DEV_TOKEN=$(cat '<path>')`, with the path single-quoted
+ * for a POSIX shell. Group 1 is the quoted body; see unquoteShellSingle.
+ */
+const DEV_TOKEN_FILE_PATTERN = /SCION_DEV_TOKEN=\$\(cat '((?:[^']|'\\'')*)'\)/;
+/** Any dev token value, for redaction in logs. */
 const DEV_TOKEN_ANY = /scion_dev_[0-9a-f]+/g;
 
 /** Hub log lines are echoed with any dev token redacted. */
 function redact(line: string): string {
   return line.replace(DEV_TOKEN_ANY, 'scion_dev_<redacted>');
+}
+
+/**
+ * Returns the message of a hub log line. The hub logs JSON records (the
+ * message is "msg", or "message" with GCP logging); other lines are used as
+ * they are.
+ */
+function hubLogMessage(line: string): string {
+  if (line.startsWith('{')) {
+    try {
+      const rec = JSON.parse(line) as { msg?: unknown; message?: unknown };
+      const msg = rec.msg ?? rec.message;
+      if (typeof msg === 'string') return msg;
+    } catch {
+      // Not JSON after all: fall through to the raw line.
+    }
+  }
+  return line;
+}
+
+/** Undoes the hub's single quoting: each '\'' in the body is one quote. */
+function unquoteShellSingle(body: string): string {
+  return body.replace(/'\\''/g, "'");
+}
+
+/** Reads the dev token from the file the hub printed; throws if it is empty. */
+function readDevTokenFile(file: string): string {
+  if (!fs.existsSync(file)) {
+    throw new Error(`Dev token file ${file}, printed by the hub, does not exist.`);
+  }
+  const token = fs.readFileSync(file, 'utf8').trim();
+  if (!token) {
+    throw new Error(`Dev token file ${file} is empty.`);
+  }
+  return token;
 }
 
 /** Path of the hub binary the harness builds and runs. */
@@ -191,6 +290,12 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   const testLogin = options.testLogin ?? true;
   const testIdentities = options.testIdentities ?? false;
   const stateFile = options.stateFile ?? STATE_FILE;
+  const binary = options.binary ?? HUB_BINARY;
+  const extraEnv = options.env ?? {};
+  checkExtraEnv(extraEnv);
+  if (options.runtimeBroker && !testIdentities) {
+    throw new Error('startHub: runtimeBroker needs testIdentities (a private HOME)');
+  }
 
   // Build assets and binary
   if (options.build ?? true) {
@@ -216,10 +321,12 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     hubId = crypto.randomBytes(6).toString('hex');
     homeDir = path.join(dbDir, 'home');
     fs.mkdirSync(homeDir, { mode: 0o700 });
-    env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId });
+    // --test-mode=member requires the hub class "test" and the marker for
+    // this hub id (written below); the hub id binding is in the flag value.
+    env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId, SCION_SERVER_HUB_CLASS: 'test' });
     console.info(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
     const markOut = execFileSync(
-      HUB_BINARY,
+      binary,
       [
         'server',
         'test-infra',
@@ -236,6 +343,13 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     );
     for (const line of markOut.trim().split('\n')) console.info(`[hub:mark] ${redact(line)}`);
   }
+
+  // The hub process gets the caller's extra environment; the mark step
+  // above does not need it. Harness-owned keys were refused above.
+  env = { ...env, ...extraEnv };
+  // The co-located broker listens on loopback, like the hub (it would
+  // default to all interfaces in hosted mode).
+  if (options.runtimeBroker) env.SCION_SERVER_RUNTIMEBROKER_HOST = '127.0.0.1';
 
   // Find a free port
   const port = await findFreePort();
@@ -255,34 +369,49 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     String(port),
     '--enable-hub',
     '--enable-web',
-    '--enable-runtime-broker=false',
     '--hosted',
     '--dev-auth',
   ];
+  if (options.runtimeBroker) {
+    // Two probes can return the same free port; the broker needs its own.
+    let brokerPort = await findFreePort();
+    for (let i = 0; i < 10 && brokerPort === port; i++) brokerPort = await findFreePort();
+    if (brokerPort === port) throw new Error('startHub: no free port for the runtime broker');
+    args.push(
+      '--enable-runtime-broker',
+      '--runtime-broker-port',
+      String(brokerPort),
+      '--auto-provide'
+    );
+  } else {
+    args.push('--enable-runtime-broker=false');
+  }
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
-  if (testIdentities) args.push('--enable-test-identities');
+  if (testIdentities) args.push(`--test-mode=member:${hubId}`);
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
-  const hubProcess = spawn(HUB_BINARY, args, {
+  const hubProcess = spawn(binary, args, {
     cwd: homeDir ?? WORKSPACE_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
     env,
   });
 
-  // Capture the dev token from hub startup logs
-  let devToken = '';
-  // Token is scion_dev_ followed by hex; stop before any trailing quote/brace.
-  const devTokenPattern = DEV_TOKEN_PATTERN;
+  // Capture the dev token file path from hub startup logs; the token is
+  // read from that file once the hub is healthy.
+  let devTokenFile = '';
+  const captureDevTokenFile = (line: string) => {
+    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
+    if (match) {
+      devTokenFile = unquoteShellSingle(match[1]);
+    }
+  };
 
-  // Log hub output for debugging and capture dev token
+  // Log hub output for debugging and capture the dev token file path
   hubProcess.stdout?.on('data', (data: Buffer) => {
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       console.log(`[hub:stdout] ${redact(line)}`);
-      const match = line.match(devTokenPattern);
-      if (match) {
-        devToken = match[1];
-      }
+      captureDevTokenFile(line);
     }
   });
 
@@ -290,6 +419,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     const lines = data.toString().trim().split('\n');
     for (const line of lines) {
       console.log(`[hub:stderr] ${redact(line)}`);
+      captureDevTokenFile(line);
     }
   });
 
@@ -304,11 +434,14 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // Wait for health
   await waitForHealth(baseURL);
 
-  if (!devToken) {
+  if (!devTokenFile) {
     throw new Error(
-      'Failed to capture dev token from hub output. ' + 'Ensure the hub is started with --dev-auth.'
+      'Failed to capture the dev token file path from hub output. ' +
+        'Ensure the hub is started with --dev-auth.'
     );
   }
+  // A relative path is relative to the hub's working directory.
+  const devToken = readDevTokenFile(path.resolve(homeDir ?? WORKSPACE_ROOT, devTokenFile));
 
   console.log(`[hub] Dev token captured.`);
 
@@ -344,7 +477,17 @@ export function readHubState(stateFile: string = STATE_FILE): HubState | null {
   }
 }
 
-/** Stop the hub process and clean up temp files. */
+/**
+ * Whether stopHub keeps the hub's temp dir (E2E_KEEP_HUB_STATE=1). Off by
+ * default. The kept dir holds the database and the private HOME, which
+ * contain hub credentials (dev token, session keys, test identities): do
+ * not copy it into evidence or artifacts, and remove it by hand when done.
+ */
+export function keepHubState(): boolean {
+  return process.env.E2E_KEEP_HUB_STATE === '1';
+}
+
+/** Stop the hub process and clean up temp files (see keepHubState). */
 export function stopHub(stateFile: string = STATE_FILE): void {
   const state = readHubState(stateFile);
   if (!state) {
@@ -364,11 +507,19 @@ export function stopHub(stateFile: string = STATE_FILE): void {
     }
   }
 
-  // Clean up temp database
-  try {
-    fs.rmSync(state.dbDir, { recursive: true, force: true });
-  } catch {
-    // Best-effort cleanup
+  // Clean up temp database, unless E2E_KEEP_HUB_STATE=1 asks to keep it
+  // (database, private HOME and hub files) for inspection after a run.
+  if (keepHubState()) {
+    console.info(
+      `[hub] E2E_KEEP_HUB_STATE=1: kept the hub state at ${state.dbDir} ` +
+        '(contains hub credentials; do not copy it into evidence or artifacts)'
+    );
+  } else {
+    try {
+      fs.rmSync(state.dbDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
   }
 
   // Clean up state file

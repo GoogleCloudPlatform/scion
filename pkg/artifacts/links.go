@@ -106,6 +106,12 @@ type CreateLinkResponse struct {
 // LinkListResponse answers GET /{id}/links.
 type LinkListResponse struct {
 	Links []LinkInfo `json:"links"`
+	// DefaultTTLHours is the lifetime, in hours, of a link created without
+	// ttlHours.
+	DefaultTTLHours int64 `json:"defaultTtlHours"`
+	// MaxTTLHours is the longest lifetime, in hours, a link can be created
+	// with; a longer ttlHours is refused with ttl_too_long.
+	MaxTTLHours int64 `json:"maxTtlHours"`
 }
 
 // newLinkToken returns a fresh link token: linkTokenBytes from
@@ -232,22 +238,42 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, nil, false
 	}
 	if authority == "" {
-		writeAdminForbidden(w)
+		s.logAdminRefusal(r, logActionAdminister, a)
+		s.writeAdminForbidden(w, r)
 		return b, nil, nil, false
 	}
 	return b, a, s.callerActor(r.Context(), authority), true
 }
 
-// adminForbiddenMessage is the text of every 403 for a caller that may read
+// adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused.
+// artifact and every refusal, and never why this caller was refused. One
+// narrow exception (ptone/scion#5119): a caller that holds review-grant
+// authority on an artifact owned by an agent, asking for a well-formed
+// review grant, learns when the user cannot read the artifact
+// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
+// grant (CodeReviewReplacesAccess); see putReviewGrant.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
 	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 
+// agentAdminForbiddenMessage is the same 403's text for an agent, which may
+// never administer an artifact, its own included (sharing is user-only), so
+// the user text would read as if it were not the owner (ptone/scion#4576).
+// It too is the same for every artifact and every refusal.
+const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
+	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
+	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
+
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
-// but not administer it.
-func writeAdminForbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, "forbidden", adminForbiddenMessage)
+// but not administer it: the agent text for an agent, the user text
+// otherwise. Its callers run it only after the read check, so a caller that
+// cannot read the artifact still gets the 404 of a missing one.
+func (s *Service) writeAdminForbidden(w http.ResponseWriter, r *http.Request) {
+	msg := adminForbiddenMessage
+	if kind, _, _, ok := s.host.Principal(r.Context()); ok && kind == PrincipalKindAgent {
+		msg = agentAdminForbiddenMessage
+	}
+	writeError(w, http.StatusForbidden, "forbidden", msg)
 }
 
 // manageable reports whether the caller may administer a, which it can
@@ -307,7 +333,7 @@ func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, _, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -351,6 +377,9 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		Permission: GrantRead, ExpiresAt: &exp, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	switch err := b.store.CreateLink(r.Context(), g, MaxLinksPerArtifact, now); {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyLinks):
 		writeError(w, http.StatusConflict, "too_many_links",
 			"the artifact already has "+strconv.Itoa(MaxLinksPerArtifact)+" active share links; revoke one first")
@@ -363,6 +392,7 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not create the link")
 		return
 	}
+	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
 		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
@@ -395,7 +425,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 }
 
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
-// first.
+// first, and the link lifetimes POST /{id}/links applies.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
@@ -408,7 +438,12 @@ func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	now := time.Now()
-	out := LinkListResponse{Links: []LinkInfo{}}
+	def, maxTTL := b.currentLimits(r.Context()).linkLifetimes()
+	out := LinkListResponse{
+		Links:           []LinkInfo{},
+		DefaultTTLHours: int64(def / time.Hour),
+		MaxTTLHours:     int64(maxTTL / time.Hour),
+	}
 	for i := range grants {
 		g := &grants[i]
 		if g.SubjectKind != SubjectLink || g.ExpiresAt == nil || !now.Before(*g.ExpiresAt) {
@@ -437,6 +472,7 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		slog.ErrorContext(r.Context(), "artifacts: revoke link failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not revoke the link")
 	default:
+		s.logLink(r, a, logActionLinkRevoked, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

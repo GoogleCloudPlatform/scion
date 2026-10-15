@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-sqlite-coverage sqlite-ci-pkgs check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -105,11 +105,11 @@ HUB_PKG := github.com/GoogleCloudPlatform/scion/pkg/hub
 non_hub_pkgs = go list -tags '$(1)' ./... | grep -vx '$(HUB_PKG)'
 
 # SHARD selects the pkg/hub test shard (1..N, N from
-# go run ./hack/hubshard -shards) for test-hub-shard, build-hub-shard,
+# hack/hubshard/hubshard.sh -shards) for test-hub-shard, build-hub-shard,
 # vet-hub-shard and test-hub-postgres.
 SHARD ?= 1
 
-## test-hub-sqlite: Run pkg/hub (every shard), perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
+## test-hub-sqlite: Run pkg/hub (every shard) and the non-hub SQLite packages (SQLITE_NONHUB_PKGS) with SQLite
 # enabled (no build tag). This is the ~67% of pkg/hub's test files that
 # "make test-fast" never compiles (see ptone/scion#1118), plus the
 # non-hub SQLite packages (test-sqlite-nonhub). pkg/hub runs shard by
@@ -117,13 +117,16 @@ SHARD ?= 1
 # pieces in parallel jobs: SQLite Tests (non-hub) and pkg/hub shard K/N.
 test-hub-sqlite: test-sqlite-nonhub test-hub-shards
 
-## test-sqlite-nonhub: Run the pkg/hub subpackages, perf/bench/seed, pkg/conduit, pkg/store/entadapter and pkg/artifacts tests with SQLite
+## test-sqlite-nonhub: Run the pkg/hub subpackages and the other non-hub SQLite packages (SQLITE_NONHUB_PKGS) with SQLite
 # perf/bench/seed's and pkg/store/entadapter's own SQLite-backed tests carry
 # a `//go:build !no_sqlite` constraint (ptone/scion#2393,
 # ptone/scion#2851), pkg/conduit's relay/router tests run against the
 # SQLite-backed conduit registry store, and pkg/artifacts' store and
-# service tests run on SQLite. The pkg/hub package itself is left out: it
-# runs in shards (test-hub-shard).
+# service tests run on SQLite. pkg/brokerownership, pkg/brokerregistration,
+# pkg/ent/entc, pkg/secret, pkg/store/storetest and pkg/testinfra also have
+# `//go:build !no_sqlite` test files; before ptone/scion#1088 they ran only
+# in the non-blocking Full Test Suite. The pkg/hub package itself is left
+# out: it runs in shards (test-hub-shard).
 #
 # The test binaries are first compiled with HUB_TEST_GOGC (go test -c into a
 # scratch directory, then deleted). The go test run that follows reuses the
@@ -133,10 +136,32 @@ test-hub-sqlite: test-sqlite-nonhub test-hub-shards
 # 1.21+). There are no duplicates among the test packages today; if one
 # appears, prebuild with $(HUB_TEST_GOGC) go test -count=1 -run '^$'
 # instead, which compiles every package and runs no test functions.
-SQLITE_NONHUB_PKGS_CMD = go list ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... ./pkg/store/entadapter/... ./pkg/artifacts/... | grep -vx '$(HUB_PKG)'
+#
+# check-sqlite-coverage fails if a package with a `//go:build !no_sqlite`
+# test file is in none of SQLITE_CI_PKGS, so add new SQLite packages here.
+SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
+	./pkg/store/entadapter/... ./pkg/artifacts/... ./pkg/brokerownership/... \
+	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
+	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/...
+SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
+
+# SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
+# SQLite enabled (no no_sqlite tag): SQLITE_NONHUB_PKGS (SQLite Tests
+# (non-hub), test-sqlite-nonhub; ./pkg/hub/... there also matches the
+# pkg/hub package itself, which the pkg/hub shard jobs run instead),
+# SQLITE_CMD_PKGS (test-cmd-sqlite) and FIXTURE_PKGS
+# (test-fixture-coverage). Those targets test exactly these variables, so
+# the list check-sqlite-coverage checks is the list CI runs.
+SQLITE_CMD_PKGS := ./cmd
+FIXTURE_PKGS := ./internal/fixturegen/...
+SQLITE_CI_PKGS = $(SQLITE_NONHUB_PKGS) $(SQLITE_CMD_PKGS) $(FIXTURE_PKGS)
+
+## sqlite-ci-pkgs: Print SQLITE_CI_PKGS, one pattern per line (read by hack/check-sqlite-coverage.sh)
+sqlite-ci-pkgs:
+	@printf '%s\n' $(SQLITE_CI_PKGS)
 
 test-sqlite-nonhub:
-	@echo "Running pkg/hub subpackages + perf/bench/seed + pkg/conduit + pkg/store/entadapter + pkg/artifacts tests (SQLite-enabled)..."
+	@echo "Running pkg/hub subpackages + the other SQLITE_NONHUB_PKGS tests (SQLite-enabled)..."
 	@pkgs=$$($(SQLITE_NONHUB_PKGS_CMD)) || exit 1; \
 	dir=$$(mktemp -d) || exit 1; \
 	$(HUB_TEST_GOGC) go test -c -o "$$dir/" $$pkgs; \
@@ -153,15 +178,16 @@ test-sqlite-nonhub:
 # (non-hub) job.
 test-cmd-sqlite:
 	@echo "Running cmd tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 20m ./cmd
+	@go test -count=1 -timeout 20m $(SQLITE_CMD_PKGS)
 
 ## hubshard-parity: Check the pkg/hub test shards: every test runs in exactly one shard, every shard compiles (parse only)
 # Also fails if a hubshard tag or a generated imports file is committed:
 # the tags exist only in the overlay hack/hubshard writes on every run.
-# go run ./hack/hubshard prints the shard sizes; -untag strips tags an
-# older generator committed. See hack/hubshard/README.md.
+# hubshard prints the shard sizes; -untag strips tags an older generator
+# committed. hack/hubshard/hubshard.sh builds the tool into a temp dir and
+# runs it (as go run would). See hack/hubshard/README.md.
 hubshard-parity:
-	@go run ./hack/hubshard -parity
+	@./hack/hubshard/hubshard.sh -parity
 
 ## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
 testpart-selftest:
@@ -175,10 +201,10 @@ test-hub-shard:
 	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race)
 
 ## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
-# The shard list comes from go run ./hack/hubshard -shards. Every shard
+# The shard list comes from hack/hubshard/hubshard.sh -shards. Every shard
 # runs even when an earlier one fails; the target fails if any did.
 test-hub-shards:
-	@shards=$$(go run ./hack/hubshard -shards) || exit 1; \
+	@shards=$$(./hack/hubshard/hubshard.sh -shards) || exit 1; \
 	failed=; \
 	for k in $$shards; do \
 		./hack/hubshard/shard.sh test $$k $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) || failed="$$failed $$k"; \
@@ -203,7 +229,7 @@ vet-hub-shard:
 # ptone/scion#1931). CI runs this in the SQLite Tests (non-hub) job.
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
-	@go test -count=1 ./internal/fixturegen/...
+	@go test -count=1 $(FIXTURE_PKGS)
 
 # TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
 # concurrency tests (ptone/scion#4240, Phase 3b) run by
@@ -460,8 +486,11 @@ test-store-postgres-entadapter: test-store-postgres-env-check
 		fi; \
 	fi
 
-# test-store-postgres-tail: the storetest, pkg/ent/entc and cmd runs of
-# test-store-postgres (after entadapter).
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc
+# and cmd runs of test-store-postgres (after entadapter). The enttest run
+# includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
+# schema snapshot the harness provisions test schemas from matches
+# entc.AutoMigrate.
 test-store-postgres-tail: test-store-postgres-env-check
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
@@ -475,6 +504,19 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/store/enttest/ > /tmp/test-launch-store-postgres-enttest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-enttest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: one or more pkg/store/enttest Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestSchemaSnapshot_MatchesAutoMigrate ' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: the schema snapshot equivalence test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
@@ -529,7 +571,8 @@ test-launch-store-postgres: test-store-postgres
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
-	$(TEST_IDENTITY_POSTGRES_TESTS)
+	$(TEST_IDENTITY_POSTGRES_TESTS) \
+	TestHubInternal_ReplayAcrossHubReplicas
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -567,7 +610,7 @@ test-hub-postgres-integration: test-hub-postgres-env-check
 ## hub-postgres-integration-shards: Print the pkg/hub shards that hold a HUB_INTEGRATION_POSTGRES_TESTS test, one per line (CI's shard plan)
 # Fails if a listed test is in no test file (hubshard -locate).
 hub-postgres-integration-shards:
-	@located=$$(go run ./hack/hubshard -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
+	@located=$$(./hack/hubshard/hubshard.sh -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
 	echo "$$located" | awk '{print $$2}' | sort -nu
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
@@ -589,7 +632,9 @@ WEBCHAT_POSTGRES_TESTS := TestListTopicsByProjects_Postgres \
 	TestScheduledStore_Postgres \
 	TestWebChatStore_Postgres_MessagesInOtherSchema \
 	TestWebChatStore_Postgres_ThreadMigrationsWaitForMessagesTable \
-	TestWebChatStore_Postgres_ThreadMigrationsRunOnce
+	TestWebChatStore_Postgres_ThreadMigrationsRunOnce \
+	TestUserPrefsThreadGroupsMarker_Postgres \
+	TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB
 
 test-webchat-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -607,7 +652,8 @@ test-webchat-postgres:
 CONDUIT_AUTHZ_POSTGRES_TESTS := TestConduitAuthzPostgres_NotifyAcrossNodes \
 	TestConduitAuthzPostgres_UserSuspendDeleteAndTokenRevoke \
 	TestConduitAuthzPostgres_ListenGapResync \
-	TestConduitAuthzPostgres_BulkRevocation
+	TestConduitAuthzPostgres_BulkRevocation \
+	TestSeparateRelayListenerReceivesHubEvents
 
 test-conduit-authz-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \
@@ -794,8 +840,15 @@ check-debug-defaults:
 	@./hack/check-debug-defaults.sh --self-test
 	@./hack/check-debug-defaults.sh
 
+## check-sqlite-coverage: Verify every package with a !no_sqlite test file is tested with SQLite by a blocking CI job
+# NOTE: same caveat as check-authz-guards above -- make collapses the
+# script's exit codes. CI invokes the script directly.
+check-sqlite-coverage:
+	@./hack/check-sqlite-coverage.sh --self-test
+	@./hack/check-sqlite-coverage.sh
+
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults
+check-custom: hubshard-parity testpart-selftest compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed check-debug-defaults check-sqlite-coverage
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
@@ -913,12 +966,15 @@ proto:
 ## ent-check: Verify generated ent code (pkg/ent) matches pkg/ent/schema
 # Regenerates in place, then fails if anything under pkg/ent (tracked diff
 # or new untracked files -- a new schema adds new directories, which
-# git diff alone does not see) or go.mod/go.sum changed. The generator runs
-# with -mod=mod, so a codegen dependency missing from go.sum shows up as a
-# go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
+# git diff alone does not see) or go.mod/go.sum changed. The generator is
+# declared as a module tool (the tool directive in go.mod) and runs through
+# go tool ent, so go mod tidy keeps the go.sum lines it needs (see tidy-check;
+# ptone/scion#4799). Run on a clean pkg/ent tree:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
 # Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
-# make as "Error 3".
+# make as "Error 3". Besides a schema compile or module download error, exit 3
+# also covers a go.sum entry the generator needs but is missing: go tool runs
+# read-only, so it fails instead of adding it (run make tidy-check).
 # Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
 # it greps for the "go generate ./pkg/ent failed (not drift)" line below.
 ent-check:
@@ -931,6 +987,25 @@ ent-check:
 		exit 1; \
 	fi; \
 	echo "ent generated code is up to date."
+
+## tidy-check: Verify go.mod/go.sum are tidy (go mod tidy would change nothing)
+# Uses go mod tidy -diff, which prints the edits tidy would make and changes no
+# files, so it does not depend on the state of the working tree. Catches a
+# go.mod/go.sum that disagrees with tidy, for example go.sum lines that a tool
+# or generator needs but tidy would drop (ptone/scion#4799).
+# Exit codes: 1 = not tidy; 3 = go mod tidy itself failed (not drift), shown by
+# make as "Error 3".
+# Keep in sync with the tidy-check step in .github/workflows/ci.yml: it greps
+# for the "go mod tidy -diff failed (not drift)" line below.
+tidy-check:
+	@echo "Checking go.mod/go.sum are tidy..."
+	@out="$$(mktemp)"; \
+	go mod tidy -diff >"$$out"; rc=$$?; \
+	if [ "$$rc" -eq 0 ]; then rm -f "$$out"; echo "go.mod/go.sum are tidy."; exit 0; fi; \
+	if [ ! -s "$$out" ]; then rm -f "$$out"; echo "go mod tidy -diff failed (not drift)"; exit 3; fi; \
+	cat "$$out"; rm -f "$$out"; \
+	echo "go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."; \
+	exit 1
 
 ## proto-check: Verify generated protobuf code is up to date
 proto-check:

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -98,7 +99,32 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	var err error
 	switch event.Name {
 	case hooks.EventSessionStart:
-		// Session starting - report running phase with working activity (clears any sticky)
+		// A clear or compact restarts the session inside the running
+		// harness. Working is reported only when the StatusHandler wrote
+		// it, on one of two paths:
+		//   - the parent's restart released a notification-set wait to
+		//     working and marked that write (session-restart); any other
+		//     state it kept, so nothing is sent. A wait that also records
+		//     the parent's own question became that agent-set wait without
+		//     the marker, so nothing is sent for it either. The marker
+		//     stays until the next local write, so a second restart before
+		//     then re-sends working, which is harmless.
+		//   - a sub-agent's restart took the held sub-agent path, which
+		//     writes working unless the local activity stays sticky. The
+		//     guard above returned when it stayed sticky, so local is the
+		//     working just written.
+		// "Session started" is never sent for a restart: the Hub's
+		// harness-ready attribution counts only new sessions.
+		if isInPlaceSessionStart(event) {
+			if !isLocalSessionRestartRelease() && !isHeldSubagentEvent(event) {
+				return nil
+			}
+			source := strings.ToLower(strings.TrimSpace(event.Data.Source))
+			log.Debug("Hub: Reporting running/working (session restarted in place)")
+			err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session restarted ("+source+")")
+			break
+		}
+		// New session - report running phase with working activity (clears any sticky)
 		log.Debug("Hub: Reporting running/working (session start)")
 		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session started")
 
@@ -142,6 +168,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			// waiting_for_input would replace the agent's own message.
 			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
 				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
+				return nil
+			}
+			// It also leaves blocked, completed, limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
 				return nil
 			}
 			message := "Waiting on parent"
@@ -199,12 +231,42 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			Message:  "Ready",
 		})
 
+	case hooks.EventSubagentEnd:
+		// The StatusHandler cleared a sub-agent-held wait to working when
+		// this SubagentStop was its last owner, and marked that write. Any
+		// other SubagentStop, and any parent event, changed nothing the Hub
+		// shows, so nothing is sent. The marker stays until the next local
+		// write, so a second SubagentStop before then re-sends working,
+		// which is harmless.
+		if !isSubagentEvent(event) || !isLocalSubagentEndRelease() {
+			return nil
+		}
+		log.Debug("Hub: Reporting working (sub-agent wait released)")
+		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{
+			Activity: state.ActivityWorking,
+			Status:   as.DisplayStatus(),
+			Message:  "Ready",
+		})
+
 	case hooks.EventNotification:
 		// A Notification during a wait the agent set itself leaves that
 		// wait in place locally; sending a new waiting_for_input would
 		// replace the agent's own message.
 		if h.isLocalWaitAgentSet() {
 			log.Debug("Hub: Skipping waiting_for_input (agent-set wait kept)")
+			return nil
+		}
+		// A sub-agent's Notification leaves blocked, completed,
+		// limits_exceeded and crashed in place locally; the Hub follows.
+		if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+			log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+			return nil
+		}
+		// Any Notification, the parent's included, leaves limits_exceeded
+		// and crashed in place locally; the Hub follows.
+		if h.isLocalTerminal() {
+			log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
 			return nil
 		}
 		// Agent is waiting for input
@@ -260,10 +322,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	} else {
 		log.Debug("Hub status update sent successfully")
 		// SessionStart is the one event currently used for start-time
-		// attribution (see pkg/hub's since_create_ms), so it logs at Info;
-		// every other event logs the same shape at Debug.
+		// attribution (see pkg/hub's since_create_ms), so it logs at Info
+		// with its source; only a new-session source counts there, since a
+		// clear or compact restart can only follow the first start. Every
+		// other event logs the same shape at Debug.
 		if event.Name == hooks.EventSessionStart {
-			slog.Info("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
+			slog.Info("hub status update sent", "event", event.Name, "source", event.Data.Source, "elapsed_ms", elapsedMs)
 		} else {
 			slog.Debug("hub status update sent", "event", event.Name, "elapsed_ms", elapsedMs)
 		}
@@ -280,9 +344,45 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 }
 
 // isLocalWaitAgentSet reports whether the local agent-info.json holds a
-// waiting_for_input that the agent set itself (no notification marker).
+// waiting_for_input that the agent set itself: with no notification marker,
+// or recorded as the parent's own question inside a wait that sub-agents
+// hold (parentWaitAgent). Either way the Hub already shows the agent's own
+// message, which a later waiting_for_input must not replace.
 func (h *HubHandler) isLocalWaitAgentSet() bool {
-	return isAgentSetWaiting(readLocalAgentInfo())
+	info := readLocalAgentInfo()
+	return isAgentSetWaiting(info) || (isNotificationWaiting(info) && parentWaitOf(info) == parentWaitAgent)
+}
+
+// isLocalSubagentEndRelease reports whether the local agent-info.json holds
+// the working activity that the last owner's SubagentStop wrote when it
+// released a sub-agent-held wait.
+func isLocalSubagentEndRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSubagentEnd
+}
+
+// isLocalSessionRestartRelease reports whether the local agent-info.json
+// holds the working activity that a clear or compact session-start wrote
+// when it released a notification-set wait.
+func isLocalSessionRestartRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSessionRestart
+}
+
+// isLocalHeldNonWaiting reports whether the local agent-info.json holds
+// blocked, completed, limits_exceeded or crashed.
+func (h *HubHandler) isLocalHeldNonWaiting() bool {
+	return isHeldNonWaitingActivity(readLocalActivity())
+}
+
+// isLocalTerminal reports whether the local agent-info.json holds a
+// terminal activity: limits_exceeded or crashed (state.Activity.IsTerminal).
+func (h *HubHandler) isLocalTerminal() bool {
+	return state.Activity(readLocalActivity()).IsTerminal()
 }
 
 // readLocalActivity returns the activity recorded in the local

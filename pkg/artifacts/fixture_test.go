@@ -132,6 +132,22 @@ func (h *fakeHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope s
 	return h.reviewers[PrincipalRef(kind, ref)+" "+ownerAgentID+" "+homeScope]
 }
 
+// ReviewGrantClause answers as MayGrantReview, naming project_admin when the
+// caller is also an admin of homeScope (allowAdmin) and delegating_user
+// otherwise.
+func (h *fakeHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
+	if !h.MayGrantReview(ctx, ownerAgentID, homeScope) {
+		return ""
+	}
+	kind, ref, _, _ := h.Principal(ctx)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.admins[PrincipalRef(kind, ref)+" "+homeScope] {
+		return ReviewClauseProjectAdmin
+	}
+	return ReviewClauseDelegatingUser
+}
+
 func (h *fakeHost) CrossScopeSharingAllowed(context.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -57,9 +57,12 @@ func runBrokerRegisterInstance(cmd *cobra.Command, key string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured; configure via SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or --hub flag")
+		return errHubNotConfigured
+	}
+	if err := checkBrokerHubURL(endpoint); err != nil {
+		return err
 	}
 
 	// Step 1: the strictly loaded instance with this key.

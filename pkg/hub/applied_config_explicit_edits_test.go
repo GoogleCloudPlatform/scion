@@ -155,8 +155,8 @@ func TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical(t *testing.T)
 // TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch is test-plan item
 // 3: an env key the template originally supplied, echoed back unchanged by a
 // PATCH, must not freeze into CreateInputs -- so when the template's default
-// later changes, reincarnate picks up the NEW template value, not the one
-// the echo would otherwise have pinned.
+// later changes, reincarnate does not replay the old value the echo would
+// otherwise have pinned.
 func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -202,7 +202,10 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, updated, project, "")
 	require.NoError(t, err)
-	assert.Equal(t, "b", fresh.Env["K"], "reincarnate must pick up the template's new default, not freeze the echoed value")
+	// The echoed value is not frozen, and the template's env is not copied
+	// into the agent config either: it reaches the agent from the
+	// template's own file on the broker (ptone/scion#4222).
+	assert.NotContains(t, fresh.Env, "K", "reincarnate must not freeze the echoed value")
 }
 
 // TestApplyAgentUpdate_DeletesEnvKeyAndThinkingLevel is test-plan item 4: a

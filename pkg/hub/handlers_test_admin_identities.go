@@ -34,19 +34,25 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// Admin-kind test identities (ptone/scion#4240, admin tier phase A1).
+// Admin-kind test identities (ptone/scion#4240, admin tier phases A1 and
+// A2).
 //
 // POST /api/v1/test-identities/admin issues a short-lived test identity
-// holding a real, expiring system hub-admin binding (kind test_hub_admin,
-// email in store.TestHubAdminEmailDomain) and returns one access token for
-// it. The test_super_admin kind is defined but its issuance answers 404
-// until the admin tier's policy phase (A2) ships and its own gate is on.
+// holding a real, expiring system hub-admin binding (adminRole hub-admin:
+// kind test_hub_admin, email in store.TestHubAdminEmailDomain) or
+// super-admin binding plus the admin role (adminRole super-admin: kind
+// test_super_admin, store.TestSuperAdminEmailDomain), and returns one
+// access token for it. Each kind answers 404 unless the hub started with
+// its level: --test-mode=admin (or above) for hub-admin,
+// --test-mode=super-admin for super-admin. What either kind may do is
+// limited by the test-admin policy (test_admin_policy.go).
 // POST /api/v1/test-identities/admin/revoke-all deletes every admin-kind
 // identity, for a human super-admin session.
 //
-// Both routes answer 404 unless the hub started with the test admin gate
-// on (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
-// hold the kind's capability (test_identity.issue_admin), and be a live
+// Both routes answer 404 unless the hub started with --test-mode=admin or
+// above (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
+// hold the kind's capability (test_identity.issue_admin or
+// test_identity.issue_super_admin), and be a live
 // super-admin through its own current bindings (canIssueTestAdmin). An
 // access-token issuer must present a hub-boundary token carrying exactly
 // the capability's scope, at most testAdminIssuerPATMaxAge old, which is
@@ -252,18 +258,50 @@ func testAdminRowRejection(ctx context.Context, kindFn func(context.Context, str
 // row block, from the row it read, and feeds mutation audit labels
 // (auditActorFromContext).
 type testAdminActor struct {
-	Kind               string
+	Kind string
+	// Credential names how the request authenticated: "web_session" for a
+	// token the web server minted for a test identity web session (WS4),
+	// "bearer" for the identity's own access token.
+	Credential         string
 	IssuerID           string
 	IssuerCredentialID string
 	IssuanceID         string
 	PurposeHash        string
+	// IdentityID and ExpiresAt are the identity's user ID and expiry, the
+	// inputs of grant shaping (grantShapingMiddleware).
+	IdentityID string
+	ExpiresAt  time.Time
 }
 
 type testAdminActorKey struct{}
 
-// contextWithTestAdminActor records u's immutable issuance facts on ctx.
-func contextWithTestAdminActor(ctx context.Context, u *store.User) context.Context {
-	a := testAdminActor{Kind: u.Kind}
+// Values of testAdminActor.Credential.
+const (
+	testAdminCredentialBearer     = "bearer"
+	testAdminCredentialWebSession = "web_session"
+)
+
+// testAdminCredentialFor returns testAdminActor.Credential for a hub-issued
+// user token's client type. An admin-kind identity has no OAuth, test-login
+// or refresh path, so its only token with client type web is the one the
+// web server mints per request for its web session
+// (testIdentityAccessToken); its own access token is issued with client
+// type api. The client type is a signed claim, and it is used here for the
+// audit record only, never for an authorization decision.
+func testAdminCredentialFor(clientType ClientType) string {
+	if clientType == ClientTypeWeb {
+		return testAdminCredentialWebSession
+	}
+	return testAdminCredentialBearer
+}
+
+// contextWithTestAdminActor records u's immutable issuance facts on ctx,
+// and how the request authenticated (testAdminCredentialFor).
+func contextWithTestAdminActor(ctx context.Context, u *store.User, credential string) context.Context {
+	a := testAdminActor{Kind: u.Kind, Credential: credential, IdentityID: u.ID}
+	if u.ExpiresAt != nil {
+		a.ExpiresAt = *u.ExpiresAt
+	}
 	if u.IssuedBy != nil {
 		a.IssuerID = *u.IssuedBy
 	}
@@ -297,6 +335,7 @@ func (a testAdminActor) labels() string {
 	return boundedLabelsJSON(map[string]string{
 		"test_tier":            "admin",
 		"kind":                 a.Kind,
+		"credential":           a.Credential,
 		"issuer_id":            a.IssuerID,
 		"issuer_credential_id": a.IssuerCredentialID,
 		"issuance_id":          a.IssuanceID,
@@ -308,16 +347,18 @@ func (a testAdminActor) labels() string {
 // /api/v1/test-identities/admin. Unknown fields are rejected, so no user
 // field (kind, email, expiry, issuer, role) can be bound from a request.
 type CreateTestAdminIdentityRequest struct {
-	// AdminRole is "hub-admin" (or "super-admin", refused with 404 until
-	// the admin tier's policy phase).
+	// AdminRole is "hub-admin" or "super-admin" (404 unless the hub
+	// started with --test-mode=super-admin).
 	AdminRole string `json:"adminRole"`
 	// Purpose is required, 8 to 200 characters.
 	Purpose string `json:"purpose"`
 	// LifetimeSeconds is the identity lifetime. 0 means the kind's
-	// default; at most the kind's cap (60 min for hub-admin).
+	// default; at most the kind's cap (60 min for hub-admin, 30 min for
+	// super-admin).
 	LifetimeSeconds int64 `json:"lifetimeSeconds,omitempty"`
 	// TokenTTLSeconds is the access token lifetime. 0 means the kind's
-	// default (15 min for hub-admin); at most the kind's cap (30 min).
+	// default (15 min for hub-admin, 10 min for super-admin); at most the
+	// kind's cap (30 min for hub-admin, 15 min for super-admin).
 	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
 }
 
@@ -502,6 +543,10 @@ func permissionAction(permissionID string) string {
 // ceiling, so revoking the user's super-admin binding stops the next
 // issuance even while the token is valid.
 func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission string) error {
+	// Test identities never issue (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, userID, "handlers_test_admin_identities.go:canIssueTestAdmin") {
+		return fmt.Errorf("%w: test identities do not issue", errTestAdminIssuerNotLive)
+	}
 	u, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
@@ -606,7 +651,8 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// A kind that is off answers 404, as the whole route does while the
-	// tier is off: the test super-admin kind until its own gate exists.
+	// tier is off: the test super-admin kind on a hub started with
+	// --test-mode=admin.
 	if !s.testAdminTierEnabled(spec.kind) {
 		NotFound(w, "endpoint")
 		return
@@ -805,8 +851,11 @@ var errTestAdminSinkWrite = errors.New("test admin audit sink write failed")
 // handleRevokeAllTestAdminIdentities handles POST
 // /api/v1/test-identities/admin/revoke-all: the emergency stop of admin
 // tier design §3.3, for a human super-admin on an interactive session (or
-// dev credential) only. It deletes every admin-kind identity, live or
-// expired, with its role bindings, group memberships and user-scope data,
+// dev credential) only. It first bumps the session generation of every
+// admin-kind identity, so their browser web sessions end on their next
+// request (WS4), then deletes every admin-kind identity, live or expired,
+// with every grant stamped with its issuance (admin tier A3), its role
+// bindings, group memberships and user-scope data,
 // and writes a test_admin_revoke audit record and sink line for each. An
 // identity the user delete refuses (it owns agents, or is a project's last
 // owner) is instead suspended and stripped of its role bindings in one
@@ -829,6 +878,12 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
 		return
 	}
+	// Revoke-all is for human super-admins only (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, actor.ID(), "handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities") {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session",
+			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
+		return
+	}
 	if !s.authzService.IsSystemAdmin(ctx, actor.ID()) {
 		logAuthzDenial(r, actor, Resource{Type: permissions.ResourceTestIdentity}, Action("revoke"), "caller is not a super-admin")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session", nil)
@@ -839,6 +894,22 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// End every live browser session of these identities first (WS4): each
+	// row's session generation is bumped, on its own write, before any
+	// delete. A web session snapshots the generation at redeem and is
+	// refused on its next request (page, API or event stream) once the row
+	// moves on, even while the row delete below is still pending or is
+	// refused. It fails closed: if any bump fails, nothing is deleted and
+	// the answer is 503, so revoke-all never reports a revocation that may
+	// have left a live session behind. A row already gone needs no bump.
+	for i := range users {
+		if err := s.store.IncrementSessionGeneration(ctx, users[i].ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.ErrorContext(ctx, "test admin revoke-all: session generation bump failed; no identity deleted or suspended", "test_identity_id", users[i].ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"test admin revoke-all could not end every identity's web sessions; no identity was deleted or suspended; retry", nil)
+			return
+		}
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	now := s.testIdentities.clock()
@@ -898,6 +969,20 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 			return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
 		}
 		return nil
+	}
+	// The grants the identity handed out (stamped with its issuance, admin
+	// tier A3) end first. Its stamped resources (agents, projects) stay
+	// for the purge route, which also removes any grant left here.
+	if u.IssuanceID != nil && *u.IssuanceID != "" {
+		report := &TestIdentityPurgeReport{IdentityID: u.ID}
+		run := fixturePurgeRun{rootID: u.ID, user: u, issuanceID: *u.IssuanceID, trigger: testAdminRevokeMutation, actor: auditActor}
+		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: auditActor.CorrelationID, Trigger: testAdminRevokeMutation}
+		if u.IssuedBy != nil {
+			run.issuerID, basis.IssuerID = *u.IssuedBy, *u.IssuedBy
+		}
+		if err := s.purgeTestAdminGrants(ctx, run, basis, report); err != nil {
+			return "", err
+		}
 	}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := deleteUserRowCascadeTx(ctx, tx, u.ID, s.membershipNow()); err != nil {

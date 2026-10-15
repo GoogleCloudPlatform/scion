@@ -53,7 +53,7 @@ func testServer(t *testing.T) (*Server, store.Store) {
 // data written since its last Migrate. The store is closed when the test ends.
 func testServerWithStore(t *testing.T, s store.Store) (*Server, store.Store) {
 	t.Helper()
-	if err := migrateTestStore(context.Background(), s); err != nil {
+	if err := s.Migrate(context.Background()); err != nil {
 		t.Fatalf("failed to migrate test store: %v", err)
 	}
 	return testServerOnMigratedStore(t, s)

@@ -40,13 +40,15 @@ import (
 // as the profile's issuer delegation, keep issued identities in the run
 // cache, and also run in agent mode, but only against a target whose
 // endpoint is not the agent's own hub. delegate is the human consent step
-// on the target: human mode only, never with a profile. web-code is not
-// available with a profile (it is not in hubProfileAllowed).
+// on the target: human mode only, never with a profile. web-code with a
+// profile mints the code through the issuer delegation, for an identity
+// that delegation issued; in agent mode it runs only with such a profile.
 //
 // A token or web-login code is a secret. Without a profile it is written
 // only to the file named by --out, created exclusively (never overwriting
 // an existing path or following a symlink) with mode 0600; with a profile
-// a token goes only to the run cache (0600, exclusive, symlinks refused).
+// a token goes only to the run cache (0600, exclusive, symlinks refused)
+// and a web-login code still only to --out.
 // Standard output and standard error carry only non-secret facts: the
 // identity's ID, email, role, expiry, the code ID and the output file path.
 
@@ -56,7 +58,7 @@ var hubTestIdentityCmd = &cobra.Command{
 	Long: `Manage hub test identities: short-lived synthetic member or viewer
 users for testing on a test hub.
 
-The hub must run with --enable-test-identities, and you need the
+The hub must run with --test-mode=member or above, and you need the
 test_identity.issue permission: an admin session, or a hub-bound access
 token carrying the test_identity:issue scope (the intended credential for
 CI and operators, set in SCION_HUB_TOKEN).
@@ -69,8 +71,9 @@ With a target-hub profile (see 'scion hub profile'), the commands act as the
 profile's issuer delegation on another test hub, issued identities go to the
 run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
 removes a whole run, and the commands also run in agent mode, but only
-against a profile for another hub. 'delegate' is the human consent step on
-the target hub. 'web-code' is not available with a profile or in agent mode.
+against a profile for another hub. 'web-code' with a profile mints the code
+through the issuer delegation, for an identity issued through it. 'delegate'
+is the human consent step on the target hub.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
@@ -88,8 +91,16 @@ Examples:
   # Delete a test identity when the run is done
   scion hub test-identity delete <id>
 
-  # With a target-hub profile: issue into the run cache, then tear the run down
+  # On a hub with --test-mode=admin: a test identity with the hub-admin
+  # role, its residue report, and the emergency stop (human super-admin)
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin journey" --out ./admin.token
+  scion hub test-identity residue <id>
+  scion hub test-identity revoke-all --reason "INC-123" --dry-run
+
+  # With a target-hub profile: issue into the run cache, mint a web-login
+  # code for the identity, then tear the run down
   scion --hub-profile t1 hub test-identity issue --as owner --run r1
+  scion --hub-profile t1 hub test-identity web-code <id> --out ./code.txt
   scion --hub-profile t1 hub test-identity teardown --run r1`,
 }
 
@@ -106,9 +117,18 @@ email, role and expiry are printed.
 outlives the identity. --lifetime is the identity lifetime (default 1h on
 the hub, at most 8h).
 
+With --admin-role hub-admin or super-admin, the identity holds the real
+hub-admin or super-admin role, on a hub started with --test-mode=admin (or
+super-admin for the super-admin role). The issuer must be a live human
+super-admin. --purpose (8 to 200 characters) and --out are required, --role
+does not apply, and the token is never re-issued. Lifetimes: hub-admin
+token 15m (at most 30m), identity 1h; super-admin token 10m (at most 15m),
+identity 30m. Not available in agent mode or with a hub profile.
+
 Examples:
   scion hub test-identity issue --out ./fixture.token
-  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token`,
+  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin settings journey" --out ./hub-admin.token`,
 	Args: cobra.NoArgs,
 	RunE: runHubTestIdentityIssue,
 }
@@ -195,9 +215,16 @@ symlink, or a path under a symlinked directory is refused. The file is
 created with mode 0600 and holds only the code. The code is never printed;
 only the identity ID, the code ID, the code expiry and the file path are.
 
+With a target-hub profile (--hub-profile or SCION_HUB_PROFILE), the code is
+minted on the target hub through the profile's issuer delegation, for a
+member identity issued through that delegation ('scion hub test-identity
+list' shows their IDs); --as does not apply. In agent mode web-code runs
+only with a profile for another hub, never this agent's own.
+
 Examples:
   scion hub test-identity web-code 6f1c... --out ./code.txt
-  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json`,
+  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json
+  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubTestIdentityWebCode,
 }
@@ -270,6 +297,11 @@ type testIdentityTokenOptions struct {
 }
 
 func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
+	// --admin-role (admin tier A4) is checked first: it never runs with a
+	// profile or in agent mode (hub_test_identity_admin.go).
+	if cmd.Flags().Changed("admin-role") {
+		return runHubTestIdentityAdminIssue(cmd)
+	}
 	if hubProfileSelected() {
 		return runProfileTestIdentityIssue(cmd)
 	}
@@ -310,7 +342,9 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 }
 
 func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	// With a profile: the issuer delegation on the target hub (--as is
+	// refused); without one: the CLI's usual hub client.
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
@@ -370,7 +404,15 @@ func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
-	return deleteTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+	return deleteTestIdentityWithHint(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0], testAdminDeleteHintApplies())
+}
+
+// testAdminDeleteHintApplies reports whether a plain delete's 404 notice
+// names the admin-role purge path: only on the human path without a hub
+// profile (delegation-issued identities are member or viewer, and agents
+// never manage admin-role identities).
+func testAdminDeleteHintApplies() bool {
+	return !hubProfileSelected() && resolveMode() != ModeAgent
 }
 
 // purgeTestIdentity purges a test identity and prints the hub's report.
@@ -713,13 +755,24 @@ func listTestIdentities(ctx context.Context, out io.Writer, svc hubclient.TestId
 // or it is not one of the caller's) succeeds with a notice, so a teardown
 // step can run more than once.
 func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
+	return deleteTestIdentityWithHint(ctx, out, errOut, svc, id, false)
+}
+
+// deleteTestIdentityWithHint is deleteTestIdentity; with adminHint, a 404
+// notice also says that a test identity with an admin role is removed only
+// by a purge. The hub answers a plain delete of one with 404, and the CLI
+// cannot tell that from a missing identity.
+func deleteTestIdentityWithHint(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string, adminHint bool) error {
 	err := svc.Delete(ctx, id)
 	if err == nil {
 		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", id)
 		return nil
 	}
 	if apiclient.IsNotFoundError(err) {
-		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found (already deleted, or not one you may delete); nothing to do.\n", id)
+		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n", id)
+		if adminHint {
+			_, _ = fmt.Fprintf(errOut, "A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete %s --purge\".\n", id)
+		}
 		return nil
 	}
 	if agents, projects, ok := hubclient.TestIdentityDeleteConflict(err); ok && (len(agents) > 0 || len(projects) > 0) {
