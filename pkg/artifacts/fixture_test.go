@@ -384,7 +384,7 @@ func errCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 // allowSteward makes StewardClause answer clause for u on artifacts owned
-// by agent homed in scope; revokeSteward takes that back.
+// by agent homed in scope.
 func (h *fakeHost) allowSteward(u principal, agent, scope, clause string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -392,12 +392,6 @@ func (h *fakeHost) allowSteward(u principal, agent, scope, clause string) {
 		h.stewards = map[string]string{}
 	}
 	h.stewards[PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope] = clause
-}
-
-func (h *fakeHost) revokeSteward(u principal, agent, scope string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	delete(h.stewards, PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope)
 }
 
 // StewardClause implements Stewardship from the stewards table.
