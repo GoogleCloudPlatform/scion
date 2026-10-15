@@ -15,9 +15,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -25,6 +27,9 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/envelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -136,6 +141,10 @@ type routedBrokerTunnel struct {
 	// onFallback, when set, sees a fallback forced by a hub-side fault
 	// (reason: brokerRPCFallback*).
 	onFallback func(brokerID, op, reason string, err error)
+	// signer, when set, signs each attempt for the session it is sent on
+	// (signForSession). The broker serves only requests signed for the
+	// receiving session.
+	signer brokerRequestSigner
 }
 
 var _ controlChannelTunnel = (*routedBrokerTunnel)(nil)
@@ -282,6 +291,14 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 		// legacy sessions for streams only, so this does not happen.
 		return nil, errRoutedFallback
 	}
+	if t.signer != nil {
+		signed, err := t.signForSession(ctx, res.Record.PrincipalID, res.Record.SessionID, rpc)
+		if err != nil {
+			// Nothing was sent.
+			return nil, fmt.Errorf("%w: %w", errRoutedFallback, err)
+		}
+		rpc = signed
+	}
 	callCtx, cancel := context.WithTimeout(ctx, t.attemptTimeout())
 	defer cancel()
 	r, err := res.Session.Call(callCtx, rpc)
@@ -385,6 +402,43 @@ var sessionStaleReasons = map[string]bool{
 // reason (relay-wide reasons are handled before it).
 func ownerStaleReason(reason string) bool { return sessionStaleReasons[reason] }
 
+// signForSession returns a copy of rpc signed for brokerID and the
+// conduit session sessionID: conduit.BrokerRPCSessionHeader carries the
+// session id and is listed among the signed headers, so the signature
+// covers it. The request is signed as the control channel signs it, on
+// the same method, path, query and body.
+func (t *routedBrokerTunnel) signForSession(ctx context.Context, brokerID, sessionID string, rpc *conduitv1.RpcRequest) (*conduitv1.RpcRequest, error) {
+	if sessionID == "" {
+		return nil, errors.New("no session to sign the request for")
+	}
+	target := "http://runtime-broker" + rpc.GetPath()
+	if q := rpc.GetQuery(); q != "" {
+		target += "?" + q
+	}
+	var body io.Reader
+	if len(rpc.GetBody()) > 0 {
+		body = bytes.NewReader(rpc.GetBody())
+	}
+	req, err := http.NewRequestWithContext(ctx, rpc.GetMethod(), target, body)
+	if err != nil {
+		return nil, fmt.Errorf("building the request to sign: %w", err)
+	}
+	for k, v := range rpc.GetHeaders() {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set(conduit.BrokerRPCSessionHeader, sessionID)
+	req.Header.Set(apiclient.HeaderSignedHeaders, conduit.BrokerRPCSessionHeader)
+	if err := t.signer.Sign(ctx, req, brokerID); err != nil {
+		return nil, fmt.Errorf("signing the request: %w", err)
+	}
+	out := proto.Clone(rpc).(*conduitv1.RpcRequest)
+	out.Headers = make(map[string]string, len(req.Header))
+	for k := range req.Header {
+		out.Headers[k] = req.Header.Get(k)
+	}
+	return out, nil
+}
+
 // drained handles a draining session's refusal: the first is retried on a
 // replacement session (the router excludes this one), a second falls back.
 func (st *routedAttempt) drained() error {
@@ -422,6 +476,7 @@ func (s *Server) newRoutedBrokerTunnel() *routedBrokerTunnel {
 			return brokerExecScope(b), nil
 		},
 		onFallback: s.recordBrokerRPCFallback,
+		signer:     &hmacBrokerSigner{store: s.store},
 	}
 	if s.controlChannel != nil {
 		t.timeout = s.controlChannel.config.RequestTimeout

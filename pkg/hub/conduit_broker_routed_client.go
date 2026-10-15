@@ -28,13 +28,14 @@ import (
 
 // SetConduitRouting routes the transient broker operations through t,
 // with the existing control channel and HTTP paths as the fallback. The
-// requests are built and signed as on the control channel.
+// requests are built as on the control channel; t signs each attempt.
 func (c *HybridBrokerClient) SetConduitRouting(t *routedBrokerTunnel) {
 	if t == nil {
 		c.routed = nil
 		return
 	}
-	c.routed = &ControlChannelBrokerClient{manager: t, debug: c.debug, signer: c.controlChannel.signer}
+	// The tunnel signs each attempt for its session; the client does not.
+	c.routed = &ControlChannelBrokerClient{manager: t, debug: c.debug}
 }
 
 // routedFor reports whether a request to brokerID may go through the
