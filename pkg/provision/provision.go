@@ -3984,7 +3984,7 @@ const (
 	// for it is kept.
 	staleEntryDirKept
 	// staleEntryDirNotRecreated: git's entry was removed, but the empty
-	// directory could not be created again.
+	// directory could not be created again with its owner and mode.
 	staleEntryDirNotRecreated
 )
 
@@ -4002,8 +4002,8 @@ func staleEntryError(in ProvisionInput, path string, state staleEntryState, err 
 			"Make sure nothing is mounted at it and remove the empty directory, unlock the entry if it is locked (git worktree unlock %s), "+
 			"then run git worktree remove %s in the shared checkout and start the agent again", shown, err, gitPath, gitPath)
 	case staleEntryDirNotRecreated:
-		return fmt.Errorf("ProvisionShared: removed git's stale worktree entry at %s, but could not create its empty directory again: %w. "+
-			"Start the agent again", shown, err)
+		return fmt.Errorf("ProvisionShared: removed git's stale worktree entry at %s, but could not create its empty directory again with its owner and mode: %w. "+
+			"Check the directory's owner and mode (or remove it), then start the agent again", shown, err)
 	default:
 		return fmt.Errorf("ProvisionShared: git still has a worktree entry at %s, where nothing exists any more, and it could not be removed: %w. "+
 			"Unlock the entry if it is locked (git worktree unlock %s), then run git worktree remove %s in the shared checkout and start the agent again",

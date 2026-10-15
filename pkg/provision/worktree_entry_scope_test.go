@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +139,7 @@ func TestProvisionShared_BranchHeldByHiddenWorktree_ClearErrorAndKeepsEntry(t *t
 	err := ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-3", "sibling"))
 	require.Error(t, err, "expected ProvisionShared to fail for a branch held by another worktree")
 	assert.Contains(t, err.Error(), "git worktree remove "+sibling, "error should name the holder and how to clear it")
+	assert.Contains(t, err.Error(), "Start the agent with a different branch", "mounted mode uses the branch-in-another-worktree advice")
 	requireSiblingIntact(t, workspace, sibling, restore)
 }
 
@@ -229,6 +231,9 @@ func TestClearOwnStaleWorktreeEntry_UsesSafeGitCommand(t *testing.T) {
 // writable; a mount point gives EBUSY), nothing else is touched and the
 // error says to remove the directory first.
 func TestClearOwnStaleWorktreeEntry_RmdirFails_ClearError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
 	workspace, origin, worktreePath := staleOwnEntry(t)
 	require.NoError(t, os.Mkdir(worktreePath, 0o755))
 	worktreesDir := filepath.Dir(worktreePath)
@@ -257,7 +262,7 @@ func TestClearOwnStaleWorktreeEntry_RecreateFails_ClearError(t *testing.T) {
 
 	err := clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not create its empty directory again")
+	assert.Contains(t, err.Error(), "could not create its empty directory again with its owner and mode")
 	assert.Contains(t, err.Error(), "recreate refused")
 	assert.NoDirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-1"), "the own entry was removed")
 	requireSiblingIntact(t, workspace, sibling, restore)
@@ -270,15 +275,18 @@ func TestClearOwnStaleWorktreeEntry_EmptyDirNotRegisteredLeftAlone(t *testing.T)
 	origin := worktreeGit(t, workspace, "remote", "get-url", "origin")
 	worktreePath := WorktreePath(workspace, "agent-3")
 	require.NoError(t, os.Mkdir(worktreePath, 0o755))
-	before, err := os.Stat(worktreePath)
+	// Held open, the directory shows a link count of 0 once it is removed,
+	// even if a new one gets the same inode number.
+	dir, err := os.Open(worktreePath)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = dir.Close() })
 	in := mountedWorktreeInput(workspace, origin, "agent-3", "agent-three")
 
 	require.NoError(t, clearOwnStaleWorktreeEntry(t.Context(), in, workspace, worktreePath))
 
-	after, err := os.Stat(worktreePath)
+	fi, err := dir.Stat()
 	require.NoError(t, err)
-	assert.True(t, os.SameFile(before, after), "the directory should not be replaced")
+	assert.NotZero(t, fi.Sys().(*syscall.Stat_t).Nlink, "the directory should not be replaced")
 }
 
 // Outside MountedWorktree the error shows the path as is and does not
@@ -306,4 +314,21 @@ func TestParseWorktreeList(t *testing.T) {
 		{path: "/w/plain path", branch: "b2"},
 	}
 	assert.Equal(t, want, got)
+}
+
+// A branch held by a worktree entry inside the shared checkout whose
+// directory is missing: in mounted mode the error names it relative to the
+// shared checkout, never by the init container's path, and the entry is
+// kept.
+func TestProvisionShared_BranchHeldInsideCheckout_RelativePathInError(t *testing.T) {
+	workspace := provisionTwoMountedWorktrees(t)
+	origin := worktreeGit(t, workspace, "remote", "get-url", "origin")
+	_, err := moveWorktreeAside(workspace, "agent-2", removedWorktreePrefix)
+	require.NoError(t, err)
+
+	err = ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-3", "agent-two"))
+	require.Error(t, err, "expected ProvisionShared to fail for a branch held by another worktree")
+	assert.Contains(t, err.Error(), "git worktree remove worktrees/agent-2", "the holder is named relative to the shared checkout")
+	assert.NotContains(t, err.Error(), WorktreePath(workspace, "agent-2"), "the init container's path is not shown")
+	assert.DirExists(t, filepath.Join(workspace, ".git", "worktrees", "agent-2"), "the holder's entry is kept")
 }
