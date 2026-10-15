@@ -396,8 +396,7 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // sends no metadata mode, and the broker applies its runtime default
 // ("block" on most runtimes, "passthrough" on Kubernetes).
 //
-// Unlike brokerHasCloudRunSandboxProfile (handlers_agents_core.go), which
-// treats a broker as qualifying when any one of its profiles matches, this
+// Like passthroughProfileIsCloudRunSandbox (handlers_agents_core.go), this
 // resolves the single profile this agent's dispatch will actually use
 // (resolveAgentRuntimeProfileType), because one broker can run more than one
 // runtime profile and only one of them applies to a given agent. On a grant
