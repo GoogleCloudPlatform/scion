@@ -17,6 +17,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -201,13 +202,13 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 	sort.Strings(names)
 
 	var (
-		resolved  bool
-		hostCtx   string
-		hostConn  KubeConnection
-		hostErr   error
-		nsOf      = make(map[string]string, len(names))
-		byID      = make(map[[2]string][]string)
-		unresolve []string
+		resolved   bool
+		hostCtx    string
+		hostConn   KubeConnection
+		hostErr    error
+		nsOf       = make(map[string]string, len(names))
+		byID       = make(map[[2]string][]string)
+		unresolved []string
 	)
 	for _, name := range names {
 		rt := runtimes[name]
@@ -228,11 +229,16 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 			} else {
 				hostCtx, hostConn, hostErr = currentContext()
 			}
+			if hostErr != nil {
+				// The warning carries a fixed reason; the detail is
+				// logged here only.
+				slog.Warn("Kubernetes placement: could not read the current context to group runtime entries", "error", hostErr)
+			}
 		}
 		var reason string
 		switch {
 		case hostErr != nil:
-			reason = fmt.Sprintf("the current context could not be read: %v", hostErr)
+			reason = "the current context could not be read"
 		case hostConn == KubeConnInCluster:
 			id := [2]string{"in-cluster", ns}
 			byID[id] = append(byID[id], name)
@@ -246,7 +252,7 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 		default:
 			reason = "the connection mode is unknown"
 		}
-		unresolve = append(unresolve, name)
+		unresolved = append(unresolved, name)
 		warnings = append(warnings, fmt.Sprintf("runtimes.%s: cluster identity could not be resolved (%s); treating it as targeting the same cluster as every entry in namespace %q", name, reason, ns))
 	}
 
@@ -255,7 +261,7 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 			groups = append(groups, members)
 		}
 	}
-	for _, u := range unresolve {
+	for _, u := range unresolved {
 		group := []string{u}
 		for _, other := range names {
 			if other != u && nsOf[other] == nsOf[u] {

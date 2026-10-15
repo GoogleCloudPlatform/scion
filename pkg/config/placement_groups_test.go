@@ -147,6 +147,25 @@ func TestIdentityGroups_GT2(t *testing.T) {
 			}
 		})
 	}
+	t.Run("callback error text stays out of the warning", func(t *testing.T) {
+		runtimes := map[string]V1RuntimeConfig{
+			"u": {Type: "kubernetes", Namespace: "ns"},
+			"a": {Type: "kubernetes", Context: "ctx-a", Namespace: "ns"},
+		}
+		const detail = "open /distinctive/path/kubeconfig-7f3a: permission denied"
+		calls := 0
+		groups, warnings := IdentityGroups(runtimes, hostContext("", KubeConnKubeconfig, errors.New(detail), &calls), "ns")
+		if !reflect.DeepEqual(groups, [][]string{{"a", "u"}}) {
+			t.Fatalf("groups = %v, want [[a u]]", groups)
+		}
+		want := `runtimes.u: cluster identity could not be resolved (the current context could not be read); treating it as targeting the same cluster as every entry in namespace "ns"`
+		if len(warnings) != 1 || warnings[0] != want {
+			t.Fatalf("warnings = %q, want [%q]", warnings, want)
+		}
+		if strings.Contains(warnings[0], "distinctive") || strings.Contains(warnings[0], "permission denied") {
+			t.Fatalf("warning carries the callback error text: %q", warnings[0])
+		}
+	})
 	t.Run("overlapping groups", func(t *testing.T) {
 		runtimes := map[string]V1RuntimeConfig{
 			"u": {Type: "kubernetes", Namespace: "ns"},
