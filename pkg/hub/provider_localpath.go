@@ -64,10 +64,9 @@ func linkedProjectInitDir(localPath string) (string, bool) {
 	return scionDir, true
 }
 
-// globalProjectSlug is the slug of a broker's global project: the CLI
-// registers it under the name "global", and the combined hub and broker
-// server creates it with this slug. Project slugs are unique on the hub.
-const globalProjectSlug = "global"
+// globalProjectSlug is the slug of a broker's global project
+// (config.GlobalProjectSlug).
+const globalProjectSlug = config.GlobalProjectSlug
 
 // isGlobalHubProject reports whether a hub project with this slug is the
 // global project. Only the slug counts, the same rule dispatch uses to mark
@@ -76,7 +75,7 @@ const globalProjectSlug = "global"
 // isReservedProjectSlug); project names and labels can be set by clients and
 // do not identify the global project.
 func isGlobalHubProject(slug string) bool {
-	return slug == globalProjectSlug
+	return config.IsGlobalProjectSlug(slug)
 }
 
 // isBrokerGlobalDirPath reports whether localPath has the shape of a broker's
