@@ -263,7 +263,7 @@ func (s *Server) hubRelayRPC(w http.ResponseWriter, r *http.Request, peer, sessi
 	if rpc.GetPath() == conduitTunnelsPath {
 		// The relay holding the session opens the tunnel the hub
 		// authorizes (conduit_tunnel_relay.go).
-		resp, tunnel = s.relayTunnelRPC(r.Context(), rt, v.identity, credExpiry, sessionID, rpc, req.ExcludeTargets)
+		resp, tunnel = s.relayTunnelRPC(r.Context(), rt, v.identity, credExpiry, sessionID, rpc, req.ExcludeTargets, req.OpenTunnels)
 	} else {
 		resp = newConduitRelayRPCHandler(s, v.identity, credExpiry).HandleRPC(r.Context(), rpc)
 	}

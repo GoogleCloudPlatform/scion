@@ -46,7 +46,7 @@ import (
 // sessionID and returns the success answer (its stream id left for the
 // relay to set) with the instruction to open the tunnel. Refusals are
 // returned as errors, as open returns them.
-func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExternalRuntime, sessionID string, body []byte, exclude []string) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
+func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExternalRuntime, sessionID string, body []byte, exclude []string, openTunnels int) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
 	log := slog.Default().With("subsystem", "hub.conduit", "user_id", ts.identity.ID(), "session_id", sessionID, "relay_held", true)
 	if !ts.credExpiry.IsZero() && !ts.now().Before(ts.credExpiry) {
 		log.Info("Conduit tunnel refused", "cause", "credential_expired")
@@ -62,6 +62,11 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	req, kind, params, err := parseConduitTunnelRequest(body)
 	if err != nil {
 		return nil, nil, err
+	}
+	// The session's tunnel cap, at the point open applies it: the relay
+	// holding the session counts its open and opening tunnels.
+	if int64(openTunnels) >= conduitTunnelStreamCap.Load() {
+		return nil, nil, tunnelRefusal(tunnelRateLimited, "too many tunnels on this session")
 	}
 	agent, _, log, err := ts.checkTunnelTarget(ctx, log, req.Agent, kind, params)
 	if err != nil {
@@ -143,12 +148,12 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 // relayTunnelRPC answers a POST /v1/tunnels forwarded from the relay-held
 // user session sessionID, for identity: a refusal (no instruction), or the
 // success answer with the instruction to open the tunnel.
-func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime, identity UserIdentity, credExpiry time.Time, sessionID string, rpc *conduitv1.RpcRequest, exclude []string) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime, identity UserIdentity, credExpiry time.Time, sessionID string, rpc *conduitv1.RpcRequest, exclude []string, openTunnels int) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
 	if rpc.GetMethod() != http.MethodPost {
 		return withRPCHeader(conduitRPCError(http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "method not allowed"), "Allow", http.MethodPost), nil
 	}
 	ts := newConduitTunnelSession(s, identity, credExpiry)
-	resp, open, err := ts.openForRelay(ctx, rt, sessionID, rpc.GetBody(), exclude)
+	resp, open, err := ts.openForRelay(ctx, rt, sessionID, rpc.GetBody(), exclude, openTunnels)
 	if err != nil {
 		var te *conduitTunnelError
 		if errors.As(err, &te) {

@@ -30,6 +30,9 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// TunnelsRPCPath is the RPC path of a tunnel request (POST).
+const TunnelsRPCPath = "/v1/tunnels"
+
 // MaxTunnelReResolves bounds how many times one tunnel request goes back to
 // the hub after the target session it named turned out stale (the same
 // budget the router gives one resolution).
@@ -60,10 +63,41 @@ type tunnelKey struct {
 	stream  uint32
 }
 
-// tunnelTable holds the open tunnels of a Role.
+// tunnelTable holds the open tunnels of a Role, and the tunnel requests
+// still being answered, per user session.
 type tunnelTable struct {
-	mu sync.Mutex
-	m  map[tunnelKey]Tunnel
+	mu      sync.Mutex
+	m       map[tunnelKey]Tunnel
+	pending map[string]int
+}
+
+// reserve counts a tunnel request on the user session: it returns how many
+// tunnels the session has open or is opening besides this one, and the
+// release to call once the request is answered (an opened tunnel is then
+// counted by its entry).
+func (t *tunnelTable) reserve(session string) (others int, release func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.pending == nil {
+		t.pending = map[string]int{}
+	}
+	others = t.pending[session]
+	for k := range t.m {
+		if k.session == session {
+			others++
+		}
+	}
+	t.pending[session]++
+	var once sync.Once
+	return others, func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.pending[session]--; t.pending[session] <= 0 {
+				delete(t.pending, session)
+			}
+		})
+	}
 }
 
 func (t *tunnelTable) add(tn Tunnel) (remove func()) {
@@ -99,6 +133,14 @@ func (ro *Role) Tunnels() []Tunnel {
 		out = append(out, tn)
 	}
 	return out
+}
+
+// relayLocal is the relay's Local, false before the role is bound.
+func (ro *Role) relayLocal(ctx context.Context, sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
+	if ro.relay == nil {
+		return nil, registry.SessionRecord{}, false
+	}
+	return ro.relay.Local(ctx, sessionID)
 }
 
 // errTunnelStale reports a target session the owner no longer holds or no
@@ -171,6 +213,10 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		_ = target.CloseWithCode(conduit.CloseCancelled, relay.ReasonCancelled)
 		return unavailable, nil
 	}
+	// The tunnel is recorded with what its re-checks need (the target-side
+	// ids, the open grant, the bridge). It is not yet handed to the stream
+	// scheduler: until that wiring lands, nothing re-checks or renews it, and
+	// a target that enforces deadlines ends it at its authorization deadline.
 	remove := ro.tunnels.add(Tunnel{
 		UserSessionID: userSessionID,
 		UserStreamID:  user.ID(),

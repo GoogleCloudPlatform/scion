@@ -302,8 +302,8 @@ func TestRoleTunnel_StaleRouteRetriesWithExclusion(t *testing.T) {
 	if resp.GetStatus() != http.StatusOK {
 		t.Fatalf("answer %v, want 200 after re-resolution", resp)
 	}
-	streamIDOf(t, resp)
-	relaytest.Wait(t, target.ids, "the target stream")
+	_ = streamIDOf(t, resp)
+	_ = relaytest.Wait(t, target.ids, "the target stream")
 	mu.Lock()
 	defer mu.Unlock()
 	if len(excluded) != 2 || len(excluded[0]) != 0 || len(excluded[1]) != 1 || excluded[1][0] != "session-gone" {
@@ -356,5 +356,31 @@ func TestRoleTunnel_BridgeRefusesAcceptWithoutTargetIDs(t *testing.T) {
 	}
 	if tns := f.role.Tunnels(); len(tns) != 0 {
 		t.Fatalf("tunnels %+v, want none", tns)
+	}
+}
+
+// TestRoleTunnel_ReportsOpenTunnelsForCap: each tunnel request tells the
+// hub how many tunnels the session already has open or opening, so the hub
+// can apply its per-session cap.
+func TestRoleTunnel_ReportsOpenTunnelsForCap(t *testing.T) {
+	f := newRoleFixture(t)
+	target := newEchoTarget()
+	rec := dialTarget(t, f.w, f.node, target.config)
+	var (
+		mu     sync.Mutex
+		counts []int
+	)
+	ls, _ := userSessionFor(t, f, func(_ int, req relay.HubRPCRequest) hubAnswer {
+		mu.Lock()
+		counts = append(counts, req.OpenTunnels)
+		mu.Unlock()
+		return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, f.node.Internal.URL)}
+	})
+	_ = streamIDOf(t, requestTunnel(t, ls))
+	_ = streamIDOf(t, requestTunnel(t, ls))
+	mu.Lock()
+	defer mu.Unlock()
+	if len(counts) != 2 || counts[0] != 0 || counts[1] != 1 {
+		t.Fatalf("open tunnel counts sent to the hub %v, want [0 1]", counts)
 	}
 }

@@ -579,3 +579,36 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// TestRelayRPC_TunnelCapAppliesToRelayCount: on a relay-held session the
+// hub applies the per-session tunnel cap to the count the relay reports,
+// at the point the in-process path reserves a slot: after the request
+// shape and before the agent is read (a capped session learns nothing
+// about the agent), with no instruction to open anything.
+func TestRelayRPC_TunnelCapAppliesToRelayCount(t *testing.T) {
+	f, cf := newUserRelayOps(t)
+	adm := f.mustAdmit(t, bearer(ownerJWT(t, cf)), "s1")
+	body, err := json.Marshal(conduitTunnelRequest{Agent: "no-such-agent", Kind: "tcp", Params: map[string]string{"port": "3000"}})
+	require.NoError(t, err)
+	b, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1", Method: http.MethodPost, Path: conduitTunnelsPath, Body: body})
+	require.NoError(t, err)
+	call := func(open int) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+		var out relay.HubRPCResponse
+		require.NoError(t, f.hub.Call(context.Background(), relay.HubSessionPath("s1", "rpc"),
+			relay.HubRPCRequest{AdmissionToken: adm.AdmissionToken, RPC: b, OpenTunnels: open}, &out))
+		resp := &conduitv1.RpcResponse{}
+		require.NoError(t, proto.Unmarshal(out.RPC, resp))
+		return resp, out.Tunnel
+	}
+	limit := int(conduitTunnelStreamCap.Load())
+
+	resp, tunnel := call(limit)
+	assert.Equal(t, int32(http.StatusTooManyRequests), resp.GetStatus(), string(resp.GetBody()))
+	assert.Contains(t, string(resp.GetBody()), ErrCodeRateLimited)
+	assert.Nil(t, tunnel)
+
+	resp, tunnel = call(limit - 1)
+	assert.Equal(t, int32(http.StatusNotFound), resp.GetStatus(), "below the cap the agent is looked up: %s", resp.GetBody())
+	assert.Contains(t, string(resp.GetBody()), ErrCodeAgentNotFound)
+	assert.Nil(t, tunnel)
+}

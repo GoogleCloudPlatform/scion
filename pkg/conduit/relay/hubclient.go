@@ -303,6 +303,10 @@ type HubRPCRequest struct {
 	// them). The hub resolves the tunnel's target without them, re-checks
 	// and mints a new grant for the session it picks.
 	ExcludeTargets []string `json:"exclude_targets,omitempty"`
+	// OpenTunnels is, on a tunnel request, how many tunnels the relay holds
+	// open or is opening on the session, this request excluded. The hub
+	// applies its per-session tunnel cap to it.
+	OpenTunnels int `json:"open_tunnels,omitempty"`
 }
 
 // HubRPCResponse is the RPC's answer (the encoded RpcResponse).
