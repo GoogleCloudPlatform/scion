@@ -82,6 +82,19 @@ var SecurityMutationSymbols = map[string]string{
 	// LinkPendingFederatedUser links an issuer subject to a pending
 	// federated account and activates it: first contact (ptone/scion#4603).
 	"LinkPendingFederatedUser": "change-principal-status",
+	// Project visitor rules (ptone/scion#4603): a rule gives visitor
+	// access by email domain through the bindings it creates; changing its
+	// window changes theirs, removing it deletes them, and an exclusion
+	// stops it binding one visitor again.
+	"CreateProjectVisitorRule":       "grant-authority",
+	"UpdateProjectVisitorRuleWindow": "change-authority",
+	"DeleteProjectVisitorRule":       "revoke-authority",
+	"CreateProjectVisitorExclusion":  "revoke-authority",
+	// Project deletion removes the project's visitor rules with their
+	// bindings and exclusions; a rule binding replaces a visitor grant by
+	// email that is no longer active.
+	"DeleteProjectVisitorRulesByProject": "revoke-authority",
+	"DeleteInactiveVisitorGrant":         "revoke-authority",
 
 	// Role definition mutations
 	"CreateRoleDefinition":                  "create-resource",
@@ -343,11 +356,17 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// Project visitor grants (ptone/scion#4603): the grant routes, and first
 	// contact in the auth middleware's visitor lookup. The revoke route's
-	// delete is in the membership service (RemoveVisitor), below.
+	// delete, and its exclusion of a visitor from the rule that bound them,
+	// are in the membership service (RemoveVisitor), below.
 	// -----------------------------------------------------------------------
 	{File: "pkg/hub/handlers_project_visitors.go", Function: "grantProjectVisitor", Symbol: "CreateVisitorRoleBinding", OperationID: "project.visitors.add"},
 	{File: "pkg/hub/handlers_project_visitors.go", Function: "handleUpdateProjectVisitor", Symbol: "UpdateVisitorRoleBindingWindow", OperationID: "project.visitors.update"},
-	{File: "pkg/hub/federation_visitor.go", Function: "linkPendingVisitor", Symbol: "LinkPendingFederatedUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "First contact during federated authentication: a verified user token of an issuer that allows visitor grants, with a present and (where the issuer sends it) verified email, links its subject to the pending federated account a project owner granted that email, and activates it; the visitor_linked audit record is written in the same transaction. It adds no grant", Scope: "pkg/hub/federation_visitor.go"}},
+	{File: "pkg/hub/federation_visitor.go", Function: "linkPendingVisitor", Symbol: "LinkPendingFederatedUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "First contact during federated authentication: a verified issuer token for a user of an issuer that allows visitor grants, with a present and (where the issuer sends it) verified email, links its subject to the pending federated account a project owner granted that email, or to a new account when a project owner's visitor rule matches the email's domain, and activates it; the visitor_linked audit record is written in the same transaction. The link itself adds no grant", Scope: "pkg/hub/federation_visitor.go"}},
+	{File: "pkg/hub/federation_visitor.go", Function: "bindVisitorRules", Symbol: "CreateVisitorRoleBinding", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Visitor rule binding during federated authentication: for a verified issuer token for a user of an issuer that allows visitor grants, with a present and (where the issuer sends it) verified email that passes the issuer's allowed_emails and allowed_domains, it binds the linked federated account to the project-visitor role on each project whose active visitor rule (added by a holder of project.manage_visitors under project.visitors.rules.add) names that issuer and exactly the email's domain, unless the account has an exclusion from the rule or already has a visitor binding there other than an inactive visitor grant by email. The store refuses a rule that is missing or not active when the binding is written, and gives the binding the rule's ID and its window as read in the same transaction; a visitor_linked audit record naming the rule is written in the same transaction. It grants nothing the rule did not", Scope: "pkg/hub/federation_visitor.go"}},
+	{File: "pkg/hub/federation_visitor.go", Function: "bindVisitorRules", Symbol: "DeleteInactiveVisitorGrant", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Visitor rule binding during federated authentication: when the linked federated account's only visitor binding on the rule's project is a visitor grant by email whose window does not contain the current time (expired or not started), that grant is deleted, after the store re-reads and re-checks it in the same transaction, and replaced by the rule's binding; the visitor_linked audit record names the replaced binding. An active grant by email is never deleted, and the transaction rolls back if the rule binding is then refused, so no access is lost", Scope: "pkg/hub/federation_visitor.go"}},
+	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleAddProjectVisitorRule", Symbol: "CreateProjectVisitorRule", OperationID: "project.visitors.rules.add"},
+	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleUpdateProjectVisitorRule", Symbol: "UpdateProjectVisitorRuleWindow", OperationID: "project.visitors.rules.update"},
+	{File: "pkg/hub/handlers_project_visitor_rules.go", Function: "handleRemoveProjectVisitorRule", Symbol: "DeleteProjectVisitorRule", OperationID: "project.visitors.rules.remove"},
 	// -----------------------------------------------------------------------
 	// pkg/hub/project_membership_service.go — RS1 bounded domain service
 	// Mutations moved from handlers to the service in RS1. Handlers now
@@ -358,6 +377,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_membership_service.go", Function: "UpdateMemberRole", Symbol: "DeleteRoleBinding", OperationID: "project.membership.update"},
 	{File: "pkg/hub/project_membership_service.go", Function: "RemoveMember", Symbol: "DeleteRoleBinding", OperationID: "project.membership.remove"},
 	{File: "pkg/hub/project_membership_service.go", Function: "RemoveVisitor", Symbol: "DeleteRoleBinding", OperationID: "project.visitors.remove"},
+	{File: "pkg/hub/project_membership_service.go", Function: "RemoveVisitor", Symbol: "CreateProjectVisitorExclusion", OperationID: "project.visitors.remove"},
 	{File: "pkg/hub/project_membership_service.go", Function: "TransferOwnership", Symbol: "CreateRoleBinding", OperationID: "project.membership.transfer"},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "CreateRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement used by AddMember/UpdateMemberRole/TransferOwnership; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
 	{File: "pkg/hub/project_membership_service.go", Function: "replaceBindingTx", Symbol: "DeleteRoleBinding", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "RS1 one-binding invariant: atomic binding replacement cleanup; always called from a governed service method", Scope: "pkg/hub/project_membership_service.go"}},
@@ -556,6 +576,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGroup", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGCPServiceAccount", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteProjectVisitorRulesByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},

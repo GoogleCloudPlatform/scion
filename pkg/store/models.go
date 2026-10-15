@@ -3684,6 +3684,10 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
 	// IssuanceID is the issuance ID of the admin-kind test identity whose
 	// request created the row (admin tier A3 grant shaping). The store sets
 	// it only from the context's GrantShaping; a value supplied by the

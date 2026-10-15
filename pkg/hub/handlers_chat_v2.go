@@ -6210,7 +6210,9 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// attached to. Anyone else gets the same answer as for an unknown
 	// attachment; the reason is logged.
 	// A token reads a file of a project through project:read on that
-	// project only.
+	// project only. A token reads a file with no project only through a
+	// message it may read, or as the uploader of a file not sent yet (see
+	// canReadAttachment).
 	var allowed bool
 	if token := chatToken(ctx); token != nil && meta.ProjectID != "" {
 		allowed = s.canReadProject(ctx, token, meta.ProjectID)

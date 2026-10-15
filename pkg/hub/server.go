@@ -2071,6 +2071,9 @@ type Server struct {
 	// Dedicated message logger for message audit trail (nil = uses messageLog fallback)
 	dedicatedMessageLog *slog.Logger
 
+	// Dedicated artifact decision logger (nil = entries are discarded)
+	artifactDecisionLog *slog.Logger
+
 	// missingAgents and lifecycleOps back the heartbeat missing-container
 	// reconcile (broker_heartbeat_reconcile.go). Zero values are ready to use.
 	missingAgents missingAgentTracker
@@ -3964,6 +3967,16 @@ func (s *Server) SetMessageLogger(l *slog.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dedicatedMessageLog = l
+}
+
+// SetArtifactLogger sets the dedicated artifact decision logger, the
+// "scion-artifacts" log stream (ptone/scion#5120). The artifact service and
+// the artifact maintenance pass write to it; until it is set their entries
+// are discarded.
+func (s *Server) SetArtifactLogger(l *slog.Logger) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.artifactDecisionLog = l
 }
 
 // SetChannelRegistry sets the notification channel registry for external delivery.

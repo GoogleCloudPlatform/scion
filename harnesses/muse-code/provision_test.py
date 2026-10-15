@@ -1032,7 +1032,7 @@ class TestMuseAgentPlugins(unittest.TestCase):
         self.assertNotIn("a", self.registry())
 
     def test_mcp_diagnostics_surface_as_warnings(self) -> None:
-        # muse <= 1.4.7 keeps Agent Plugins MCP servers inactive (M3).
+        # muse <= 1.4.9 keeps Agent Plugins MCP servers inactive (M3).
         self.stage({"a": "d1"}, mcp=True)
         warnings: list[str] = []
         self.reconcile(warnings)

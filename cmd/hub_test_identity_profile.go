@@ -149,7 +149,6 @@ var hubTestIdentityDelegateRevokeCmd = &cobra.Command{
 }
 
 var (
-	testIdentityAdminRole     string
 	testIdentityTeardownPurge bool
 	delegateWorkloadSub       string
 	delegateTTL               time.Duration

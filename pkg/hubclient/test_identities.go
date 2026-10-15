@@ -34,12 +34,6 @@ type TestIdentityService interface {
 	// Issue creates a test identity and returns one access token for it.
 	Issue(ctx context.Context, req *IssueTestIdentityRequest) (*TestIdentityTokenResponse, error)
 
-	// IssueAdmin creates an admin-kind test identity (a test hub-admin or
-	// test super-admin) on POST /api/v1/test-identities/admin and returns
-	// one access token for it. The hub must run with --test-mode=admin (or
-	// super-admin for a test super-admin); otherwise it answers 404.
-	IssueAdmin(ctx context.Context, req *IssueTestAdminIdentityRequest) (*TestAdminIdentityTokenResponse, error)
-
 	// Token issues a new access token for a live test identity.
 	Token(ctx context.Context, id string, req *TestIdentityTokenRequest) (*TestIdentityTokenResponse, error)
 
@@ -68,6 +62,23 @@ type TestIdentityService interface {
 	// any earlier unredeemed one. The hub answers 404 when web sessions are
 	// not available on it.
 	WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error)
+
+	// IssueAdmin creates a test identity with an admin role (POST
+	// /api/v1/test-identities/admin) and returns its one access token.
+	// The hub answers 404 unless it started with --test-mode=admin (or
+	// super-admin for the super-admin role). See test_admin_identities.go.
+	IssueAdmin(ctx context.Context, req *IssueTestAdminIdentityRequest) (*TestAdminIdentityTokenResponse, error)
+
+	// RevokeAllAdmin revokes every test identity with an admin role (POST
+	// /api/v1/test-identities/admin/revoke-all). Human super-admin on an
+	// interactive session only.
+	RevokeAllAdmin(ctx context.Context) (*RevokeAllTestAdminIdentitiesResponse, error)
+
+	// AdminResidue returns the residue report of one test identity with an
+	// admin role, live or purged (GET
+	// /api/v1/test-identities/admin/{id}/residue). Human super-admin on an
+	// interactive session only.
+	AdminResidue(ctx context.Context, id string) (*TestAdminResidueReport, error)
 }
 
 // TestIdentityPurgeCounts counts what a purge removed.
@@ -162,40 +173,6 @@ type TestIdentityTokenResponse struct {
 	TokenExpiresAt time.Time    `json:"tokenExpiresAt"`
 }
 
-// IssueTestAdminIdentityRequest is the request for POST
-// /api/v1/test-identities/admin.
-type IssueTestAdminIdentityRequest struct {
-	// AdminRole is "hub-admin" or "super-admin".
-	AdminRole string `json:"adminRole"`
-	// Purpose is required by the hub: 8 to 200 characters.
-	Purpose string `json:"purpose"`
-	// LifetimeSeconds is the identity lifetime; 0 means the kind's default.
-	LifetimeSeconds int64 `json:"lifetimeSeconds,omitempty"`
-	// TokenTTLSeconds is the access token lifetime; 0 means the kind's
-	// default. The token never outlives the identity.
-	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
-}
-
-// TestAdminIdentity is an admin-kind test identity as the hub reports it.
-// It never carries a token.
-type TestAdminIdentity struct {
-	TestIdentity
-	Kind       string `json:"kind"`
-	AdminRole  string `json:"adminRole"`
-	IssuanceID string `json:"issuanceId"`
-}
-
-// TestAdminIdentityTokenResponse is the response of IssueAdmin. AccessToken
-// is a secret: write it only where the caller asked for it, never to logs
-// or standard output.
-type TestAdminIdentityTokenResponse struct {
-	Identity       TestAdminIdentity `json:"identity"`
-	AccessToken    string            `json:"accessToken"`
-	TokenType      string            `json:"tokenType"`
-	ExpiresIn      int64             `json:"expiresIn"`
-	TokenExpiresAt time.Time         `json:"tokenExpiresAt"`
-}
-
 // TestIdentityWebLoginCode is the response of WebLoginCode. Code is a
 // secret: callers write it only to a private file and never log or print
 // it.
@@ -232,26 +209,6 @@ func (s *testIdentityService) Issue(ctx context.Context, req *IssueTestIdentityR
 		return nil, err
 	}
 	return apiclient.DecodeRequired[TestIdentityTokenResponse](resp)
-}
-
-// IssueAdmin creates an admin-kind test identity. It is sent once, never
-// retried, since a retry could create a second identity.
-func (s *testIdentityService) IssueAdmin(ctx context.Context, req *IssueTestAdminIdentityRequest) (*TestAdminIdentityTokenResponse, error) {
-	if req == nil {
-		return nil, fmt.Errorf("an admin role and purpose are required")
-	}
-	resp, err := s.c.postNoRetry(ctx, "/api/v1/test-identities/admin", req, nil)
-	if err != nil {
-		return nil, err
-	}
-	out, err := apiclient.DecodeRequired[TestAdminIdentityTokenResponse](resp)
-	if err != nil {
-		return nil, err
-	}
-	if out.AccessToken == "" || out.Identity.ID == "" {
-		return nil, fmt.Errorf("hub returned no admin test identity token")
-	}
-	return out, nil
 }
 
 // Token issues a new access token for a live test identity. It is sent
