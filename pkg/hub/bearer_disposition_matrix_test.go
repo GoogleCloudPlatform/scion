@@ -238,9 +238,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
-	}, {OperationID: "agent.messages.read", Method: "GET", Pattern: "/api/v1/agents/{id}/messages/stream"}: {
+	},
+	{OperationID: "agent.messages.read", Method: "GET", Pattern: "/api/v1/agents/{id}/messages/stream"}: {
 		Reason: "the matrix server configures no event publisher, so every caller gets 501 before the agent is looked up",
-		Pin:    "TestTokenStream_EndsAfterRevocation",
+		Pin:    "TestMessagesStreamToken_AdmissionByBoundary",
 	},
 	{OperationID: "project.conversation.gcsobject.read", Method: "GET", Pattern: "/api/v1/gcs/object"}: {
 		Reason: "the matrix server enables no gs:// link experiment and configures no token generator, so every caller gets the same 404 before the message is looked up",

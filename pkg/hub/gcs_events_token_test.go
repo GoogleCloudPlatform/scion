@@ -73,10 +73,7 @@ func TestGCSObjectToken_ProjectGroupNeedsProjectRead(t *testing.T) {
 
 	t.Run("hub token with project:read is admitted", func(t *testing.T) {
 		key, err := mint(t, hubBoundary(), "project:read")
-		if err != nil {
-			t.Logf("a hub token with project:read cannot be minted for a project member: %v", err)
-			return
-		}
+		require.NoError(t, err)
 		rec := fetch(t, key)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	})
@@ -105,7 +102,8 @@ func TestGCSObjectToken_ProjectGroupNeedsProjectRead(t *testing.T) {
 
 // TestWebEventStream_RefusesUserAccessToken requires the web event stream
 // to refuse a request that carries a user access token and no web session:
-// the stream never opens for a token.
+// the stream never opens for a token. TestSSEHandler_SubjectAuthzAllowed
+// is the positive control: a signed-in web session opens the same stream.
 func TestWebEventStream_RefusesUserAccessToken(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

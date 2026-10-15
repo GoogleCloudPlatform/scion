@@ -77,10 +77,11 @@ func openTokenPTY(t *testing.T, f *ptyConduitFixture, brokerPath bool, auth stri
 
 // TestAgentPTY_TokenSessionEndsWhenTokenStopsValidating requires a PTY
 // session opened with a user access token, on the broker path and on the
-// agent path, to close with 4401 authz_expired once the token is revoked
-// or expires, and to stay open past many re-check intervals while the
-// token validates. A session opened with a session credential is not
-// re-checked and stays open.
+// agent path, to close with 4401 authz_expired once the token is revoked or
+// expires, its user is suspended, or its user loses agent.attach, and to
+// stay open past many re-check intervals while the token validates. A
+// session opened with a session credential is not re-checked and stays
+// open.
 func TestAgentPTY_TokenSessionEndsWhenTokenStopsValidating(t *testing.T) {
 	shortenStreamRecheck(t)
 	for _, path := range []struct {
@@ -115,7 +116,7 @@ func TestAgentPTY_TokenSessionEndsWhenTokenStopsValidating(t *testing.T) {
 
 			t.Run("expired token", func(t *testing.T) {
 				f := newPTYConduitFixture(t)
-				exp := time.Unix(0, 0).Add(time.Since(time.Unix(0, 0)) + 3*time.Second)
+				exp := time.Now().Add(3 * time.Second)
 				key, _ := mint(t, f, &exp)
 				c := openTokenPTY(t, f, path.broker, key)
 				requireAuthzExpired(t, c)
@@ -126,6 +127,24 @@ func TestAgentPTY_TokenSessionEndsWhenTokenStopsValidating(t *testing.T) {
 				key, _ := mint(t, f, nil)
 				c := openTokenPTY(t, f, path.broker, key)
 				setUserStatus(t, f.store, f.launched.OwnerID, store.UserStatusSuspended)
+				requireAuthzExpired(t, c)
+			})
+
+			t.Run("agent.attach removed", func(t *testing.T) {
+				// A project member who is not the agent's owner holds
+				// agent.attach only through super-admin; removing it
+				// leaves the token valid and takes agent.attach away.
+				f := newPTYConduitFixture(t)
+				stranger := f.stranger.ID()
+				grantSuperAdmin(t, f.store, stranger)
+				key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(stranger), CreateTokenParams{
+					UserID: stranger, Name: "pty-" + tid("attach"), Boundary: hubBoundary(), Scopes: []string{"agent:attach"},
+				})
+				require.NoError(t, err)
+				c := openTokenPTY(t, f, path.broker, key)
+				time.Sleep(10 * streamCredentialRecheckInterval)
+				ptyPingPong(t, c)
+				revokeSuperAdmin(t, f.store, stranger)
 				requireAuthzExpired(t, c)
 			})
 

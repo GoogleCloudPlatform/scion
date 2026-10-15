@@ -201,7 +201,7 @@ func runTokenStreamEnds(t *testing.T, cause string, expiry time.Duration, change
 				UserID: userID, Name: "ts-" + tid(cause), Boundary: hubBoundary(), Scopes: []string{st.selector},
 			}
 			if expiry > 0 {
-				exp := time.Unix(0, 0).Add(time.Since(time.Unix(0, 0)) + expiry)
+				exp := time.Now().Add(expiry)
 				params.ExpiresAt = &exp
 			}
 			key, token, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(userID), params)
@@ -236,7 +236,7 @@ func TestTokenStream_EndsAfterRevocation(t *testing.T) {
 // opened by a user access token to end with streamCredentialEndedEvent once
 // the token expires.
 func TestTokenStream_EndsAfterExpiry(t *testing.T) {
-	runTokenStreamEnds(t, "expired", time.Second, func(*testing.T, *tokenStreamFixture, string, string) {})
+	runTokenStreamEnds(t, "expired", 3*time.Second, func(*testing.T, *tokenStreamFixture, string, string) {})
 }
 
 // TestTokenStream_EndsAfterUserSuspended requires every agent and project
@@ -360,8 +360,10 @@ func TestBearerStillValid_OnlyTokensAreChecked(t *testing.T) {
 // TestMessageLogStream_UsesFullHistoryRule requires the agent message-log
 // stream to apply the message-log list's rule for every caller: agent.attach
 // gives the full history (no participant filter), agent.read alone gives the
-// messages the caller sent or received, and a caller the list refuses, or
-// admits, gets the same answer on the stream.
+// messages the caller sent or received, a caller the list refuses gets 403
+// on the stream too, and a non-user caller follows the same rule: an agent
+// with agent.attach gets the full history on both, and a read-only agent
+// gets 403 on both.
 func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 	srv, s, alice, bob, agentID := setupMessagePrivacyTest(t)
 	logs := &openTailLogQuerier{}
@@ -452,13 +454,181 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 		}
 	}
 
-	t.Run("agent caller: the stream answers as the list does", func(t *testing.T) {
-		setAuth := func(r *http.Request) { r.Header.Set("X-Scion-Agent-Token", agentTok) }
-		listStatus, listParticipant := list(t, byID, setAuth)
-		require.NotEqual(t, http.StatusUnauthorized, listStatus, "the agent caller authenticates")
-		streamStatus, streamParticipant := stream(t, byID, setAuth)
-		assert.Equal(t, listStatus, streamStatus)
-		assert.Equal(t, listParticipant, streamParticipant)
-		t.Logf("agent caller: list %d (%q), stream %d (%q)", listStatus, listParticipant, streamStatus, streamParticipant)
+	readOnlyCaller := &store.Agent{ID: tid("mls-ro-caller"), Slug: "mls-ro-caller", Name: "RO Caller", ProjectID: agent.ProjectID, Phase: "running", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateAgent(ctx, readOnlyCaller))
+	readOnlyTok, err := srv.GenerateAgentToken(readOnlyCaller.ID, readOnlyCaller.ProjectID, nil, AgentRoleReadOnly, nil)
+	require.NoError(t, err)
+
+	for _, path := range []string{byID, inProject} {
+		t.Run(path+" agent caller with agent.attach: full history on list and stream", func(t *testing.T) {
+			setAuth := func(r *http.Request) { r.Header.Set("X-Scion-Agent-Token", agentTok) }
+			listStatus, listParticipant := list(t, path, setAuth)
+			require.Equal(t, http.StatusOK, listStatus, "list")
+			require.Equal(t, "", listParticipant, "list: full history")
+			streamStatus, streamParticipant := stream(t, path, setAuth)
+			assert.Equal(t, http.StatusOK, streamStatus, "stream")
+			assert.Equal(t, "", streamParticipant, "stream: full history")
+		})
+		t.Run(path+" read-only agent caller: refused on list and stream", func(t *testing.T) {
+			setAuth := func(r *http.Request) { r.Header.Set("X-Scion-Agent-Token", readOnlyTok) }
+			listStatus, listParticipant := list(t, path, setAuth)
+			require.Equal(t, http.StatusForbidden, listStatus, "list")
+			require.Equal(t, "<none>", listParticipant, "list: no query")
+			streamStatus, streamParticipant := stream(t, path, setAuth)
+			assert.Equal(t, http.StatusForbidden, streamStatus, "stream")
+			assert.Equal(t, "<none>", streamParticipant, "stream: no tail")
+		})
+	}
+}
+
+// grantSuperAdmin binds the seeded super-admin role to userID at system
+// scope.
+func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
 	})
+	require.NoError(t, err)
+}
+
+// revokeSuperAdmin removes every super-admin binding of userID.
+func revokeSuperAdmin(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID == rd.ID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.NotZero(t, removed, "the user held super-admin")
+}
+
+// TestTokenStream_EndsAfterAttachRemoved requires a message-log or message
+// stream opened by a user access token with the full history (agent.attach)
+// to end once the token's user loses agent.attach while keeping agent.read,
+// and a stream the same user opened with agent.read alone (participant
+// filtered) to keep running across the same change. The user is a project
+// member (agent.read, no agent.attach on another member's agent) who also
+// holds super-admin (agent.attach) until the change removes it.
+func TestTokenStream_EndsAfterAttachRemoved(t *testing.T) {
+	shortenStreamRecheck(t)
+	f := newTokenStreamFixture(t)
+	byID := "/api/v1/agents/" + f.agent.ID
+	inProject := "/api/v1/projects/" + f.agent.ProjectID + "/agents/" + f.agent.ID
+	streams := []struct {
+		name, path string
+		logs       bool // a log tail records the participant filter
+	}{
+		{"agent message logs", byID + "/message-logs/stream", true},
+		{"project agent message logs", inProject + "/message-logs/stream", true},
+		{"agent messages", byID + "/messages/stream", false},
+	}
+	for i, st := range streams {
+		t.Run(st.name, func(t *testing.T) {
+			userID := tid("ts-attach-" + string(rune('a'+i)))
+			createTestUserWithProjectRole(t, f.store, userID, userID+"@test.com", f.agent.ProjectID, store.ProjectRoleMember)
+			ensureHubMembership(context.Background(), f.store, userID)
+			grantSuperAdmin(t, f.store, userID)
+			full := mintHubConfigToken(t, f.srv, userID, hubBoundary(), "agent:read", "agent:attach")
+			readOnly := mintHubConfigToken(t, f.srv, userID, hubBoundary(), "agent:read")
+
+			before := len(f.logs.tails())
+			fullDone, fullRec, fullCancel := openStream(t, f.srv, st.path, "Bearer "+full)
+			defer fullCancel()
+			if st.logs {
+				tails := f.logs.tails()
+				require.Greater(t, len(tails), before)
+				require.Equal(t, "", tails[len(tails)-1].ParticipantID, "the attach token opens the full history")
+			}
+			before = len(f.logs.tails())
+			readDone, readRec, readCancel := openStream(t, f.srv, st.path, "Bearer "+readOnly)
+			defer readCancel()
+			if st.logs {
+				tails := f.logs.tails()
+				require.Greater(t, len(tails), before)
+				require.Equal(t, userID, tails[len(tails)-1].ParticipantID, "the read token opens the participant view")
+			}
+			requireStreamStaysOpen(t, fullDone)
+
+			revokeSuperAdmin(t, f.store, userID)
+
+			requireStreamEnds(t, fullDone)
+			require.Equal(t, http.StatusOK, fullRec.Code, fullRec.Body.String())
+			body := fullRec.Body.String()
+			require.Contains(t, body, streamCredentialEndedEvent)
+			assert.Equal(t, streamCredentialEndedEvent, body[len(body)-len(streamCredentialEndedEvent):])
+
+			requireStreamStaysOpen(t, readDone)
+			readCancel()
+			requireStreamEnds(t, readDone)
+			require.Equal(t, http.StatusOK, readRec.Code, readRec.Body.String())
+			assert.NotContains(t, readRec.Body.String(), streamCredentialEndedEvent,
+				"a stream admitted with agent.read keeps running while agent.read holds")
+		})
+	}
+}
+
+// streamStatus opens the stream at path with auth for a short while and
+// returns its status: 200 for a stream that opened, the refusal status
+// otherwise.
+func streamStatus(t *testing.T, srv *Server, path, auth string) int {
+	t.Helper()
+	reqCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(reqCtx)
+	req.Header.Set("Authorization", auth)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestMessagesStreamToken_AdmissionByBoundary requires the agent message
+// stream to admit a user access token with agent:read on a boundary that
+// contains the agent's project (a project token for the project, a hub
+// token), to refuse a token without agent:read and a token bounded to
+// another project, and to admit a session. The user is a member of the
+// agent's project and of one other project.
+func TestMessagesStreamToken_AdmissionByBoundary(t *testing.T) {
+	f := newTokenStreamFixture(t)
+	ctx := context.Background()
+	path := "/api/v1/agents/" + f.agent.ID + "/messages/stream"
+	userID := tid("ms-member")
+	createTestUserWithProjectRole(t, f.store, userID, userID+"@test.com", f.agent.ProjectID, store.ProjectRoleMember)
+	ensureHubMembership(ctx, f.store, userID)
+	other := &store.Project{ID: tid("ms-other"), Name: "ms-other", Slug: "ms-other"}
+	require.NoError(t, f.store.CreateProject(ctx, other))
+	createTestUserWithProjectRole(t, f.store, userID, userID+"@test.com", other.ID, store.ProjectRoleMember)
+
+	mint := func(boundary TokenBoundary, scopes ...string) string {
+		key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
+			UserID: userID, Name: "ms-" + tid("tok"), Boundary: boundary, Scopes: scopes,
+		})
+		require.NoError(t, err)
+		return "Bearer " + key
+	}
+	u, err := f.store.GetUser(ctx, userID)
+	require.NoError(t, err)
+	session, _, _, err := f.srv.userTokenService.GenerateTokenPair(u.ID, u.Email, u.DisplayName, u.Role, ClientTypeWeb)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusOK, streamStatus(t, f.srv, path, mint(projectBoundary(f.agent.ProjectID), "agent:read")),
+		"project token with agent:read")
+	assert.Equal(t, http.StatusOK, streamStatus(t, f.srv, path, mint(hubBoundary(), "agent:read")),
+		"hub token with agent:read")
+	assert.Equal(t, http.StatusForbidden, streamStatus(t, f.srv, path, mint(projectBoundary(f.agent.ProjectID), "project:read")),
+		"token without agent:read")
+	other403or404 := streamStatus(t, f.srv, path, mint(projectBoundary(other.ID), "agent:read"))
+	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, other403or404,
+		"token bounded to another project")
+	assert.Equal(t, http.StatusOK, streamStatus(t, f.srv, path, "Bearer "+session), "session")
 }
