@@ -661,7 +661,7 @@ func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient
 	}
 
 	util.Debugf("Hub client auth: %s (source: %s)", info.Method, info.Source)
-	util.Debugf("Hub endpoint: %s", endpoint)
+	util.Debugf("Hub endpoint: %s", config.RedactURL(endpoint))
 
 	opts = append(opts, hubclient.WithTimeout(30*time.Second))
 
@@ -704,8 +704,7 @@ func endpointSourceNote(s hubEndpointScope) string {
 
 // redactEndpointIn returns text (an error message that may quote the hub
 // URL, or a URL built from it) with the user info of endpoint redacted as
-// config.RedactURL does. net/http already masks a password in its errors,
-// but not a user name given without a password, which may be a token.
+// config.RedactURL does.
 func redactEndpointIn(text, endpoint string) string {
 	u, err := url.Parse(endpoint)
 	if err != nil {
@@ -738,7 +737,7 @@ const redactedHubURL = "[redacted hub URL]"
 
 // urlUserInfoInTextRe matches the user info of a URL anywhere in a text, up
 // to the last '@' of the authority (a password may contain '@').
-var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s"'<>]*@`)
+var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s"<>]*@`)
 
 // redactUnparsedEndpointIn is redactEndpointIn for an endpoint that
 // url.Parse rejects, so its user info cannot be located: it fails closed.
@@ -797,6 +796,22 @@ func redactSecretForms(text, secret string) string {
 // quotedBody returns a strconv.Quote result without its outer quotes.
 func quotedBody(q string) string {
 	return q[1 : len(q)-1]
+}
+
+// hubLinkJSONResult is the --format json result of 'hub link'. The
+// endpoint is shown without user info.
+func hubLinkJSONResult(projectName, projectID, hubProjectID, endpoint string) ActionResult {
+	return ActionResult{
+		Status:  "success",
+		Command: "hub link",
+		Message: fmt.Sprintf("Project '%s' is now linked to the Hub.", projectName),
+		Details: map[string]interface{}{
+			"project":      projectName,
+			"projectId":    projectID,
+			"hubProjectId": hubProjectID,
+			"endpoint":     config.RedactURL(endpoint),
+		},
+	}
 }
 
 // hubStatusName returns the nickname of the hub at endpoint for hub
@@ -2469,7 +2484,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// not visible to anyone else, so it needs no confirmation (the same rule
 	// as the auto-link in hubsync.EnsureHubReady); remote hubs keep it.
 	if isLocalWorkstationEndpoint(endpoint) {
-		fmt.Fprintf(os.Stderr, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+		fmt.Fprintf(os.Stderr, "Linking project '%s' to the local hub at %s\n", projectName, config.RedactURL(endpoint))
 	} else if !hubsync.ShowProjectLinkPrompt(projectName, endpoint, autoConfirm) {
 		return fmt.Errorf("linking cancelled")
 	}
@@ -2477,7 +2492,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	// Verify authentication before proceeding
 	authInfo := getAuthInfo(settings, endpoint)
 	if authInfo.MethodType == "none" {
-		return fmt.Errorf("not authenticated to Hub at %s\n\nPlease log in first:\n  scion hub auth login", endpoint)
+		return fmt.Errorf("not authenticated to Hub at %s\n\nPlease log in first:\n  scion hub auth login", config.RedactURL(endpoint))
 	}
 
 	// Create Hub client
@@ -2494,7 +2509,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		if isLocalWorkstationEndpoint(endpoint) {
 			return &hubsync.LocalServerNotRunningError{Endpoint: endpoint, Err: err}
 		}
-		return fmt.Errorf("hub at %s is not responding: %w", endpoint, err)
+		return fmt.Errorf("hub at %s is not responding: %w", config.RedactURL(endpoint), err)
 	}
 
 	// Ensure project_id exists
@@ -2703,17 +2718,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	recordLinkEntry(linkOut, cmd.ErrOrStderr(), endpoint, effectiveHubProjectID, linkSlug, linkName, resolvedPath)
 
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
-			Status:  "success",
-			Command: "hub link",
-			Message: fmt.Sprintf("Project '%s' is now linked to the Hub.", projectName),
-			Details: map[string]interface{}{
-				"project":      projectName,
-				"projectId":    projectID,
-				"hubProjectId": effectiveHubProjectID,
-				"endpoint":     endpoint,
-			},
-		})
+		return outputJSON(hubLinkJSONResult(projectName, projectID, effectiveHubProjectID, endpoint))
 	}
 
 	fmt.Println()

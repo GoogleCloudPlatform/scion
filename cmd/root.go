@@ -369,7 +369,7 @@ var plainErrorCommands = map[string]bool{
 // ANSI escape sequence is removed, including any carried in the error text
 // itself, so piped stderr stays plain.
 func formatCLIError(f *os.File, err error) string {
-	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
+	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %s%s\n\n", util.BgRed, util.White, util.Bold, config.RedactURLsIn(err.Error()), util.Reset))
 }
 
 // configureDebugOutput sets up CLI debug output for one invocation. An
@@ -713,7 +713,7 @@ func checkAgentContainerContext(cmd *cobra.Command) error {
 
 	reason := "no Hub endpoint is configured"
 	if endpoint != "" {
-		reason = fmt.Sprintf("the Hub endpoint (%s) points to localhost, which is not reachable from inside this container", endpoint)
+		reason = fmt.Sprintf("the Hub endpoint (%s) points to localhost, which is not reachable from inside this container", config.RedactURL(endpoint))
 	}
 
 	return fmt.Errorf(
