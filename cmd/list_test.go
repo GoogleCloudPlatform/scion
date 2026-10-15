@@ -64,7 +64,9 @@ func TestFormatLastActivity(t *testing.T) {
 	}
 }
 
-func TestDisplayAgentsLocalMode(t *testing.T) {
+// TestDisplayAgents_RowsAndMissingValues checks the table header and rows,
+// including "-" for a missing harness config.
+func TestDisplayAgents_RowsAndMissingValues(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
 			Name:            tid("agent-1"),
@@ -135,7 +137,9 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	}
 }
 
-func TestDisplayAgentsHubMode(t *testing.T) {
+// TestDisplayAgents_BrokerColumn checks that the BROKER column shows the
+// broker name.
+func TestDisplayAgents_BrokerColumn(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
 			Name:              "hub-agent",

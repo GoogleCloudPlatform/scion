@@ -259,7 +259,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 		for i := range results {
 			r := &results[i]
 			if r.Removed && r.Error == "" {
-				if _, err := cleanupAfterHubDelete(hubCtx, r.Name, false); err != nil {
+				if _, err := cleanupAfterConfirmedHubDelete(hubCtx, r.Name, false); err != nil {
 					r.Warnings = append(r.Warnings, stopRmCleanupWarning(r.Name, err))
 				}
 			}
@@ -389,7 +389,7 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 		// Same local cleanup as scion delete (ptone/scion#2896); the branch
 		// is kept, as with a local stop --rm.
 		var warnings []string
-		if _, err := cleanupAfterHubDelete(hubCtx, agentName, false); err != nil {
+		if _, err := cleanupAfterConfirmedHubDelete(hubCtx, agentName, false); err != nil {
 			warnings = append(warnings, stopRmCleanupWarning(agentName, err))
 		}
 		if isJSONOutput() {

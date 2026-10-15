@@ -1103,7 +1103,7 @@ func (r *CloudRunRuntime) GetWorkspacePath(ctx context.Context, id string) (stri
 	return "", fmt.Errorf("cloudrun: host workspace paths are not available for Cloud Run instances; use the Hub workspace API")
 }
 
-// StreamLogs tails log output in real time (for scion look / scion logs -f).
+// StreamLogs tails log output in real time.
 func (r *CloudRunRuntime) StreamLogs(ctx context.Context, instanceName string, opts cloudrun.LogOptions) (<-chan cloudrun.LogEntry, error) {
 	if err := r.resolveConfig(ctx); err != nil {
 		return nil, fmt.Errorf("failed to resolve Cloud Run config: %w", err)

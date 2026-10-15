@@ -272,7 +272,9 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 // agent directory; the git branch too if removeBranch), removes its
 // synced-agent entry and advances the sync watermark. Used by scion delete
 // and scion stop --rm. The error is from removing the files; the sync state
-// is updated either way, since the Hub record is gone. An agent with no
+// is updated either way, since the Hub record is gone, unless the project
+// has no local directory here (ErrAgentProjectUnresolved, returned as is;
+// see cleanupAfterConfirmedHubDelete). An agent with no
 // local files is not an error. Calls must not overlap: they run git
 // worktree operations.
 func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (branchDeleted bool, err error) {
@@ -283,19 +285,28 @@ func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bo
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
 	branchDeleted, err = agent.DeleteAgentFiles(agentName, projectPath, removeBranch)
-	if errors.Is(err, agent.ErrAgentProjectUnresolved) {
-		// The project has no local checkout here (for example a hub-native
-		// project reached with --project from another directory): there
-		// are no local files or sync state to clean up (ptone/scion#5083).
-		util.Debugf("delete: skipping local cleanup for agent %s: %v", agentName, err)
-		return false, nil
-	}
 
 	// Keep sync watermark current after a successful Hub delete. If hub server
 	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
-	if hubCtx != nil && hubCtx.ProjectPath != "" {
+	if hubCtx != nil && hubCtx.ProjectPath != "" && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
 		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
+	}
+	return branchDeleted, err
+}
+
+// cleanupAfterConfirmedHubDelete is cleanupAfterHubDelete for the callers
+// that just had the Hub delete the agent (scion delete, scion stop --rm).
+// When the project has no local checkout here (for example a hub-native
+// project reached with --project from another directory), there is nothing
+// local to clean up: that is logged at debug level and is not an error
+// (ptone/scion#5083). 'scion delete --cleanup-only' calls
+// cleanupAfterHubDelete and reports the missing project instead.
+func cleanupAfterConfirmedHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (bool, error) {
+	branchDeleted, err := cleanupAfterHubDelete(hubCtx, agentName, removeBranch)
+	if errors.Is(err, agent.ErrAgentProjectUnresolved) {
+		util.Debugf("delete: skipping local cleanup for agent %s: %v", agentName, err)
+		return false, nil
 	}
 	return branchDeleted, err
 }
@@ -379,6 +390,10 @@ func deleteAgentsCleanupOnly(hubCtx *HubContext, hubErr error, agentNames []stri
 
 		branchDeleted, err := cleanupAfterHubDelete(cleanupCtx, name, !preserveBranch)
 		if err != nil {
+			if errors.Is(err, agent.ErrAgentProjectUnresolved) {
+				record(name, "error", fmt.Sprintf("no local files to remove: the project has no local directory here (%v)", err))
+				continue
+			}
 			record(name, "error", fmt.Sprintf("local cleanup failed: %v", err))
 			continue
 		}
@@ -521,7 +536,7 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 		}
 		return
 	}
-	branchDeleted, err := cleanupAfterHubDelete(hubCtx, agentName, !preserveBranch)
+	branchDeleted, err := cleanupAfterConfirmedHubDelete(hubCtx, agentName, !preserveBranch)
 	if err != nil {
 		job.lines = append(job.lines,
 			fmt.Sprintf("Warning: Hub record deleted but local cleanup failed for '%s': %v", agentName, err),

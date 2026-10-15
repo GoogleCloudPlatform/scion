@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -202,10 +203,13 @@ func TestDeleteAgentsViaHub_NoLocalCheckout(t *testing.T) {
 	_, statErr := os.Stat(filepath.Dir(missing))
 	assert.True(t, os.IsNotExist(statErr), "no files are created for a project with no local checkout")
 
-	// The helper itself reports no error and no deleted branch.
-	branchDeleted, err := cleanupAfterHubDelete(hubCtx, "remote-agent", true)
+	// The post-delete helper reports no error; the shared helper returns
+	// ErrAgentProjectUnresolved for --cleanup-only to report.
+	branchDeleted, err := cleanupAfterConfirmedHubDelete(hubCtx, "remote-agent", true)
 	assert.NoError(t, err)
 	assert.False(t, branchDeleted)
+	_, err = cleanupAfterHubDelete(hubCtx, "remote-agent", true)
+	assert.ErrorIs(t, err, agent.ErrAgentProjectUnresolved)
 }
 
 func TestDeleteAgentsViaHub_MultipleAgents(t *testing.T) {

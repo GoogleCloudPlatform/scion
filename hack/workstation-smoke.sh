@@ -251,9 +251,15 @@ if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   # init --machine prefers podman over docker. Where docker answers, use it,
   # so a podman that is installed but old or unconfigured does not leave the
   # workstation broker reporting a degraded runtime.
+  # profiles.* is not a settable key, so edit the seeded line directly.
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    "$SCION" config set --global profiles.local.runtime docker >"$WORK/runtime.out" 2>&1 || {
-      cat "$WORK/runtime.out" >&2; fail "scion config set --global profiles.local.runtime docker"; }
+    SEEDED="$HOME/.scion/settings.yaml"
+    [ -f "$SEEDED" ] || fail "init --machine did not seed $SEEDED"
+    sed -i 's/^    runtime: podman  # Auto-detected$/    runtime: docker  # set by the smoke test/' "$SEEDED"
+    got_rt="$("$SCION" config get profiles.local.runtime 2>"$WORK/runtime.err")" || {
+      cat "$WORK/runtime.err" >&2; fail "scion config get profiles.local.runtime"; }
+    [ "$got_rt" = docker ] || fail "local profile runtime is '$got_rt', want docker"
+    log "local profile runtime: docker"
   fi
   "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
   # A second project, initialised while no hub runs (so init does not link
