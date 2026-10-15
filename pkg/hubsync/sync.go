@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -1795,14 +1796,25 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	if globalErr != nil {
 		_, _ = fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
 	} else {
-		if resp.BrokerToken != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
-			}
-		}
+		// A broker ID that is not a single path element rejects the
+		// response's broker settings as a whole: neither the token nor the
+		// ID is saved.
+		var brokerIDErr error
 		if resp.Broker != nil && resp.Broker.ID != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+			brokerIDErr = brokercredentials.ValidateBrokerIDPathElement(resp.Broker.ID)
+		}
+		if brokerIDErr != nil {
+			_, _ = fmt.Fprintf(promptOut, "Warning: not saving the broker token or broker ID: %v\n", brokerIDErr)
+		} else {
+			if resp.BrokerToken != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
+				}
+			}
+			if resp.Broker != nil && resp.Broker.ID != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+				}
 			}
 		}
 	}

@@ -2829,6 +2829,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
+	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -3896,7 +3897,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	brokerID, err := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	if err != nil {
+		return err
+	}
 	// Resolve broker name
 	brokerName := resolveBrokerName(cfg, settings, vsBroker)
 
@@ -3954,10 +3958,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
 				log.Printf("Broker ID updated from %s to %s (name-based dedup)", brokerID, effectiveID)
-				brokerID = effectiveID
-				if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-					log.Printf("Warning: failed to persist deduplicated broker ID: %v", err)
+				if err := adoptDedupedBrokerID(globalDir, effectiveID, log.Printf); err != nil {
+					return err
 				}
+				brokerID = effectiveID
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
 			if statelessCloudRunBroker {
@@ -4319,7 +4323,7 @@ var cloudRunLogicalBrokerNamespace = uuid.MustParse("c10f7a0a-6f03-5f9f-8d52-1d9
 // It checks (in order): versioned settings, legacy settings, global config,
 // deterministic Cloud Run ID, DB recovery (single embedded broker), and
 // finally generates a new UUID as a last resort.
-func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) string {
+func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) (string, error) {
 	var brokerID string
 	if vsBroker != nil && vsBroker.BrokerID != "" {
 		brokerID = vsBroker.BrokerID
@@ -4331,7 +4335,7 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 	}
 	if brokerID == "" && defaultBrokerID != "" {
 		log.Printf("Using deterministic logical broker ID: %s", defaultBrokerID)
-		return defaultBrokerID
+		brokerID = defaultBrokerID
 	}
 
 	// Recover from DB: if exactly one embedded broker exists, reuse its ID.
@@ -4340,12 +4344,8 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 		if err != nil {
 			log.Printf("Warning: failed to query database for broker ID recovery: %v", err)
 		} else if embedded != nil {
-			brokerID = embedded.ID
-			log.Printf("NOTICE: recovered broker ID %s from database (single embedded broker)", brokerID)
-			// Persist so we don't re-recover on next boot (writes to both legacy
-			// hub.brokerId and versioned server.broker.broker_id via UpdateSetting).
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-				log.Printf("Warning: failed to persist recovered broker ID to settings: %v", err)
+			if brokerID, err = recoverEmbeddedBrokerID(globalDir, embedded.ID, log.Printf); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -4358,7 +4358,12 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 			log.Printf("Generated and persisted new broker ID: %s", brokerID)
 		}
 	}
-	return brokerID
+	// Every source of the ID (configured, deterministic default, recovered,
+	// generated) is checked before it is used.
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", fmt.Errorf("broker ID: %w", err)
+	}
+	return brokerID, nil
 }
 
 func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) (string, error) {

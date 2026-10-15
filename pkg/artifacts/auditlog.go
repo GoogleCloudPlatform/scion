@@ -28,8 +28,9 @@ import (
 // it does not), each authorization refusal on a
 // management or write route (WARN; a refused POST /{id}/grants from a
 // caller who may read the artifact but not administer it, which
-// putReviewGrant answers, is not logged here), and each read answered with
-// the 404 of a hidden or missing artifact (DEBUG only, to bound volume).
+// putReviewGrant answers, is logged by logReviewGrantRefusal with a review_
+// reason), and each read answered with the 404 of a hidden or missing
+// artifact (DEBUG only, to bound volume).
 //
 // An entry carries ids, enums and counts only. It never carries a share
 // link's token, its hash or its id (no segment under a link route), a
