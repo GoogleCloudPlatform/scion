@@ -426,6 +426,15 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 			return nil, false
 		}
+		// Admin-scope delegations (phase X4) are issue-only: they reach
+		// POST /api/v1/test-identities/admin and nothing here (member
+		// issuance, list, token re-issue, delete, purge, web-login code),
+		// whatever the route guard decided.
+		if st.delegation.Scope != testIdentityDelegationScope {
+			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "admin-scope workload delegations are issue-only")
+			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+			return nil, false
+		}
 	default:
 		// Fail closed: broker on-behalf-of, agent, federation and any
 		// unknown credential cannot issue test identities.

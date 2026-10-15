@@ -785,6 +785,12 @@ func TestIsTestIdentityIssuanceRoute(t *testing.T) {
 		{http.MethodDelete, "/api/v1/test-identities/a%2Fb", false},
 		{http.MethodPost, "/api/v1/test-identity-delegations", false},
 		{http.MethodGet, "/api/v1/test-identities/", false},
+		// X4: admin-kind issuance, POST only; revoke-all never.
+		{http.MethodPost, "/api/v1/test-identities/admin", true},
+		{http.MethodGet, "/api/v1/test-identities/admin", false},
+		{http.MethodPost, "/api/v1/test-identities/admin/revoke-all", false},
+		{http.MethodPost, "/api/v1/test-identities/admin/", false},
+		{http.MethodPost, "/api/v1/test-identities/admin%2F", false},
 	} {
 		req := httptest.NewRequest(tc.method, tc.target, nil)
 		assert.Equal(t, tc.want, isTestIdentityIssuanceRoute(req), "%s %s", tc.method, tc.target)
@@ -1104,15 +1110,20 @@ func TestWorkloadDelegation_StartupValidation(t *testing.T) {
 	cfg.HubID = ""
 	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), errWorkloadIssuerNoHubID)
 
+	// X4: a max_tier "admin" entry needs --test-mode=admin or above; below
+	// it the hub refuses to start (no silent narrowing).
 	cfg = base()
 	cfg.TestIdentityWorkloadIssuers = []config.TestIdentityWorkloadIssuer{{Sub: x2Sub, MaxTier: "admin"}}
-	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), config.ErrWorkloadIssuerAdminTierUnsupported)
+	assert.ErrorIs(t, validateTestIdentityWorkloadIssuers(cfg), errWorkloadIssuerAdminTierOff)
+	admitted := cfg
+	admitted.TestAdminGate = TestAdminGateConfig{HubAdmin: true, HubID: x2HubID}
+	assert.NoError(t, validateTestIdentityWorkloadIssuers(admitted), "admin entry at the admin level")
 
 	// New refuses to build a Server from such a config.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
 	_, err = New(cfg, s)
-	assert.ErrorIs(t, err, config.ErrWorkloadIssuerAdminTierUnsupported)
+	assert.ErrorIs(t, err, errWorkloadIssuerAdminTierOff)
 }
 
 // --- status: testIssuerAudience -------------------------------------------------

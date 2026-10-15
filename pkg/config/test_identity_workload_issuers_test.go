@@ -19,8 +19,8 @@ import (
 	"testing"
 )
 
-// X2 AC (allowlist): the startup allowlist accepts only decimal subjects
-// with maxTier "member"; "admin" refuses startup with its own named error.
+// X2/X4 AC (allowlist): the startup allowlist accepts only decimal subjects
+// with maxTier "member" or "admin" (X4); every other tier is refused.
 func TestTestIdentityWorkloadIssuers_Validate(t *testing.T) {
 	ok := []TestIdentityWorkloadIssuer{{Sub: "100000000000000000001", MaxTier: "member"}, {Sub: "2", MaxTier: "member"}}
 	if err := ValidateTestIdentityWorkloadIssuers(ok); err != nil {
@@ -30,9 +30,9 @@ func TestTestIdentityWorkloadIssuers_Validate(t *testing.T) {
 		t.Fatalf("empty allowlist refused: %v", err)
 	}
 
-	admin := []TestIdentityWorkloadIssuer{{Sub: "1", MaxTier: "admin"}}
-	if err := ValidateTestIdentityWorkloadIssuers(admin); !errors.Is(err, ErrWorkloadIssuerAdminTierUnsupported) {
-		t.Fatalf("admin maxTier: err = %v, want ErrWorkloadIssuerAdminTierUnsupported", err)
+	admin := []TestIdentityWorkloadIssuer{{Sub: "1", MaxTier: "admin"}, {Sub: "2", MaxTier: "member"}}
+	if err := ValidateTestIdentityWorkloadIssuers(admin); err != nil {
+		t.Fatalf("admin maxTier refused: %v", err)
 	}
 
 	long := make([]byte, 65)
@@ -40,16 +40,18 @@ func TestTestIdentityWorkloadIssuers_Validate(t *testing.T) {
 		long[i] = '1'
 	}
 	bad := map[string][]TestIdentityWorkloadIssuer{
-		"empty sub":          {{Sub: "", MaxTier: "member"}},
-		"non-decimal sub":    {{Sub: "sa@example.iam.gserviceaccount.com", MaxTier: "member"}},
-		"space in sub":       {{Sub: "12 3", MaxTier: "member"}},
-		"sub too long":       {{Sub: string(long), MaxTier: "member"}},
-		"duplicate sub":      {{Sub: "7", MaxTier: "member"}, {Sub: "7", MaxTier: "member"}},
-		"empty tier":         {{Sub: "7", MaxTier: ""}},
-		"case variant tier":  {{Sub: "7", MaxTier: "Member"}},
-		"unknown tier":       {{Sub: "7", MaxTier: "super-admin"}},
-		"viewer is no tier":  {{Sub: "7", MaxTier: "viewer"}},
-		"good then bad tier": {{Sub: "7", MaxTier: "member"}, {Sub: "8", MaxTier: "x"}},
+		"empty sub":            {{Sub: "", MaxTier: "member"}},
+		"non-decimal sub":      {{Sub: "sa@example.iam.gserviceaccount.com", MaxTier: "member"}},
+		"space in sub":         {{Sub: "12 3", MaxTier: "member"}},
+		"sub too long":         {{Sub: string(long), MaxTier: "member"}},
+		"duplicate sub":        {{Sub: "7", MaxTier: "member"}, {Sub: "7", MaxTier: "member"}},
+		"empty tier":           {{Sub: "7", MaxTier: ""}},
+		"case variant tier":    {{Sub: "7", MaxTier: "Member"}},
+		"case variant admin":   {{Sub: "7", MaxTier: "Admin"}},
+		"hub-admin is no tier": {{Sub: "7", MaxTier: "hub-admin"}},
+		"unknown tier":         {{Sub: "7", MaxTier: "super-admin"}},
+		"viewer is no tier":    {{Sub: "7", MaxTier: "viewer"}},
+		"good then bad tier":   {{Sub: "7", MaxTier: "member"}, {Sub: "8", MaxTier: "x"}},
 	}
 	for name, list := range bad {
 		t.Run(name, func(t *testing.T) {

@@ -148,10 +148,11 @@ func (User) Fields() []ent.Field {
 			Nillable().
 			Immutable().
 			Comment("Canonical issuer URL of a federated user"),
-		// issuer_delegation_id is set only on a test_fixture row issued
+		// issuer_delegation_id is set only on a test identity row (a
+		// test_fixture row, or since phase X4 an admin-kind row) issued
 		// through a workload-bound issuer delegation
 		// (test_identity_delegations), at create, and never changes. The
-		// per-delegation cap and management scope key on it.
+		// per-delegation caps and management scope key on it.
 		field.String("issuer_delegation_id").
 			Optional().
 			Nillable().

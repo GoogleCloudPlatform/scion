@@ -1494,9 +1494,10 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
-	// IssuerDelegationID is set only on a test-fixture row issued through
-	// a workload-bound issuer delegation (TestIdentityDelegation), at
-	// create, and never changes. Nil for session and PAT issuance.
+	// IssuerDelegationID is set only on a test identity row (test fixture,
+	// or an admin kind since phase X4) issued through a workload-bound
+	// issuer delegation (TestIdentityDelegation), at create, and never
+	// changes. Nil for session and PAT issuance.
 	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
@@ -1727,10 +1728,13 @@ type TestIdentityDelegation struct {
 	ID          string
 	GrantorID   string
 	WorkloadSub string
-	// Scope is the single delegated scope (test_identity:issue).
+	// Scope is the single delegated scope: test_identity:issue, or
+	// test_identity:issue_admin or test_identity:issue_super_admin (X4).
 	Scope string
 	// MemberCap is the number of live test identities the delegation may
-	// hold at once.
+	// hold at once: member and viewer identities for test_identity:issue,
+	// identities of the scope's admin kind for an admin scope (the API
+	// calls it adminCap there).
 	MemberCap int
 	Label     string
 	Created   time.Time

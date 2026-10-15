@@ -221,9 +221,10 @@ type Store interface {
 	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
 	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
 	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
-	// IssuanceID, and a system-scoped roleDefinitionID, and refuses a non-nil
-	// IssuerDelegationID (workload issuer delegations issue the member tier
-	// only); it returns ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// IssuanceID, and a system-scoped roleDefinitionID, and refuses an empty
+	// non-nil IssuerDelegationID (a non-empty one, from a workload issuer
+	// delegation of the kind's scope, is written once); it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
 	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
 	// so it never outlives the identity. It is a Store method because it
 	// spans the user and role-binding sub-stores.
@@ -2021,6 +2022,11 @@ type TestIdentityDelegationStore interface {
 	// CountLiveTestFixtureUsersByDelegation counts test fixture users
 	// issued through delegationID whose expiry is after now.
 	CountLiveTestFixtureUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
+
+	// CountLiveTestAdminUsersByDelegation counts admin-kind test
+	// identities (either kind) issued through delegationID whose expiry is
+	// after now. An empty delegationID returns ErrInvalidInput.
+	CountLiveTestAdminUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
 
 	// ListTestFixtureUsersByDelegation returns test fixture users issued
 	// through delegationID, newest first, with ListTestFixtureUsers'

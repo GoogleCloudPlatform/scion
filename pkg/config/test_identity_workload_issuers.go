@@ -35,14 +35,8 @@ const (
 // account's unique id is a decimal string of about 21 digits.
 const workloadIssuerSubMaxLen = 64
 
-var (
-	// ErrInvalidWorkloadIssuer marks a malformed workload_issuers entry.
-	ErrInvalidWorkloadIssuer = errors.New("invalid test identity workload issuer")
-	// ErrWorkloadIssuerAdminTierUnsupported refuses a workload_issuers entry
-	// with max_tier "admin": workload delegation covers the member tier only
-	// in this release.
-	ErrWorkloadIssuerAdminTierUnsupported = errors.New(`test identity workload issuer max_tier "admin" is not supported in this release; only "member" is accepted`)
-)
+// ErrInvalidWorkloadIssuer marks a malformed workload_issuers entry.
+var ErrInvalidWorkloadIssuer = errors.New("invalid test identity workload issuer")
 
 // TestIdentitiesConfig is server.hub.test_identities: startup-only settings
 // of hub-issued test identities (ptone/scion#4240).
@@ -59,17 +53,18 @@ type TestIdentityWorkloadIssuer struct {
 	// Sub is the Google subject (the service account's unique id) of the
 	// workload identity.
 	Sub string `json:"sub" yaml:"sub" koanf:"sub"`
-	// MaxTier is "member". "admin" is refused at startup until the admin
-	// tiers support workload delegation.
+	// MaxTier is "member" (member and viewer issuance) or "admin" (also the
+	// admin tiers, phase X4). The hub refuses to start with an "admin"
+	// entry unless it runs with --test-mode=admin or above.
 	MaxTier string `json:"maxTier" yaml:"maxTier" koanf:"maxTier"`
 }
 
 // ValidateTestIdentityWorkloadIssuers checks the workload_issuers allowlist:
 // every subject is a non-empty decimal string of at most 64 digits, no
-// subject appears twice, and every max_tier is exactly "member". A max_tier
-// of "admin" returns ErrWorkloadIssuerAdminTierUnsupported; any other
-// problem returns ErrInvalidWorkloadIssuer. The hub refuses to start on
-// either.
+// subject appears twice, and every max_tier is exactly "member" or
+// "admin". Any problem returns ErrInvalidWorkloadIssuer, and the hub
+// refuses to start on it. Whether an "admin" entry is admitted at the
+// hub's test mode is the hub's own startup check.
 func ValidateTestIdentityWorkloadIssuers(issuers []TestIdentityWorkloadIssuer) error {
 	seen := make(map[string]bool, len(issuers))
 	for i, e := range issuers {
@@ -81,11 +76,9 @@ func ValidateTestIdentityWorkloadIssuers(issuers []TestIdentityWorkloadIssuer) e
 		}
 		seen[e.Sub] = true
 		switch e.MaxTier {
-		case WorkloadIssuerTierMember:
-		case WorkloadIssuerTierAdmin:
-			return fmt.Errorf("%w (%s.workload_issuers[%d].max_tier)", ErrWorkloadIssuerAdminTierUnsupported, TestIdentitiesKey, i)
+		case WorkloadIssuerTierMember, WorkloadIssuerTierAdmin:
 		default:
-			return fmt.Errorf("%w: %s.workload_issuers[%d].max_tier must be %q", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, WorkloadIssuerTierMember)
+			return fmt.Errorf("%w: %s.workload_issuers[%d].max_tier must be %q or %q", ErrInvalidWorkloadIssuer, TestIdentitiesKey, i, WorkloadIssuerTierMember, WorkloadIssuerTierAdmin)
 		}
 	}
 	return nil

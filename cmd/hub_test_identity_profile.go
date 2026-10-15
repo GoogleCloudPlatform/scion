@@ -66,26 +66,35 @@ var hubTestIdentityDelegateCmd = &cobra.Command{
 
 A delegation lets one pinned workload identity (the target hub's issuer
 service account, by its numeric unique id, which must be in the hub's
-startup allowlist server.hub.test_identities.workload_issuers) issue member
-and viewer test identities on your behalf, within your own live
-test_identity.issue authority. It is the human consent step: these commands
+startup allowlist server.hub.test_identities.workload_issuers) issue test
+identities on your behalf, within your own live authority: member and
+viewer identities (--scope member, the default), or on a hub running the
+admin tiers test hub-admins (--scope hub-admin) or one test super-admin
+(--scope super-admin). An admin scope needs a live super-admin session and
+an allowlist entry with max_tier admin. It is the human consent step: these commands
 take your interactive login on the hub ('scion hub auth login'), never an
 access token, an agent token or a hub profile, and are not available in
 agent mode.
 
 Examples:
   scion --hub https://t1.example.com hub test-identity delegate create --workload-sub 1234567890 --ttl 8h --label "uat window"
+  scion --hub https://t1.example.com hub test-identity delegate create --workload-sub 1234567891 --scope hub-admin --ttl 2h --admin-cap 1
   scion --hub https://t1.example.com hub test-identity delegate list
   scion --hub https://t1.example.com hub test-identity delegate revoke <id>`,
 }
 
 var hubTestIdentityDelegateCreateCmd = &cobra.Command{
 	Use:   "create --workload-sub SUB",
-	Short: "Create a member-tier workload issuer delegation",
-	Long: `Create a member-tier workload issuer delegation. The delegation id it
-prints is not a secret: it is useless without a token for the pinned
-workload identity. Give it to the runner's hub profile with
-'--issuer-delegation member=<id>'.`,
+	Short: "Create a workload issuer delegation",
+	Long: `Create a workload issuer delegation with one scope: member (default),
+hub-admin or super-admin. The delegation id it prints is not a secret: it
+is useless without a token for the pinned workload identity. Give a member
+delegation to the runner's hub profile with '--issuer-delegation
+member=<id>'. An admin delegation is presented by the runner on
+POST /api/v1/test-identities/admin (see the target hubs guide).
+
+Lifetimes (--ttl): member default 8h, at most 7 days; hub-admin default 4h,
+at most 8h; super-admin default 1h, at most 2h.`,
 	Args: cobra.NoArgs,
 	RunE: runHubTestIdentityDelegateCreate,
 }
@@ -109,6 +118,8 @@ var (
 	delegateWorkloadSub       string
 	delegateTTL               time.Duration
 	delegateMemberCap         int
+	delegateAdminCap          int
+	delegateScope             string
 	delegateLabel             string
 	delegateJSON              bool
 )
@@ -122,7 +133,9 @@ func init() {
 	f := hubTestIdentityDelegateCreateCmd.Flags()
 	f.StringVar(&delegateWorkloadSub, "workload-sub", "", "Numeric unique id of the workload identity (the target's issuer service account)")
 	f.DurationVar(&delegateTTL, "ttl", 0, "Delegation lifetime, e.g. 8h (default: the hub's, 8h; at most 7 days)")
-	f.IntVar(&delegateMemberCap, "member-cap", 0, "Live test identities the delegation may hold at once, 1-5 (default: 5)")
+	f.StringVar(&delegateScope, "scope", delegateScopeMember, "Delegated scope: member, hub-admin or super-admin")
+	f.IntVar(&delegateMemberCap, "member-cap", 0, "Live test identities a member delegation may hold at once, 1-5 (default: 5)")
+	f.IntVar(&delegateAdminCap, "admin-cap", 0, "Live admin identities an admin delegation may hold at once: hub-admin 1-2, super-admin 1 (default: the maximum)")
 	f.StringVar(&delegateLabel, "label", "", "Short label for the test window")
 	f.BoolVar(&delegateJSON, "json", false, "Output in JSON format")
 	_ = hubTestIdentityDelegateCreateCmd.MarkFlagRequired("workload-sub")
@@ -356,13 +369,46 @@ func delegationClient() (hubclient.Client, error) {
 	return client, err
 }
 
+// Delegate --scope values and the hub scope each maps to.
+const (
+	delegateScopeMember     = "member"
+	delegateScopeHubAdmin   = "hub-admin"
+	delegateScopeSuperAdmin = "super-admin"
+)
+
+var delegateScopes = map[string]string{
+	delegateScopeMember:     "test_identity:issue",
+	delegateScopeHubAdmin:   "test_identity:issue_admin",
+	delegateScopeSuperAdmin: "test_identity:issue_super_admin",
+}
+
+// delegateAdminCapMax is the largest --admin-cap per admin scope (the hub
+// enforces the same bounds).
+var delegateAdminCapMax = map[string]int{delegateScopeHubAdmin: 2, delegateScopeSuperAdmin: 1}
+
 func runHubTestIdentityDelegateCreate(cmd *cobra.Command, _ []string) error {
 	ttl, err := wholeSeconds("ttl", delegateTTL)
 	if err != nil {
 		return err
 	}
-	if delegateMemberCap < 0 || delegateMemberCap > 5 {
-		return newUsageError("invalid --member-cap %d: must be 1-5", delegateMemberCap)
+	scope, ok := delegateScopes[delegateScope]
+	if !ok {
+		return newUsageError("invalid --scope %q: must be member, hub-admin or super-admin", delegateScope)
+	}
+	if delegateScope == delegateScopeMember {
+		if delegateAdminCap != 0 {
+			return newUsageError("--admin-cap applies to the hub-admin and super-admin scopes only")
+		}
+		if delegateMemberCap < 0 || delegateMemberCap > 5 {
+			return newUsageError("invalid --member-cap %d: must be 1-5", delegateMemberCap)
+		}
+	} else {
+		if delegateMemberCap != 0 {
+			return newUsageError("--member-cap applies to the member scope only; use --admin-cap")
+		}
+		if maxCap := delegateAdminCapMax[delegateScope]; delegateAdminCap < 0 || delegateAdminCap > maxCap {
+			return newUsageError("invalid --admin-cap %d: must be 1-%d for --scope %s", delegateAdminCap, maxCap, delegateScope)
+		}
 	}
 	client, err := delegationClient()
 	if err != nil {
@@ -371,8 +417,8 @@ func runHubTestIdentityDelegateCreate(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 	d, err := client.TestIdentityDelegations().Create(ctx, &hubclient.CreateTestIdentityDelegationRequest{
-		WorkloadSub: strings.TrimSpace(delegateWorkloadSub), Scopes: []string{"test_identity:issue"},
-		TTLSeconds: ttl, MemberCap: delegateMemberCap, Label: delegateLabel,
+		WorkloadSub: strings.TrimSpace(delegateWorkloadSub), Scopes: []string{scope},
+		TTLSeconds: ttl, MemberCap: delegateMemberCap, AdminCap: delegateAdminCap, Label: delegateLabel,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create the delegation: %w", err)
@@ -384,9 +430,17 @@ func runHubTestIdentityDelegateCreate(cmd *cobra.Command, _ []string) error {
 	_, _ = fmt.Fprintf(out, "Created delegation %s\n", d.ID)
 	_, _ = fmt.Fprintf(out, "  Workload sub: %s\n", d.WorkloadSub)
 	_, _ = fmt.Fprintf(out, "  Scope:        %s\n", d.Scope)
-	_, _ = fmt.Fprintf(out, "  Member cap:   %d\n", d.MemberCap)
+	if d.AdminCap > 0 {
+		_, _ = fmt.Fprintf(out, "  Admin cap:    %d\n", d.AdminCap)
+	} else {
+		_, _ = fmt.Fprintf(out, "  Member cap:   %d\n", d.MemberCap)
+	}
 	_, _ = fmt.Fprintf(out, "  Expires:      %s\n", formatTestIdentityTime(d.ExpiresAt))
-	_, _ = fmt.Fprintf(out, "Add it to the runner's hub profile with --issuer-delegation member=%s\n", d.ID)
+	if delegateScope == delegateScopeMember {
+		_, _ = fmt.Fprintf(out, "Add it to the runner's hub profile with --issuer-delegation member=%s\n", d.ID)
+	} else {
+		_, _ = fmt.Fprintf(out, "The runner presents it in the %s header on POST /api/v1/test-identities/admin.\n", hubprofile.HeaderIssuerDelegation)
+	}
 	return nil
 }
 
@@ -416,7 +470,11 @@ func runHubTestIdentityDelegateList(cmd *cobra.Command, _ []string) error {
 		if d.Live {
 			live = "yes"
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", d.ID, d.WorkloadSub, d.Scope, d.MemberCap, live, formatTestIdentityTime(d.ExpiresAt), d.Label)
+		identityCap := d.MemberCap
+		if d.AdminCap > 0 {
+			identityCap = d.AdminCap
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", d.ID, d.WorkloadSub, d.Scope, identityCap, live, formatTestIdentityTime(d.ExpiresAt), d.Label)
 	}
 	if err := w.Flush(); err != nil {
 		return err
