@@ -1712,6 +1712,15 @@ type BrokerDispatchStore interface {
 	// therefore never accept delivery. Returns the number of messages failed.
 	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 
+	// ExpireAndListStuckPendingMessages does what ExpireStuckPendingMessages
+	// does for at most one page of the oldest rows (entadapter's
+	// expirePageSize; later calls expire the rest) and returns the rows it
+	// expired, oldest first, so the sweep can name them in its log line
+	// (ptone/scion#5211). It runs in one transaction, and a row is returned
+	// only if this call changed it from pending to failed. A row dispatched
+	// concurrently is neither expired nor returned.
+	ExpireAndListStuckPendingMessages(ctx context.Context, before time.Time, reason string) ([]ExpiredPendingMessage, error)
+
 	// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
 	// "pending", or "failed" with reason == expiredReason, by the pre-fix
 	// nc-promote-busy bug (a storeMsg persisted without stamping
