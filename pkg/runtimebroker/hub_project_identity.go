@@ -216,7 +216,7 @@ func (s *Server) otherProjectAgentsInUse(ctx context.Context, projectID, agentID
 			continue
 		}
 		switch state.Phase(a.Phase) {
-		case state.PhaseStopped, state.PhaseError:
+		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		default:
 			return true, nil
 		}
@@ -311,7 +311,7 @@ func (s *Server) newProjectAgentsInUseReason(ctx context.Context, projectID stri
 			continue
 		}
 		switch state.Phase(a.Phase) {
-		case state.PhaseStopped, state.PhaseError:
+		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		default:
 			return true, projectInUseHere, nil
 		}

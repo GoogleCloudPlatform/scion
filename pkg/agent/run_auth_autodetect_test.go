@@ -34,7 +34,8 @@ import (
 // deferring entirely to the container-side provisioner's own (harness-local,
 // default_type-blind) guess. autoDetectAuthSelectedType makes Go the single
 // source of truth, reusing the same file -> env -> GCP-identity precedence
-// the hub preflight (extractRequiredEnvKeys) already uses.
+// (with the API key over gcloud-adc exception, ptone/scion#4559) the broker
+// preflight (extractRequiredEnvKeys) already uses.
 
 // antigravityLikeAuthMeta returns auth metadata shaped like
 // harnesses/antigravity/config.yaml's auth block, minus the ambient

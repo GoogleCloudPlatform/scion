@@ -68,11 +68,7 @@ type sshHubConn struct {
 // sshTransportResolver resolves transport-layer auth (for example IAP) for
 // the hub requests; tests replace it.
 var sshTransportResolver = func() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-	var ts *transportauth.TransportSettings
-	if s := tunnelSettings(); s != nil && s.Hub != nil && s.Hub.Transport != nil {
-		ts = &transportauth.TransportSettings{Mode: s.Hub.Transport.Mode, Audience: s.Hub.Transport.Audience}
-	}
-	return tunnelTransportSource(ts)
+	return tunnelTransportSource(hubTransportSettings(invocationHubEndpoint()))
 }
 
 // newSSHHubConn builds the hub access for endpoint with a user token.

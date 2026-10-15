@@ -386,12 +386,15 @@ type rollbackClaimStore struct {
 // rollbackFaults are the store faults of one failed create: the run-intent
 // write fails (runIntentErrStore), the compensation's audit insert fails so
 // the fallback runs (createTxFaultStore), or every conditional row delete
-// gives up (finalizeErr). onFinalize runs before each rollback row delete.
+// gives up (finalizeErr). assignDeactErr fails every service-account
+// assignment deactivation (createTxFaultStore), the compensation's and the
+// fallback's. onFinalize runs before each rollback row delete.
 type rollbackFaults struct {
-	runIntent    bool
-	compensation bool
-	finalizeErr  error
-	onFinalize   func(t *testing.T, s store.Store, call int, id string)
+	runIntent      bool
+	compensation   bool
+	assignDeactErr error
+	finalizeErr    error
+	onFinalize     func(t *testing.T, s store.Store, call int, id string)
 }
 
 // installRollbackStore installs the wrappers of faults on srv, innermost
@@ -406,8 +409,8 @@ func installRollbackStore(t *testing.T, srv *Server, s store.Store, faults rollb
 		if faults.runIntent {
 			inner = runIntentErrStore{inner}
 		}
-		if faults.compensation {
-			inner = &createTxFaultStore{Store: inner, auditErrFor: mutationTypeAgentCreateDispatchFailed}
+		if faults.compensation || faults.assignDeactErr != nil {
+			inner = &createTxFaultStore{Store: inner, auditErrFor: mutationTypeAgentCreateDispatchFailed, assignDeactErr: faults.assignDeactErr}
 		}
 		return &rollbackClaimStore{Store: inner, fault: f, finalizeErr: faults.finalizeErr}
 	})

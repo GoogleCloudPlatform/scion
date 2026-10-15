@@ -139,9 +139,9 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_governance.go:isConstraintAdmin:GetEffectiveGroups":                          censusClamped,
 	"access_constraint_governance.go:isConstraintAdmin:ListRoleBindingsForPrincipals":               censusClamped,
 	"access_constraint_preview.go:getBasePermissions:ListRoleBindingsForPrincipals":                 censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:GetEffectiveGroups":                              censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
+	"authorize_message.go:checkEffectiveMembership:GetEffectiveGroups":                              censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
 	"authz_list_helpers.go:resolveUserOwnerProjectIDsOrError:ListRoleBindingsForPrincipal":          censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:GetEffectiveGroups":                                    censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:ListRoleBindingsForPrincipal":                          censusClamped,
@@ -174,6 +174,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":          "authz: group closure fed to the clamped binding read with the user principal",
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":  "authz: agent group closure fed to the clamped binding read",
 	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":   "delegation: the target group's closure, whose bindings the actor must already hold",
+	"authz_candelegate.go:grantPermissionSet:GetParentGroups":           "delegation: the group closure whose role permissions a test admin's grant would confer (test-admin policy check; counts every binding, so it only refuses more)",
 	"authz.go:buildMembershipPathChains:GetGroupMembership":             "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetParentGroups":                "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetUserGroups":                  "display: decision explain membership paths",
@@ -303,8 +304,9 @@ var testAdminAdminEmailsCensus = map[string]string{
 // user's role (stored or claim) with admin, keyed "file:function". A
 // test_hub_admin's stored role is member and the JWT row block refuses a
 // token whose role claim is not its kind's role, so no role gate admits
-// it; the test_super_admin kind is refused until admin tier A2 classifies
-// these gates.
+// it. A test_super_admin holds the admin role: every "role gate" entry here
+// is classified allow or deny for it in testAdminRoleGatePolicy (admin tier
+// A2, TestTestAdminPolicy_RoleGateCensus).
 var testAdminRoleAdminCensus = map[string]string{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": "role gate: admin only",
 	"admin_mode.go:adminModeWebMiddleware":                        "role gate: admin only",
@@ -327,7 +329,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
 	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
 	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
-	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test identity's stored role is never admin and the JWT row block refuses a mismatched role claim",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test_super_admin passes it, so each caller is classified as its own gate in testAdminRoleGatePolicy",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.
@@ -563,6 +565,7 @@ var testAdminActivationCensus = map[string]string{
 	"projectMembershipInputs":    "loader: ProjectMembershipEvidence filters with bindingActivationOK",
 	"projectScopedGrants":        "loader: unionScopedRoleBindingPermissions filters with bindingActivationOK",
 	"canDelegateGroupMembership": "delegation: the group's bindings are what the actor must already hold; an inactive one only makes the check stricter",
+	"grantPermissionSet":         "delegation: permissions a test admin's group grant would confer; inactive bindings are counted on purpose (one becoming active later must not slip past the test-admin policy check), so it only refuses more",
 }
 
 // TestTestAdminDecidePathsApplyActivation (DEC-4 C-b): every binding read

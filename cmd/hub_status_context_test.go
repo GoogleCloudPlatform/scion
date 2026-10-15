@@ -48,12 +48,10 @@ func TestHubEndpointScope_Context(t *testing.T) {
 
 func TestEndpointSourceNote(t *testing.T) {
 	for label, scope := range map[string]hubEndpointScope{
-		"current context":             {Source: "context", Label: "current context"},
-		"--hub flag":                  {Source: "flag", Label: "--hub flag"},
-		"SCION_HUB_ENDPOINT":          {Source: "env", Label: "SCION_HUB_ENDPOINT", Inherited: true},
-		"directory link":              {Source: "directory", Label: "directory link"},
-		"project settings: ~/src/foo": {Source: "project_settings", Label: "project settings: ~/src/foo"},
-		"global settings":             {Source: "global_settings", Label: "global settings", Inherited: true},
+		"current context":    {Source: "context", Label: "current context"},
+		"--hub flag":         {Source: "flag", Label: "--hub flag"},
+		"SCION_HUB_ENDPOINT": {Source: "env", Label: "SCION_HUB_ENDPOINT", Inherited: true},
+		"directory link":     {Source: "directory", Label: "directory link"},
 	} {
 		assert.Equal(t, "            ("+label+")", endpointSourceNote(scope))
 	}

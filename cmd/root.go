@@ -579,30 +579,6 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 `)
 }
 
-// GetHubEndpoint returns the effective Hub endpoint based on flags, settings,
-// and environment variables.
-// Returns empty string if no hub is configured.
-func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
-	if hubEndpoint != "" {
-		return hubEndpoint
-	}
-	if settings != nil {
-		if ep := settings.GetHubEndpoint(); ep != "" {
-			return ep
-		}
-	}
-	// Fall back to env vars — covers the case where settings loading didn't
-	// populate the Hub struct (e.g., inside a hub-connected container where
-	// the project path resolves to a synthetic/empty directory).
-	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
-		return ep
-	}
-	if ep := os.Getenv("SCION_HUB_URL"); ep != "" {
-		return ep
-	}
-	return ""
-}
-
 // errNoHubRemoved is returned for any use of the removed --no-hub flag.
 var errNoHubRemoved = fmt.Errorf("--no-hub was removed together with local-only mode; scion always uses a hub. See %s", hubsync.LocalModeRemovalDocsURL)
 
@@ -629,22 +605,22 @@ func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 		return
 	}
 
-	// No hub configured: nothing to warn about. hubConfigured counts the hub
-	// selected with 'scion use' too (it is in hubEndpoint).
-	if !hubConfigured(settings) {
+	// No hub selected: nothing to warn about.
+	if !hubConfigured() {
 		return
 	}
 
-	// Check if explicit auth is configured in settings
-	if settings.Hub != nil {
-		if settings.Hub.Token != "" || settings.Hub.APIKey != "" || settings.Hub.BrokerToken != "" {
-			// Explicit auth configured, not using dev auth
-			return
-		}
+	// Explicit auth: a token from the environment, or the broker's own
+	// token. Tokens in settings files are not read.
+	if os.Getenv("SCION_HUB_TOKEN") != "" || os.Getenv("SCION_HUB_API_KEY") != "" {
+		return
+	}
+	if settings.Hub != nil && settings.Hub.BrokerToken != "" {
+		return
 	}
 
 	// Check if OAuth credentials are available (from scion hub auth login)
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint != "" && credentials.IsAuthenticated(endpoint) {
 		// OAuth credentials available, not using dev auth
 		return

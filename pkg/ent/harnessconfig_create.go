@@ -224,6 +224,20 @@ func (_c *HarnessConfigCreate) SetNillableImageStatusCheckedAt(v *time.Time) *Ha
 	return _c
 }
 
+// SetBuiltImage sets the "built_image" field.
+func (_c *HarnessConfigCreate) SetBuiltImage(v string) *HarnessConfigCreate {
+	_c.mutation.SetBuiltImage(v)
+	return _c
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_c *HarnessConfigCreate) SetNillableBuiltImage(v *string) *HarnessConfigCreate {
+	if v != nil {
+		_c.SetBuiltImage(*v)
+	}
+	return _c
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_c *HarnessConfigCreate) SetOwnerID(v string) *HarnessConfigCreate {
 	_c.mutation.SetOwnerID(v)
@@ -368,6 +382,10 @@ func (_c *HarnessConfigCreate) defaults() {
 	if _, ok := _c.mutation.ImageStatus(); !ok {
 		v := harnessconfig.DefaultImageStatus
 		_c.mutation.SetImageStatus(v)
+	}
+	if _, ok := _c.mutation.BuiltImage(); !ok {
+		v := harnessconfig.DefaultBuiltImage
+		_c.mutation.SetBuiltImage(v)
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := harnessconfig.DefaultCreated()
@@ -533,6 +551,10 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.ImageStatusCheckedAt(); ok {
 		_spec.SetField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime, value)
 		_node.ImageStatusCheckedAt = &value
+	}
+	if value, ok := _c.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+		_node.BuiltImage = value
 	}
 	if value, ok := _c.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -859,6 +881,24 @@ func (u *HarnessConfigUpsert) UpdateImageStatusCheckedAt() *HarnessConfigUpsert 
 // ClearImageStatusCheckedAt clears the value of the "image_status_checked_at" field.
 func (u *HarnessConfigUpsert) ClearImageStatusCheckedAt() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldImageStatusCheckedAt)
+	return u
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsert) SetBuiltImage(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldBuiltImage, v)
+	return u
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateBuiltImage() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldBuiltImage)
+	return u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsert) ClearBuiltImage() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldBuiltImage)
 	return u
 }
 
@@ -1288,6 +1328,27 @@ func (u *HarnessConfigUpsertOne) UpdateImageStatusCheckedAt() *HarnessConfigUpse
 func (u *HarnessConfigUpsertOne) ClearImageStatusCheckedAt() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearImageStatusCheckedAt()
+	})
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsertOne) SetBuiltImage(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetBuiltImage(v)
+	})
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateBuiltImage() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateBuiltImage()
+	})
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsertOne) ClearBuiltImage() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearBuiltImage()
 	})
 }
 
@@ -1898,6 +1959,27 @@ func (u *HarnessConfigUpsertBulk) UpdateImageStatusCheckedAt() *HarnessConfigUps
 func (u *HarnessConfigUpsertBulk) ClearImageStatusCheckedAt() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearImageStatusCheckedAt()
+	})
+}
+
+// SetBuiltImage sets the "built_image" field.
+func (u *HarnessConfigUpsertBulk) SetBuiltImage(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetBuiltImage(v)
+	})
+}
+
+// UpdateBuiltImage sets the "built_image" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateBuiltImage() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateBuiltImage()
+	})
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (u *HarnessConfigUpsertBulk) ClearBuiltImage() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearBuiltImage()
 	})
 }
 

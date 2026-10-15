@@ -90,6 +90,13 @@ var ErrAgentDeletedDuringLaunch = errors.New("agent was deleted while launching"
 // ErrLaunchNotRunning matches *LaunchNotRunningError with errors.Is.
 var ErrLaunchNotRunning = errors.New("agent launch ended without the agent running")
 
+// AgentGetter reads one agent by ID or slug. It is the only method the
+// launch wait helpers use; AgentService satisfies it, and a client with its
+// own transport can implement just this method.
+type AgentGetter interface {
+	Get(ctx context.Context, agentID string) (*Agent, error)
+}
+
 // LaunchOutcome is how a launch wait ended.
 type LaunchOutcome struct {
 	// Agent is the last agent read in the wait; nil when none was read.
@@ -309,7 +316,7 @@ func launchWaitBudget(a *Agent) time.Duration {
 // errors, 5xx, 408 and 429 are retried. With an error, the outcome carries
 // the last agent read, if any, and Running is false. It never changes the
 // agent.
-func WaitForLaunch(ctx context.Context, svc AgentService, agentID string, start *Agent, opts LaunchWaitOptions) (LaunchOutcome, error) {
+func WaitForLaunch(ctx context.Context, svc AgentGetter, agentID string, start *Agent, opts LaunchWaitOptions) (LaunchOutcome, error) {
 	if svc == nil {
 		return LaunchOutcome{}, errors.New("hubclient: WaitForLaunch: nil agent service")
 	}
@@ -485,7 +492,7 @@ func launchInterruptedError(ctx context.Context, agentID string) error {
 // sending a message to an agent that may still be launching, which the Hub
 // would refuse; it is the form for callers that hold only an ID or slug, or
 // an agent read earlier.
-func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentService, agentID string, opts LaunchWaitOptions) error {
+func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentGetter, agentID string, opts LaunchWaitOptions) error {
 	if svc == nil {
 		return errors.New("hubclient: EnsureRunningBeforeSendByID: nil agent service")
 	}
@@ -511,7 +518,7 @@ func EnsureRunningBeforeSendByID(ctx context.Context, svc AgentService, agentID 
 // read. A stale agent that shows no active launch skips the wait, and the
 // send may then be refused because the agent is still launching. Callers
 // without a fresh agent use EnsureRunningBeforeSendByID.
-func EnsureRunningBeforeSend(ctx context.Context, svc AgentService, a *Agent, opts LaunchWaitOptions) error {
+func EnsureRunningBeforeSend(ctx context.Context, svc AgentGetter, a *Agent, opts LaunchWaitOptions) error {
 	if a == nil {
 		return errors.New("hubclient: EnsureRunningBeforeSend: nil agent")
 	}
@@ -520,7 +527,7 @@ func EnsureRunningBeforeSend(ctx context.Context, svc AgentService, a *Agent, op
 
 // ensureRunning waits for a's launch, reading the agent by id, when a shows
 // one; a.ID is preferred over id when set.
-func ensureRunning(ctx context.Context, svc AgentService, id string, a *Agent, opts LaunchWaitOptions) error {
+func ensureRunning(ctx context.Context, svc AgentGetter, id string, a *Agent, opts LaunchWaitOptions) error {
 	if !LaunchActive(a) {
 		return nil
 	}

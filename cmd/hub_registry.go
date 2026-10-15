@@ -321,10 +321,6 @@ func hubList(out, stderr io.Writer, check bool) error {
 	var reachable []bool
 	var verified []*bool
 	if check {
-		settings, err := config.LoadSettings(useSettingsPath())
-		if err != nil {
-			settings = &config.Settings{}
-		}
 		reachable = make([]bool, len(names))
 		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
@@ -332,7 +328,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 			endpoint := c.Hubs[name].Endpoint
 			// Every hub but the effective one is checked with only its
 			// own entry's transport.
-			fanOut := !hubGetsFullChain(settings, endpoint, false)
+			fanOut := !hubGetsFullChain(endpoint, false)
 			wg.Add(1)
 			go func(i int, endpoint string, fanOut bool) {
 				defer wg.Done()
@@ -359,7 +355,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 		row := hubListJSON{
 			Current:  name == c.CurrentHub,
 			Name:     name,
-			Endpoint: h.Endpoint,
+			Endpoint: config.RedactURL(h.Endpoint),
 			Auth:     useAuthJSON{Method: info.MethodType, User: useAuthUser(info)},
 		}
 		if check {

@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 )
 
 // TestMain disables the UTC pin for the whole cmd test binary.
@@ -31,19 +33,30 @@ import (
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
 	clearAmbientScionEnv()
-	// The CLI imports the global settings' hub.endpoint into
-	// ~/.scion/context.yaml the first time it reads the context, and that
-	// import writes the file. Most cmd tests run the root command without
-	// an isolated HOME, so with the import on they would write the real
-	// user's context.yaml, and tests that write a global hub.endpoint would
-	// change behaviour. Tests of the import turn it back on with a temp
-	// HOME (enableGlobalHubImport). This is the only place it is turned off.
+	// The CLI imports the global settings' hub.endpoint (and a linked
+	// project's hub.endpoint) into ~/.scion/context.yaml the first time it
+	// reads the context, and that import writes the file. Most cmd tests
+	// run the root command without an isolated HOME, so with the import on
+	// they would write the real user's context.yaml, and tests that write
+	// a hub.endpoint would change behaviour. Tests of the imports turn them
+	// back on with a temp HOME (enableGlobalHubImport). This is the only
+	// place they are turned off.
 	importGlobalHubSettings = false
+	// A flat Kubernetes instance with no kubeconfig builds its client
+	// from the default loading rules only: no test uses the in-cluster
+	// config of the pod it runs in (ptone/scion#5088). This is the only
+	// place it is set.
+	productionFlatDefaultKubernetesClient = flatDefaultKubernetesClient
+	flatDefaultKubernetesClient = k8s.NewClientWithContextNoInCluster
 	teardown := integrationTestSetup()
 	code := m.Run()
 	teardown()
 	os.Exit(code)
 }
+
+// productionFlatDefaultKubernetesClient is flatDefaultKubernetesClient's
+// value before TestMain replaces it, so a test can pin the production value.
+var productionFlatDefaultKubernetesClient func(kubeconfigPath, contextName string) (*k8s.Client, error)
 
 // integrationTestSetup runs before the cmd tests and returns their teardown.
 // It does nothing by default; main_integration_test.go replaces it under
