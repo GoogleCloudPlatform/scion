@@ -71,3 +71,50 @@ func TestRoutedBrokerRPC_StaleReasonScope(t *testing.T) {
 		assert.Equal(t, 0, all[3].calls, "within the shared budget")
 	})
 }
+
+// TestRoutedBrokerRPC_StaleReasonScopeTable: every owner stale reason of
+// the closed set, written as a literal, with its exclusion scope. A
+// relay-wide reason skips the replacement session on the same relay and
+// is served on another relay; a session-only reason is served by the
+// replacement on the same relay. Moving any value between the scopes, or
+// out of the set, fails this test.
+func TestRoutedBrokerRPC_StaleReasonScopeTable(t *testing.T) {
+	const relayWide, sessionOnly = "relay-wide", "session-only"
+	for _, tc := range []struct{ reason, scope string }{
+		{"relay_missing", relayWide},
+		{"relay_superseded", relayWide},
+		{"relay_stale", relayWide},
+		{"relay_target_mismatch", relayWide},
+		{"relay_not_serving", relayWide},
+		{"read_error", relayWide},
+		{"not_local", sessionOnly},
+		{"not_found", sessionOnly},
+		{"session_stale", sessionOnly},
+		{"epoch_obsolete", sessionOnly},
+		{"incarnation_mismatch", sessionOnly},
+		{"draining", sessionOnly},
+		{"not_sent", sessionOnly},
+		{"project_mismatch", sessionOnly},
+		{"exec_scope_mismatch", sessionOnly},
+		{"capability_missing", sessionOnly},
+		{"not_routable", sessionOnly},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			stale := &scriptedSession{err: &relay.StaleRouteError{Reason: tc.reason}, relayID: "relay-a"}
+			sameRelay := answered()
+			sameRelay.relayID = "relay-a"
+			otherRelay := answered()
+			otherRelay.relayID = "relay-b"
+			resp, err := tunnelOnce(t, scriptedTunnel(stale, sameRelay, otherRelay), conduit.RPCAgentExec, false)
+			require.NoError(t, err)
+			assert.Equal(t, "served", string(resp.Body))
+			if tc.scope == relayWide {
+				assert.Equal(t, 0, sameRelay.calls, "a relay-wide reason skips the same relay")
+				assert.Equal(t, 1, otherRelay.calls)
+			} else {
+				assert.Equal(t, 1, sameRelay.calls, "a session-only reason uses the replacement on the same relay")
+				assert.Equal(t, 0, otherRelay.calls)
+			}
+		})
+	}
+}
