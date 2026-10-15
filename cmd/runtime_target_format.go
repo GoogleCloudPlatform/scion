@@ -42,11 +42,11 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 	}
 	line := func(label, value string) {
 		if value != "" {
-			fmt.Fprintf(w, "%-27s %s\n", label+":", value)
+			_, _ = fmt.Fprintf(w, "%-27s %s\n", label+":", value)
 		}
 	}
-	fmt.Fprintln(w, "Runtime target")
-	fmt.Fprintln(w, "--------------")
+	_, _ = fmt.Fprintln(w, "Runtime target")
+	_, _ = fmt.Fprintln(w, "--------------")
 	line("ID", target.ID)
 	line("Type", target.Type)
 	line("Display name", target.DisplayName)
@@ -54,17 +54,17 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 		line("Namespace", p.Target.Namespace)
 	}
 
-	fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w)
 	if p == nil {
-		fmt.Fprintln(w, "Reported defaults: none reported yet")
+		_, _ = fmt.Fprintln(w, "Reported defaults: none reported yet")
 		return
 	}
-	fmt.Fprintln(w, "Reported defaults")
-	fmt.Fprintln(w, "-----------------")
+	_, _ = fmt.Fprintln(w, "Reported defaults")
+	_, _ = fmt.Fprintln(w, "-----------------")
 	if observedAt != nil {
-		fmt.Fprintf(w, "As reported by the instance at %s; %s.\n", clitime.Format(*observedAt, clitime.Full), presentationCaption)
+		_, _ = fmt.Fprintf(w, "As reported by the instance at %s; %s.\n", clitime.Format(*observedAt, clitime.Full), presentationCaption)
 	} else {
-		fmt.Fprintf(w, "As reported by the instance; %s.\n", presentationCaption)
+		_, _ = fmt.Fprintf(w, "As reported by the instance; %s.\n", presentationCaption)
 	}
 	if t := p.Target; t != nil {
 		line("Safe to evict", triState(t.SafeToEvict))
@@ -87,13 +87,13 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 	line("Clone depth", string(d.CloneDepth))
 	line("Resources", formatResourceSpec(d.Resources))
 	if len(d.Volumes) > 0 {
-		fmt.Fprintln(w, "Volumes:")
+		_, _ = fmt.Fprintln(w, "Volumes:")
 		for _, v := range d.Volumes {
-			fmt.Fprintf(w, "  - %s\n", formatPresentedVolume(v))
+			_, _ = fmt.Fprintf(w, "  - %s\n", formatPresentedVolume(v))
 		}
 	}
 	if len(d.Secrets) > 0 {
-		fmt.Fprintln(w, "Secrets:")
+		_, _ = fmt.Fprintln(w, "Secrets:")
 		for _, s := range d.Secrets {
 			text := s.Key
 			if s.Type != "" {
@@ -102,22 +102,22 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 			if s.Description != "" {
 				text += ": " + s.Description
 			}
-			fmt.Fprintf(w, "  - %s\n", text)
+			_, _ = fmt.Fprintf(w, "  - %s\n", text)
 		}
 	}
 	if len(d.HarnessOverrides) > 0 {
-		fmt.Fprintln(w, "Harness overrides:")
+		_, _ = fmt.Fprintln(w, "Harness overrides:")
 		names := make([]string, 0, len(d.HarnessOverrides))
 		for name := range d.HarnessOverrides {
 			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			fmt.Fprintf(w, "  - %s\n", name)
+			_, _ = fmt.Fprintf(w, "  - %s\n", name)
 			o := d.HarnessOverrides[name]
 			sub := func(label, value string) {
 				if value != "" {
-					fmt.Fprintf(w, "      %-18s %s\n", label+":", value)
+					_, _ = fmt.Fprintf(w, "      %-18s %s\n", label+":", value)
 				}
 			}
 			sub("Image", o.Image)
