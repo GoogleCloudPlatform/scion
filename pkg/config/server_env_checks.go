@@ -110,18 +110,72 @@ func lookupSettingsEnv(name string) (e ServerEnvEntry, alias bool, seed bool, ok
 	return ServerEnvEntry{}, false, false, false
 }
 
-// ValidateServerEnv checks, for the server's startup, that every non-empty
+// settingsEnvSet returns the upper-cased names of the non-empty variables
+// in environ.
+func settingsEnvSet(environ []string) map[string]bool {
+	set := map[string]bool{}
+	for _, kv := range environ {
+		if name, value, _ := strings.Cut(kv, "="); value != "" {
+			set[strings.ToUpper(name)] = true
+		}
+	}
+	return set
+}
+
+// readSettingsEnv returns the table entry of a SCION_SERVER_* or SCION_SEED_*
+// name when a consumer reads its value: false for an inert or unknown name,
+// for a SCION_SEED_* name of a setting seeding does not seed (isLayer1
+// false), and for an alias another spelling of the same setting overrides
+// (the precedence of resolveServerEnv, computed from set, the names set in
+// the environment). overriddenBy names the winning variable when the name
+// is an overridden alias.
+func readSettingsEnv(name string, set map[string]bool, isLayer1 func(string) bool) (e ServerEnvEntry, alias, seed bool, overriddenBy string, ok bool) {
+	up := strings.ToUpper(name)
+	e, alias, seed, ok = lookupSettingsEnv(up)
+	if !ok {
+		return ServerEnvEntry{}, false, false, "", false
+	}
+	if seed && (isLayer1 == nil || !isLayer1(e.Path)) {
+		return ServerEnvEntry{}, false, false, "", false
+	}
+	if !alias {
+		return e, false, seed, "", true
+	}
+	spell := func(n string) string {
+		if seed {
+			return seedEnvNameFor(e, n)
+		}
+		return n
+	}
+	if c := spell(e.Canonical); set[c] {
+		return e, true, seed, c, true
+	}
+	for _, a := range e.Aliases {
+		if sa := spell(a); sa < up && set[sa] {
+			return e, true, seed, sa, true
+		}
+	}
+	return e, true, seed, "", true
+}
+
+// ValidateServerEnv checks, for the server's startup, every non-empty
 // SCION_SERVER_* and SCION_SEED_* variable in environ (KEY=VALUE pairs, as
-// from os.Environ) that sets a boolean, integer or number setting parses as
-// that type, and that each directly-read boolean (SCION_SERVER_ADMIN_MODE)
-// parses. The error names each variable and its setting, never the value.
-// An empty value is unset and is not checked.
-func ValidateServerEnv(environ []string) error {
+// from os.Environ) whose value a consumer reads, for a boolean, integer or
+// number setting: the value must parse as that type. It skips a SCION_SEED_*
+// name of a setting seeding does not seed (isLayer1 false; pass
+// opsettings.IsLayer1Key) and an alias another spelling of the same setting
+// overrides, since nothing reads those values. Lists (for example the
+// integer list server.hub.conduit.tcp_allowed_ports) are not checked here.
+// It also checks each directly-read boolean (SCION_SERVER_ADMIN_MODE) with
+// its reader's parser. The error names each variable and its setting, never
+// the value. An empty or blank value is unset and is not checked.
+func ValidateServerEnv(environ []string, isLayer1 func(string) bool) error {
+	set := settingsEnvSet(environ)
 	var bad []string
 	seen := map[string]bool{}
 	for _, kv := range environ {
 		name, value, _ := strings.Cut(kv, "=")
-		if value == "" || seen[name] {
+		if strings.TrimSpace(value) == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
@@ -131,8 +185,8 @@ func ValidateServerEnv(environ []string) error {
 			}
 			continue
 		}
-		e, _, _, ok := lookupSettingsEnv(name)
-		if !ok {
+		e, _, _, overriddenBy, ok := readSettingsEnv(name, set, isLayer1)
+		if !ok || overriddenBy != "" {
 			continue
 		}
 		if _, err := parseServerEnvValue(e.Type, value); err != nil {
@@ -163,54 +217,38 @@ type ServerEnvAliasUse struct {
 }
 
 // FindServerEnvAliases returns the legacy aliases set (non-empty) in
-// environ, sorted by name, with the variable that wins over each one (see
-// resolveServerEnv for the precedence).
-func FindServerEnvAliases(environ []string) []ServerEnvAliasUse {
-	set := map[string]bool{}
-	for _, kv := range environ {
-		if name, value, _ := strings.Cut(kv, "="); value != "" {
-			set[strings.ToUpper(name)] = true
-		}
-	}
+// environ whose setting a consumer reads, sorted by name, with the variable
+// that wins over each one (see resolveServerEnv for the precedence). A
+// SCION_SEED_* alias of a setting seeding does not seed (isLayer1 false) is
+// left out: FindUnmatchedSettingsEnv reports it.
+func FindServerEnvAliases(environ []string, isLayer1 func(string) bool) []ServerEnvAliasUse {
+	set := settingsEnvSet(environ)
 	var out []ServerEnvAliasUse
 	for name := range set {
-		e, alias, seed, ok := lookupSettingsEnv(name)
+		e, alias, seed, overriddenBy, ok := readSettingsEnv(name, set, isLayer1)
 		if !ok || !alias {
 			continue
 		}
-		spell := func(n string) string {
-			if seed {
-				return seedEnvNameFor(e, n)
-			}
-			return n
+		use := e.Canonical
+		if seed {
+			use = seedEnvNameFor(e, e.Canonical)
 		}
-		u := ServerEnvAliasUse{Name: name, Use: spell(e.Canonical), Path: e.Path}
-		if set[u.Use] {
-			u.IgnoredFor = u.Use
-		} else {
-			for _, a := range e.Aliases {
-				if sa := spell(a); sa < name && set[sa] {
-					u.IgnoredFor = sa
-					break
-				}
-			}
-		}
-		out = append(out, u)
+		out = append(out, ServerEnvAliasUse{Name: name, Use: use, Path: e.Path, IgnoredFor: overriddenBy})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
 // WarnDeprecatedServerEnvAliases logs one warning for each legacy alias set
-// in environ (FindServerEnvAliases): the alias still works but is removed
+// in environ whose setting a consumer reads (FindServerEnvAliases): the alias still works but is removed
 // after the next release. An alias another variable overrides is reported
 // as ignored. Call once at server startup. Only names are logged, never
 // values.
-func WarnDeprecatedServerEnvAliases(logger *slog.Logger, environ []string) {
+func WarnDeprecatedServerEnvAliases(logger *slog.Logger, environ []string, isLayer1 func(string) bool) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	for _, u := range FindServerEnvAliases(environ) {
+	for _, u := range FindServerEnvAliases(environ, isLayer1) {
 		if u.IgnoredFor != "" {
 			logger.Warn("Deprecated environment variable is ignored: another spelling of the same setting is set",
 				"env_var", u.Name, "setting", u.Path, "set_by", u.IgnoredFor, "use", u.Use)

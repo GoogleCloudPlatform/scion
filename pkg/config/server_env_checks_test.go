@@ -51,6 +51,14 @@ func TestServerEnvValues_FalseIsFalse(t *testing.T) {
 	assert.Equal(t, "nope", LoadEnvKoanf().Get("server.hub.auto_suspend_stalled"))
 }
 
+// testIsLayer1 stands in for opsettings.IsLayer1Key, which pkg/config cannot
+// import: every setting but the Layer-0 keys server.hub.port and
+// server.hub.read_timeout counts as one seeding seeds. The opsettings tests
+// use the real registry.
+func testIsLayer1(path string) bool {
+	return path != "server.hub.port" && path != "server.hub.read_timeout"
+}
+
 // TestValidateServerEnv: an unparseable value fails, naming the variable and
 // the setting but not the value; an empty value is unset; a string setting
 // takes anything; the directly-read ADMIN_MODE uses its reader's parser.
@@ -65,13 +73,13 @@ func TestValidateServerEnv(t *testing.T) {
 		"SCION_SERVER_ADMIN_MODE=yes",
 		"SCION_SERVER_NO_SUCH_SETTING=whatever",
 		"HOME=/tmp",
-	}))
+	}, testIsLayer1))
 
 	err := ValidateServerEnv([]string{
 		"SCION_SERVER_HUB_AUTOSUSPENDSTALLED=secret-garbage",
 		"SCION_SEED_DEFAULT_MAX_TURNS=twelve",
 		"SCION_SERVER_ADMIN_MODE=maybe",
-	})
+	}, testIsLayer1)
 	require.Error(t, err)
 	msg := err.Error()
 	for _, want := range []string{
@@ -98,7 +106,7 @@ func TestValidateServerEnv(t *testing.T) {
 		}
 		for _, name := range append([]string{e.Canonical}, e.Aliases...) {
 			n++
-			assert.Error(t, ValidateServerEnv([]string{name + "=x-not-a-value"}), name)
+			assert.Error(t, ValidateServerEnv([]string{name + "=x-not-a-value"}, testIsLayer1), name)
 		}
 	}
 	if n < 50 {
@@ -118,7 +126,7 @@ func TestFindServerEnvAliases(t *testing.T) {
 		"SCION_SERVER_BROKER_HUBENDPOINT=http://b:1",
 		"SCION_SERVER_RUNTIMEBROKER_PORT=", // empty: unset
 		"SCION_SERVER_HUB_PORT=9810",       // canonical: not an alias
-	})
+	}, testIsLayer1)
 	assert.Equal(t, []ServerEnvAliasUse{
 		{Name: "SCION_SEED_SERVER_HUB_STALLED_THRESHOLD", Use: "SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD", Path: "server.hub.stalled_threshold"},
 		{Name: "SCION_SERVER_BROKER_HUBENDPOINT", Use: "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT", Path: "server.broker.hub_endpoint"},
@@ -135,7 +143,7 @@ func TestWarnDeprecatedServerEnvAliases_NamesNotValues(t *testing.T) {
 	WarnDeprecatedServerEnvAliases(slog.New(slog.NewTextHandler(&buf, nil)), []string{
 		"SCION_SERVER_HUB_ADMIN_EMAILS=topsecret@example.com",
 		"SCION_SERVER_HUB_PORT=9810",
-	})
+	}, testIsLayer1)
 	out := buf.String()
 	assert.Equal(t, 1, strings.Count(out, "level=WARN"), out)
 	assert.Contains(t, out, "env_var=SCION_SERVER_HUB_ADMIN_EMAILS")
@@ -170,4 +178,33 @@ func TestAgentContainerEnvExcluded(t *testing.T) {
 
 	t.Setenv("SCION_AGENT_ID", "")
 	assert.Equal(t, "workspace_path", versionedEnvKeyMapper("SCION_WORKSPACE_PATH"), "outside an agent container it maps as before")
+}
+
+// TestValidateServerEnv_OnlyValuesARead: ValidateServerEnv checks only values
+// a consumer reads. A SCION_SEED_* name of a setting seeding does not seed and
+// an alias its canonical name overrides pass with a bad value; the same alias
+// alone, and a bad canonical value, fail. A blank SCION_SERVER_ADMIN_MODE is
+// unset, as for its reader.
+func TestValidateServerEnv_OnlyValuesARead(t *testing.T) {
+	assert.NoError(t, ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_PORT=abc"}, testIsLayer1), "a Layer-0 seed name is not read")
+	assert.NoError(t, ValidateServerEnv([]string{
+		"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED=garbage",
+		"SCION_SERVER_HUB_AUTOSUSPENDSTALLED=true",
+	}, testIsLayer1), "an overridden alias is not read")
+	assert.NoError(t, ValidateServerEnv([]string{
+		"SCION_SERVER_BROKER_HUB_ENDPOINT=x",
+		"SCION_SERVER_BROKER_PORT=9801",
+	}, testIsLayer1))
+	assert.Error(t, ValidateServerEnv([]string{"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED=garbage"}, testIsLayer1), "the alias alone is read")
+	assert.Error(t, ValidateServerEnv([]string{
+		"SCION_SERVER_HUB_AUTO_SUSPEND_STALLED=true",
+		"SCION_SERVER_HUB_AUTOSUSPENDSTALLED=garbage",
+	}, testIsLayer1), "the canonical value is read")
+	assert.Error(t, ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED=garbage"}, testIsLayer1), "a Layer-1 seed name is read")
+	assert.NoError(t, ValidateServerEnv([]string{"SCION_SERVER_ADMIN_MODE=   "}, testIsLayer1), "a blank ADMIN_MODE is unset")
+	// A seed alias of a setting seeding does not seed gets no deprecation
+	// warning (FindUnmatchedSettingsEnv reports it as matching nothing).
+	e := serverEnvEntry(t, "server.hub.read_timeout")
+	require.Contains(t, e.Aliases, "SCION_SERVER_HUB_READ_TIMEOUT")
+	assert.Empty(t, FindServerEnvAliases([]string{"SCION_SEED_SERVER_HUB_READ_TIMEOUT=30s"}, testIsLayer1))
 }

@@ -1268,12 +1268,12 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	// An unparseable SCION_SERVER_* / SCION_SEED_* value fails startup with
 	// an error naming the variable, rather than being ignored or falling
 	// back to a default (ptone/scion#3911).
-	if err := config.ValidateServerEnv(os.Environ()); err != nil {
+	if err := config.ValidateServerEnv(os.Environ(), opsettings.IsLayer1Key); err != nil {
 		return nil, err
 	}
 	// Legacy spellings of a setting still work for one more release; name
 	// each one set, and any that another spelling overrides. Once per start.
-	config.WarnDeprecatedServerEnvAliases(slog.Default(), os.Environ())
+	config.WarnDeprecatedServerEnvAliases(slog.Default(), os.Environ(), opsettings.IsLayer1Key)
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)

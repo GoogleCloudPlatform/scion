@@ -229,3 +229,15 @@ func TestBooleanFalseFromEnvValidates(t *testing.T) {
 		t.Errorf("auto_suspend_stalled = %v, want false", lc.AutoSuspendStalled)
 	}
 }
+
+// TestValidateServerEnvRegistry: with the real registry, a Layer-0
+// SCION_SEED_* name (seeding never reads it) does not stop the server, while a
+// Layer-1 one with a bad value does.
+func TestValidateServerEnvRegistry(t *testing.T) {
+	if err := config.ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_PORT=abc"}, IsLayer1Key); err != nil {
+		t.Errorf("Layer-0 seed name stopped the server: %v", err)
+	}
+	if err := config.ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED=abc"}, IsLayer1Key); err == nil {
+		t.Error("a bad Layer-1 seed value did not stop the server")
+	}
+}
