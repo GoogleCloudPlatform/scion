@@ -127,10 +127,17 @@ type ResolvedSkillResponse struct {
 }
 
 // ResolveSkillError describes a resolution failure for a single skill.
+// Message is the fixed reason phrase for Code (see
+// agent.SkillResolutionPhrase). Status is the HTTP status of the upstream
+// response that failed the resolution, when one is known. CorrelationID
+// ties the error to the server-side log record that holds the full error
+// (see newSkillResolveError).
 type ResolveSkillError struct {
-	URI     string `json:"uri"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	URI           string `json:"uri"`
+	Code          string `json:"code"`
+	Message       string `json:"message"`
+	Status        int    `json:"status,omitempty"`
+	CorrelationID string `json:"correlationId,omitempty"`
 }
 
 // UpdateSkillRequest is the request body for updating a skill.

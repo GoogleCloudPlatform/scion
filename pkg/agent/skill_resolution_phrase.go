@@ -19,6 +19,18 @@ package agent
 // resolve errors both show the phrase for an error code in place of the
 // resolver's own text; the full text goes to the server-side log.
 
+// Error codes of the Hub's federated skill registry lookups.
+const (
+	SkillErrCodeUnknownRegistry   = "unknown_registry"
+	SkillErrCodeRegistryDisabled  = "registry_disabled"
+	SkillErrCodeWrongRegistryType = "wrong_registry_type"
+	SkillErrCodeFederationError   = "federation_error"
+	SkillErrCodeTrustViolation    = "trust_violation"
+	// SkillErrCodeInternalError has no phrase of its own (see
+	// SkillResolutionDefaultPhrase).
+	SkillErrCodeInternalError = "internal_error"
+)
+
 // skillResolutionPhrases is the fixed reason phrase for each skill
 // resolution error code. A code not listed gets
 // SkillResolutionDefaultPhrase.
@@ -30,6 +42,11 @@ var skillResolutionPhrases = map[string]string{
 	SkillErrCodeUpstreamUnavailable: "skill source unavailable",
 	SkillErrCodeUnreachable:         "skill source unreachable",
 	SkillErrCodeInvalidURI:          "invalid skill URI",
+	SkillErrCodeUnknownRegistry:     "skill registry not configured",
+	SkillErrCodeRegistryDisabled:    "skill registry disabled",
+	SkillErrCodeWrongRegistryType:   "unsupported skill registry type",
+	SkillErrCodeFederationError:     "skill registry request failed",
+	SkillErrCodeTrustViolation:      "skill content hash not trusted",
 }
 
 // SkillResolutionDefaultPhrase is the reason phrase for a skill resolution
