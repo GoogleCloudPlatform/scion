@@ -672,13 +672,14 @@ func finalizeHarnessConfigWith(t *testing.T, srv *Server, hcID string, paths ...
 	}
 }
 
-// TestHandleHarnessConfigFinalize_DeletesFilesMissingFromManifest verifies
-// that finalize removes the storage objects of files the previous record
-// listed but the manifest does not (files deleted locally before a sync,
-// ptone/scion#3161). Brokers with local storage hydrate the whole storage
-// directory, so a stale object would still reach agents if only the record's
-// file list were updated.
-func TestHandleHarnessConfigFinalize_DeletesFilesMissingFromManifest(t *testing.T) {
+// TestHandleHarnessConfigFinalize_DroppedFilesNotServed verifies that files
+// the previous record listed but the manifest does not (files deleted locally
+// before a sync, ptone/scion#3161) no longer reach agents. With the blob
+// layout (ptone/scion#4219 part 2) the finalize migrates the legacy row, and
+// a blob row is hydrated only through its manifest's download URLs, so a
+// dropped file is never served; its storage is reclaimed by the legacy-tree
+// removal or the blob garbage collector, not by the commit.
+func TestHandleHarnessConfigFinalize_DroppedFilesNotServed(t *testing.T) {
 	srv, s, stor := testHarnessConfigFileServer(t)
 
 	hc := createTestHarnessConfigWithFiles(t, s, stor, map[string]string{
@@ -689,21 +690,32 @@ func TestHandleHarnessConfigFinalize_DeletesFilesMissingFromManifest(t *testing.
 
 	finalizeHarnessConfigWith(t, srv, hc.ID, "config.yaml")
 
-	for _, gone := range []string{"removed.yaml", "scripts/provision.py"} {
-		if _, ok := stor.objects[hc.StoragePath+"/"+gone]; ok {
-			t.Errorf("expected %s to be deleted from storage after finalize", gone)
-		}
+	updated, err := s.GetHarnessConfig(context.Background(), hc.ID)
+	if err != nil {
+		t.Fatalf("get harness config: %v", err)
 	}
-	if _, ok := stor.objects[hc.StoragePath+"/config.yaml"]; !ok {
-		t.Error("expected config.yaml to be kept in storage after finalize")
+	if updated.Layout != store.HarnessConfigLayoutBlobs || len(updated.Files) != 1 || updated.Files[0].Path != "config.yaml" {
+		t.Fatalf("after finalize: layout %q files %+v, want the blob layout with only config.yaml", updated.Layout, updated.Files)
+	}
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/download", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp DownloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Files) != 1 || resp.Files[0].Path != "config.yaml" {
+		t.Errorf("download lists %+v, want only config.yaml", resp.Files)
 	}
 }
 
 // TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord verifies
-// that finalize deletes only files the previous record listed, never other
-// objects under the storage path: clones live at <scope>/<slug>/<cloneID>,
-// and a slug rename leaves StoragePath unchanged, so another config's objects
-// can sit below this one's storage path.
+// that finalize never deletes other objects under the storage path: clones
+// live at <scope>/<slug>/<cloneID>, and a slug rename leaves StoragePath
+// unchanged, so another config's objects can sit below this one's storage
+// path. (The legacy-tree removal of a migration is covered against real
+// local storage by TestHarnessConfigBlob_NestedLegacyCloneSurvivesParentMigration.)
 func TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord(t *testing.T) {
 	srv, s, stor := testHarnessConfigFileServer(t)
 
@@ -812,7 +824,7 @@ func TestHandleHarnessConfigFinalize_KeepsFilesOutsideStoragePath(t *testing.T) 
 // written before manifest paths were validated: dropping a parent-directory
 // path or an alias of a kept file must not delete anything.
 func TestHandleHarnessConfigFinalize_SkipsUnsafePathsInOldRecord(t *testing.T) {
-	srv, _, hc, root := localStorageHarnessConfig(t,
+	srv, s, hc, root := localStorageHarnessConfig(t,
 		[]string{"config.yaml", outsidePath, "./config.yaml"}, []string{"config.yaml"})
 	outside := writeOutsideFile(t, root)
 
@@ -822,7 +834,18 @@ func TestHandleHarnessConfigFinalize_SkipsUnsafePathsInOldRecord(t *testing.T) {
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("file outside storage must survive finalize: %v", err)
 	}
-	kept := filepath.Join(root, "b", filepath.FromSlash(hc.StoragePath), "config.yaml")
+	// The finalize migrated the row to the blob layout (ptone/scion#4219
+	// part 2): config.yaml is still listed and its content is kept as a
+	// blob, whatever the old record's unsafe entries named.
+	got, err := s.GetHarnessConfig(context.Background(), hc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := templateFileByPath(got.Files, "config.yaml")
+	if !ok || len(got.Files) != 1 {
+		t.Fatalf("files = %+v, want only config.yaml", got.Files)
+	}
+	kept := filepath.Join(root, "b", filepath.FromSlash(srv.harnessConfigObjectPath(got, entry)))
 	if _, err := os.Stat(kept); err != nil {
 		t.Errorf("config.yaml is still listed and must survive dropping its alias ./config.yaml: %v", err)
 	}

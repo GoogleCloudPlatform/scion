@@ -157,3 +157,39 @@ func TestComputeAgentLaunch_Cause(t *testing.T) {
 		}
 	}
 }
+
+// TestComputeAgentLaunch_ResumePhase pins the client-facing resume memory
+// (ptone/scion#4669): set only when EffectiveRestingPhase differs from the
+// stored phase, and omitted from the JSON otherwise.
+func TestComputeAgentLaunch_ResumePhase(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name string
+		a    Agent
+		want string
+	}{
+		{"error row with memory", Agent{Phase: "error", LaunchID: "l1", LaunchState: LaunchStateEnded, LaunchKind: LaunchKindStart, LaunchResumePhase: "created"}, "created"},
+		{"error row without memory", Agent{Phase: "error", LaunchID: "l1", LaunchState: LaunchStateEnded, LaunchKind: LaunchKindStart}, ""},
+		{"active launch hides memory", Agent{Phase: "error", LaunchID: "l1", LaunchState: LaunchStateActive, LaunchKind: LaunchKindStart, LaunchResumePhase: "suspended"}, ""},
+		{"non-error row hides memory", Agent{Phase: "stopped", LaunchID: "l1", LaunchState: LaunchStateEnded, LaunchKind: LaunchKindStart, LaunchResumePhase: "suspended"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l := ComputeAgentLaunch(&tc.a, now)
+			if l == nil {
+				t.Fatal("expected a launch view")
+			}
+			if l.ResumePhase != tc.want {
+				t.Fatalf("ResumePhase = %q, want %q", l.ResumePhase, tc.want)
+			}
+			raw, err := json.Marshal(l)
+			if err != nil {
+				t.Fatal(err)
+			}
+			has := strings.Contains(string(raw), `"resumePhase"`)
+			if has != (tc.want != "") {
+				t.Fatalf("resumePhase in JSON = %v, want %v: %s", has, tc.want != "", raw)
+			}
+		})
+	}
+}

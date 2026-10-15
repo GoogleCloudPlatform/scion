@@ -115,6 +115,11 @@ func StoragePath(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldStoragePath, v))
 }
 
+// Layout applies equality check predicate on the "layout" field. It's identical to LayoutEQ.
+func Layout(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldLayout, v))
+}
+
 // Files applies equality check predicate on the "files" field. It's identical to FilesEQ.
 func Files(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldFiles, v))
@@ -1018,6 +1023,81 @@ func StoragePathEqualFold(v string) predicate.HarnessConfig {
 // StoragePathContainsFold applies the ContainsFold predicate on the "storage_path" field.
 func StoragePathContainsFold(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldContainsFold(FieldStoragePath, v))
+}
+
+// LayoutEQ applies the EQ predicate on the "layout" field.
+func LayoutEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldLayout, v))
+}
+
+// LayoutNEQ applies the NEQ predicate on the "layout" field.
+func LayoutNEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldLayout, v))
+}
+
+// LayoutIn applies the In predicate on the "layout" field.
+func LayoutIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldLayout, vs...))
+}
+
+// LayoutNotIn applies the NotIn predicate on the "layout" field.
+func LayoutNotIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldLayout, vs...))
+}
+
+// LayoutGT applies the GT predicate on the "layout" field.
+func LayoutGT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGT(FieldLayout, v))
+}
+
+// LayoutGTE applies the GTE predicate on the "layout" field.
+func LayoutGTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGTE(FieldLayout, v))
+}
+
+// LayoutLT applies the LT predicate on the "layout" field.
+func LayoutLT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLT(FieldLayout, v))
+}
+
+// LayoutLTE applies the LTE predicate on the "layout" field.
+func LayoutLTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLTE(FieldLayout, v))
+}
+
+// LayoutContains applies the Contains predicate on the "layout" field.
+func LayoutContains(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContains(FieldLayout, v))
+}
+
+// LayoutHasPrefix applies the HasPrefix predicate on the "layout" field.
+func LayoutHasPrefix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasPrefix(FieldLayout, v))
+}
+
+// LayoutHasSuffix applies the HasSuffix predicate on the "layout" field.
+func LayoutHasSuffix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasSuffix(FieldLayout, v))
+}
+
+// LayoutIsNil applies the IsNil predicate on the "layout" field.
+func LayoutIsNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIsNull(FieldLayout))
+}
+
+// LayoutNotNil applies the NotNil predicate on the "layout" field.
+func LayoutNotNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotNull(FieldLayout))
+}
+
+// LayoutEqualFold applies the EqualFold predicate on the "layout" field.
+func LayoutEqualFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEqualFold(FieldLayout, v))
+}
+
+// LayoutContainsFold applies the ContainsFold predicate on the "layout" field.
+func LayoutContainsFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContainsFold(FieldLayout, v))
 }
 
 // FilesEQ applies the EQ predicate on the "files" field.

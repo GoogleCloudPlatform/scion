@@ -166,8 +166,10 @@ func (h StartClaimHolds) HoldExpiry(a *Agent) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// LaunchEndClaimSettlement says what a launch's terminal write does to a
-// create claim on the same row: release it, demote a live claim to
+// LaunchEndClaimSettlement says what a launch's terminal write does to the
+// start claim linked to it on the same row (a create claim for a create
+// launch, a user claim for a start, a restart claim for a restart;
+// ptone/scion#4669): release it, demote a live claim to
 // unconfirmed, or nothing. A launch whose outcome is known releases; one
 // whose outcome is unknown demotes. A launch that ended not_launched
 // settles nothing: only the claim holder's dispatch, or its deferred

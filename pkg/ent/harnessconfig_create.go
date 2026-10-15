@@ -168,6 +168,20 @@ func (_c *HarnessConfigCreate) SetNillableStoragePath(v *string) *HarnessConfigC
 	return _c
 }
 
+// SetLayout sets the "layout" field.
+func (_c *HarnessConfigCreate) SetLayout(v string) *HarnessConfigCreate {
+	_c.mutation.SetLayout(v)
+	return _c
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_c *HarnessConfigCreate) SetNillableLayout(v *string) *HarnessConfigCreate {
+	if v != nil {
+		_c.SetLayout(*v)
+	}
+	return _c
+}
+
 // SetFiles sets the "files" field.
 func (_c *HarnessConfigCreate) SetFiles(v string) *HarnessConfigCreate {
 	_c.mutation.SetFiles(v)
@@ -375,6 +389,10 @@ func (_c *HarnessConfigCreate) defaults() {
 		v := harnessconfig.DefaultScope
 		_c.mutation.SetScope(v)
 	}
+	if _, ok := _c.mutation.Layout(); !ok {
+		v := harnessconfig.DefaultLayout
+		_c.mutation.SetLayout(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := harnessconfig.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -535,6 +553,10 @@ func (_c *HarnessConfigCreate) createSpec() (*HarnessConfig, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.StoragePath(); ok {
 		_spec.SetField(harnessconfig.FieldStoragePath, field.TypeString, value)
 		_node.StoragePath = value
+	}
+	if value, ok := _c.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+		_node.Layout = value
 	}
 	if value, ok := _c.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
@@ -821,6 +843,24 @@ func (u *HarnessConfigUpsert) UpdateStoragePath() *HarnessConfigUpsert {
 // ClearStoragePath clears the value of the "storage_path" field.
 func (u *HarnessConfigUpsert) ClearStoragePath() *HarnessConfigUpsert {
 	u.SetNull(harnessconfig.FieldStoragePath)
+	return u
+}
+
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsert) SetLayout(v string) *HarnessConfigUpsert {
+	u.Set(harnessconfig.FieldLayout, v)
+	return u
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsert) UpdateLayout() *HarnessConfigUpsert {
+	u.SetExcluded(harnessconfig.FieldLayout)
+	return u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsert) ClearLayout() *HarnessConfigUpsert {
+	u.SetNull(harnessconfig.FieldLayout)
 	return u
 }
 
@@ -1258,6 +1298,27 @@ func (u *HarnessConfigUpsertOne) UpdateStoragePath() *HarnessConfigUpsertOne {
 func (u *HarnessConfigUpsertOne) ClearStoragePath() *HarnessConfigUpsertOne {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearStoragePath()
+	})
+}
+
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsertOne) SetLayout(v string) *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsertOne) UpdateLayout() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsertOne) ClearLayout() *HarnessConfigUpsertOne {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearLayout()
 	})
 }
 
@@ -1889,6 +1950,27 @@ func (u *HarnessConfigUpsertBulk) UpdateStoragePath() *HarnessConfigUpsertBulk {
 func (u *HarnessConfigUpsertBulk) ClearStoragePath() *HarnessConfigUpsertBulk {
 	return u.Update(func(s *HarnessConfigUpsert) {
 		s.ClearStoragePath()
+	})
+}
+
+// SetLayout sets the "layout" field.
+func (u *HarnessConfigUpsertBulk) SetLayout(v string) *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *HarnessConfigUpsertBulk) UpdateLayout() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *HarnessConfigUpsertBulk) ClearLayout() *HarnessConfigUpsertBulk {
+	return u.Update(func(s *HarnessConfigUpsert) {
+		s.ClearLayout()
 	})
 }
 

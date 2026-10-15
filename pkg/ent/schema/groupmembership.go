@@ -52,6 +52,24 @@ func (GroupMembership) Fields() []ent.Field {
 		field.UUID("agent_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+		// expires_at bounds the membership (ptone/scion#4240, admin tier
+		// A3): a membership past it confers nothing and is not read as a
+		// membership. NULL is unbounded. Grant shaping forces it for
+		// memberships added by an admin-kind test identity.
+		field.Time("expires_at").
+			Optional().
+			Nillable().
+			Immutable(),
+		// issuance_id is the issuance ID of the admin-kind test identity
+		// whose request created this row (ptone/scion#4240, admin tier A3),
+		// set only by the store's grant shaping (entadapter
+		// grantShapingFor and issuanceStamp), at create. NULL for every other row. The
+		// purge of that identity removes the rows carrying it.
+		field.String("issuance_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Issuance ID of the admin-kind test identity that created this row (grant shaping)"),
 	}
 }
 
@@ -75,6 +93,8 @@ func (GroupMembership) Edges() []ent.Edge {
 // Indexes of the GroupMembership.
 func (GroupMembership) Indexes() []ent.Index {
 	return []ent.Index{
+		// The admin-kind test identity purge selects rows by issuance_id.
+		index.Fields("issuance_id"),
 		index.Fields("group_id", "user_id").
 			Unique(),
 		index.Fields("group_id", "agent_id").

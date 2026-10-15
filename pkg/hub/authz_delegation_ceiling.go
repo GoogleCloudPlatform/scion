@@ -1038,6 +1038,13 @@ func (a *AuthzService) checkAgentHoldsPermission(
 
 	role, additionalScopes := agentRoleAndScopes(agent)
 	scopes := append(ScopesForRole(role), additionalScopes...)
+	// An agent delegator rooted at an admin-kind test identity holds no
+	// scope its tokens are never issued (admin tier A3), so the ceiling it
+	// passes on is no wider than its own tokens.
+	scopes, err = a.clampTestAdminRootedScopes(ctx, agent, scopes)
+	if err != nil {
+		return false, fmt.Sprintf("agent %s provenance root lookup failed: %v", agentID, err), fmt.Errorf("%w: %w", errCeilingHoldLookup, err)
+	}
 
 	requiredScope := permissionToAgentScope(permissionID)
 	if requiredScope == "" {

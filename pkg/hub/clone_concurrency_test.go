@@ -54,7 +54,7 @@ import (
 // every racing request is guaranteed to pass the pre-check
 // (GetTemplateBySlug/GetHarnessConfigBySlug) before any of them reaches
 // CreateTemplate/CreateHarnessConfig, which is the interleaving the fix
-// exists for. Each test also asserts, via assertNoOrphanedCloneStorage, that
+// exists for. Each test also asserts, via assertNoOrphanedTemplateCloneStorage, that
 // no storage survives under the destination prefix except the winner's own
 // subtree.
 // ============================================================================
@@ -96,31 +96,11 @@ func newCopyBarrier(n int) *copyBarrier {
 	}
 }
 
-// assertNoOrphanedCloneStorage asserts that, under basePath (the
-// deterministic <resource-kind>/<scope-layout>/<slug> prefix shared by every
-// racing request, before the per-request clone-ID suffix the fix adds), the
-// mock storage holds only the winner's own <cloneID>/... subtree. Every
-// losing request's subtree must have been removed by its own failure-path
-// DeletePrefix; any object under basePath outside the winner's subtree means
-// a loser's cleanup ran on a prefix it did not own, or a winner's files were
-// never cleaned up as expected.
-func assertNoOrphanedCloneStorage(t *testing.T, stor *cloneMockStorage, basePath, winnerID string) {
-	t.Helper()
-	stor.mu.Lock()
-	defer stor.mu.Unlock()
-
-	wantPrefix := basePath + "/" + winnerID + "/"
-	for p := range stor.objects {
-		if !strings.HasPrefix(p, basePath+"/") {
-			continue
-		}
-		assert.True(t, strings.HasPrefix(p, wantPrefix),
-			"found storage left over outside the winning clone's own subtree: %s (winner's subtree is %s)", p, wantPrefix)
-	}
-}
-
-// assertNoOrphanedTemplateCloneStorage is assertNoOrphanedCloneStorage for
-// template clones, which are created in the blob layout (ptone/scion#4221):
+// assertNoOrphanedTemplateCloneStorage asserts that, under basePath (the
+// deterministic <resource-kind>/<scope-layout>/<slug> path shared by every
+// racing request), the mock storage holds only the winning clone's own
+// storage. Template and harness-config clones are created in the blob layout
+// (ptone/scion#4221, ptone/scion#4219):
 // a clone's storage is <basePath>.<cloneID>.blobs/... rather than
 // <basePath>/<cloneID>/..., so the winner's subtree is <basePath>.<winnerID>.
 // and any object under basePath outside it is a loser's leftover.
@@ -360,7 +340,7 @@ func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *t
 	}
 
 	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeGlobal, "", "race-clone-global")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testing.T) {
@@ -405,7 +385,7 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 	}
 
 	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, project.ID, "race-clone-project")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }
 
 // ============================================================================
@@ -583,5 +563,5 @@ func TestHarnessConfigClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinner
 	}
 
 	basePath := storage.HarnessConfigStoragePath(srv.HubID(), store.HarnessConfigScopeProject, project.ID, "race-clone-legacy-mix")
-	assertNoOrphanedCloneStorage(t, stor, basePath, winner.ID)
+	assertNoOrphanedTemplateCloneStorage(t, stor, basePath, winner.ID)
 }

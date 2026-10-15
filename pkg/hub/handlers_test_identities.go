@@ -1179,20 +1179,62 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 	u, err := s.store.GetUser(ctx, id)
 	switch {
 	case err == nil:
-		if !u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u) {
+		if u.IssuedBy != nil {
+			run.issuerID = *u.IssuedBy
+		}
+		switch {
+		case u.IsTestFixture():
+			if !s.canDeleteTestIdentity(ctx, caller, u) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+		case store.IsTestAdminKind(u.Kind) && u.IssuanceID != nil && *u.IssuanceID != "":
+			// An admin-kind identity (admin tier A3): its issuer or a
+			// super-admin purges it, with every grant stamped with its
+			// issuance.
+			if !s.canPurgeTestAdminIdentity(ctx, caller, run.issuerID) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+			run.issuanceID = *u.IssuanceID
+		default:
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}
 		run.user = u
-		if u.IssuedBy != nil {
-			run.issuerID = *u.IssuedBy
-		}
 	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 		issuer, ok, lerr := s.fixtureLeftoverIssuer(ctx, id)
 		if lerr != nil {
 			slog.ErrorContext(ctx, "test identity purge: reading leftovers failed", "test_identity_id", id, "error", lerr)
 			InternalError(w)
 			return
+		}
+		// An admin-kind identity whose row is gone (revoke-all, or an
+		// earlier purge that did not finish): its issuance comes from its
+		// issuance audit record, and its stamped grants are leftovers too.
+		issuanceID, auditIssuer, isAdmin, aerr := s.testAdminIssuanceFromAudit(ctx, id)
+		if aerr != nil {
+			slog.ErrorContext(ctx, "test identity purge: reading the issuance record failed", "test_identity_id", id, "error", aerr)
+			InternalError(w)
+			return
+		}
+		if isAdmin {
+			if !ok {
+				grants, _, gerr := s.store.ListIssuanceStampedGrants(ctx, issuanceID, 1)
+				if gerr != nil {
+					slog.ErrorContext(ctx, "test identity purge: reading leftover grants failed", "test_identity_id", id, "error", gerr)
+					InternalError(w)
+					return
+				}
+				ok = len(grants) > 0
+			}
+			if !ok || !s.canPurgeTestAdminIdentity(ctx, caller, auditIssuer) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+			run.issuerID = auditIssuer
+			run.issuanceID = issuanceID
+			break
 		}
 		// A workload delegation manages only identities stamped with its own
 		// delegation (canManageTestIdentity). The leftovers of a deleted

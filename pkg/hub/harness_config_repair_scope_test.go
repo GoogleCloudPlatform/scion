@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,11 @@ import (
 // on the project-scoped then global record, never on "the newest record with
 // that name in any scope".
 
-const repairStorageHash = "actual-storage-hash"
+// hcRepairContent is the config.yaml every fixture record has in storage.
+// The repair commit migrates the row to the blob layout, which hashes the
+// content it copies (ptone/scion#4219 part 2), so the object holds bytes
+// whose sha256 is the hash its metadata reports.
+const hcRepairContent = "harness: claude\n"
 
 type repairScopeFixture struct {
 	srv      *Server
@@ -85,8 +90,8 @@ func newRepairScopeFixture(t *testing.T) *repairScopeFixture {
 		// Storage holds the real content for every record, so a repair of
 		// either record would "succeed" — the test distinguishes which one
 		// was touched by which DB row changed.
-		_, err := stor.Upload(ctx, storagePath+"/config.yaml", nil, storage.UploadOptions{
-			Metadata: map[string]string{"sha256": repairStorageHash},
+		_, err := stor.Upload(ctx, storagePath+"/config.yaml", strings.NewReader(hcRepairContent), storage.UploadOptions{
+			Metadata: map[string]string{"sha256": commitHash(hcRepairContent)},
 		})
 		require.NoError(t, err)
 		return hc
@@ -104,7 +109,7 @@ func (f *repairScopeFixture) repaired(t *testing.T, hc *store.HarnessConfig) boo
 	got, err := f.store.GetHarnessConfig(context.Background(), hc.ID)
 	require.NoError(t, err)
 	require.Len(t, got.Files, 1)
-	return got.Files[0].Hash == repairStorageHash
+	return got.Files[0].Hash == commitHash(hcRepairContent)
 }
 
 func TestHarnessConfigRepair_NameOnlyOtherProjectRepairsGlobal(t *testing.T) {

@@ -35,6 +35,8 @@ type RoleDefinition struct {
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
 	Updated time.Time `json:"updated,omitempty"`
+	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
+	IssuanceID *string `json:"issuance_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the RoleDefinitionQuery when eager-loading is set.
 	Edges        RoleDefinitionEdges `json:"edges"`
@@ -68,7 +70,7 @@ func (*RoleDefinition) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case roledefinition.FieldSystem, roledefinition.FieldConfersMembership:
 			values[i] = new(sql.NullBool)
-		case roledefinition.FieldName, roledefinition.FieldDescription, roledefinition.FieldScopeType:
+		case roledefinition.FieldName, roledefinition.FieldDescription, roledefinition.FieldScopeType, roledefinition.FieldIssuanceID:
 			values[i] = new(sql.NullString)
 		case roledefinition.FieldCreated, roledefinition.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -145,6 +147,13 @@ func (_m *RoleDefinition) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Updated = value.Time
 			}
+		case roledefinition.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -209,6 +218,11 @@ func (_m *RoleDefinition) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated=")
 	builder.WriteString(_m.Updated.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

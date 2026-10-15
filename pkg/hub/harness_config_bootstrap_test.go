@@ -381,10 +381,13 @@ func TestSyncHarnessConfig_DerivesTypedConfig(t *testing.T) {
 	}
 }
 
-// TestSyncHarnessConfig_ReconcilesRemovedFiles verifies harness-configs gained
-// stale-object reconcile on sync by routing through the shared ResourceStore
-// (previously harness-config sync left removed files lingering in storage).
-func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
+// TestSyncHarnessConfig_RemovedFilesLeaveTheManifest verifies that a file
+// removed from a harness-config directory leaves the row's manifest on the
+// next sync, so it is no longer hydrated. The sync deletes nothing: the
+// removed file's blob stays for in-flight hydrations until the blob garbage
+// collector removes it (ptone/scion#4219 part 2, which replaces the prefix
+// reconcile, ptone/scion#3170).
+func TestSyncHarnessConfig_RemovedFilesLeaveTheManifest(t *testing.T) {
 	srv, s, stor := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -401,7 +404,11 @@ func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalePath := hc.StoragePath + "/home/.stale"
+	staleEntry, ok := templateFileByPath(hc.Files, "home/.stale")
+	if !ok {
+		t.Fatal("expected home/.stale in the manifest after bootstrap")
+	}
+	stalePath := srv.harnessConfigObjectPath(hc, staleEntry)
 	if _, ok := stor.objects[stalePath]; !ok {
 		t.Fatalf("expected %q in storage after bootstrap", stalePath)
 	}
@@ -418,8 +425,15 @@ func TestSyncHarnessConfig_ReconcilesRemovedFiles(t *testing.T) {
 		t.Fatalf("second bootstrap failed: %v", err)
 	}
 
-	if _, ok := stor.objects[stalePath]; ok {
-		t.Errorf("expected stale object %q to be reconciled (deleted) from storage", stalePath)
+	after, err := s.GetHarnessConfigBySlug(ctx, "claude", store.HarnessConfigScopeGlobal, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := templateFileByPath(after.Files, "home/.stale"); ok {
+		t.Error("the removed file is still in the manifest after the sync")
+	}
+	if _, ok := stor.objects[stalePath]; !ok {
+		t.Errorf("the sync deleted %q; removed files are left to the blob garbage collector", stalePath)
 	}
 }
 
