@@ -139,6 +139,7 @@ type routedBrokerOpts struct {
 	noHandler   bool // the session serves no RPCs (501 unsupported)
 	interceptor conduit.Interceptor
 	answer      func(ctx context.Context, op string, env *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope
+	clk         clock.Clock // the broker session's clock (default real)
 }
 
 // dialRoutedBroker opens a broker conduit session as the fixture's broker
@@ -155,7 +156,11 @@ func (f *routedBrokerFixture) dialRoutedBroker(t *testing.T, o routedBrokerOpts)
 	if b.answer == nil {
 		b.answer = defaultBrokerAnswer
 	}
-	cfg := conduit.Config{Clock: clock.Real(), Interceptor: o.interceptor}
+	clk := o.clk
+	if clk == nil {
+		clk = clock.Real()
+	}
+	cfg := conduit.Config{Clock: clk, Interceptor: o.interceptor}
 	if !o.noHandler {
 		cfg.RPCHandler = conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
 			env := envelope.RPCToRequest(req)
@@ -619,8 +624,10 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 				}
 				return defaultBrokerAnswer(ctx, op, env)
 			}
-			b1 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold})
-			b2 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold})
+			// The broker sessions' drain deadline runs on a fake clock.
+			fake := clock.NewFake(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))
+			b1 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold, clk: fake})
+			b2 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold, clk: fake})
 			errc := make(chan error, 1)
 			var logs string
 			go func() {
@@ -637,7 +644,8 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 			if b2.count(tc.op) == 1 {
 				holder = b2
 			}
-			require.NoError(t, holder.ls.GoAway(conduit.GoAwayOptions{DrainDeadline: 50 * time.Millisecond}))
+			require.NoError(t, holder.ls.GoAway(conduit.GoAwayOptions{DrainDeadline: 10 * time.Second}))
+			fake.Advance(11 * time.Second) // past the drain deadline
 			err := <-errc
 			if tc.op == conduit.RPCAgentExec {
 				var ou *brokerOutcomeUnknownError
