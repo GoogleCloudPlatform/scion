@@ -251,7 +251,10 @@ func TestUTCTimestampAutoRun_RecheckHasItsOwnBound(t *testing.T) {
 			<-ctx.Done() // the first check takes its whole bound
 			return orig(context.Background(), db, d)
 		}
-		return orig(ctx, db, d)
+		// The re-check must get a live bound of its own, not the spent one.
+		// It then runs unbounded, so its speed cannot fail the test.
+		assert.NoError(t, ctx.Err(), "the re-check must not inherit the spent check bound")
+		return orig(context.Background(), db, d)
 	})
 	logs := captureSlog(t)
 	srv.checkStoredTimestamps(context.Background())
@@ -516,13 +519,26 @@ func TestUTCTimestampAutoRun_ManualCompletionDuringWait(t *testing.T) {
 	id := seedNormMsg(t, s, db, "manual", "2026-10-01 13:00:00 +0900 JST")
 	// The clock stands still at the file's modification time, so the
 	// re-armed attempt can never count the file as stale: it can only find
-	// nothing left to do. The wait (the stale age) leaves time for the
-	// manual run below.
+	// nothing left to do. Its check (the second) waits until the manual run
+	// below has been recorded, so no real-time window decides the outcome.
 	t0 := time.Now().Truncate(time.Second)
 	setVar(t, &timestampNow, func() time.Time { return t0 })
-	setVar(t, &timestampStaleTmpAge, 5*time.Second)
+	setVar(t, &timestampStaleTmpAge, 10*time.Millisecond)
 	require.NoError(t, os.WriteFile(normTmp(path), nil, 0o600))
 	require.NoError(t, os.Chtimes(normTmp(path), t0, t0))
+	manualDone := make(chan struct{})
+	var checks atomic.Int32
+	origCheck := checkStoredTimestampsFn
+	setVar(t, &checkStoredTimestampsFn, func(ctx context.Context, db *sql.DB, d string) (entadapter.TimestampCheck, error) {
+		if checks.Add(1) == 2 {
+			select {
+			case <-manualDone:
+			case <-ctx.Done():
+				return entadapter.TimestampCheck{}, ctx.Err()
+			}
+		}
+		return origCheck(ctx, db, d)
+	})
 	logs := syncSlog(t)
 
 	srv.startStoredTimestampCheck(ctx)
@@ -535,6 +551,7 @@ func TestUTCTimestampAutoRun_ManualCompletionDuringWait(t *testing.T) {
 	op := normOp(t, s)
 	op.Status, op.StartedBy = store.MaintenanceStatusCompleted, "admin@example.com"
 	require.NoError(t, s.UpdateMaintenanceOperation(ctx, op))
+	close(manualDone)
 
 	require.Eventually(t, func() bool {
 		return !entadapter.AutoRunIncompleteSet(normOp(t, s).Metadata)

@@ -196,6 +196,12 @@ func TestClearAutoRunKeyCAS(t *testing.T) {
 
 	// (b) Metadata changed after the read: the metadata guard holds.
 	setNormalizeRow(t, cs, store.MaintenanceStatusFailed, "system:hub-start", key)
+	started := time.Date(2026, 10, 1, 1, 0, 0, 0, time.UTC)
+	completed := started.Add(time.Minute)
+	op, err = cs.GetMaintenanceOperation(ctx, UTCTimestampNormalizeKey)
+	require.NoError(t, err)
+	op.StartedAt, op.CompletedAt = &started, &completed
+	require.NoError(t, cs.UpdateMaintenanceOperation(ctx, op))
 	changed, err = clearAutoRunKeyCAS(ctx, db, `{"autoRunIncomplete":true}`)
 	require.NoError(t, err)
 	assert.False(t, changed, "a concurrent Metadata change makes the clear a no-op")
@@ -213,6 +219,10 @@ func TestClearAutoRunKeyCAS(t *testing.T) {
 	assert.Equal(t, "system:hub-start", op.StartedBy)
 	assert.Equal(t, `{"log":"kept"}`, op.Result)
 	assert.JSONEq(t, `{"other":1}`, op.Metadata)
+	require.NotNil(t, op.StartedAt)
+	require.NotNil(t, op.CompletedAt)
+	assert.True(t, op.StartedAt.Equal(started), "started_at must not change")
+	assert.True(t, op.CompletedAt.Equal(completed), "completed_at must not change")
 }
 
 func TestRemoveStaleSnapshotTemp(t *testing.T) {
