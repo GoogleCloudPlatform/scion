@@ -353,7 +353,7 @@ func WorktreeBranchHeldError(branch, holder string) error {
 	if holder == "" {
 		return fmt.Errorf("branch '%s' is already checked out in another worktree", branch)
 	}
-	return fmt.Errorf("branch '%s' is already checked out in another worktree at %s; if that worktree no longer exists, run 'git worktree remove %s' in the repository and try again", branch, holder, holder)
+	return fmt.Errorf("branch '%s' is already checked out in another worktree at %s; if that worktree no longer exists, run git worktree remove %q in the repository and try again", branch, holder, holder)
 }
 
 // ErrPathNotContained is returned by RemoveWorktree when path's resolved

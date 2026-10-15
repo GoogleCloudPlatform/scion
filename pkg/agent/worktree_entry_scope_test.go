@@ -21,6 +21,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,25 +74,46 @@ func requireNoEntryForBranch(t *testing.T, repo, branch string) {
 }
 
 // A first provision that fails removes the agent dir it created without
-// pruning the repository.
+// pruning the repository, also when the project is reached through a
+// symlinked directory.
 func TestProvisionAgent_FailedFirstProvision_KeepsHiddenSibling(t *testing.T) {
-	agentName := "failed-first-agent"
-	scionDir, agentDir, _ := setupNoConfigAgentProject(t, agentName)
-	projectDir := filepath.Dir(scionDir)
-	setupGitRepo(t, projectDir)
-	sibling, restore := addHiddenSiblingWorktree(t, projectDir)
-	if err := os.RemoveAll(agentDir); err != nil {
-		t.Fatal(err)
-	}
+	for _, symlinked := range []bool{false, true} {
+		name := "plain"
+		if symlinked {
+			name = "symlinked parent"
+		}
+		t.Run(name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			if symlinked {
+				realDir := filepath.Join(tmpDir, "real")
+				if err := os.MkdirAll(realDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(tmpDir, "link")
+				if err := os.Symlink(realDir, link); err != nil {
+					t.Fatal(err)
+				}
+				tmpDir = link
+			}
+			agentName := "failed-first-agent"
+			scionDir, agentDir, _ := setupNoConfigAgentProjectIn(t, tmpDir, agentName)
+			projectDir := filepath.Dir(scionDir)
+			setupGitRepo(t, projectDir)
+			sibling, restore := addHiddenSiblingWorktree(t, projectDir)
+			if err := os.RemoveAll(agentDir); err != nil {
+				t.Fatal(err)
+			}
 
-	ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
-	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws"); err == nil {
-		t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+			ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
+			if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws"); err == nil {
+				t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+			}
+			if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+				t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", err)
+			}
+			assertSiblingWorktreeIntact(t, projectDir, sibling, restore)
+		})
 	}
-	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
-		t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", err)
-	}
-	assertSiblingWorktreeIntact(t, projectDir, sibling, restore)
 }
 
 // A stale agent dir (no config, no home state, clean workspace) is removed
@@ -208,7 +230,7 @@ func TestProvisionAgent_BranchHeldByHiddenWorktree_ClearErrorAndKeepsEntry(t *te
 	if err == nil {
 		t.Fatal("expected ProvisionAgent to fail for a branch held by another worktree")
 	}
-	if !strings.Contains(err.Error(), sibling) || !strings.Contains(err.Error(), "git worktree remove "+sibling) {
+	if !strings.Contains(err.Error(), sibling) || !strings.Contains(err.Error(), fmt.Sprintf("git worktree remove %q", sibling)) {
 		t.Errorf("error should name the holder and how to clear it; got: %v", err)
 	}
 	assertSiblingWorktreeIntact(t, root, sibling, restore)

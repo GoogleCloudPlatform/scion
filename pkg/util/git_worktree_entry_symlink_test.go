@@ -15,6 +15,7 @@
 package util
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -203,7 +204,7 @@ func TestCreateWorktree_BranchHeldByHiddenWorktree(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateWorktree on a branch held by another worktree: expected an error")
 	}
-	if !strings.Contains(err.Error(), sibling) || !strings.Contains(err.Error(), "git worktree remove "+sibling) {
+	if !strings.Contains(err.Error(), sibling) || !strings.Contains(err.Error(), fmt.Sprintf("git worktree remove %q", sibling)) {
 		t.Errorf("error should name the holder and how to clear it; got: %v", err)
 	}
 	assertSiblingIntact(t, repo, sibling, restore)
