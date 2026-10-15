@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,17 +64,31 @@ func TestRunAll_OrderAndCounts(t *testing.T) {
 // check's late result is discarded.
 func TestRunAll_CouldNotRun(t *testing.T) {
 	release := make(chan struct{})
-	defer close(release)
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	slowCtxErr := make(chan error, 1)
 	r := NewRegistry()
 	r.Register(check("c.err", func(context.Context, Env) ([]Finding, error) {
 		return []Finding{{Code: "c.err.partial", Severity: SeverityInfo}}, errors.New("boom")
 	}))
 	r.Register(check("c.panic", func(context.Context, Env) ([]Finding, error) { panic("bad") }))
-	r.Register(Check{Name: "c.slow", Timeout: 10 * time.Millisecond, Run: func(context.Context, Env) ([]Finding, error) {
+	r.Register(Check{Name: "c.slow", Timeout: 10 * time.Millisecond, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
 		<-release // returns only after RunAll is done: its result is late
+		slowCtxErr <- ctx.Err()
 		return []Finding{{Code: "c.slow.late", Severity: SeverityInfo}}, nil
 	}})
 	rep := r.RunAll(context.Background(), Env{})
+	// The timed-out check's context is cancelled by the time RunAll returns.
+	releaseAll()
+	select {
+	case err := <-slowCtxErr:
+		if err == nil {
+			t.Fatal("the timed-out check's context was not cancelled after RunAll returned")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the released slow check never reported its context")
+	}
 	want := map[string]string{"c.err": "boom", "c.panic": "panic: bad", "c.slow": "timed out"}
 	if len(rep.Findings) != 3 || rep.Blocking != 3 {
 		t.Fatalf("findings %+v, want 3 blocking could_not_run", rep.Findings)
@@ -110,6 +125,23 @@ func TestRunAll_ParentCancelled(t *testing.T) {
 	rep := r.RunAll(ctx, Env{})
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Message, "cancelled") {
 		t.Fatalf("findings %+v, want one could_not_run saying cancelled", rep.Findings)
+	}
+}
+
+// A parent deadline that ends a check reads as the preflight deadline, not
+// as the check's own (much longer) timeout.
+func TestRunAll_ParentDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	r := NewRegistry()
+	r.Register(Check{Name: "c.wait", Timeout: time.Hour, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
+		<-ctx.Done()
+		select {} // never returns: only the select in RunAll decides
+	}})
+	rep := r.RunAll(ctx, Env{})
+	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Message, "the preflight deadline passed") ||
+		strings.Contains(rep.Findings[0].Message, "timed out after") {
+		t.Fatalf("findings %+v, want one could_not_run saying the preflight deadline passed", rep.Findings)
 	}
 }
 

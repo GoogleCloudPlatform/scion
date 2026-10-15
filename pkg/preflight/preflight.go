@@ -134,9 +134,11 @@ func (r *Registry) Register(c Check) {
 // timeout, and returns the report. A check that errors, times out or panics
 // gives one block finding with code "<name>.could_not_run": findings it
 // returned with an error are dropped, and a timed-out check's late result is
-// discarded (its context is cancelled). A finding whose severity the
-// registry does not know, or whose code does not start with "<name>.",
-// gives "<name>.invalid_finding" (block) in its place. RunAll sets each
+// discarded (its context is cancelled). The message says whether the
+// check's own timeout, the parent's deadline or a cancellation ended it.
+// A finding whose severity the registry does not know, or whose code does
+// not start with "<name>.", gives "<name>.invalid_finding" (block) in its
+// place. RunAll sets each
 // finding's Check, and sorts findings by check, code and subjects.
 func (r *Registry) RunAll(ctx context.Context, env Env) Report {
 	r.mu.Lock()
@@ -184,9 +186,13 @@ func (r *Registry) RunAll(ctx context.Context, env Env) Report {
 	return rep
 }
 
+// errCheckTimeout is the cause of a check's own timeout, so runOne can
+// tell it from the parent context's deadline or cancellation.
+var errCheckTimeout = errors.New("check timeout")
+
 // runOne runs c under its timeout with panic recovery.
 func runOne(ctx context.Context, c Check, env Env) []Finding {
-	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	ctx, cancel := context.WithTimeoutCause(ctx, c.Timeout, errCheckTimeout)
 	defer cancel()
 	type result struct {
 		findings []Finding
@@ -209,9 +215,12 @@ func runOne(ctx context.Context, c Check, env Env) []Finding {
 		}
 		return res.findings
 	case <-ctx.Done():
-		why := fmt.Sprintf("timed out after %s", c.Timeout)
-		if errors.Is(ctx.Err(), context.Canceled) {
-			why = "cancelled"
+		why := "cancelled"
+		switch {
+		case errors.Is(context.Cause(ctx), errCheckTimeout):
+			why = fmt.Sprintf("timed out after %s", c.Timeout)
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			why = "the preflight deadline passed"
 		}
 		return []Finding{couldNotRun(c.Name, why)}
 	}
