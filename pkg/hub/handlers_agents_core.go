@@ -6011,12 +6011,14 @@ func resolvePassthroughProfile(broker *store.RuntimeBroker, profileName string) 
 // emulator → hub gcp-token endpoint → IAM impersonation) works inside the
 // sandbox.
 //
-// The method is a no-op when:
+// The GCP setting is left unchanged when:
 //   - the agent's config is not passthrough,
-//   - the agent's resolved profile is not a cloudrun-sandbox profile, or
-//     cannot be resolved (passthrough is kept), or
+//   - the agent's profile cannot be resolved (passthrough is kept and no
+//     profile is recorded),
+//   - the agent's resolved profile is not a cloudrun-sandbox profile
+//     (passthrough is kept and the profile is recorded), or
 //   - the broker has no host SA registered (leaves passthrough as-is with a
-//     warning — identical to pre-fix behavior).
+//     warning; the profile is recorded).
 //
 // On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
 // assign mode with the broker's host SA, and a GCPServiceAccount record is
