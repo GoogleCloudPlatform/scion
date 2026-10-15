@@ -1156,3 +1156,46 @@ func TestTestAdminA3_KindReadFailClosedRealWiring(t *testing.T) {
 	d = srv.authzService.Decide(ctx, req)
 	assert.True(t, d.Allowed, "control: a readable kind admits: %s", d.Reason)
 }
+
+// The A3 agent mint census exempts conduit_relay_admit.go:writeRelayAdmission
+// (relay admission claims of a user principal copy its scoped credential's
+// scopes). That exemption holds only while no decision reads those claim
+// scopes: a relay-held user session is rebuilt from the live user and token
+// rows (relayUserIdentity) on every operation. This pins it: admission claims
+// whose scopes and project differ from the live token yield an identity with
+// the token's scopes, boundary and ceiling, for the same admin-kind user, and
+// the test-admin policy still refuses that user a deny-classified permission.
+func TestTestAdminA3_RelayUserIdentityIgnoresClaimScopes(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "a3-relay-iss", store.SystemRoleSuperAdmin)
+	admin := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	projectID := tid("a3-relay-project")
+	taProject(t, s, projectID, issuer.ID)
+	expiry := time.Now().Add(time.Hour)
+	tok := &store.UserAccessToken{ID: generateID(), UserID: admin.Identity.ID, Name: "a3-relay-uat", Prefix: "a3r_",
+		KeyHash: "a3-relay-uat-key-hash", BoundaryKind: "project", ProjectID: projectID, Scopes: []string{"project:read"},
+		ExpiresAt: &expiry, Created: time.Now()}
+	require.NoError(t, s.CreateUserAccessToken(ctx, tok))
+	live, err := s.GetUserAccessToken(ctx, tok.ID)
+	require.NoError(t, err)
+
+	claims := conduitAdmissionClaims{ID: admin.Identity.ID, AuthType: AuthTypeUAT, CredentialID: tok.ID,
+		ScopeProject: tid("a3-relay-other"), Scopes: []string{"project:read", "project:update", "project:secret:read", "hub:admin"}}
+	identity, verdict, reason := srv.relayUserIdentity(ctx, claims)
+	require.Equal(t, conduitAuthzAllowed, verdict, reason)
+	scoped, ok := identity.(*ScopedUserIdentity)
+	require.True(t, ok, "a UAT session is rebuilt as a scoped user, got %T", identity)
+	assert.Equal(t, admin.Identity.ID, scoped.ID(), "the same admin-kind user")
+	assert.Equal(t, live.Scopes, scoped.ScopedScopes(), "scopes from the live token, not the admission claims")
+	assert.NotEqual(t, claims.Scopes, scoped.ScopedScopes())
+	assert.Equal(t, projectID, scoped.Boundary().ProjectID, "boundary from the live token, not the claims' ScopeProject")
+	assert.Equal(t, live.NormalizedCeiling(), scoped.Ceiling(), "ceiling from the live token")
+
+	d := srv.authzService.Decide(ctx, AuthzRequest{
+		Principal: principalContextForIdentity(identity), Credential: credentialContextForIdentity(identity),
+		Resource: Resource{Type: "project", ID: projectID}, Action: ActionManageVisitors, Permission: "project.manage_visitors",
+	})
+	assert.False(t, d.Allowed, "deny-classified permission for the rebuilt admin-kind user: %s", d.Reason)
+	assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "the test-admin policy applies to the rebuilt user (%s)", d.Reason)
+}
