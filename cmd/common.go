@@ -348,10 +348,27 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 // prompt (see hubsync.EnsureHubReady). There is no per-command agent
 // reconcile.
 func requireHub(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, false)
+}
+
+// requireHubForUpload is requireHub for a command that uploads to, or reads
+// from, the Hub in the scope templateScopeFromGlobalFlag picks. In the
+// global scope (--global) no project ID is read, so the project is not
+// linked to the Hub or registered (ptone/scion#5217); in the project scope
+// it is requireHub.
+func requireHubForUpload(projectPath string) (*HubContext, error) {
+	return requireHubWith(projectPath, templateScopeFromGlobalFlag() == "global")
+}
+
+// requireHubWith is requireHub with skipProjectLink passed to
+// hubsync.EnsureHubReady as SkipProjectLink. A hub profile is handled
+// first, so its refusal of --global applies whatever skipProjectLink is.
+func requireHubWith(projectPath string, skipProjectLink bool) (*HubContext, error) {
 	if hubProfileSelected() {
 		return profileAgentHubContext()
 	}
 	opts := hubsync.EnsureHubReadyOptions{
+		SkipProjectLink:  skipProjectLink,
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
 		EndpointOverride: hubEndpoint,
@@ -410,6 +427,23 @@ func detectCrossProjectTarget(cmd *cobra.Command) string {
 		return ""
 	}
 	return projectPath
+}
+
+// localProjectDir returns the project directory whose local files (such as
+// harness-configs) a command reads: the directory named with --project, or
+// the one found from the working directory. A --project value that is a hub
+// project reference names no local directory, so it returns "" and only
+// the global directory is read; the hub call gets the reference itself
+// (ptone/scion#5217).
+func localProjectDir() string {
+	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
+		return ""
+	}
+	dir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // CheckAgentsGitignore verifies that .scion/agents/ is listed in .gitignore
