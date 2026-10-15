@@ -21,6 +21,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,8 +110,8 @@ func TestProvisionAgent_FailedFirstProvision_KeepsHiddenSibling(t *testing.T) {
 			}
 
 			ctx := api.ContextWithGitClone(context.Background(), &api.GitCloneConfig{URL: "https://example.com/o/r.git"})
-			if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws"); err == nil {
-				t.Fatal("expected ProvisionAgent to fail for a relative workspace with git clone")
+			if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "", "", "relative/ws"); err == nil || !strings.Contains(err.Error(), "relative --workspace is not supported") {
+				t.Fatalf("expected ProvisionAgent to fail on the relative workspace, after creating the agent dir; got: %v", err)
 			}
 			if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 				t.Fatalf("expected the agent dir created by the failed provision to be removed (stat err=%v)", err)
@@ -167,8 +168,8 @@ func TestPurgeExpiredKeptAgentDir_SymlinkedParent_RemovesOwnEntryOnly(t *testing
 	}
 	t.Chdir(base)
 
-	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); err == nil {
-		t.Fatal("expected the dir with work to be kept on the first call")
+	if err := handleAgentDirWithoutConfig("a", agentDir, agentHome, ws); !errors.Is(err, config.ErrAgentStateConflict) {
+		t.Fatalf("expected the dir with work to be kept on the first call (a state conflict); got: %v", err)
 	}
 	if _, err := os.Stat(agentDir); err != nil {
 		t.Fatalf("expected the agent dir to be kept: %v", err)
