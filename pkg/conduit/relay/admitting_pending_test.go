@@ -59,7 +59,9 @@ func TestSetAdmitting_DrainsSessionAdmittedBeforeRegistration(t *testing.T) {
 
 // TestServe_NotPausedSessionRegistersWithoutGoAway is the control for the
 // test above: a session that passes the same window while the relay keeps
-// admitting registers and serves, and gets no GoAway.
+// admitting registers and serves, and gets no GoAway. It passes with and
+// without the post-register paused check; it guards against a fix that
+// drains every session.
 func TestServe_NotPausedSessionRegistersWithoutGoAway(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
@@ -88,5 +90,42 @@ func TestServe_NotPausedSessionRegistersWithoutGoAway(t *testing.T) {
 	}
 	if relayRow(t, w, "relay-a").Draining {
 		t.Fatal("relay row marked draining")
+	}
+}
+
+// TestSetAdmitting_ResumeBeforeRegistrationRegistersWithoutGoAway: when
+// admission stops and resumes again inside the window between admission
+// and registration, the relay admits again by the time the session
+// registers, so it registers and serves with no GoAway.
+func TestSetAdmitting_ResumeBeforeRegistrationRegistersWithoutGoAway(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	n := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	reached := make(chan struct{})
+	var once sync.Once
+	n.Relay.SetBeforeReadyHookForTest(func() {
+		once.Do(func() {
+			n.Relay.SetAdmitting(false)
+			n.Relay.SetAdmitting(true)
+			close(reached)
+		})
+	})
+	cfg := echoConfig()
+	var goAways <-chan *conduitv1.GoAway
+	cfg.Interceptor, goAways = goAwayRecorder(false)
+	_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), cfg)
+
+	relaytest.WaitClosed(t, reached, "admission stopped and resumed in the window")
+	openEcho(t, n, wel.GetSessionId())
+	select {
+	case g := <-goAways:
+		t.Fatalf("unexpected GoAway {%q, %dms} after admission resumed", g.GetReason(), g.GetDrainDeadlineMs())
+	default:
+	}
+	if !n.Relay.Admitting() {
+		t.Fatal("admission not resumed")
+	}
+	if relayRow(t, w, "relay-a").Draining {
+		t.Fatal("relay row still draining")
 	}
 }
