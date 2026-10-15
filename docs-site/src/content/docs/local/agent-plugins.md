@@ -139,7 +139,7 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 | :--- | :--- | :--- | :--- | :--- |
 | `codex` | partial | 0.147.0 | 0.162.1 | Installed through a Scion-owned local marketplace. Codex skips `sse` MCP servers. |
 | `copilot` | yes | 1.0.74 | 1.0.97 | Installed with `copilot plugin install <dir>`. See the [copilot notes](#copilot). |
-| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7 | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
+| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7; 1.4.9 (live check) | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
 | `claude` | partial | 2.1.157 (approximate) | 2.1.296 | Installed as a skills-dir plugin with a generated manifest. See the [claude notes](#claude). |
 | `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
 
