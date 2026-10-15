@@ -145,15 +145,18 @@ func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 		if entry.Capabilities != nil && entry.Capabilities.AgentPlugins != (api.CapabilityField{}) {
 			t.Errorf("%s: config.yaml declares capabilities.agent_plugins; it belongs in %s", name, config.AgentPluginsSidecarFile)
 		}
-		if err := config.ApplyAgentPluginsSidecarFS(&entry, harnessesEmbed.FS, name); err != nil {
+		// Strict parse: the loaders degrade an invalid sidecar to "no", so
+		// this is what catches a bad bundled file.
+		data, err := fs.ReadFile(harnessesEmbed.FS, name+"/"+config.AgentPluginsSidecarFile)
+		if err != nil {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		if entry.Capabilities == nil {
-			t.Errorf("%s: no capabilities block", name)
+		c, err := config.ParseAgentPluginsSidecar(data)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		c := entry.Capabilities.AgentPlugins
 		if c.Support != level {
 			t.Errorf("%s: agent_plugins support = %q, want %q", name, c.Support, level)
 		}

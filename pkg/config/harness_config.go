@@ -174,9 +174,9 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	}
 	// Agent Plugins support comes from the bundle sidecar when present; a
 	// capabilities.agent_plugins value in config.yaml is the fallback.
-	if err := ApplyAgentPluginsSidecarDir(&entry, absPath); err != nil {
-		return nil, err
-	}
+	// An invalid sidecar degrades to "no" with a warning; it never fails the
+	// load.
+	ApplyAgentPluginsSidecarDir(&entry, absPath)
 
 	name := filepath.Base(absPath)
 	if entry.Name != "" {

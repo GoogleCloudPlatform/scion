@@ -92,15 +92,20 @@ func (d *DeclarativeGenericHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 }
 
 func (d *DeclarativeGenericHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
+	var caps api.HarnessAdvancedCapabilities
 	if d.entry.Capabilities != nil {
-		caps := *d.entry.Capabilities
-		caps.Harness = d.entry.Harness
-		return caps
+		caps = *d.entry.Capabilities
+	} else {
+		// Reuse the legacy Generic capability matrix as a safe default.
+		g := &Generic{}
+		caps = g.AdvancedCapabilities()
 	}
-	// Reuse the legacy Generic capability matrix as a safe default.
-	g := &Generic{}
-	caps := g.AdvancedCapabilities()
 	caps.Harness = d.entry.Harness
+	// agent_plugins comes from the bundle sidecar when present, so a bundle
+	// with only a sidecar keeps the Generic defaults above.
+	if d.entry.AgentPluginsSidecar != nil {
+		caps.AgentPlugins = *d.entry.AgentPluginsSidecar
+	}
 	return caps
 }
 

@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"gopkg.in/yaml.v3"
@@ -46,8 +48,11 @@ type agentPluginsSidecar struct {
 	Reason  string           `yaml:"reason"`
 }
 
-// ParseAgentPluginsSidecar parses the bytes of an AgentPluginsSidecarFile.
-// The support level must be yes, partial or no.
+// ParseAgentPluginsSidecar strictly parses the bytes of an
+// AgentPluginsSidecarFile: the support level must be yes, partial or no.
+// Unknown keys are ignored. The loaders do not fail on its error (they
+// degrade, see applyAgentPluginsSidecar); tests of the bundled files call it
+// directly so a bad bundled sidecar fails CI.
 func ParseAgentPluginsSidecar(data []byte) (api.CapabilityField, error) {
 	var s agentPluginsSidecar
 	if err := yaml.Unmarshal(data, &s); err != nil {
@@ -61,43 +66,74 @@ func ParseAgentPluginsSidecar(data []byte) (api.CapabilityField, error) {
 	return api.CapabilityField{Support: s.Support, Reason: s.Reason}, nil
 }
 
-// applyAgentPluginsSidecar sets entry's agent_plugins capability from the
-// sidecar bytes. The sidecar wins over a capabilities.agent_plugins value in
-// config.yaml (the deprecated Phase 1 location, still read as the fallback).
-func applyAgentPluginsSidecar(entry *HarnessConfigEntry, data []byte) error {
-	c, err := ParseAgentPluginsSidecar(data)
-	if err != nil {
-		return err
+// AgentPluginsCapability returns the entry's effective agent_plugins
+// capability: the bundle sidecar when present, otherwise the deprecated
+// capabilities.agent_plugins value of config.yaml, otherwise the zero value
+// (the harness-config predates Agent Plugins support).
+func (e *HarnessConfigEntry) AgentPluginsCapability() api.CapabilityField {
+	if e.AgentPluginsSidecar != nil {
+		return *e.AgentPluginsSidecar
 	}
-	if entry.Capabilities == nil {
-		entry.Capabilities = &api.HarnessAdvancedCapabilities{}
+	if e.Capabilities != nil {
+		return e.Capabilities.AgentPlugins
 	}
-	entry.Capabilities.AgentPlugins = c
-	return nil
+	return api.CapabilityField{}
 }
 
-// ApplyAgentPluginsSidecarDir applies dir's AgentPluginsSidecarFile to entry.
-// A missing sidecar leaves entry unchanged.
-func ApplyAgentPluginsSidecarDir(entry *HarnessConfigEntry, dir string) error {
-	data, err := os.ReadFile(filepath.Join(dir, AgentPluginsSidecarFile))
+// invalidSidecarWarned dedupes the invalid-sidecar warning per location and
+// error, so a harness-config loaded on every start warns once per process.
+var invalidSidecarWarned sync.Map
+
+// applyAgentPluginsSidecar records the sidecar bytes on entry. A sidecar that
+// does not parse, or has a support level or shape this binary does not know
+// (for example one written for a later release), never fails the load: it
+// degrades to support "no" with the parse error as the reason, and a warning
+// is logged. The feature it gates is optional; the harness stays usable.
+func applyAgentPluginsSidecar(entry *HarnessConfigEntry, data []byte, where string) {
+	c, err := ParseAgentPluginsSidecar(data)
+	if err != nil {
+		c = invalidAgentPluginsSidecar(err, where)
+	}
+	entry.AgentPluginsSidecar = &c
+}
+
+func invalidAgentPluginsSidecar(err error, where string) api.CapabilityField {
+	if _, seen := invalidSidecarWarned.LoadOrStore(where+"\x00"+err.Error(), true); !seen {
+		slog.Warn("ignoring invalid harness-config agent-plugins.yaml; Agent Plugins treated as unsupported",
+			"path", where, "error", err)
+	}
+	return api.CapabilityField{Support: api.SupportNo, Reason: err.Error()}
+}
+
+// ApplyAgentPluginsSidecarDir records dir's AgentPluginsSidecarFile on entry.
+// A missing sidecar leaves entry unchanged; an unreadable or invalid one
+// degrades to support "no" (see applyAgentPluginsSidecar).
+func ApplyAgentPluginsSidecarDir(entry *HarnessConfigEntry, dir string) {
+	p := filepath.Join(dir, AgentPluginsSidecarFile)
+	data, err := os.ReadFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", AgentPluginsSidecarFile, err)
+		c := invalidAgentPluginsSidecar(fmt.Errorf("invalid %s: %w", AgentPluginsSidecarFile, err), p)
+		entry.AgentPluginsSidecar = &c
+		return
 	}
-	return applyAgentPluginsSidecar(entry, data)
+	applyAgentPluginsSidecar(entry, data, p)
 }
 
 // ApplyAgentPluginsSidecarFS is ApplyAgentPluginsSidecarDir for a bundle
 // directory dir inside fsys (for example the embedded harnesses).
-func ApplyAgentPluginsSidecarFS(entry *HarnessConfigEntry, fsys fs.FS, dir string) error {
-	data, err := fs.ReadFile(fsys, path.Join(dir, AgentPluginsSidecarFile))
+func ApplyAgentPluginsSidecarFS(entry *HarnessConfigEntry, fsys fs.FS, dir string) {
+	p := path.Join(dir, AgentPluginsSidecarFile)
+	data, err := fs.ReadFile(fsys, p)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("failed to read %s: %w", AgentPluginsSidecarFile, err)
+		c := invalidAgentPluginsSidecar(fmt.Errorf("invalid %s: %w", AgentPluginsSidecarFile, err), p)
+		entry.AgentPluginsSidecar = &c
+		return
 	}
-	return applyAgentPluginsSidecar(entry, data)
+	applyAgentPluginsSidecar(entry, data, p)
 }

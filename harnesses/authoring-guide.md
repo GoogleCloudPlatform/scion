@@ -376,8 +376,12 @@ reason: "Native install via local marketplace; Codex skips sse MCP servers"
 
 It declares what this bundle's `provision.py` can install, so it is refreshed
 together with the provisioner scripts on seeding and `harness-config upgrade`.
-The loaders copy it into the `agent_plugins` capability. A bundle without the
-file has no plugin support (Scion reports it as predating Agent Plugins).
+The harness reports it as the `agent_plugins` capability. A bundle without the
+file (and without the deprecated key below) has no plugin support: Scion
+reports it as predating Agent Plugins. An unreadable or invalid file (including
+a support level this Scion version does not know) is a warning, not a load
+error: Agent Plugins is treated as `no` with the error as the reason. Every
+bundled harness must ship a valid file; CI parses them strictly.
 `capabilities.agent_plugins` in `config.yaml` is deprecated: it is still read
 when the bundle has no `agent-plugins.yaml`, but hubs, brokers and CLIs built
 before Agent Plugins reject `config.yaml` with that key

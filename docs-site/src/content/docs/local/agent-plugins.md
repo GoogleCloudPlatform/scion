@@ -154,7 +154,7 @@ support: "partial"
 reason: "Native install via local marketplace; Codex skips sse MCP servers"
 ```
 
-The file belongs to the harness-config's provisioner: `scion harness-config reset` and `scion harness-config upgrade` refresh it together with `provision.py`. A harness-config without it is reported as predating Agent Plugins support. Harness-configs from the first Agent Plugins release declared the level as `capabilities.agent_plugins` in `config.yaml`; Scion still reads that key when there is no `agent-plugins.yaml`, but it is deprecated, because hubs, brokers and CLIs built before Agent Plugins reject a `config.yaml` that contains it.
+The file belongs to the harness-config's provisioner: `scion harness-config reset` and `scion harness-config upgrade` refresh it together with `provision.py`. A harness-config without it (and without the deprecated key below) is reported as predating Agent Plugins support. If the file cannot be read, does not parse or has a support level this Scion version does not know, Scion logs a warning and treats the harness as not supporting Agent Plugins, with the error as the reason; the harness itself stays usable. Harness-configs from the first Agent Plugins release declared the level as `capabilities.agent_plugins` in `config.yaml`; Scion still reads that key when there is no `agent-plugins.yaml`, but it is deprecated, because hubs, brokers and CLIs built before Agent Plugins reject a `config.yaml` that contains it.
 
 ### codex
 

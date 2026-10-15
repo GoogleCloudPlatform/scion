@@ -69,10 +69,7 @@ func TestLoadHarnessConfigDir_AgentPluginsSidecar(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var got api.CapabilityField
-			if hc.Config.Capabilities != nil {
-				got = hc.Config.Capabilities.AgentPlugins
-			}
+			got := hc.Config.AgentPluginsCapability()
 			if got != tt.want {
 				t.Fatalf("agent_plugins = %+v, want %+v", got, tt.want)
 			}
@@ -90,11 +87,62 @@ func TestLoadHarnessConfigDir_AgentPluginsSidecar(t *testing.T) {
 }
 
 func TestLoadHarnessConfigDir_InvalidAgentPluginsSidecar(t *testing.T) {
-	for _, sidecar := range []string{"support: \"maybe\"\n", "reason: no level\n", "support: [yes]\n"} {
-		_, err := LoadHarnessConfigDir(writeSidecarTestDir(t, sidecarTestConfig, sidecar))
-		if err == nil || !strings.Contains(err.Error(), AgentPluginsSidecarFile) {
-			t.Errorf("sidecar %q: err = %v, want an %s error", sidecar, err, AgentPluginsSidecarFile)
+	// A malformed sidecar, or one written for a later release (a new support
+	// level, a reshaped file), must not make the harness-config unusable: it
+	// degrades to "no" with the parse error as the reason, and also wins over
+	// a legacy config.yaml value so the start warning shows the real cause.
+	legacy := sidecarTestConfig + "capabilities:\n  agent_plugins: { support: \"yes\" }\n"
+	for _, sidecar := range []string{
+		"support: \"maybe\"\n",
+		"reason: no level\n",
+		"support: [yes]\n",
+		"support:\n  default: \"yes\"\n  \">=2\": \"partial\"\n",
+		"- not a mapping\n",
+		"support: \"yes\n",
+	} {
+		for _, cfg := range []string{sidecarTestConfig, legacy} {
+			hc, err := LoadHarnessConfigDir(writeSidecarTestDir(t, cfg, sidecar))
+			if err != nil {
+				t.Errorf("sidecar %q: load failed: %v", sidecar, err)
+				continue
+			}
+			got := hc.Config.AgentPluginsCapability()
+			if got.Support != api.SupportNo || !strings.HasPrefix(got.Reason, "invalid "+AgentPluginsSidecarFile+": ") {
+				t.Errorf("sidecar %q: agent_plugins = %+v, want no with an \"invalid %s: ...\" reason", sidecar, got, AgentPluginsSidecarFile)
+			}
+			if _, err := ParseAgentPluginsSidecar([]byte(sidecar)); err == nil {
+				t.Errorf("sidecar %q: strict parse accepted it", sidecar)
+			}
 		}
+	}
+
+	// An unreadable sidecar (here a directory) degrades the same way.
+	dir := writeSidecarTestDir(t, sidecarTestConfig, "")
+	if err := os.Mkdir(filepath.Join(dir, AgentPluginsSidecarFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hc, err := LoadHarnessConfigDir(dir)
+	if err != nil {
+		t.Fatalf("unreadable sidecar: load failed: %v", err)
+	}
+	if got := hc.Config.AgentPluginsCapability(); got.Support != api.SupportNo || !strings.Contains(got.Reason, AgentPluginsSidecarFile) {
+		t.Errorf("unreadable sidecar: agent_plugins = %+v", got)
+	}
+}
+
+// A sidecar does not create a capabilities block: config.yaml without one
+// keeps Capabilities nil, so harnesses keep their defaults for the other
+// capabilities.
+func TestLoadHarnessConfigDir_SidecarWithoutCapabilitiesBlock(t *testing.T) {
+	hc, err := LoadHarnessConfigDir(writeSidecarTestDir(t, sidecarTestConfig, "support: \"yes\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.Config.Capabilities != nil {
+		t.Fatalf("Capabilities = %+v, want nil", hc.Config.Capabilities)
+	}
+	if got := hc.Config.AgentPluginsCapability(); got.Support != api.SupportYes {
+		t.Fatalf("agent_plugins = %+v, want yes", got)
 	}
 }
 
@@ -140,8 +188,8 @@ func TestSeedHarnessConfigFromDir_AgentPluginsSidecarAtRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hc.Config.Capabilities == nil || hc.Config.Capabilities.AgentPlugins.Support != api.SupportPartial {
-		t.Fatalf("seeded claude agent_plugins = %+v, want partial", hc.Config.Capabilities)
+	if got := hc.Config.AgentPluginsCapability(); got.Support != api.SupportPartial {
+		t.Fatalf("seeded claude agent_plugins = %+v, want partial", got)
 	}
 }
 
