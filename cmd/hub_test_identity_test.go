@@ -339,7 +339,8 @@ func TestHubTestIdentityDelete(t *testing.T) {
 	stderr.Reset()
 	require.NoError(t, deleteTestIdentity(ctx, &stdout, &stderr, gone.client(t).TestIdentities(), "fx-1"))
 	assert.Empty(t, stdout.String())
-	assert.Equal(t, "Notice: test identity fx-1 was not found (already deleted, or not one you may delete); nothing to do.\n", stderr.String())
+	assert.Equal(t, "Notice: test identity fx-1 was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n"+
+		"A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete fx-1 --purge\" or \"scion hub test-identity revoke-all\".\n", stderr.String())
 
 	agents := &tiCLIHub{deleteStatus: http.StatusConflict, deleteBody: `{"error":{"code":"conflict","message":"owns agents","details":{"agents":[{"id":"a-1","slug":"worker","projectId":"p-1"}]}}}`}
 	err := deleteTestIdentity(ctx, &stdout, &stderr, agents.client(t).TestIdentities(), "fx-1")

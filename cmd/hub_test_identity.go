@@ -745,7 +745,10 @@ func listTestIdentities(ctx context.Context, out io.Writer, svc hubclient.TestId
 
 // deleteTestIdentity deletes a test identity. A 404 (it no longer exists,
 // or it is not one of the caller's) succeeds with a notice, so a teardown
-// step can run more than once.
+// step can run more than once. The hub also answers 404 to a plain delete
+// of a test identity with an admin role (those are removed only by a purge
+// or revoke-all), and the CLI cannot tell the cases apart, so the notice
+// names that path instead of claiming there is nothing to do.
 func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
 	err := svc.Delete(ctx, id)
 	if err == nil {
@@ -753,7 +756,8 @@ func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclien
 		return nil
 	}
 	if apiclient.IsNotFoundError(err) {
-		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found (already deleted, or not one you may delete); nothing to do.\n", id)
+		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n", id)
+		_, _ = fmt.Fprintf(errOut, "A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete %s --purge\" or \"scion hub test-identity revoke-all\".\n", id)
 		return nil
 	}
 	if agents, projects, ok := hubclient.TestIdentityDeleteConflict(err); ok && (len(agents) > 0 || len(projects) > 0) {

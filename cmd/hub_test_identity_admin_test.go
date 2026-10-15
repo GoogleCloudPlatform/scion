@@ -580,3 +580,20 @@ func jsonFieldNames(typ reflect.Type) []string {
 	sort.Strings(names)
 	return names
 }
+
+// A plain delete of a test identity with an admin role gets the hub's 404
+// (only a purge or revoke-all removes one). The command still succeeds, so
+// a teardown can run twice, but its notice names --purge and revoke-all
+// instead of claiming there is nothing to do; it sends no purge itself.
+func TestHubTestIdentityDelete_AdminKind404PointsToPurge(t *testing.T) {
+	hub := &tiCLIHub{deleteStatus: http.StatusNotFound, deleteBody: `{"error":{"code":"not_found","message":"test identity not found"}}`}
+	var stdout, stderr bytes.Buffer
+	require.NoError(t, deleteTestIdentity(context.Background(), &stdout, &stderr, hub.client(t).TestIdentities(), "ta-1"))
+	assert.Empty(t, stdout.String())
+	assert.NotContains(t, stderr.String(), "nothing to do")
+	assert.Contains(t, stderr.String(), "nothing was deleted")
+	assert.Contains(t, stderr.String(), `"scion hub test-identity delete ta-1 --purge"`)
+	assert.Contains(t, stderr.String(), `"scion hub test-identity revoke-all"`)
+	require.Len(t, hub.queries, 1)
+	assert.Equal(t, "", hub.queries[0], "a plain delete sends no purge")
+}
