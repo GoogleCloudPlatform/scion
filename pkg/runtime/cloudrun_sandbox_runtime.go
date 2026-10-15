@@ -1516,6 +1516,20 @@ func NewCloudRunSandboxRuntime(cfg *config.V1CloudRunSandboxConfig) *CloudRunSan
 	}
 }
 
+// NewCloudRunSandboxRuntimeForTest builds a CloudRunSandboxRuntime that runs
+// bin as the sandbox CLI, keeps its state in statePath and lays agents out
+// under rootDir, without the start-up reconcile. Exported so tests in other
+// packages (e.g. pkg/agent, pkg/runtimebroker) can drive the real runtime
+// through a fake CLI, as NewSubstrateRuntimeForTest does for substrate.
+func NewCloudRunSandboxRuntimeForTest(bin, statePath, rootDir string) *CloudRunSandboxRuntime {
+	return &CloudRunSandboxRuntime{
+		bin:          bin,
+		state:        newSandboxStateStore(statePath),
+		rootDir:      rootDir,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+}
+
 func (r *CloudRunSandboxRuntime) Name() string { return "cloudrun-sandbox" }
 
 func (r *CloudRunSandboxRuntime) ExecUser() string { return "scion" }
@@ -2691,7 +2705,7 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     entry.SandboxName,
 			RunID:           entry.Labels[api.LabelRunID],
-			Name:            entry.AgentID,
+			Name:            sandboxAgentName(entry),
 			ContainerStatus: statusStr,
 			Phase:           phase,
 			Image:           entry.Image,
@@ -2705,6 +2719,20 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 	}
 
 	return agents, nil
+}
+
+// sandboxAgentName is the agent name List reports for entry: the agent slug
+// (the scion.name label), as DockerRuntime.List and SubstrateRuntime.List
+// report it, not AgentID, which Run records as the project-prefixed
+// container name ("<project>--<agent>"). The broker's delete and stop
+// resolution and AgentManager match the hub-side agent name against Name,
+// so a project-prefixed Name never matches and the sandbox is left behind
+// (ptone/scion#5156). An entry without the label falls back to AgentID.
+func sandboxAgentName(entry *sandboxStateEntry) string {
+	if name := entry.Labels["scion.name"]; name != "" {
+		return name
+	}
+	return entry.AgentID
 }
 
 // listEntries returns this instance's cached entries, with every Starting

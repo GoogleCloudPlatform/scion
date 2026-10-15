@@ -519,16 +519,16 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// If none of the above, image defaults (ENTRYPOINT + CMD) are used.
 
 	inst := &runpb.Instance{
+		// No run.googleapis.com/ annotations: the Instances API rejects
+		// system annotations with INVALID_ARGUMENT. The instance therefore
+		// gets the platform default restart behaviour, under which an agent
+		// that exits 0 may not be restarted. Restoring ALWAYS needs the
+		// native Instance.restartPolicy field, which runpb does not expose
+		// yet; see ptone/scion#5141.
 		LaunchStage: googleapi.LaunchStage_ALPHA,
-		Annotations: map[string]string{
-			// Cloud Run Instances default to OnFailure, which kills the instance
-			// permanently on clean exit (code 0). Agents that complete a task and
-			// exit 0 must be restarted so they stay available for new messages.
-			"run.googleapis.com/restart-policy": "Always",
-		},
-		Containers: []*runpb.Container{container},
-		Volumes:    volumes,
-		Labels:     labels,
+		Containers:  []*runpb.Container{container},
+		Volumes:     volumes,
+		Labels:      labels,
 	}
 
 	if r.config != nil {

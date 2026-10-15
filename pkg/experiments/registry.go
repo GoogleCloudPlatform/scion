@@ -173,6 +173,13 @@ const FederationProjectVisitors = "federation.project_visitors"
 // Turning it off hides the feature but keeps every stored group.
 const ChatThreadGroups = "hub.chat_thread_groups"
 
+// AgentPlugins gates native install of Agent Plugins 1.0.0 bundles declared
+// in a template's agent_plugins. The hub sends it to the broker at each
+// dispatch; outside broker mode the settings key local_experiments decides.
+// It is checked at provisioning and at every start, so turning it off
+// removes Scion-installed plugins at the next start.
+const AgentPlugins = "hub.agent_plugins"
+
 // AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
 // hub sends a create to the broker as an async launch only while it is on
 // and the request opted in (acceptAsyncLaunch). It is read at each create
@@ -315,6 +322,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#4424",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-11",
+	},
+	{
+		Name:        AgentPlugins,
+		Title:       "Agent Plugins (native install)",
+		Description: "Installs Agent Plugins 1.0.0 bundles declared in a template's agent_plugins into harnesses that support them natively (codex, copilot, muse-code, claude). While off, agent_plugins is ignored with a start warning and previously installed plugins are removed at the next start.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4933",
+		Owner:       "harness",
+		ReviewBy:    "2027-01-13",
 	},
 }
 

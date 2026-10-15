@@ -1974,7 +1974,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2092,7 +2092,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}

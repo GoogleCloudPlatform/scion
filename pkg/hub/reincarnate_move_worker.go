@@ -126,21 +126,36 @@ func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reinca
 // it does not serve it yet. The caller's right to link it was checked when
 // the move was accepted; a self-move's target already serves the project,
 // so a self-move never links.
+//
+// A move onto the co-located broker also records, at once, the references
+// it adds there (the project's activeProfile and the moved agent's own
+// profile), whether or not it links, so the built-ins they name are
+// retained before the move provisions (ptone/scion#5113).
 func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMove) error {
-	if mv.SelfMove || s.brokerServesProject(ctx, mv.TargetBrokerID, mv.ProjectID) {
+	if mv.SelfMove {
+		return nil
+	}
+	if s.brokerServesProject(ctx, mv.TargetBrokerID, mv.ProjectID) {
+		s.onColocatedPlacement(ctx, mv.ProjectID, mv.TargetBrokerID, mv.Profile)
 		return nil
 	}
 	dst, err := s.store.GetRuntimeBroker(ctx, mv.TargetBrokerID)
 	if err != nil {
 		return err
 	}
-	return s.store.AddProjectProvider(ctx, &store.ProjectProvider{
+	if err := s.linkProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  mv.ProjectID,
 		BrokerID:   dst.ID,
 		BrokerName: dst.Name,
 		Status:     dst.Status,
 		LinkedBy:   "agent-move",
-	})
+	}); err != nil {
+		return err
+	}
+	// linkProjectProvider recorded the project's activeProfile; add the
+	// moved agent's own profile.
+	s.addColocatedAgentReference(dst.ID, mv.Profile)
+	return nil
 }
 
 // rollbackMove undoes a move that failed after the agent was assigned to
