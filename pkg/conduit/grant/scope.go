@@ -107,18 +107,6 @@ func NewScope(scopes []string, boundary ScopeBoundary, ceilingVersion int, permi
 	}
 }
 
-// clone returns a deep copy of s (nil for nil).
-func (s *Scope) clone() *Scope {
-	if s == nil {
-		return nil
-	}
-	return &Scope{
-		Scopes:   slices.Clone(s.Scopes),
-		Boundary: s.Boundary,
-		Ceiling:  ScopeCeiling{Version: s.Ceiling.Version, PermissionIDs: slices.Clone(s.Ceiling.PermissionIDs)},
-	}
-}
-
 func sortedUnique(v []string) bool {
 	for i := 1; i < len(v); i++ {
 		if v[i-1] >= v[i] {

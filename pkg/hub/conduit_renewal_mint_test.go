@@ -497,8 +497,13 @@ func mustScope(t *testing.T, ident Identity) *grant.Scope {
 	return sc
 }
 
-// wrappedScoped embeds a scoped identity, so its accessors are promoted.
-type wrappedScoped struct{ *ScopedUserIdentity }
+// wrappedScoped wraps a scoped identity behind the user identity and scoped
+// credential interfaces, so it exposes the scoped accessors without
+// embedding an attested identity type.
+type wrappedScoped struct {
+	UserIdentity
+	conduitScopedCredential
+}
 
 // opaqueIdentity wraps an identity behind the Identity interface alone.
 type opaqueIdentity struct{ Identity }
@@ -512,7 +517,7 @@ func TestConduitScopeForFailsClosed(t *testing.T) {
 	f := newRenewalFixture(t)
 	scoped := NewScopedUserIdentity(f.user, f.agent.ProjectID, []string{store.UATScopeAgentPortAccess})
 
-	got, err := conduitScopeFor(wrappedScoped{scoped})
+	got, err := conduitScopeFor(wrappedScoped{scoped, scoped})
 	require.NoError(t, err)
 	assert.True(t, grant.ScopeEqual(mustScope(t, scoped), got), "a wrapper exposing the accessors is scoped like the wrapped identity")
 
