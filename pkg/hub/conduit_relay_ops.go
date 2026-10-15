@@ -381,6 +381,10 @@ func (s *Server) hubRelaySessionRecheck(w http.ResponseWriter, r *http.Request, 
 		v := s.recheckRelayAdmission(r.Context(), c)
 		switch v.verdict {
 		case conduitAuthzAllowed:
+			if c.Kind == registry.PrincipalBroker && s.relayBrokerSessionSuperseded(r.Context(), rt.registry, now, c) {
+				res.Close, res.CloseCode, res.Reason = true, relay.CloseSupersededIncarnation, relay.SupersededIncarnationReason()
+				break
+			}
 			res.OK = true
 			// Re-issued only while the credential itself is valid.
 			if admissionHalfLifeLeft(c, now) && (c.CredentialExpiry == 0 || now.Unix() < c.CredentialExpiry) {

@@ -1707,6 +1707,11 @@ type Server struct {
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
 	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
+	// conduitBrokerIncarnationMetrics counts broker sessions closed with
+	// 4409 superseded_incarnation and broker incarnation flaps
+	// (conduit_broker_incarnation.go); nil until
+	// SetConduitBrokerIncarnationMetrics.
+	conduitBrokerIncarnationMetrics atomic.Pointer[OTelConduitBrokerIncarnationMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu sync.Mutex
