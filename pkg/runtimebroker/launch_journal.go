@@ -152,6 +152,10 @@ type journalRecord struct {
 	// bound the retries (ptone/scion#5177). Counters only: no error text.
 	CleanupAttempts      int       `json:"cleanupAttempts,omitempty"`
 	CleanupFirstFailedAt time.Time `json:"cleanupFirstFailedAt,omitzero"`
+	// CleanupScope is "resources" when the launch's clean-up was only its
+	// recorded resources (a local stop or delete owns the files), so a
+	// retry reruns only that; "" is the full clean-up.
+	CleanupScope string `json:"cleanupScope,omitempty"`
 }
 
 // key is the registry key the record's launch was registered under.
@@ -420,17 +424,20 @@ func (e *journalEntry) terminal(t journalTerminal) {
 }
 
 // cleanupPending keeps the record, as cleanup_pending with one failed
-// attempt at failedAt, for the next recovery to retry the clean-up
-// (ptone/scion#5177). Only removal follows it.
-func (e *journalEntry) cleanupPending(failedAt time.Time) {
+// attempt at failedAt and the clean-up scope (cleanupScopeResources, or ""
+// for the full clean-up), for the next recovery to retry the clean-up
+// (ptone/scion#5177). Only removal follows it. It reports whether the
+// record is now on disk.
+func (e *journalEntry) cleanupPending(failedAt time.Time, scope string) bool {
 	if e == nil {
-		return
+		return false
 	}
 	e.mu.Lock()
 	e.base.CleanupAttempts = 1
 	e.base.CleanupFirstFailedAt = failedAt.UTC()
+	e.base.CleanupScope = scope
 	e.mu.Unlock()
-	e.write(journalCleanupPending, nil)
+	return e.write(journalCleanupPending, nil)
 }
 
 // remove deletes the record. Nothing is written for this entry afterwards.

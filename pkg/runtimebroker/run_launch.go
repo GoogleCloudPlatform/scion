@@ -168,7 +168,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	defer s.launchRegistry.Finish(lc.key, rec)
 	// Runs just before Finish, after every report and cleanup.
 	defer s.endLaunchJournal(rec)
-	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+	// The marker is kept when deleting the agent's files failed: the
+	// retry at the next boot checks it before deleting them
+	// (ptone/scion#5177), and removes it once it settles.
+	defer func() {
+		if !rec.filesCleanupFailed.Load() {
+			removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
+		}
+	}()
 
 	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, time.Duration(lc.req.LaunchKeepaliveSeconds)*time.Second)
 	rec.journal.setSender(sender)
@@ -395,6 +402,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// delete is conditional on the identity recorded at create
 			// time, so a newer launch's same-named resources are untouched.
 			if !alreadyCompleted && !sender.IsCompleted() {
+				rec.resourcesOnlyCleanup.Store(true)
 				s.cleanupLaunchResources(lc.mgr, rec)
 			}
 			return
@@ -567,12 +575,17 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 	}
 	// The ownership checks and the removal run under the process-wide
 	// workspace lock on the agent's files.
-	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	lockWait := 60 * time.Second
+	if s.agentFilesLockWait > 0 {
+		lockWait = s.agentFilesLockWait
+	}
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), lockWait)
 	defer cancelLock()
 	unlock, err := s.lockAgentFiles(lockCtx, opts.ProjectPath, opts.Name)
 	if err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		rec.filesCleanupFailed.Store(true)
 		return failCleanup(rec, cleanupFailFilesLock)
 	}
 	defer unlock()
@@ -598,6 +611,7 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 	if _, err := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		rec.filesCleanupFailed.Store(true)
 		return failCleanup(rec, cleanupFailFilesDelete)
 	}
 	return nil
@@ -691,8 +705,16 @@ func (s *Server) endLaunchJournal(rec *launchRecord) {
 	if class := rec.cleanupFailure.Load(); class != nil {
 		s.agentLifecycleLog.Warn("runLaunch: launch clean-up failed; its journal record is kept for a retry at the next broker start",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID, "error_class", string(*class))
-		rec.journal.cleanupPending(time.Now())
-		return
+		scope := ""
+		if rec.resourcesOnlyCleanup.Load() {
+			scope = cleanupScopeResources
+		}
+		if rec.journal.cleanupPending(time.Now(), scope) {
+			return
+		}
+		// The record could not be kept: remove it, as before #5177, so
+		// it never sits in launching or terminal_pending after the hub
+		// has answered.
 	}
 	rec.journal.remove()
 }

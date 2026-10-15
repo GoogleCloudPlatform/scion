@@ -267,7 +267,7 @@ func TestLaunchJournal_CleanupPendingOrdering(t *testing.T) {
 		t.Fatal("admit returned nil")
 	}
 	e.terminal(journalTerminal{ErrorCode: "runtime_error"})
-	e.cleanupPending(time.Now())
+	e.cleanupPending(time.Now(), "")
 	jr := readJournalFileT(t, e.path)
 	if jr.State != "cleanup_pending" || jr.CleanupAttempts != 1 || jr.Terminal != nil {
 		t.Fatalf("cleanup_pending did not follow the terminal: %+v", jr)
@@ -278,7 +278,7 @@ func TestLaunchJournal_CleanupPendingOrdering(t *testing.T) {
 		t.Fatalf("a write after cleanup_pending replaced it: %+v", got)
 	}
 	e.remove()
-	e.cleanupPending(time.Now())
+	e.cleanupPending(time.Now(), "")
 	if _, err := os.Stat(e.path); !os.IsNotExist(err) {
 		t.Fatalf("a cleanup_pending write after removal recreated the record: %v", err)
 	}
@@ -297,4 +297,128 @@ func TestRecoveryClassifiesCleanupFailures(t *testing.T) {
 	if cleanupFailureClassOf(nil) != "" {
 		t.Fatal("nil must have no class")
 	}
+}
+
+// TestLaunchCleanup_LiveFilesFailureRetriedAtRecovery is R1 of the #5177
+// review end to end: a live create launch whose agent-file clean-up fails
+// (its workspace lock is held) keeps both its journal record and its launch
+// marker; after a broker restart, recovery retries the file deletion, which
+// now succeeds, then removes the marker and the record.
+func TestLaunchCleanup_LiveFilesFailureRetriedAtRecovery(t *testing.T) {
+	mgr := &failingCleanupManager{recFakeManager: newRecFakeManager()}
+	mgr.setStartErr(errors.New("runtime refused"))
+	srv, rtb := newAsyncTestServer(t, mgr)
+	rtb.launchReportFunc = appliedReports
+	srv.agentFilesLockWait = 50 * time.Millisecond
+
+	projectDir := t.TempDir()
+	agentDir := filepath.Join(projectDir, "agents", "agent-lf")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLaunchMarker(projectDir, false, "agent-lf", "L-lf"); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the agent's workspace lock so the live file clean-up fails.
+	unlock, err := srv.locks().Lock(context.Background(), agentFileLockPaths(projectDir, "agent-lf")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newLaunchRecord("L-lf", "agent-id-lf", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+	rec.journal = srv.launchJournal.admit(rec, journalRecord{Slug: "agent-lf", AgentName: "agent-lf",
+		ProjectPath: projectDir, RuntimeName: "mock", RuntimeIdentity: "mock"})
+	if rec.journal == nil {
+		t.Fatal("launch not journalled")
+	}
+	srv.trackAsyncLaunch(rec)
+	srv.runLaunch(ctx, rec, launchCtx{
+		opts: api.StartOptions{Name: "agent-lf", ProjectPath: projectDir},
+		mgr:  mgr,
+		key:  launchKey{Slug: "agent-lf"},
+	})
+	unlock()
+
+	path := rec.journal.path
+	if jr := readJournalFileT(t, path); jr.State != "cleanup_pending" {
+		t.Fatalf("a live file clean-up failure did not keep the record: %+v", jr)
+	}
+	if !launchMarkerMatches(projectDir, false, "agent-lf", "L-lf") {
+		t.Fatal("the launch marker was removed although the file clean-up failed; the retry cannot delete the files")
+	}
+	if _, err := os.Stat(agentDir); err != nil {
+		t.Fatalf("test setup: the agent files should still be there: %v", err)
+	}
+
+	// The broker restarts with the same state dir.
+	srv.launchJournal.Close()
+	cfg := srv.config
+	cfg.StateDir = srv.stateDir
+	srv2 := New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "mock" }})
+	closeJournalAtCleanup(t, srv2)
+	runRecovery(t, srv2)
+
+	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("recovery did not retry the file deletion: %v", err)
+	}
+	if launchMarkerMatches(projectDir, false, "agent-lf", "L-lf") {
+		t.Fatal("recovery left the launch marker after the retry succeeded")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("recovery did not remove the record after the retry succeeded: %v", err)
+	}
+}
+
+// TestLaunchCleanup_ResourcesOnlyScope is O2 of the #5177 review: a launch
+// whose clean-up was only its recorded resources (a local stop or delete
+// owns the files) keeps scope "resources", and recovery retries only the
+// resources, not the run-scoped delete or the files.
+func TestLaunchCleanup_ResourcesOnlyScope(t *testing.T) {
+	t.Run("endLaunchJournal records the scope", func(t *testing.T) {
+		srv, _ := newAsyncTestServer(t, newAsyncManager())
+		rec := newLaunchRecord("L-sc", "agent-id-sc", store.LaunchKindCreate, "", time.Now().Add(time.Hour), func() {})
+		rec.journal = srv.launchJournal.admit(rec, journalRecord{Slug: "agent-sc", AgentName: "agent-sc"})
+		rec.resourcesOnlyCleanup.Store(true)
+		_ = failCleanup(rec, cleanupFailRuntimeResources)
+		srv.endLaunchJournal(rec)
+		jr := readJournalFileT(t, rec.journal.path)
+		if jr.State != "cleanup_pending" || jr.CleanupScope != cleanupScopeResources {
+			t.Fatalf("the resources-only scope was not recorded: %+v", jr)
+		}
+	})
+	t.Run("recovery retries only the resources", func(t *testing.T) {
+		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR5", ContainerID: "c-run", RunID: "run-LR5"})}
+		srv, rtb := newAsyncTestServer(t, mgr)
+		rtb.launchReportFunc = appliedReports
+		jr := launchingRecord("LR5")
+		jr.State = journalCleanupPending.String()
+		jr.CleanupAttempts = 1
+		jr.CleanupFirstFailedAt = time.Now()
+		jr.CleanupScope = cleanupScopeResources
+		path := writeDeadRecord(t, srv, jr)
+
+		runRecovery(t, srv)
+
+		if mgr.CleanupCalls() != 1 {
+			t.Fatalf("the resources were not retried (cleanup %d)", mgr.CleanupCalls())
+		}
+		if d := mgr.Deleted(); len(d) != 0 {
+			t.Fatalf("a resources-only retry ran the run-scoped delete: %+v", d)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("the record was not removed after the retry: %v", err)
+		}
+	})
+}
+
+// closeJournalAtCleanup closes srv's journal at the end of the
+// test (a server built directly with New, not through the test helpers).
+func closeJournalAtCleanup(t *testing.T, srv *Server) {
+	t.Helper()
+	t.Cleanup(srv.launchJournal.Close)
 }

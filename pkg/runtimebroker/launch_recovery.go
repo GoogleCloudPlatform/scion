@@ -231,6 +231,11 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName, "runtime_identity", jr.RuntimeIdentity)
 		return failCleanup(rec, cleanupFailRuntimeUnavailable)
 	}
+	if jr.State == journalCleanupPending.String() && jr.CleanupScope == cleanupScopeResources {
+		// A local stop or delete owned the files: retry only the
+		// recorded resources, as the live clean-up did.
+		return s.cleanupLaunchResources(mgr, rec)
+	}
 	return errors.Join(
 		s.cleanupLaunchResources(mgr, rec),
 		s.recoveryNameCleanup(ctx, mgr, jr, rec),

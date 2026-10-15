@@ -42,7 +42,7 @@ var journalAllowedKeys = map[string]bool{
 	"projectId": true, "slug": true, "agentName": true, "projectPath": true,
 	"hubProjectId": true, "sharedWorkspace": true, "runtimeName": true, "runtimeIdentity": true, "profile": true,
 	"ownedRun": true, "handles": true, "lastStep": true, "state": true, "terminal": true,
-	"cleanupAttempts": true, "cleanupFirstFailedAt": true,
+	"cleanupAttempts": true, "cleanupFirstFailedAt": true, "cleanupScope": true,
 }
 
 func newTestJournal(t *testing.T, instanceID string) (*launchJournal, string) {

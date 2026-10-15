@@ -31,6 +31,10 @@ import (
 const (
 	launchCleanupMaxAttempts = 5
 	launchCleanupMaxAge      = 24 * time.Hour
+
+	// cleanupScopeResources marks a record whose clean-up is only its
+	// recorded resources (journalRecord.CleanupScope).
+	cleanupScopeResources = "resources"
 )
 
 // cleanupFailureClass names what part of a launch's clean-up failed. It is a
@@ -98,6 +102,7 @@ func (s *Server) finishRecoveredCleanup(ctx context.Context, path string, jr *jo
 		return
 	}
 	if cleanupErr == nil {
+		removeLaunchMarkerIfMatches(jr.ProjectPath, jr.SharedWorkspace, jr.Slug, jr.LaunchID)
 		_ = os.Remove(path)
 		return
 	}
@@ -112,6 +117,7 @@ func (s *Server) finishRecoveredCleanup(ctx context.Context, path string, jr *jo
 		s.agentLifecycleLog.Error("Launch recovery: launch clean-up given up; leftover resources are removed by `scion delete`",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "instance_id", jr.InstanceID,
 			"attempts", attempts, "first_failed_at", first.Format(time.RFC3339), "error_class", string(class))
+		removeLaunchMarkerIfMatches(jr.ProjectPath, jr.SharedWorkspace, jr.Slug, jr.LaunchID)
 		_ = os.Remove(path)
 		return
 	}

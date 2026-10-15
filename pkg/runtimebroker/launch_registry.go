@@ -75,6 +75,14 @@ type launchRecord struct {
 	// failed for this launch (failCleanup), so runLaunch keeps its journal
 	// record for a retry (ptone/scion#5177).
 	cleanupFailure atomic.Pointer[cleanupFailureClass]
+	// filesCleanupFailed is set when deleting the agent's files failed
+	// (files_lock or files_delete), whatever failed first, so runLaunch
+	// keeps the launch marker the retry needs (ptone/scion#5177).
+	filesCleanupFailed atomic.Bool
+	// resourcesOnlyCleanup is set when the launch's clean-up was only its
+	// recorded resources (a local stop or delete owns the files), so a
+	// retry reruns only that.
+	resourcesOnlyCleanup atomic.Bool
 
 	// journal is the launch's journal entry (launch_journal.go), or nil
 	// when the launch is not journalled. Its methods are nil-safe.
