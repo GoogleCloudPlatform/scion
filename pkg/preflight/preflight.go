@@ -72,10 +72,9 @@ type Check struct {
 }
 
 // Env is what a check reads; the preflight command fills it. pkg/preflight
-// imports no hub or store package: the database reader the next slice adds
-// is an interface declared in this package (ReadOnlyQueries) and implemented
-// by the command, so the dependency points from the command to this package.
-// That field is optional and keeps the report at version 1.
+// imports no hub or store package: the database reader is an interface
+// declared in this package (ReadOnlyQueries) and implemented by the
+// command, so the dependency points from the command to this package.
 type Env struct {
 	// GlobalDir is the hub's global settings directory (~/.scion).
 	GlobalDir string
@@ -84,6 +83,9 @@ type Env struct {
 	// ColocatedBrokerID is the hub's co-located broker, or "" for a hub
 	// with none.
 	ColocatedBrokerID string
+	// DB reads the hub database. Optional: a check that needs it and finds
+	// it nil cannot run.
+	DB ReadOnlyQueries
 }
 
 // ReportVersion is the version of Report. Adding optional fields keeps it;
