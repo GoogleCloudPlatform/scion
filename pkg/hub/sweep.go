@@ -25,6 +25,11 @@ const stuckMessageThreshold = 5 * time.Minute
 
 const stuckMessageExpireTTL = 24 * time.Hour
 
+// stuckMessageLogIDCap bounds how many message IDs the stuck-pending sweep
+// line names (ptone/scion#4827). 20 UUIDs keep the line under about 1 KB;
+// message_ids_truncated on the line says when more rows were stuck.
+const stuckMessageLogIDCap = 20
+
 // defaultFailedMessageRetentionDays is the fallback retention window (in days)
 // for dispatch_state="failed" messages when
 // Server.Config.FailedMessageRetentionDays is unset or non-positive.
@@ -37,9 +42,16 @@ const missingRecipientFailureReason = "recipient agent no longer exists"
 // brokerMessageSweepHandler returns a handler that counts messages still in
 // dispatch_state='pending' beyond the stuck threshold and logs/emits metrics.
 // Messages stuck beyond stuckMessageExpireTTL are transitioned to failed.
-// After Phase 4 (no-queuing delivery), no code path creates pending rows — any
-// count > 0 indicates a bug. Registered as a RecurringSingleton guarded by
-// LockBrokerMessageSweep (B5-2).
+// After Phase 4 (no-queuing delivery), the only writer of pending rows is
+// ExecuteAgentDM: it persists the row "pending" for the length of its
+// dispatch, then marks it dispatched or failed. The dispatch is detached
+// from the caller's cancellation (dispatchContext), so a row stays pending
+// past the threshold only by design after a deadline-ambiguous dispatch
+// (AC-4 of #1689), or by a fault: a failed finalization write, a hub that
+// exited mid-dispatch, or a writer that left the state empty
+// (ptone/scion#4827). Every write of a pending row is logged as
+// store.MessageEnteredPendingLogMsg. Registered as a RecurringSingleton
+// guarded by LockBrokerMessageSweep (B5-2).
 func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Tight timeout: fail fast if DB connections are saturated rather than
@@ -55,8 +67,17 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		}
 
 		if count > 0 {
-			s.agentLifecycleLog.Warn("sweep: stuck pending messages detected",
-				"count", count, "threshold", stuckMessageThreshold.String())
+			// Name the stuck rows (ptone/scion#4827) so each can be matched to
+			// its "row entered pending" line. The ID lookup is best-effort: a
+			// failure is logged on the line and does not stop the sweep.
+			attrs := []any{"count", count, "threshold", stuckMessageThreshold.String()}
+			ids, idsErr := s.store.ListStuckPendingMessageIDs(ctx, cutoff, stuckMessageLogIDCap)
+			if idsErr != nil {
+				attrs = append(attrs, "message_ids_error", idsErr)
+			} else {
+				attrs = append(attrs, "message_ids", ids, "message_ids_truncated", count > len(ids))
+			}
+			s.agentLifecycleLog.Warn("sweep: stuck pending messages detected", attrs...)
 		}
 
 		if rec := s.dispatchMetrics; rec != nil {

@@ -67,8 +67,12 @@ func (Message) Fields() []ent.Field {
 		// dispatch_state tracks cross-node delivery:
 		// pending|dispatched|failed|deferred|no_recipient (see the
 		// store.MessageDispatch* constants).
-		// After Phase 4 (no-queuing delivery), new rows are created as "dispatched";
-		// any pending rows indicate a bug — monitored by brokerMessageSweepHandler.
+		// After Phase 4 (no-queuing delivery), every writer sets the state
+		// explicitly. Only ExecuteAgentDM writes "pending", for the length of its
+		// dispatch; a row stays pending only after a deadline-ambiguous dispatch,
+		// by design (AC-4 of #1689), and brokerMessageSweepHandler reports and
+		// expires it. The schema default applies only to a writer that leaves
+		// the state empty, which the store logs (ptone/scion#4827).
 		field.String("dispatch_state").
 			Default("pending"),
 		field.String("dispatch_failure_reason").
