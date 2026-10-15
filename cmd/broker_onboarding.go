@@ -221,43 +221,20 @@ func recoverEmbeddedBrokerID(globalDir, embeddedID string, logf func(string, ...
 // directory the broker keeps its template cache under (~/.scion); stateRoot
 // is the base of its state directories (configuredBrokerStateRoot:
 // server.broker.state_dir, default ~/.scion/runtime-broker-state).
-func brokerLocalStatePaths(globalDir, scionHome, stateRoot, brokerID string) []string {
-	paths := []string{daemon.GetLogPath(globalDir)}
+func brokerLocalStatePaths(globalDir, scionHome, stateRoot, brokerID string) []brokerLocalStateEntry {
+	entries := []brokerLocalStateEntry{{Kind: stateEntryDaemonLog, Path: daemon.GetLogPath(globalDir), Root: globalDir}}
 	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
-		paths = append(paths, filepath.Join(stateRoot, brokerID))
+		entries = append(entries, brokerLocalStateEntry{Kind: stateEntryStateDir, Path: filepath.Join(stateRoot, brokerID), Root: stateRoot, BrokerID: brokerID})
 	}
-	return append(paths, filepath.Join(scionHome, "cache", "templates"))
-}
-
-// existingPaths returns the entries of paths that exist.
-func existingPaths(paths []string) []string {
-	var out []string
-	for _, p := range paths {
-		if _, err := os.Lstat(p); err == nil {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// purgeBrokerLocalState removes paths and reports each removal to out.
-func purgeBrokerLocalState(paths []string, out io.Writer) error {
-	var errs []error
-	for _, p := range existingPaths(paths) {
-		if err := os.RemoveAll(p); err != nil {
-			errs = append(errs, fmt.Errorf("failed to remove %s: %w", p, err))
-			continue
-		}
-		_, _ = fmt.Fprintf(out, "Removed %s\n", p)
-	}
-	return errors.Join(errs...)
+	return append(entries, brokerLocalStateEntry{Kind: stateEntryTemplateCache, Path: filepath.Join(scionHome, "cache", "templates"), Root: scionHome})
 }
 
 // cleanupAfterDeregister handles local broker state after deregister.
 // remaining lists the hub connections left in the credentials store (in
 // credsDir) and listErr is the error listing them, if any. It removes the
 // credentials directory when it is known to be left empty. With purge it
-// also removes statePaths (brokerLocalStatePaths), but only when the store
+// also removes statePaths (brokerLocalStatePaths), each checked against its
+// expected location first (purgeBrokerLocalState), but only when the store
 // was listed, no hub connection remains (the state is shared by all of
 // them) and no broker is running (it is in use). A purge that cannot run
 // prints the paths left in place and returns an error, so a script sees a
@@ -270,7 +247,7 @@ func purgeBrokerLocalState(paths []string, out io.Writer) error {
 // directory, which is only a guess. The purge then refuses, removes nothing
 // and returns an error (fail closed); without --purge-local it is a warning
 // and the default path is listed with a note.
-func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr, stateDirErr error, brokerRunning, purge bool, statePaths []string) error {
+func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr, stateDirErr error, brokerRunning, purge bool, statePaths []brokerLocalStateEntry) error {
 	if listErr == nil && len(remaining) == 0 && credsDir != "" {
 		if removed, err := removeDirIfEmpty(credsDir); err != nil {
 			_, _ = fmt.Fprintf(out, "Warning: failed to remove empty %s: %v\n", credsDir, err)
@@ -278,7 +255,8 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 			_, _ = fmt.Fprintf(out, "Removed empty %s\n", credsDir)
 		}
 	}
-	left := existingPaths(statePaths)
+	leftEntries := existingEntries(statePaths)
+	left := entryPaths(leftEntries)
 	if purge {
 		var refusal error
 		switch {
@@ -294,7 +272,7 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 			_, _ = fmt.Fprintln(out, "No local broker state to remove.")
 			return nil
 		default:
-			return purgeBrokerLocalState(left, out)
+			return purgeBrokerLocalState(statePaths, out)
 		}
 		if stateDirErr != nil {
 			printStateDirGuessNote(out, stateDirErr)
