@@ -408,10 +408,11 @@ func TestAgentPTY_IntervalRenewalNoticeDelivered(t *testing.T) {
 	waitClosedPTY(t, p)
 }
 
-// TestAgentPTY_CrossNodeHasNoRenewalSender: an agent-path PTY stream whose
-// agent session is held by another relay is tracked without a renewal
-// sender (the notice is not forwarded across nodes).
-func TestAgentPTY_CrossNodeHasNoRenewalSender(t *testing.T) {
+// TestAgentPTY_CrossNodeHasRenewalSender: an agent-path PTY stream whose
+// agent session is held by another relay, to an agent that advertises
+// stream_renewal.v2, is tracked with the stream's own renewer, which sends
+// renewals across the internal hop (design v2.21.36 §3.5).
+func TestAgentPTY_CrossNodeHasRenewalSender(t *testing.T) {
 	f := newPTYConduitFixture(t)
 	f.setBrokerRow(t, attachCaps(false), "")
 	hubB := f.startPeerRelay(t, "hub-b")
@@ -427,7 +428,8 @@ func TestAgentPTY_CrossNodeHasNoRenewalSender(t *testing.T) {
 	a := f.srv.conduitAuthz.Load()
 	require.NotNil(t, a)
 	st := soleTrackedStream(t, a)
-	assert.Nil(t, st.Renew, "the target's session is held by hub-b: no notice sender")
+	assert.False(t, st.AuthzUntil.IsZero(), "the v2 agent's grant carries a deadline")
+	assert.NotNil(t, st.Renew, "renewals cross the hop to hub-b")
 	require.NoError(t, c.WriteControl(websocket.CloseMessage,
 		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second)))
 	waitClosedPTY(t, p)

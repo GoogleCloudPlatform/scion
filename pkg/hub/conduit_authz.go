@@ -545,7 +545,8 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		Issuer: conduitGrantIssuer, Target: target, OpenJTI: req.OpenJTI, StreamID: req.TargetStreamID,
 	}, now)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errConduitRenewalUnavailable, err)
+		// %w for both, so ClassifyConduitRenewal sees the verification result.
+		return nil, fmt.Errorf("%w: %w", errConduitRenewalUnavailable, err)
 	}
 	userID, ok := strings.CutPrefix(c.Subject, grant.SubjectUserPrefix)
 	if !ok || userID == "" {

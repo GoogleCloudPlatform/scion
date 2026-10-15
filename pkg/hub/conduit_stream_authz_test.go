@@ -432,15 +432,17 @@ func TestConduitNotifyQueue_Coalesces(t *testing.T) {
 
 // renewRecorder records the renewal notices sent for a stream.
 type renewRecorder struct {
-	mu  sync.Mutex
-	n   int
-	err error
+	mu     sync.Mutex
+	n      int
+	err    error
+	grants [][]byte
 }
 
-func (r *renewRecorder) renew() error {
+func (r *renewRecorder) renew(g []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.n++
+	r.grants = append(r.grants, append([]byte(nil), g...))
 	return r.err
 }
 

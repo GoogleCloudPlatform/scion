@@ -618,11 +618,12 @@ func TestConduitTunnel_TrackedStreamMarked(t *testing.T) {
 	assert.True(t, tracked[0].ViaTunnel)
 }
 
-// TestConduitTunnel_CrossNodeHasNoRenewalSender: a tunnel whose agent
-// session is held by another relay is tracked without a renewal sender
-// (the notice is not forwarded across nodes, so its renewals are logged
-// notice=not_delivered); a tunnel to a local session has one.
-func TestConduitTunnel_CrossNodeHasNoRenewalSender(t *testing.T) {
+// TestConduitTunnel_CrossNodeHasRenewalSender: a tunnel whose agent session
+// is held by another relay, to an agent that advertises stream_renewal.v2
+// (its open grant carries authz_until), is tracked with the stream's own
+// renewer, which sends renewals across the internal hop to the owner
+// relay (design v2.21.36 §3.5, the renewal driver).
+func TestConduitTunnel_CrossNodeHasRenewalSender(t *testing.T) {
 	tf := newTunnelFixture(t)
 	hubB := tf.startPeerRelay(t, "hub-b")
 	tf.startAgent(t, hubB, tf.launched)
@@ -640,7 +641,9 @@ func TestConduitTunnel_CrossNodeHasNoRenewalSender(t *testing.T) {
 	require.NotNil(t, a)
 	tracked := soleTrackedStream(t, a)
 	assert.True(t, tracked.ViaTunnel)
-	assert.Nil(t, tracked.Renew, "the target's session is held by hub-b: no notice sender")
+	assert.False(t, tracked.AuthzUntil.IsZero(), "the v2 agent's grant carries a deadline")
+	assert.NotNil(t, tracked.Renew, "renewals cross the hop to hub-b")
+	assert.Equal(t, recs[0].SessionID, tracked.TargetSessionID, "renewals name the target-side session")
 }
 
 // TestConduitTunnel_LocalSessionHasRenewalSender: the tunnel open path
@@ -658,7 +661,7 @@ func TestConduitTunnel_LocalSessionHasRenewalSender(t *testing.T) {
 	require.NotNil(t, a)
 	tracked := soleTrackedStream(t, a)
 	require.NotNil(t, tracked.Renew, "the agent's session is local: a notice sender is set")
-	assert.NoError(t, tracked.Renew(), "the notice is sent on the agent's session")
+	assert.NoError(t, tracked.Renew(nil), "the notice is sent on the agent's session")
 	roundTrip(t, st, "after notice")
 }
 
