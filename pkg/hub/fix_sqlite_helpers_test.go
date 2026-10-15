@@ -388,7 +388,8 @@ type rollbackClaimStore struct {
 // the fallback runs (createTxFaultStore), or every conditional row delete
 // gives up (finalizeErr). assignDeactErr fails every service-account
 // assignment deactivation (createTxFaultStore), the compensation's and the
-// fallback's. onFinalize runs before each rollback row delete.
+// fallback's; setting it also fails the compensation's audit insert, as
+// compensation does. onFinalize runs before each rollback row delete.
 type rollbackFaults struct {
 	runIntent      bool
 	compensation   bool

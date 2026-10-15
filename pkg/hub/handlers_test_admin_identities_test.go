@@ -453,11 +453,9 @@ func TestTestAdmin_IssuedRowBindingAndAudit(t *testing.T) {
 	memberHuman := taUser(t, s, "ta-row-member", store.SystemRoleHubMember)
 	rec = tiPost(t, srv, resp.AccessToken, "/api/v1/groups/"+grp.ID+"/members", map[string]any{"memberType": "user", "memberId": memberHuman.ID, "role": "member"})
 	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
-	var byActor []*store.MutationAuditRecord
-	assert.Eventually(t, func() bool {
-		byActor, _, err = s.ListMutationAudits(ctx, store.MutationAuditFilter{ActorPrincipalID: u.ID})
-		return err == nil && len(byActor) > 0
-	}, 5*time.Second, 20*time.Millisecond, "a mutation under the admin-kind identity is audited")
+	byActor, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{ActorPrincipalID: u.ID})
+	require.NoError(t, err)
+	require.NotEmpty(t, byActor, "a mutation under the admin-kind identity is audited")
 	// The same labels straight from the context the row block builds.
 	direct := auditActorFromContext(contextWithTestAdminActor(ctx, u))
 	byActor = append(byActor, &store.MutationAuditRecord{CredentialLabels: direct.CredentialLabels, CorrelationID: direct.CorrelationID})
