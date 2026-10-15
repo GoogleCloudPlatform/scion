@@ -320,7 +320,7 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	switch a.Phase {
-	case "suspended", "stopping", "stopped", "error":
+	case "suspended", "stopping", "stopped", "error", "halted":
 	default:
 		return false
 	}
@@ -1352,6 +1352,14 @@ type HarnessConfig struct {
 	ImageStatus          string     `json:"imageStatus"`                    // unknown, valid, invalid, error
 	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
 
+	// BuiltImage is the image the hub's image-build executor last built for
+	// this harness-config (ptone/scion#4219). It is operational state, not
+	// derived from config.yaml: only UpdateHarnessConfigBuiltImage writes it
+	// (CreateHarnessConfig stores it as given), and neither
+	// UpdateHarnessConfig nor UpdateHarnessConfigContent touches it. Readers
+	// that show or check "the image" prefer it over Config.Image.
+	BuiltImage string `json:"builtImage,omitempty"`
+
 	// Ownership
 	OwnerID   string `json:"ownerId,omitempty"`
 	CreatedBy string `json:"createdBy,omitempty"`
@@ -2053,6 +2061,14 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
+// CreatorFallbackSubscriptionID is the SubscriptionID of a notification
+// sent to an agent's creator without a subscription: the HALTED
+// notification a halted agent's creator gets when none of the creator's
+// subscriptions matched (ptone/scion#4853). It is the nil UUID, which no
+// subscription has; the column carries no foreign key, and the retry sweep
+// rebuilds such a notification's subscriber from the notification itself.
+const CreatorFallbackSubscriptionID = "00000000-0000-0000-0000-000000000000"
+
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
 func (s *NotificationSubscription) MatchesActivity(activity string) bool {
@@ -2507,6 +2523,9 @@ const (
 	LifecycleHookTriggerSuspended = "suspended"
 	LifecycleHookTriggerStopped   = "stopped"
 	LifecycleHookTriggerError     = "error"
+	// LifecycleHookTriggerHalted fires when the platform halts an agent
+	// (ptone/scion#4853).
+	LifecycleHookTriggerHalted = "halted"
 )
 
 // LifecycleHookActionType constants (v1).

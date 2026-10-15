@@ -159,3 +159,31 @@ func TestCodexDialect_PromptExtraction(t *testing.T) {
 	assert.Equal(t, "fix the build", event.Data.Prompt)
 	assert.Equal(t, "s-1", event.Data.SessionID)
 }
+
+// TestCodexDialect_SessionStartSource checks that the built-in codex dialect
+// carries the session-start source, as the staged dialect file does. Status
+// handling tells a clear apart from a new session by this field, so without
+// it every codex clear would count as a new session whenever the staged
+// dialect file is missing.
+func TestCodexDialect_SessionStartSource(t *testing.T) {
+	builtin := NewCodexDialect()
+	staged := loadStagedCodexDialect(t)
+
+	for _, source := range []string{"startup", "resume", "clear", ""} {
+		t.Run("source="+source, func(t *testing.T) {
+			payload := map[string]interface{}{"hook_event_name": "SessionStart"}
+			if source != "" {
+				payload["source"] = source
+			}
+
+			event, err := builtin.Parse(payload)
+			require.NoError(t, err)
+			assert.Equal(t, hooks.EventSessionStart, event.Name)
+			assert.Equal(t, source, event.Data.Source, "built-in codex dialect source")
+
+			stagedEvent, err := staged.Parse(payload)
+			require.NoError(t, err)
+			assert.Equal(t, stagedEvent.Data.Source, event.Data.Source, "built-in and staged codex dialects disagree on source")
+		})
+	}
+}

@@ -347,8 +347,18 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 		}
 	}
 
+	// Retained built-in profiles (ptone/scion#5113) resolve by name for the
+	// agents and projects that still use them, but are not offered as
+	// selectable profiles: offering them would keep them in use forever.
+	retained := make(map[string]bool)
+	for _, name := range vs.RetainedProfileNames() {
+		retained[name] = true
+	}
 	names := make([]string, 0, len(vs.Profiles))
 	for name := range vs.Profiles {
+		if retained[name] {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -819,6 +829,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if refusal := s.createRuntimeTargetRefusal(&req); refusal != nil {
 		span.SetStatus(codes.Error, refusal.code)
 		refusal.write(w)
+		return
+	}
+
+	// Refused while the broker drains for shutdown, before the dispatch
+	// attempt, the registration and any file work (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "create", req.ID) {
 		return
 	}
 
@@ -1464,7 +1480,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		default:
 			// runLaunch completes the ownership mirror only for an accepted
 			// launch; a refused one leaves it to the deferred release.
-			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
+			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.RuntimeType, ss, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -1582,6 +1598,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			cfg, err = sc.Manager.Provision(ctx, opts)
 		}
 		if err != nil {
+			// A skill failure anywhere in the error chain has its full text
+			// logged once, with the correlation id its response carries.
+			provisionSkill := skillFailureFrom(err, opts.RunID)
+			if provisionSkill != nil {
+				s.logSkillResolutionFailure(provisionSkill,
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+			}
 			if d, ok := harnessPolicyRefusalFrom(err); ok {
 				markAttemptFailed(d.HTTPStatus, d.detail())
 				span.SetStatus(codes.Error, d.detail())
@@ -1595,11 +1618,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// "refused to run" apart from an actual provisioning error.
 			if errors.Is(err, agent.ErrReprovisionRefused) {
 				markAttemptFailed(http.StatusConflict, "reprovision refused")
-				span.SetStatus(codes.Error, err.Error())
+				span.SetStatus(codes.Error, spanErrorText(err))
 				Conflict(w, "Failed to provision agent: "+err.Error())
 				return
 			}
-			span.SetStatus(codes.Error, err.Error())
+			span.SetStatus(codes.Error, spanErrorText(err))
 			if config.IsAgentStateConflict(err) {
 				markAttemptFailed(http.StatusConflict, "failed to provision agent")
 				writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to provision agent: "+err.Error(), nil)
@@ -1609,8 +1632,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
 				// Names the resource without err's own text, which can carry
 				// broker paths (ptone/scion#3113); the full error is logged.
-				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
-					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found", append([]any{
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID},
+					failureLogAttrs(err, provisionSkill)...)...)
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("provision agent", err, opts.TemplateName), nil)
 				return
 			}
@@ -1621,7 +1645,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			var skillErr *agent.SkillResolutionError
 			if errors.As(err, &skillErr) {
 				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
-				SkillResolutionFailed(w, skillErr)
+				SkillResolutionFailed(w, skillErr, provisionSkill.ref)
 				return
 			}
 			// An unusable harness-config provisioner is a configuration
@@ -1716,10 +1740,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
-		s.agentLifecycleLog.Error("Agent create failed", append([]any{
+		createSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
-			"name", req.Name, "slug", req.Slug,
-			"error", err}, runtimeFailureLogAttrs(err)...)...)
+			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
+			runtimeCauseLogAttrs(err, createSkill)...)...)
+		if createSkill != nil {
+			s.logSkillResolutionFailure(createSkill,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+		}
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1768,7 +1797,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 		}
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, spanErrorText(err))
 		switch {
 		case isPolicyErr:
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
@@ -1788,7 +1817,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// broker paths (ptone/scion#3113). The full error is logged above.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
-			SkillResolutionFailed(w, skillErr)
+			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
@@ -2960,6 +2989,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 }
 
 func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "start", id) {
+		return
+	}
 	// Tracked until Manager.Start and Run's deferred cleanup have returned.
 	// The run comes from the runId query parameter when the hub sends it,
 	// so the start carries its run from the moment it is tracked
@@ -3324,7 +3358,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	agentInfo, err := mgr.Start(ctx, opts)
 	err = s.completeOwnedStart(ctx, mgr, opts.RunID, err, true)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
+		span.SetStatus(codes.Error, spanErrorText(err))
 		if d, ok := harnessPolicyRefusalFrom(err); ok {
 			// Raised from inside Manager.Start, which may already have
 			// acted: carry the start-attempted details like any other
@@ -3332,8 +3366,14 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.writeHarnessPolicyRefusal(w, d, "start agent", id, s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID))
 			return
 		}
-		s.agentLifecycleLog.Error("Agent start failed",
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", err)
+		startSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent start failed", append([]any{
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID},
+			failureLogAttrs(err, startSkill)...)...)
+		if startSkill != nil {
+			s.logSkillResolutionFailure(startSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the
@@ -3355,7 +3395,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		default:
@@ -4085,6 +4125,11 @@ func (s *Server) panicFailureDetails(ctx context.Context, mgr agent.Manager, id,
 }
 
 func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
+	// Refused while the broker drains for shutdown, before the start is
+	// tracked or registered (design wave 3 §1 C-e).
+	if s.refuseIfDraining(w, "restart", id) {
+		return
+	}
 	// Tracked until the start leg, including Run's deferred cleanup, has
 	// returned, with its run from the runId query parameter as on start.
 	queryRunID := r.URL.Query().Get("runId")
@@ -4428,8 +4473,13 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.writeHarnessPolicyRefusal(w, d, "restart agent", id, s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID))
 			return
 		}
-		s.agentLifecycleLog.Error("Agent restart failed",
-			"agent_id", id, "error", err)
+		restartSkill := skillFailureFrom(err, opts.RunID)
+		s.agentLifecycleLog.Error("Agent restart failed", append([]any{
+			"agent_id", id}, failureLogAttrs(err, restartSkill)...)...)
+		if restartSkill != nil {
+			s.logSkillResolutionFailure(restartSkill,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+		}
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
@@ -4443,7 +4493,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// is not reported as a missing agent.
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			skillResolutionFailedWithDetails(w, skillErr, restartSkill.ref, details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {

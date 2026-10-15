@@ -40,6 +40,7 @@ var validTriggers = map[string]bool{
 	store.LifecycleHookTriggerSuspended: true,
 	store.LifecycleHookTriggerStopped:   true,
 	store.LifecycleHookTriggerError:     true,
+	store.LifecycleHookTriggerHalted:    true,
 }
 
 // validActionTypes is the set of action types supported in v1.
@@ -184,7 +185,7 @@ func ValidateHook(
 	if !validTriggers[hook.Trigger] {
 		errs = append(errs, FieldError{
 			Field:   "trigger",
-			Message: fmt.Sprintf("must be one of: running, suspended, stopped, error; got %q", hook.Trigger),
+			Message: fmt.Sprintf("must be one of: running, suspended, stopped, error, halted; got %q", hook.Trigger),
 		})
 	}
 

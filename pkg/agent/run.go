@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1032,8 +1033,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
 		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome) }); err != nil {
+			// hub.agent_plugins is re-checked at every start: while it is off
+			// no plugins are restored, so the provisioner removes the ones
+			// Scion installed earlier.
+			includePlugins := agentPluginsEnabled(ctx, settings)
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome, includePlugins) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
+			if msg := startAgentPluginsWarning(recordHasAgentPlugins(agentDir), includePlugins, harnessConfigName, h); msg != "" {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
 			}
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
@@ -2636,7 +2647,7 @@ authDone:
 			}
 			if matched {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})

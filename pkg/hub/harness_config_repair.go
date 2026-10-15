@@ -171,8 +171,27 @@ func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, ref HarnessCo
 	}
 	id := hc.ID
 	_, err, _ = repairFlight.Do("hc:"+id, func() (interface{}, error) {
-		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), id)
+		return nil, s.syncHarnessConfigFromStorageRetrying(context.WithoutCancel(ctx), id)
 	})
+	return err
+}
+
+// syncHarnessConfigFromStorageRetrying runs the repair, and runs it once
+// more (re-reading the row and re-deriving from storage) when its commit
+// loses the compare-and-swap to a concurrent commit. A second conflict is
+// logged and skipped: the row was just written by another commit, which is
+// newer than anything the repair would write (ptone/scion#4219).
+func (s *Server) syncHarnessConfigFromStorageRetrying(ctx context.Context, id string) error {
+	err := s.syncHarnessConfigFromStorageInner(ctx, id)
+	if !errors.Is(err, store.ErrHarnessConfigConflict) {
+		return err
+	}
+	s.resourceLog.Warn("harness-config repair: harness-config changed during repair; retrying once", "id", id)
+	err = s.syncHarnessConfigFromStorageInner(ctx, id)
+	if errors.Is(err, store.ErrHarnessConfigConflict) {
+		s.resourceLog.Warn("harness-config repair: harness-config changed again during repair; skipping", "id", id)
+		return nil
+	}
 	return err
 }
 
@@ -197,11 +216,19 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 		return nil
 	}
 
-	hc.Files = updated
-	hc.ContentHash = contentHash
-	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
+	// syncResourceFromStorage read a legacy row without a storage path from
+	// the computed path; commit against, and record, that same path.
+	if hc.StoragePath == "" {
+		hc.StoragePath = storage.ResourceStoragePath(s.HubID(), storage.ResourceKindHarnessConfig, hc.Scope, hc.ScopeID, hc.Slug)
+	}
+	// Commit the manifest rebuilt from storage. The commit re-derives
+	// Harness and Config from the stored config.yaml; a refused commit (an
+	// unusable provisioner) leaves the row unchanged and is returned for
+	// the caller to log.
+	if err := s.commitHarnessConfigFiles(ctx, hc, updated, harnessConfigCommitOpts{}); err != nil {
 		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
+	contentHash = hc.ContentHash
 	s.resourceLog.Info("harness-config repair: synced DB manifest from storage",
 		"config", hc.Name, "id", hc.ID, "scope", hc.Scope, "scopeId", hc.ScopeID,
 		"contentHash", contentHash)
