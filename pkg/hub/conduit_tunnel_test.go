@@ -727,11 +727,28 @@ func TestConduitTunnel_GoAwayDrain(t *testing.T) {
 	assert.Equal(t, conduit.ErrDraining.Error(), r.body, "the bare session-layer answer")
 	assert.Empty(t, r.err.Code, "no error code: the session layer answers before the tunnel handler")
 	roundTrip(t, st, "during the drain")
-	tf.relayClock.Advance(drain / 2)
+
+	// The relay clock moves in steps shorter than the session's per-write
+	// deadline (conduit.DefaultWriteWait), which also runs on the relay
+	// clock: one jump of WriteWait or more fires the write timer of a
+	// frame the relay is still writing (an echo, a window update) and
+	// ends the session mid-drain (ptone/scion#5209). A round trip between
+	// steps lets every in-flight write finish before the next one.
+	const drainStep = conduit.DefaultWriteWait / 2
+	require.Zero(t, (drain/2)%drainStep, "each half of the drain is a whole number of steps")
+	advanceDrain := func(d time.Duration, label string) {
+		for left := d - drainStep; left >= 0; left -= drainStep {
+			tf.relayClock.Advance(drainStep)
+			if left > 0 {
+				roundTrip(t, st, label+", "+left.String()+" to go")
+			}
+		}
+	}
+	advanceDrain(drain/2, "first half of the drain")
 	roundTrip(t, st, "half way through the drain")
 
 	// The session's timers run on the relay clock.
-	tf.relayClock.Advance(drain / 2)
+	advanceDrain(drain/2, "second half of the drain")
 	assert.Equal(t, conduit.CloseRelayRestart, closeCode(t, streamEnd(t, st)), "closed at the drain deadline")
 }
 
