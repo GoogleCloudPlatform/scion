@@ -537,7 +537,7 @@ func RemoveWorktree(base, path string, deleteBranch bool) (bool, error) {
 // git matches a path with more than one missing trailing component only by
 // its literal text against the recorded entry, and whether that recorded
 // path is symlink-resolved depends on the layout when the worktree was
-// created. So the path is tried as given first and, only if git does not
+// created. So the cleaned path is tried first and, only if git does not
 // know it, again with its existing ancestor's symlinks resolved; both name
 // the same location. Any other failure (for example a locked entry) is
 // returned; callers must not fall back to a repository-wide prune.
@@ -561,7 +561,7 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // LC_ALL=C to the command's environment so git's messages can be matched.
 //
 // It acts only when path is absent (Lstat reports it does not exist), runs
-// "git worktree remove <path>" without --force, first with path as given
+// "git worktree remove <path>" without --force, first with the cleaned path
 // and, only if git does not know it, again with its existing ancestor's
 // symlinks resolved. "is not a working tree" after the last attempt means
 // git has no entry for path and is not an error. Before any git call, a
@@ -632,7 +632,7 @@ func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context,
 type resolveState int
 
 const (
-	// resolvedLiteralOnly: no resolved form; only the path as given is
+	// resolvedLiteralOnly: no resolved form; only the cleaned path is
 	// used. The deepest existing ancestor is above the bound (so git can
 	// only match the path's text) or cannot be resolved (a dangling link,
 	// which git cannot follow either).
