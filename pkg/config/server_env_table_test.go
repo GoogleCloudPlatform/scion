@@ -396,3 +396,15 @@ func TestServerEnvTable_ImageRegistryNotVersioned(t *testing.T) {
 	assert.Equal(t, "image_registry", serverEnvToOpsettingsKey("IMAGEREGISTRY"))
 	assert.Equal(t, "image_registry", seedEnvToOpsettingsKey("IMAGEREGISTRY"))
 }
+
+// TestServerEnvTable_AmbientEnvCleared: the package TestMain leaves no
+// SCION_SERVER_* or SCION_SEED_* variable from the environment running the
+// tests, so the alias mapping tests do not depend on it.
+func TestServerEnvTable_AmbientEnvCleared(t *testing.T) {
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, serverEnvPrefix) || strings.HasPrefix(name, seedEnvPrefix) {
+			t.Errorf("%s is set in the test process; TestMain must clear it", name)
+		}
+	}
+}
