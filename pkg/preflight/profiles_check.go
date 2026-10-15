@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"sort"
 	"time"
 
@@ -52,7 +54,9 @@ type ReadOnlyQueries interface {
 	// Providers returns the provider rows of broker brokerID.
 	Providers(ctx context.Context, brokerID string) ([]agent.ProfileRefProvider, error)
 	// Broker reports whether broker id has a row, and whether that row is a
-	// flat instance (a non-empty runtime_target_id).
+	// flat instance (a non-empty runtime_target_id). The command takes the
+	// ID only from the hub's legacy-only co-located broker accessor; a flat
+	// row here means it was mis-wired, and the check does not apply.
 	Broker(ctx context.Context, id string) (found, flat bool, err error)
 }
 
@@ -69,15 +73,25 @@ func ProfilesCheck() Check {
 // catalogSections are the hub_settings sections the check evaluates.
 var catalogSections = []string{"runtimes", "profiles"}
 
-// extractSection is opsettings.ExtractSectionFromKoanf; a test seam for its
-// error path.
-var extractSection = opsettings.ExtractSectionFromKoanf
+// The settings loaders the check calls; test seams for their error paths.
+var (
+	extractSection = opsettings.ExtractSectionFromKoanf
+	catalogView    = config.ProfileCatalogView
+	profileOrigins = config.ProfileOrigins
+)
 
 func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	code := func(suffix string) string { return ProfilesCheckName + "." + suffix }
+	// Without a legacy co-located Runtime Broker the hub's stored profiles
+	// affect no broker in this process: the check does not apply. A flat
+	// instance co-located with the hub is a legitimate deployment, so it is
+	// information, never a block (blocking would make force routine there).
+	notApplicable := func(why string) []Finding {
+		return []Finding{{Code: code("not_applicable"), Severity: SeverityInfo,
+			Message: "no legacy co-located broker; profile check skipped: " + why}}
+	}
 	if env.ColocatedBrokerID == "" {
-		return []Finding{{Code: code("skipped_no_colocated_broker"), Severity: SeverityWarn,
-			Message: "the profile check was skipped: this hub has no co-located Runtime Broker, so its stored profiles affect no broker in this process"}}, nil
+		return notApplicable("this hub has no legacy co-located Runtime Broker"), nil
 	}
 	if env.DB == nil {
 		return nil, errors.New("no database reader")
@@ -90,7 +104,7 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 		return nil, fmt.Errorf("co-located broker %s has no broker row", env.ColocatedBrokerID)
 	}
 	if flat {
-		return nil, fmt.Errorf("co-located broker %s is a flat instance", env.ColocatedBrokerID)
+		return notApplicable(fmt.Sprintf("the co-located broker %s is a flat instance", env.ColocatedBrokerID)), nil
 	}
 	rows, err := env.DB.HubSettings(ctx, catalogSections)
 	if err != nil {
@@ -120,8 +134,9 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	for _, section := range catalogSections {
 		bootDoc, err := extractSection(bootstrap, section)
 		if err != nil {
+			slog.Warn("preflight: the bootstrap section does not extract", "section", section, "error", err)
 			return append(out, Finding{Code: code("could_not_evaluate"), Severity: SeverityBlock,
-				Message:     fmt.Sprintf("the preflight could not evaluate the %s bootstrap material: %s", section, errorClass(err)),
+				Message:     fmt.Sprintf("the preflight could not evaluate the %s bootstrap material: %s", section, loaderErrorClass("the server config or SCION_SEED settings for it do not decode", err)),
 				Remediation: "fix the server config or SCION_SEED material for this section, then run the rebuild again"}), nil
 		}
 		var row *opsettings.SectionRow
@@ -156,18 +171,21 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	refs, counted, _ := agent.BuildProfileReferencesDetailed(env.GlobalDir, env.ColocatedBrokerID,
 		agent.ProfileRefInputs{Providers: providers, Projects: projects, Agents: agents})
 
-	after, err := config.ProfileCatalogView(env.GlobalDir, afterSec.Runtimes, afterSec.Profiles, &refs)
+	after, err := catalogView(env.GlobalDir, afterSec.Runtimes, afterSec.Profiles, &refs)
 	if err != nil {
-		return nil, fmt.Errorf("load the effective settings: %w", err)
+		slog.Warn("preflight: the effective settings do not load", "error", err)
+		return nil, errors.New(loaderErrorClass("the hub's effective settings do not load", err))
 	}
-	before, err := config.ProfileCatalogView(env.GlobalDir, beforeSec.Runtimes, beforeSec.Profiles, nil)
+	before, err := catalogView(env.GlobalDir, beforeSec.Runtimes, beforeSec.Profiles, nil)
 	if err != nil {
-		return nil, fmt.Errorf("load the effective settings: %w", err)
+		slog.Warn("preflight: the effective settings do not load", "error", err)
+		return nil, errors.New(loaderErrorClass("the hub's effective settings do not load", err))
 	}
-	origins, err := config.ProfileOrigins(env.GlobalDir)
+	origins, err := profileOrigins(env.GlobalDir)
 	if err != nil {
+		slog.Warn("preflight: the profile origins do not load", "error", err)
 		return append(out, Finding{Code: code("could_not_evaluate"), Severity: SeverityBlock,
-			Message:     "the preflight could not label where profiles come from: " + errorClass(err),
+			Message:     "the preflight could not label where profiles come from: " + loaderErrorClass("the settings files under the hub's global directory do not load", err),
 			Remediation: "check that the settings files under the hub's global directory load"}), nil
 	}
 
@@ -200,10 +218,38 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	return out, nil
 }
 
-// errorClass is the error's message, for a finding that names what failed.
-// The errors it is given come from settings loaders and carry no settings
-// values.
-func errorClass(err error) string { return err.Error() }
+// keyPathRE finds the key paths a decode error names: mapstructure's
+// "* 'profiles.a.runtime' expected type ..." and koanf's "'profiles.a'
+// ..." forms. Only a quoted dotted name of key characters counts.
+var keyPathRE = regexp.MustCompile(`(?m)(?:^|\* )'([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)' `)
+
+// loaderErrorClass is how a settings loader's error is reported in a
+// finding: the fixed class, plus the key paths the error names. The error
+// text itself never goes into a finding, because a decode error quotes the
+// value it could not convert; the caller logs it locally.
+func loaderErrorClass(class string, err error) string {
+	seen := map[string]bool{}
+	var paths []string
+	for _, m := range keyPathRE.FindAllStringSubmatch(err.Error(), -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			paths = append(paths, m[1])
+		}
+	}
+	if len(paths) == 0 {
+		return class
+	}
+	sort.Strings(paths)
+	return fmt.Sprintf("%s (at %s)", class, joinPaths(paths))
+}
+
+func joinPaths(paths []string) string {
+	out := paths[0]
+	for _, p := range paths[1:] {
+		out += ", " + p
+	}
+	return out
+}
 
 // subjectIndex lists the counted agents by profile, and the projects whose
 // activeProfile references a profile.

@@ -117,10 +117,13 @@ func TestRunAll_InvalidFinding(t *testing.T) {
 func TestRunAll_ParentCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	r := NewRegistry()
 	r.Register(Check{Name: "c.wait", Timeout: time.Hour, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
 		<-ctx.Done()
-		select {} // never returns: only the select in RunAll decides
+		<-done // returns only after the test: only the select in RunAll decides
+		return nil, nil
 	}})
 	rep := r.RunAll(ctx, Env{})
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Message, "cancelled") {
@@ -133,10 +136,13 @@ func TestRunAll_ParentCancelled(t *testing.T) {
 func TestRunAll_ParentDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	r := NewRegistry()
 	r.Register(Check{Name: "c.wait", Timeout: time.Hour, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
 		<-ctx.Done()
-		select {} // never returns: only the select in RunAll decides
+		<-done // returns only after the test: only the select in RunAll decides
+		return nil, nil
 	}})
 	rep := r.RunAll(ctx, Env{})
 	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Message, "the preflight deadline passed") ||

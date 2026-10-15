@@ -161,19 +161,33 @@ func wantCodes(t *testing.T, rep Report, want ...string) {
 	}
 }
 
-// A hub with no co-located broker gets exactly the skipped warning.
+// A hub with no legacy co-located broker gets exactly the not-applicable
+// information, never a block.
 func TestProfilesCheck_HubOnly(t *testing.T) {
 	globalDir := profilesHome(t, "a", "a")
 	rep := runProfiles(t, globalDir, nil, "")
-	wantCodes(t, rep, "settings.profiles.skipped_no_colocated_broker")
-	if rep.Findings[0].Severity != SeverityWarn {
-		t.Fatalf("severity %s, want warn", rep.Findings[0].Severity)
+	wantCodes(t, rep, "settings.profiles.not_applicable")
+	if rep.Findings[0].Severity != SeverityInfo || rep.Blocking != 0 {
+		t.Fatalf("finding %+v (blocking %d), want info and no block", rep.Findings[0], rep.Blocking)
 	}
 }
 
-// A broker ID with no broker row, a flat co-located broker row, a row with
-// no origin, a stored document that does not decode, and a missing reader
-// cannot be evaluated: could_not_run.
+// A flat co-located broker row is a legitimate deployment: the check does
+// not apply (information, not a block), and none of that broker's agents
+// is evaluated, even one on a missing profile.
+func TestProfilesCheck_FlatColocatedNotApplicable(t *testing.T) {
+	globalDir := profilesHome(t, "a", "a")
+	db := &fakeDB{flatBroker: true, agents: []agent.ProfileRefAgentRow{{Slug: "w", ProjectID: "p1", RuntimeBrokerID: testBroker, AppliedProfile: "gone"}}}
+	rep := runProfiles(t, globalDir, db, testBroker)
+	wantCodes(t, rep, "settings.profiles.not_applicable")
+	if f := rep.Findings[0]; f.Severity != SeverityInfo || rep.Blocking != 0 || len(f.Subjects) != 0 || !strings.Contains(f.Message, "is a flat instance") {
+		t.Fatalf("finding %+v (blocking %d), want info naming the flat instance, no block, no subjects", f, rep.Blocking)
+	}
+}
+
+// A broker ID with no broker row, a row with no origin, a stored document
+// that does not decode, and a missing reader cannot be evaluated:
+// could_not_run.
 func TestProfilesCheck_CouldNotRun(t *testing.T) {
 	globalDir := profilesHome(t, "a", "a")
 	for _, c := range []struct {
@@ -182,7 +196,6 @@ func TestProfilesCheck_CouldNotRun(t *testing.T) {
 		want string
 	}{
 		{"no broker row", &fakeDB{noBroker: true}, "has no broker row"},
-		{"flat co-located broker", &fakeDB{flatBroker: true}, "is a flat instance"},
 		{"no origin", &fakeDB{settings: []HubSettingRow{profilesRow("", nil, "a")}}, "hub_settings row profiles has no origin"},
 		{"undecodable profiles", &fakeDB{settings: []HubSettingRow{{Section: "profiles", Origin: "managed", Value: json.RawMessage(`{not json`)}}}, "stored profiles section does not decode"},
 		{"no reader", nil, "no database reader"},
@@ -252,8 +265,12 @@ func TestProfilesCheck_ExtractErrorBlocks(t *testing.T) {
 	extractSection = func(*koanf.Koanf, string) (json.RawMessage, error) { return nil, errors.New("bad section") }
 	rep := runProfiles(t, globalDir, &fakeDB{}, testBroker)
 	wantCodes(t, rep, "settings.profiles.could_not_evaluate")
-	if rep.Findings[0].Severity != SeverityBlock || !strings.Contains(rep.Findings[0].Message, "bad section") {
-		t.Fatalf("finding %+v, want a block naming the error", rep.Findings[0])
+	if f := rep.Findings[0]; f.Severity != SeverityBlock || !strings.Contains(f.Message, "the profiles bootstrap material") && !strings.Contains(f.Message, "the runtimes bootstrap material") {
+		t.Fatalf("finding %+v, want a block naming the section", f)
+	}
+	// The loader's error text can quote a value: it goes to the log, never into the finding.
+	if strings.Contains(rep.Findings[0].Message, "bad section") {
+		t.Fatalf("finding %+v quotes the loader's error", rep.Findings[0])
 	}
 }
 
@@ -368,5 +385,103 @@ func TestProfilesCheck_OneStoredDefaultStaysWithRetainedBuiltin(t *testing.T) {
 	}
 	if f := rep.Findings[1]; f.Data["profile"] != "local" || f.Data["agents"] != 1 {
 		t.Fatalf("retained finding %+v, want local with 1 agent", f)
+	}
+}
+
+// The before view is built without references (the running hub may predate
+// ptone/scion#5113), even when the before rows store two or more profiles,
+// where retention would keep a built-in active_profile: before, the default
+// did not resolve, so the after view's single-profile fallback carries no
+// Previous.
+func TestProfilesCheck_BeforeViewWithoutRetention(t *testing.T) {
+	globalDir := profilesHome(t, "local", "x")
+	db := &fakeDB{settings: []HubSettingRow{profilesRow("seeded", strPtr("seed"), "x", "y")}}
+	rep := runProfiles(t, globalDir, db, testBroker)
+	wantCodes(t, rep, "settings.profiles.active_profile_fallback", "settings.profiles.dropped_unused_profile")
+	if f := rep.Findings[0]; f.Data["profile"] != "local" || f.Data["previous"] != nil {
+		t.Fatalf("fallback finding %+v, want local with no previous (before had no default)", f)
+	}
+	if f := rep.Findings[1]; f.Data["profile"] != "y" {
+		t.Fatalf("dropped finding %+v, want y", f)
+	}
+}
+
+// With stored runtimes, a built-in runtime kept for stored profiles that
+// name it counts the agents of every after profile naming it.
+func TestProfilesCheck_RetainedRuntimeSumsProfiles(t *testing.T) {
+	globalDir := profilesHome(t, "gke")
+	profiles, _ := json.Marshal(map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s"}, "a": {Runtime: "docker"}, "b": {Runtime: "docker"}})
+	runtimes, _ := json.Marshal(map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}})
+	db := &fakeDB{
+		settings: []HubSettingRow{
+			{Section: "profiles", Origin: "managed", UpdatedBy: strPtr("admin"), Value: profiles},
+			{Section: "runtimes", Origin: "managed", UpdatedBy: strPtr("admin"), Value: runtimes},
+		},
+		agents: []agent.ProfileRefAgentRow{
+			{Slug: "a1", ProjectID: "p1", AppliedProfile: "a"},
+			{Slug: "b1", ProjectID: "p1", AppliedProfile: "b"},
+			{Slug: "b2", ProjectID: "p1", AppliedProfile: "b"},
+		},
+	}
+	rep := runProfiles(t, globalDir, db, testBroker)
+	wantCodes(t, rep, "settings.profiles.retained_builtin_runtime")
+	f := rep.Findings[0]
+	if f.Data["profile"] != "docker" || f.Data["agents"] != 3 || !strings.Contains(f.Message, "(3 agent(s))") {
+		t.Fatalf("finding %+v, want docker kept for 3 agents", f)
+	}
+}
+
+// A settings loader's error can quote the value it could not convert. The
+// finding carries the fixed class and the key path, never the error text:
+// the secret-like value appears nowhere in the report.
+func TestProfilesCheck_LoaderErrorsNeverQuoteValues(t *testing.T) {
+	const secret = "s3cr3t-tok-91"
+	mapErr := errors.New("1 error(s) decoding:\n\n* 'profiles.a.runtime' expected type 'string', got unconvertible type 'map[string]interface {}', value: 'map[k:" + secret + "]'")
+	yamlErr := errors.New("yaml: unmarshal errors:\n  line 3: cannot unmarshal !!str `" + secret + "` into int")
+	for _, c := range []struct {
+		name     string
+		inject   func(error)
+		err      error
+		wantCode string
+		wantPath bool
+	}{
+		{"bootstrap extract, key path", func(e error) {
+			extractSection = func(*koanf.Koanf, string) (json.RawMessage, error) { return nil, e }
+		}, mapErr, "settings.profiles.could_not_evaluate", true},
+		{"effective settings, key path", func(e error) {
+			catalogView = func(string, map[string]config.V1RuntimeConfig, map[string]config.V1ProfileConfig, *config.ProfileReferences) (*config.VersionedSettings, error) {
+				return nil, e
+			}
+		}, mapErr, "settings.profiles.could_not_run", true},
+		{"profile origins, key path", func(e error) {
+			profileOrigins = func(string) (map[string]config.ProfileSource, error) { return nil, e }
+		}, mapErr, "settings.profiles.could_not_evaluate", true},
+		{"effective settings, no key path", func(e error) {
+			catalogView = func(string, map[string]config.V1RuntimeConfig, map[string]config.V1ProfileConfig, *config.ProfileReferences) (*config.VersionedSettings, error) {
+				return nil, e
+			}
+		}, yamlErr, "settings.profiles.could_not_run", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			globalDir := profilesHome(t, "a", "a")
+			oldE, oldV, oldO := extractSection, catalogView, profileOrigins
+			t.Cleanup(func() { extractSection, catalogView, profileOrigins = oldE, oldV, oldO })
+			c.inject(c.err)
+			rep := runProfiles(t, globalDir, &fakeDB{settings: []HubSettingRow{profilesRow("managed", strPtr("admin"), "a")}}, testBroker)
+			doc, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(doc), secret) {
+				t.Fatalf("the report quotes the loader's value: %s", doc)
+			}
+			f := finding(t, rep, c.wantCode)
+			if f.Severity != SeverityBlock {
+				t.Fatalf("finding %+v, want a block", f)
+			}
+			if got := strings.Contains(f.Message, "(at profiles.a.runtime)"); got != c.wantPath {
+				t.Fatalf("finding message %q: key path shown = %v, want %v", f.Message, got, c.wantPath)
+			}
+		})
 	}
 }
