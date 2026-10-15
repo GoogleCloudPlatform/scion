@@ -4618,6 +4618,9 @@ type AgentMutation struct {
 	launch_step                *string
 	launch_error               *string
 	launch_cause               *string
+	launch_prior_phase         *string
+	launch_revoke_on_fail      *bool
+	launch_resume_phase        *string
 	deletion_state             *string
 	deletion_claim             *int64
 	adddeletion_claim          *int64
@@ -7961,6 +7964,140 @@ func (m *AgentMutation) ResetLaunchCause() {
 	delete(m.clearedFields, agent.FieldLaunchCause)
 }
 
+// SetLaunchPriorPhase sets the "launch_prior_phase" field.
+func (m *AgentMutation) SetLaunchPriorPhase(s string) {
+	m.launch_prior_phase = &s
+}
+
+// LaunchPriorPhase returns the value of the "launch_prior_phase" field in the mutation.
+func (m *AgentMutation) LaunchPriorPhase() (r string, exists bool) {
+	v := m.launch_prior_phase
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchPriorPhase returns the old "launch_prior_phase" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchPriorPhase(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchPriorPhase is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchPriorPhase requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchPriorPhase: %w", err)
+	}
+	return oldValue.LaunchPriorPhase, nil
+}
+
+// ClearLaunchPriorPhase clears the value of the "launch_prior_phase" field.
+func (m *AgentMutation) ClearLaunchPriorPhase() {
+	m.launch_prior_phase = nil
+	m.clearedFields[agent.FieldLaunchPriorPhase] = struct{}{}
+}
+
+// LaunchPriorPhaseCleared returns if the "launch_prior_phase" field was cleared in this mutation.
+func (m *AgentMutation) LaunchPriorPhaseCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLaunchPriorPhase]
+	return ok
+}
+
+// ResetLaunchPriorPhase resets all changes to the "launch_prior_phase" field.
+func (m *AgentMutation) ResetLaunchPriorPhase() {
+	m.launch_prior_phase = nil
+	delete(m.clearedFields, agent.FieldLaunchPriorPhase)
+}
+
+// SetLaunchRevokeOnFail sets the "launch_revoke_on_fail" field.
+func (m *AgentMutation) SetLaunchRevokeOnFail(b bool) {
+	m.launch_revoke_on_fail = &b
+}
+
+// LaunchRevokeOnFail returns the value of the "launch_revoke_on_fail" field in the mutation.
+func (m *AgentMutation) LaunchRevokeOnFail() (r bool, exists bool) {
+	v := m.launch_revoke_on_fail
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchRevokeOnFail returns the old "launch_revoke_on_fail" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchRevokeOnFail(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchRevokeOnFail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchRevokeOnFail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchRevokeOnFail: %w", err)
+	}
+	return oldValue.LaunchRevokeOnFail, nil
+}
+
+// ResetLaunchRevokeOnFail resets all changes to the "launch_revoke_on_fail" field.
+func (m *AgentMutation) ResetLaunchRevokeOnFail() {
+	m.launch_revoke_on_fail = nil
+}
+
+// SetLaunchResumePhase sets the "launch_resume_phase" field.
+func (m *AgentMutation) SetLaunchResumePhase(s string) {
+	m.launch_resume_phase = &s
+}
+
+// LaunchResumePhase returns the value of the "launch_resume_phase" field in the mutation.
+func (m *AgentMutation) LaunchResumePhase() (r string, exists bool) {
+	v := m.launch_resume_phase
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchResumePhase returns the old "launch_resume_phase" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchResumePhase(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchResumePhase is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchResumePhase requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchResumePhase: %w", err)
+	}
+	return oldValue.LaunchResumePhase, nil
+}
+
+// ClearLaunchResumePhase clears the value of the "launch_resume_phase" field.
+func (m *AgentMutation) ClearLaunchResumePhase() {
+	m.launch_resume_phase = nil
+	m.clearedFields[agent.FieldLaunchResumePhase] = struct{}{}
+}
+
+// LaunchResumePhaseCleared returns if the "launch_resume_phase" field was cleared in this mutation.
+func (m *AgentMutation) LaunchResumePhaseCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLaunchResumePhase]
+	return ok
+}
+
+// ResetLaunchResumePhase resets all changes to the "launch_resume_phase" field.
+func (m *AgentMutation) ResetLaunchResumePhase() {
+	m.launch_resume_phase = nil
+	delete(m.clearedFields, agent.FieldLaunchResumePhase)
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (m *AgentMutation) SetDeletionState(s string) {
 	m.deletion_state = &s
@@ -9372,7 +9509,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 89)
+	fields := make([]string, 0, 92)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9570,6 +9707,15 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.launch_cause != nil {
 		fields = append(fields, agent.FieldLaunchCause)
+	}
+	if m.launch_prior_phase != nil {
+		fields = append(fields, agent.FieldLaunchPriorPhase)
+	}
+	if m.launch_revoke_on_fail != nil {
+		fields = append(fields, agent.FieldLaunchRevokeOnFail)
+	}
+	if m.launch_resume_phase != nil {
+		fields = append(fields, agent.FieldLaunchResumePhase)
 	}
 	if m.deletion_state != nil {
 		fields = append(fields, agent.FieldDeletionState)
@@ -9780,6 +9926,12 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchError()
 	case agent.FieldLaunchCause:
 		return m.LaunchCause()
+	case agent.FieldLaunchPriorPhase:
+		return m.LaunchPriorPhase()
+	case agent.FieldLaunchRevokeOnFail:
+		return m.LaunchRevokeOnFail()
+	case agent.FieldLaunchResumePhase:
+		return m.LaunchResumePhase()
 	case agent.FieldDeletionState:
 		return m.DeletionState()
 	case agent.FieldDeletionClaim:
@@ -9967,6 +10119,12 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchError(ctx)
 	case agent.FieldLaunchCause:
 		return m.OldLaunchCause(ctx)
+	case agent.FieldLaunchPriorPhase:
+		return m.OldLaunchPriorPhase(ctx)
+	case agent.FieldLaunchRevokeOnFail:
+		return m.OldLaunchRevokeOnFail(ctx)
+	case agent.FieldLaunchResumePhase:
+		return m.OldLaunchResumePhase(ctx)
 	case agent.FieldDeletionState:
 		return m.OldDeletionState(ctx)
 	case agent.FieldDeletionClaim:
@@ -10484,6 +10642,27 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLaunchCause(v)
 		return nil
+	case agent.FieldLaunchPriorPhase:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchPriorPhase(v)
+		return nil
+	case agent.FieldLaunchRevokeOnFail:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchRevokeOnFail(v)
+		return nil
+	case agent.FieldLaunchResumePhase:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchResumePhase(v)
+		return nil
 	case agent.FieldDeletionState:
 		v, ok := value.(string)
 		if !ok {
@@ -10912,6 +11091,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldLaunchCause) {
 		fields = append(fields, agent.FieldLaunchCause)
 	}
+	if m.FieldCleared(agent.FieldLaunchPriorPhase) {
+		fields = append(fields, agent.FieldLaunchPriorPhase)
+	}
+	if m.FieldCleared(agent.FieldLaunchResumePhase) {
+		fields = append(fields, agent.FieldLaunchResumePhase)
+	}
 	if m.FieldCleared(agent.FieldDeletionState) {
 		fields = append(fields, agent.FieldDeletionState)
 	}
@@ -11141,6 +11326,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchCause:
 		m.ClearLaunchCause()
+		return nil
+	case agent.FieldLaunchPriorPhase:
+		m.ClearLaunchPriorPhase()
+		return nil
+	case agent.FieldLaunchResumePhase:
+		m.ClearLaunchResumePhase()
 		return nil
 	case agent.FieldDeletionState:
 		m.ClearDeletionState()
@@ -11413,6 +11604,15 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchCause:
 		m.ResetLaunchCause()
+		return nil
+	case agent.FieldLaunchPriorPhase:
+		m.ResetLaunchPriorPhase()
+		return nil
+	case agent.FieldLaunchRevokeOnFail:
+		m.ResetLaunchRevokeOnFail()
+		return nil
+	case agent.FieldLaunchResumePhase:
+		m.ResetLaunchResumePhase()
 		return nil
 	case agent.FieldDeletionState:
 		m.ResetDeletionState()

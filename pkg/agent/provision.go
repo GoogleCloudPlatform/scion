@@ -2846,24 +2846,74 @@ func injectPlatformSkills(
 	return nil
 }
 
+// SavedProfileState says where SavedProfileOnDisk found an agent's profile.
+type SavedProfileState int
+
+const (
+	// SavedProfileMissing: the agent has no agent-info.json (it was never
+	// provisioned on this host, or projectPath does not resolve).
+	SavedProfileMissing SavedProfileState = iota
+	// SavedProfileFound: the profile is the Profile in agent-info.json.
+	SavedProfileFound
+	// SavedProfileUnreadable: agent-info.json exists but could not be read
+	// or parsed; the profile is the provisioned one from the image
+	// provenance record when there is one, else "".
+	SavedProfileUnreadable
+)
+
+// SavedProfileOnDisk returns the saved profile of the agent agentName in
+// projectPath on this host, as the start path would see it, for the hub's
+// built-in profile reference count (ptone/scion#5113). It reads
+// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// then GetAgentHomePath). When that file exists but cannot be used, the
+// start path's runtime selection would use the provisioned profile from the
+// image provenance record (ProvisionedProfile), so that is returned instead.
+// sharedWorkspace and hubProjectID are passed to ProvisionedProfile.
+//
+// It is read-only and has no other side effects (no writes, no caches, no
+// logging), so the rebuild preflight can call it directly.
+func SavedProfileOnDisk(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) (string, SavedProfileState) {
+	info, state := readSavedAgentInfo(agentName, projectPath)
+	switch state {
+	case SavedProfileFound:
+		return info.Profile, SavedProfileFound
+	case SavedProfileUnreadable:
+		if profile, ok, err := ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, false); err == nil && ok {
+			return profile, SavedProfileUnreadable
+		}
+		return "", SavedProfileUnreadable
+	default:
+		return "", SavedProfileMissing
+	}
+}
+
 func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
+	info, _ := readSavedAgentInfo(agentName, projectPath)
+	return info
+}
+
+// readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
+// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// look at the same file. info is non-nil only when state is
+// SavedProfileFound.
+func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
 	if _, err := os.Stat(agentInfoPath); err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
 	var info api.AgentInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
-	return &info
+	return &info, SavedProfileFound
 }
 
 // hasRuntimeEntry reports whether the runtime holds an entry for opts.Name

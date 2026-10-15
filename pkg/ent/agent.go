@@ -153,6 +153,12 @@ type Agent struct {
 	LaunchError string `json:"launch_error,omitempty"`
 	// LaunchCause holds the value of the "launch_cause" field.
 	LaunchCause string `json:"launch_cause,omitempty"`
+	// LaunchPriorPhase holds the value of the "launch_prior_phase" field.
+	LaunchPriorPhase string `json:"launch_prior_phase,omitempty"`
+	// LaunchRevokeOnFail holds the value of the "launch_revoke_on_fail" field.
+	LaunchRevokeOnFail bool `json:"launch_revoke_on_fail,omitempty"`
+	// LaunchResumePhase holds the value of the "launch_resume_phase" field.
+	LaunchResumePhase string `json:"launch_resume_phase,omitempty"`
 	// DeletionState holds the value of the "deletion_state" field.
 	DeletionState string `json:"deletion_state,omitempty"`
 	// DeletionClaim holds the value of the "deletion_claim" field.
@@ -278,11 +284,11 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case agent.FieldLabels, agent.FieldAnnotations, agent.FieldExposedPorts, agent.FieldAncestry, agent.FieldPreviousRunIds:
 			values[i] = new([]byte)
-		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
+		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn, agent.FieldLaunchRevokeOnFail:
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldPinnedRuntimeBrokerID, agent.FieldPinnedRuntimeTargetID, agent.FieldPinnedRuntimeTargetType, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldSSHHostKey, agent.FieldSSHHostKeyRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldLaunchCause, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldPinnedRuntimeBrokerID, agent.FieldPinnedRuntimeTargetID, agent.FieldPinnedRuntimeTargetType, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldRunID, agent.FieldSSHHostKey, agent.FieldSSHHostKeyRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldLaunchCause, agent.FieldLaunchPriorPhase, agent.FieldLaunchResumePhase, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
 		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldRunIDUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil:
 			values[i] = new(sql.NullTime)
@@ -730,6 +736,24 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LaunchCause = value.String
 			}
+		case agent.FieldLaunchPriorPhase:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_prior_phase", values[i])
+			} else if value.Valid {
+				_m.LaunchPriorPhase = value.String
+			}
+		case agent.FieldLaunchRevokeOnFail:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_revoke_on_fail", values[i])
+			} else if value.Valid {
+				_m.LaunchRevokeOnFail = value.Bool
+			}
+		case agent.FieldLaunchResumePhase:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field launch_resume_phase", values[i])
+			} else if value.Valid {
+				_m.LaunchResumePhase = value.String
+			}
 		case agent.FieldDeletionState:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field deletion_state", values[i])
@@ -1168,6 +1192,15 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("launch_cause=")
 	builder.WriteString(_m.LaunchCause)
+	builder.WriteString(", ")
+	builder.WriteString("launch_prior_phase=")
+	builder.WriteString(_m.LaunchPriorPhase)
+	builder.WriteString(", ")
+	builder.WriteString("launch_revoke_on_fail=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LaunchRevokeOnFail))
+	builder.WriteString(", ")
+	builder.WriteString("launch_resume_phase=")
+	builder.WriteString(_m.LaunchResumePhase)
 	builder.WriteString(", ")
 	builder.WriteString("deletion_state=")
 	builder.WriteString(_m.DeletionState)

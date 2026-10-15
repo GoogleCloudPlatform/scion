@@ -295,7 +295,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			span.SetStatus(codes.Error, err.Error())
 			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "Failed to resolve the global config directory", OriginalErr: err}
 		}
-		in.ProjectPath = filepath.Join(globalDir, "projects", in.ProjectSlug)
+		// The same helper decides the path the hub's built-in profile
+		// reference count reads agent-info.json from (ptone/scion#5113).
+		in.ProjectPath = config.BrokerProjectPath(globalDir, "", in.ProjectSlug)
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Resolved hub-managed project path from slug",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath)
