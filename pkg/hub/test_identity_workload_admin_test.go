@@ -824,6 +824,36 @@ func TestWorkloadAdminDelegation_IssueOnly(t *testing.T) {
 	md := e.delegateScope(t, super, testIdentityDelegationScope, map[string]any{"workloadSub": x2Sub})
 	assert.True(t, callerFor(md, x2Sub), "member-scope delegation admitted")
 	assert.False(t, callerFor(hd, x4AdminSub), "admin-scope delegation refused")
+
+	// Purge of the admin-kind identity (admin tier A3 admits
+	// DELETE ?purge=true for admin kinds, for its issuer or a super-admin):
+	// the admin-scope delegation is refused (403); the member-scope
+	// delegation of the same grantor gets the empty report (the A3 purge
+	// check refuses every workload delegation caller) and purges nothing.
+	purges := func() int {
+		audits, _, err := e.s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testIdentityPurgeMutation})
+		require.NoError(t, err)
+		return len(audits)
+	}
+	before := purges()
+	rec = e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+adminID+"?purge=true", tok(), hd.ID, nil, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "admin-scope delegation purge: %s", rec.Body.String())
+	assert.NotContains(t, x4JSONKeys(t, rec.Body.Bytes()), "identityDeleted")
+	rec = e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+adminID+"?purge=true", x2Token(t, x2TokenOpts{}), md.ID, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "member-scope delegation purge: %s", rec.Body.String())
+	var report TestIdentityPurgeReport
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &report))
+	assert.Equal(t, *emptyTestIdentityPurgeReport(adminID), report, "the empty report")
+	assert.False(t, report.IdentityDeleted, "the member-scope delegation deletes nothing")
+	_, err = e.s.GetUser(ctx, adminID)
+	require.NoError(t, err, "the admin-kind identity still exists")
+	assert.Equal(t, before, purges(), "no purge audit")
+	// Positive control: the grantor's own session purges it.
+	rec = doRequestAsUser(t, e.srv, super, http.MethodDelete, "/api/v1/test-identities/"+adminID+"?purge=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	report = TestIdentityPurgeReport{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &report))
+	assert.True(t, report.IdentityDeleted, "the grantor's session purges its admin-kind identity")
 }
 
 // Member-tier X2 behaviour is unchanged on an X4 hub: a member delegation
