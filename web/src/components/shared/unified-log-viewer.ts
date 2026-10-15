@@ -18,7 +18,7 @@
  * Unified log viewer component for the diagnostics dashboard.
  *
  * Streams and displays log entries from all Scion system components
- * (hub, broker, agent, messages) via a single SSE connection. Features
+ * (hub, broker, agent, messages, artifacts) via a single SSE connection. Features
  * source color-coding, severity filtering (server-side), source and
  * text filtering (client-side), auto-scroll with pause-on-scroll-up,
  * entry detail expansion, and reconnection with gap-fill.
@@ -41,7 +41,7 @@ interface DiagnosticLogEntry {
   insertId: string;
   sourceLocation?: { file?: string; line?: string; function?: string };
   logName?: string;
-  source: string; // "hub", "broker", "agent", "messages", "server"
+  source: string; // "hub", "broker", "agent", "messages", "artifacts", "server"
   _ts?: number; // cached numeric timestamp for sort performance
 }
 
@@ -60,10 +60,11 @@ const SOURCE_CONFIG: Record<string, { badge: string; color: string; bg: string }
   broker: { badge: 'BRK', color: '#059669', bg: '#ecfdf5' },
   agent: { badge: 'AGT', color: '#d97706', bg: '#fffbeb' },
   messages: { badge: 'MSG', color: '#7c3aed', bg: '#f5f3ff' },
+  artifacts: { badge: 'ART', color: '#db2777', bg: '#fdf2f8' },
   server: { badge: 'SRV', color: '#4b5563', bg: '#f9fafb' },
 };
 
-const ALL_SOURCES = ['hub', 'broker', 'agent', 'messages', 'server'];
+const ALL_SOURCES = ['hub', 'broker', 'agent', 'messages', 'artifacts', 'server'];
 
 const SEARCH_DEBOUNCE_MS = 300;
 const AUTO_SCROLL_THRESHOLD = 50; // px from bottom

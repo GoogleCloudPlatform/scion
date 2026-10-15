@@ -185,6 +185,26 @@ type ReviewGrantAuthority interface {
 	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
 }
 
+// Review grant clauses, as ReviewGrantClauser names them.
+const (
+	ReviewClauseProjectAdmin   = "project_admin"
+	ReviewClauseDelegatingUser = "delegating_user"
+)
+
+// ReviewGrantClauser is an optional host interface that replaces
+// ReviewGrantAuthority when a host has it (ptone/scion#5120): the service
+// asks it instead of MayGrantReview. It makes the same decision as
+// MayGrantReview, in the same single evaluation, and names the clause that
+// allowed it, so the decision log can record it without asking the host a
+// second question.
+type ReviewGrantClauser interface {
+	// ReviewGrantClause answers like MayGrantReview: ReviewClauseProjectAdmin
+	// when the caller holds project administration in homeScope,
+	// ReviewClauseDelegatingUser when it is the delegating user of agent
+	// ownerAgentID, or "" when MayGrantReview would answer false.
+	ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string
+}
+
 // PrincipalChecker is an optional extension of Host (ptone/scion#4529).
 // The owner liveness reconciler asks it which artifact owners still exist,
 // so it can mark the artifacts of a deleted agent or user. A host without
