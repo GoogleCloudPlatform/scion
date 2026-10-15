@@ -123,7 +123,7 @@ func TestPruneSQLiteSnapshots(t *testing.T) {
 
 	// Without the timestamp pattern, an old timestamp snapshot is kept.
 	oldTS = writeAged(t, dir, "hub.db.pre-utc-timestamp-normalize-20260902T000000Z.bak", old)
-	assert.Empty(t, PruneSQLiteSnapshots(db, testSnapshotPatterns[:1], nil, SnapshotRetention, retentionNow))
+	assert.Empty(t, PruneSQLiteSnapshots(db, testSnapshotPatterns[:1], keep, SnapshotRetention, retentionNow))
 	assert.FileExists(t, oldTS)
 }
 
