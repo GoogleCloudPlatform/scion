@@ -304,6 +304,16 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 		return nil, st.drained()
 	case errors.Is(err, conduit.ErrRequestNotSent):
 		return nil, &relay.StaleRouteError{Reason: "not_sent"}
+	case errors.As(err, &stale) && relayWideStaleReasons[stale.Reason]:
+		// The owner relay itself cannot serve the route, so every session
+		// it holds is ruled out. Router.Do excludes a whole relay only for
+		// relay.ErrOwnerUnreachable, so the stale route reuses that
+		// exclusion; only its text is kept, so the router does not
+		// exclude just the session. Nothing counts or logs
+		// ErrOwnerUnreachable as a dial failure (Router.Do is its only
+		// consumer). A budget exhausted on relay exclusions means nothing
+		// was sent: the request takes the fallback.
+		return nil, fmt.Errorf("%w: %s", relay.ErrOwnerUnreachable, err.Error())
 	case errors.As(err, &stale) && ownerStaleReason(stale.Reason), errors.Is(err, relay.ErrOwnerUnreachable):
 		// Refused before the target saw it: the router re-resolves.
 		return nil, err
@@ -337,24 +347,31 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 	return nil, &relay.StaleRouteError{Reason: "session_lost"}
 }
 
-// ownerStaleReasons is the closed set of X-Conduit-Stale-Reason values an
-// owner relay sends with the 404 or 409 that refuses a route before the
-// target saw the request: not_local, the registry admission reasons,
-// relay_target_mismatch, relay_not_serving, draining and not_sent. On the
-// routed broker path only a stale route with one of them is re-resolved;
-// one without the header, or with any other value, is handled under the
-// operation class like any other failure (the request may have reached
-// the broker).
-var ownerStaleReasons = map[string]bool{
+// The closed set of X-Conduit-Stale-Reason values an owner relay sends
+// with the 404 or 409 that refuses a route before the target saw the
+// request. On the routed broker path only a stale route with one of them
+// is re-resolved, within the shared budget; one without the header, or
+// with any other value, is handled under the operation class like any
+// other failure (the request may have reached the broker).
+//
+// relayWideStaleReasons exclude the owner relay for the rest of the
+// request: the relay itself cannot serve the route.
+var relayWideStaleReasons = map[string]bool{
+	string(registry.ReasonRelayMissing):    true,
+	string(registry.ReasonRelaySuperseded): true,
+	string(registry.ReasonRelayStale):      true,
+	string(registry.ReasonReadError):       true,
+	"relay_target_mismatch":                true,
+	"relay_not_serving":                    true,
+}
+
+// sessionStaleReasons exclude only the session: other sessions on the
+// same relay stay eligible.
+var sessionStaleReasons = map[string]bool{
 	"not_local":                                true,
-	"relay_target_mismatch":                    true,
-	"relay_not_serving":                        true,
 	"not_sent":                                 true,
 	string(registry.ReasonNotFound):            true,
 	string(registry.ReasonNotRoutable):         true,
-	string(registry.ReasonRelayMissing):        true,
-	string(registry.ReasonRelaySuperseded):     true,
-	string(registry.ReasonRelayStale):          true,
 	string(registry.ReasonSessionStale):        true,
 	string(registry.ReasonDraining):            true,
 	string(registry.ReasonProjectMismatch):     true,
@@ -364,8 +381,9 @@ var ownerStaleReasons = map[string]bool{
 	string(registry.ReasonEpochObsolete):       true,
 }
 
-// ownerStaleReason reports whether reason is in ownerStaleReasons.
-func ownerStaleReason(reason string) bool { return ownerStaleReasons[reason] }
+// ownerStaleReason reports whether reason is a session-only owner stale
+// reason (relay-wide reasons are handled before it).
+func ownerStaleReason(reason string) bool { return sessionStaleReasons[reason] }
 
 // drained handles a draining session's refusal: the first is retried on a
 // replacement session (the router excludes this one), a second falls back.
