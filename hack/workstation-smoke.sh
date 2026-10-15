@@ -248,6 +248,13 @@ if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   log "scion init --machine && scion init"
   "$SCION" init --machine --format json >"$WORK/init-machine.out" 2>&1 || {
     cat "$WORK/init-machine.out" >&2; fail "scion init --machine"; }
+  # init --machine prefers podman over docker. Where docker answers, use it,
+  # so a podman that is installed but old or unconfigured does not leave the
+  # workstation broker reporting a degraded runtime.
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    "$SCION" config set --global profiles.local.runtime docker >"$WORK/runtime.out" 2>&1 || {
+      cat "$WORK/runtime.out" >&2; fail "scion config set --global profiles.local.runtime docker"; }
+  fi
   "$SCION" init --format json >"$WORK/init.out" 2>&1 || { cat "$WORK/init.out" >&2; fail "scion init"; }
   # A second project, initialised while no hub runs (so init does not link
   # it): step 5b checks that its first command links it automatically.

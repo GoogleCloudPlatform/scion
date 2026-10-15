@@ -21,6 +21,9 @@
 # This script attempts to merge an agent's branch. If the branches have diverged,
 # it sends a message to the agent to rebase on main, then retries the merge
 # in a loop until successful or max retries reached.
+#
+# Needs a hub (scion server start or a configured hub): scion stop and
+# scion message go through it.
 
 set -e
 
