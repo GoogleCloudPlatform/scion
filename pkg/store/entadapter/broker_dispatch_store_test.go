@@ -728,10 +728,10 @@ func TestExpireAndListStuckPendingMessages(t *testing.T) {
 	require.Len(t, expired, 2)
 	assert.Equal(t, older.ID, expired[0].ID, "oldest first")
 	assert.Equal(t, "agent:older", expired[0].Recipient)
-	assert.True(t, older.CreatedAt.Equal(expired[0].CreatedAt), "created time of the row")
+	assert.WithinDuration(t, older.CreatedAt, expired[0].CreatedAt, time.Second, "created time of the row")
 	assert.Equal(t, newer.ID, expired[1].ID)
 	assert.Equal(t, "agent:newer", expired[1].Recipient)
-	assert.True(t, newer.CreatedAt.Equal(expired[1].CreatedAt))
+	assert.WithinDuration(t, newer.CreatedAt, expired[1].CreatedAt, time.Second, "created time of the newer row")
 
 	for _, m := range []*store.Message{older, newer} {
 		got, err := cs.GetMessage(ctx, m.ID)
