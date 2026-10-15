@@ -51,6 +51,16 @@ func TestSetAdmitting(t *testing.T) {
 	if !r.Admitting() {
 		t.Fatal("a started relay admits")
 	}
+	// The target gets its Welcome before Serve registers the session
+	// (admission only records it pending), and SetAdmitting drains only
+	// registered sessions: wait until relay-a holds it (Local waits for a
+	// pending session) before stopping admission.
+	regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, _, registered := r.Local(regCtx, p.rec.SessionID)
+	regCancel()
+	if !registered {
+		t.Fatal("the open session was never registered on relay-a")
+	}
 
 	r.SetAdmitting(false)
 	if r.Admitting() {
