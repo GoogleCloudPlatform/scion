@@ -29,8 +29,10 @@ import (
 // (TestFederationPrincipalCheckCensus).
 const (
 	// fedCensusAcceptor accepts federation credentials from requests: it
-	// must verify them through AuthenticateWithOptions and pass this hub's
-	// platform service account and proxy driver principals in the options.
+	// must verify them through the single acceptance point,
+	// AuthenticateWithOptions (directly or through the Authenticate
+	// wrapper), and pass this hub's platform service account and proxy
+	// driver principals in the options.
 	fedCensusAcceptor = "acceptor"
 	// fedCensusVerifier is the one verifier: it must run
 	// federationPrincipalRefusal.
@@ -64,6 +66,7 @@ var fedCredentialCensus = map[string]string{
 	"auth_external_bearer.go:googleTrust":                        fedCensusNoCredential,
 	"federation_auth.go:(*FederationAuthenticator).IssuerConfig": fedCensusNoCredential,
 	"federation_auth.go:NewFederationAuthenticator":              fedCensusNoCredential,
+	"federation_auth.go:federationAuthOptionsArg":                fedCensusNoCredential,
 	"federation_auth.go:extractHubTokenIdentity":                 fedCensusNoCredential,
 	"federation_auth.go:extractHubUserClaims":                    fedCensusNoCredential,
 	"federation_auth.go:extractHubClaims":                        fedCensusNoCredential,
@@ -145,12 +148,32 @@ func setsOptionsField(fn *ast.FuncDecl, field string) bool {
 	return found
 }
 
+// verifiesWithOptions reports whether fn calls Authenticate or
+// AuthenticateWithOptions with a credential and an options argument (the
+// proxy authenticator's Authenticate takes the request alone).
+func verifiesWithOptions(fn *ast.FuncDecl) bool {
+	found := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && len(call.Args) == 2 &&
+			(sel.Sel.Name == "Authenticate" || sel.Sel.Name == "AuthenticateWithOptions") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 // TestFederationPrincipalCheckCensus: every pkg/hub function that touches
 // federation credential acceptance is classified, and its class holds:
-// acceptors verify through AuthenticateWithOptions with this hub's platform
-// service account and proxy driver principals, the verifier runs federationPrincipalRefusal, the check
-// applies each principal rule, and no other function verifies a federation
-// credential. No entry is stale.
+// acceptors verify through AuthenticateWithOptions (directly or through
+// the Authenticate wrapper) with this hub's platform service account and
+// proxy driver principals, the verifier runs federationPrincipalRefusal,
+// the check applies each principal rule, and no other function verifies a
+// federation credential. No entry is stale.
 func TestFederationPrincipalCheckCensus(t *testing.T) {
 	type site struct {
 		fn    *ast.FuncDecl
@@ -179,7 +202,7 @@ func TestFederationPrincipalCheckCensus(t *testing.T) {
 		}
 		switch class {
 		case fedCensusAcceptor:
-			assert.Positive(t, s.calls["AuthenticateWithOptions"], "%s: an acceptor must verify through AuthenticateWithOptions", key)
+			assert.True(t, verifiesWithOptions(s.fn), "%s: an acceptor must verify through AuthenticateWithOptions or its Authenticate wrapper, passing FederationAuthOptions", key)
 			for _, field := range []string{"PlatformAuthSA", "DriverPrincipals"} {
 				assert.True(t, setsOptionsField(s.fn, field), "%s: an acceptor must pass %s in FederationAuthOptions", key, field)
 			}

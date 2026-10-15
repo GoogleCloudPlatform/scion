@@ -393,7 +393,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					PlatformAuthSA:      cfg.PlatformAuthSA,
 					DriverPrincipals:    cfg.DriverPrincipals,
 				}
-				identity, err := fedAuth.AuthenticateWithOptions(federationToken, fedOpts)
+				identity, err := fedAuth.Authenticate(federationToken, fedOpts)
 				if err != nil {
 					if cfg.Debug {
 						log.Debug("Federation token validation failed", "error", err)

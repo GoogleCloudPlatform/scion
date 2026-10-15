@@ -89,29 +89,17 @@ func TestFederationPrincipalCheck_PlatformServiceAccountRefused(t *testing.T) {
 
 	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
 
-	userIssuerToken := func(subject, email string) string {
-		now := time.Now()
-		return f.signUser(t, map[string]interface{}{
-			"iss":   peerTokUserIssuerURL,
-			"sub":   subject,
-			"aud":   []string{federationTokenAudience},
-			"iat":   now.Add(-time.Minute).Unix(),
-			"exp":   now.Add(10 * time.Minute).Unix(),
-			"email": email,
-		})
-	}
-
 	t.Run("issuer_type user: platform service account", func(t *testing.T) {
-		assertPeerTokRefused(t, f, userIssuerToken("idp-platform", peerTokPlatformAuthSA))
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-platform", peerTokPlatformAuthSA))
 	})
 	t.Run("issuer_type user: platform service account, mixed case", func(t *testing.T) {
-		assertPeerTokRefused(t, f, userIssuerToken("idp-platform-upper", "Platform-Transport@HUB-RECV.iam.gserviceaccount.com"))
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-platform-upper", "Platform-Transport@HUB-RECV.iam.gserviceaccount.com"))
 	})
 	t.Run("issuer_type user: test identity", func(t *testing.T) {
-		assertPeerTokRefused(t, f, userIssuerToken("idp-fixture", "driver-1@scion-fixture.invalid"))
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-fixture", "driver-1@scion-fixture.invalid"))
 	})
 	t.Run("issuer_type user: other service account accepted", func(t *testing.T) {
-		identity, _, rec := f.through(t, userIssuerToken("idp-worker", "worker@proj.iam.gserviceaccount.com"))
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-worker", "worker@proj.iam.gserviceaccount.com"))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		fu, ok := identity.(*FederatedUserIdentity)
 		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
@@ -141,26 +129,14 @@ func TestFederationPrincipalCheck_DriverPrincipalRefused(t *testing.T) {
 
 	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
 
-	userIssuerToken := func(subject, email string) string {
-		now := time.Now()
-		return f.signUser(t, map[string]interface{}{
-			"iss":   peerTokUserIssuerURL,
-			"sub":   subject,
-			"aud":   []string{federationTokenAudience},
-			"iat":   now.Add(-time.Minute).Unix(),
-			"exp":   now.Add(10 * time.Minute).Unix(),
-			"email": email,
-		})
-	}
-
 	t.Run("issuer_type user: driver principal", func(t *testing.T) {
-		assertPeerTokRefused(t, f, userIssuerToken("idp-driver", peerTokDriverPrincipal))
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-driver", peerTokDriverPrincipal))
 	})
 	t.Run("issuer_type user: service account driver principal", func(t *testing.T) {
-		assertPeerTokRefused(t, f, userIssuerToken("idp-driver-sa", peerTokDriverPrincipalSA))
+		assertPeerTokRefused(t, f, f.userIssuerToken(t, "idp-driver-sa", peerTokDriverPrincipalSA))
 	})
 	t.Run("issuer_type user: other service account accepted", func(t *testing.T) {
-		identity, _, rec := f.through(t, userIssuerToken("idp-worker", "worker@proj.iam.gserviceaccount.com"))
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-worker", "worker@proj.iam.gserviceaccount.com"))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		fu, ok := identity.(*FederatedUserIdentity)
 		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
@@ -172,11 +148,67 @@ func TestFederationPrincipalCheck_DriverPrincipalRefused(t *testing.T) {
 	t.Run("no drivers configured: same emails accepted", func(t *testing.T) {
 		f.srv.authConfig.DriverPrincipals = nil
 		assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-driver-ctl", peerTokDriverPrincipal)), "sub-driver-ctl", peerTokDriverPrincipal)
-		identity, _, rec := f.through(t, userIssuerToken("idp-driver-sa-ctl", peerTokDriverPrincipalSA))
+		identity, _, rec := f.through(t, f.userIssuerToken(t, "idp-driver-sa-ctl", peerTokDriverPrincipalSA))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		fu, ok := identity.(*FederatedUserIdentity)
 		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
 		assert.Equal(t, peerTokDriverPrincipalSA, fu.Email())
+	})
+}
+
+// userIssuerToken returns a credential for subject and email signed by the
+// issuer_type user issuer of the fixture.
+func (f *peerTokFixture) userIssuerToken(t *testing.T, subject, email string) string {
+	t.Helper()
+	now := time.Now()
+	return f.signUser(t, map[string]interface{}{
+		"iss":   peerTokUserIssuerURL,
+		"sub":   subject,
+		"aud":   []string{federationTokenAudience},
+		"iat":   now.Add(-time.Minute).Unix(),
+		"exp":   now.Add(10 * time.Minute).Unix(),
+		"email": email,
+	})
+}
+
+// Authenticate is a wrapper over AuthenticateWithOptions: called with no
+// options it still runs the principal check and the kind check, and the
+// options it is given reach AuthenticateWithOptions.
+func TestFederationPrincipalCheck_AuthenticateWrapper(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	auth := f.srv.federationAuth.Load()
+	require.NotNil(t, auth)
+
+	t.Run("no options: principal check runs", func(t *testing.T) {
+		_, err := auth.Authenticate(f.userIssuerToken(t, "idp-fixture", "driver-1@scion-fixture.invalid"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential names a test identity")
+
+		identity, err := auth.Authenticate(f.userIssuerToken(t, "idp-human", "human@corp.com"))
+		require.NoError(t, err)
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+	})
+
+	peerUser := f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com"))
+	t.Run("no options: kind check runs", func(t *testing.T) {
+		_, err := auth.Authenticate(peerUser)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "user access credentials from hub issuers are not accepted")
+	})
+
+	t.Run("options reach AuthenticateWithOptions", func(t *testing.T) {
+		identity, err := auth.Authenticate(peerUser, FederationAuthOptions{AcceptHubUserTokens: true})
+		require.NoError(t, err)
+		_, ok := identity.(*FederatedUserIdentity)
+		assert.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+
+		platform := f.userIssuerToken(t, "idp-platform", peerTokPlatformAuthSA)
+		_, err = auth.Authenticate(platform, FederationAuthOptions{PlatformAuthSA: peerTokPlatformAuthSA})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "credential names a transport identity of this hub")
+		_, err = auth.Authenticate(platform)
+		require.NoError(t, err, "without the option the account is another service account email")
 	})
 }
 

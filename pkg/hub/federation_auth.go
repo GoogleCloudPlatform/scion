@@ -261,15 +261,32 @@ func (a *FederationAuthenticator) IssuerConfig(issuerURL string) (config.Trusted
 	return entry.rawConfig, true
 }
 
-// Authenticate validates a federation OIDC identity token and returns the
-// authenticated FederatedIdentity on success. It refuses user-kind credentials
-// from hub issuers; AuthenticateWithOptions can accept them.
-func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIdentity, error) {
-	return a.AuthenticateWithOptions(tokenString, FederationAuthOptions{})
+// Authenticate is a convenience wrapper over AuthenticateWithOptions, the
+// single acceptance point for federation credentials: it passes the options
+// on and adds nothing of its own. At most one FederationAuthOptions is
+// expected; with none it uses the zero options, which refuse user-kind
+// credentials from hub issuers and leave the platform service account and
+// proxy driver principal parts of the principal check inert. Every other
+// check of AuthenticateWithOptions, including federationPrincipalRefusal,
+// runs either way.
+func (a *FederationAuthenticator) Authenticate(tokenString string, opts ...FederationAuthOptions) (FederatedIdentity, error) {
+	return a.AuthenticateWithOptions(tokenString, federationAuthOptionsArg(opts))
+}
+
+// federationAuthOptionsArg returns the options passed to Authenticate: the
+// first one, or the zero options when none is passed.
+func federationAuthOptionsArg(opts []FederationAuthOptions) FederationAuthOptions {
+	if len(opts) == 0 {
+		return FederationAuthOptions{}
+	}
+	return opts[0]
 }
 
 // AuthenticateWithOptions validates a federation OIDC identity token and
-// returns the authenticated FederatedIdentity on success.
+// returns the authenticated FederatedIdentity on success. It is the single
+// acceptance point for federation credentials: every caller, including the
+// Authenticate wrapper, verifies through it, and it runs the principal check
+// (federationPrincipalRefusal) last.
 //
 // For an issuer with issuer_type hub, the token's scion_token_kind claim
 // selects the identity (see extractHubTokenIdentity): "agent", or no kind
