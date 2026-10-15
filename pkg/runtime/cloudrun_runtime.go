@@ -312,8 +312,10 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		// An instance of this run is started. So is a legacy instance with
 		// no run label, left unstamped: it keeps reporting no run ID, and
 		// the legacy rule lets this run's stop or delete still target it.
-		// Either start carries the read's etag, so an instance replaced
-		// after the read is not started.
+		// Either start carries the read's etag, meant to keep an instance
+		// replaced after the read from being started. Whether the API
+		// enforces it on a start is unverified; it does not on a delete
+		// (ptone/scion#4760).
 		runKey := sanitizeGCPLabelKey(api.LabelRunID)
 		want := sanitizeGCPLabelValue(cfg.Labels[api.LabelRunID])
 		run := existing.GetLabels()[runKey]
@@ -384,6 +386,9 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if _, err := op.Wait(ctx); err != nil {
 		return "", fmt.Errorf("wait for create operation failed: %w", err)
 	}
+	// The create has finished, so it can no longer appear later. That is
+	// not proof the instance exists: the operation succeeds even when the
+	// instance was deleted while it ran (ptone/scion#4760).
 	clearCloudRunCreateInDoubt(getReq.Name, runID)
 
 	return instanceID, nil
@@ -846,7 +851,9 @@ func (r *CloudRunRuntime) Stop(ctx context.Context, ref RunRef) error {
 
 // Delete removes the Cloud Run instance ref.ID. As for Stop, when ref.RunID
 // is set the delete is run-checked and an instance of another run is left
-// untouched with ErrRunMismatch.
+// untouched with ErrRunMismatch. The check is on the read only: the API
+// does not enforce the etag a delete carries (a made-up etag was
+// accepted, ptone/scion#4760).
 func (r *CloudRunRuntime) Delete(ctx context.Context, ref RunRef) error {
 	return r.instanceOp(ctx, ref, "delete", false, func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.InstanceOperation, error) {
 		return c.DeleteInstance(ctx, &runpb.DeleteInstanceRequest{Name: name, Etag: etag}, defaultCallOpts...)
@@ -869,11 +876,16 @@ type instanceCall func(c cloudrun.InstancesAPI, name, etag string) (cloudrun.Ins
 //   - the instance is read; one labelled with another run is left untouched
 //     and ErrRunMismatch is returned. An instance of ref.RunID, or a legacy
 //     one with no run label (the rule k8s and the broker apply), passes;
-//   - the call carries the read's etag, so an instance replaced (or changed)
-//     after the read is refused by the API (ABORTED or FAILED_PRECONDITION).
-//     The instance is then read and checked again, at most
-//     cloudRunRunCheckAttempts times in all. If the re-read shows the etag
-//     the call carried, nothing changed and that refusal is returned;
+//   - the call carries the read's etag. The API does not enforce it on a
+//     delete (a made-up etag was accepted, ptone/scion#4760), so
+//     for a delete the run label check on the read is the only guard, and
+//     an instance replaced in the short time between the read and the
+//     delete is not detected; the API has no other delete precondition.
+//     Whether a stop enforces it is unverified. When the API does refuse
+//     the call (ABORTED or FAILED_PRECONDITION), the instance is read and
+//     checked again, at most cloudRunRunCheckAttempts times in all. If the
+//     re-read shows the etag the call carried, nothing changed and that
+//     refusal is returned;
 //   - an instance that is gone at the read gives the same NotFound error the
 //     call itself gives.
 //
