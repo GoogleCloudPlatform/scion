@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1074,5 +1075,150 @@ func TestSync_RejectsPersistedHomeDirPath(t *testing.T) {
 				t.Errorf("expected the rejection to come from agent home source validation, got: %v", err)
 			}
 		})
+	}
+}
+
+func placementRunConfig(k *api.KubernetesConfig) RunConfig {
+	return RunConfig{
+		Name:         "test-agent",
+		Image:        "test:latest",
+		UnixUsername: "scion",
+		Kubernetes:   k,
+	}
+}
+
+// PB1: buildPod validates the merged RunConfig.Kubernetes node selector,
+// tolerations and runtime class (malformed values are an error) and copies
+// the node selector map.
+func TestBuildPod_PB1_PlacementValidation(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	for _, tc := range []struct {
+		name string
+		k    *api.KubernetesConfig
+		want string
+	}{
+		{"selector key", &api.KubernetesConfig{NodeSelector: map[string]string{"bad key": "v"}}, "kubernetes.nodeSelector"},
+		{"selector prefix", &api.KubernetesConfig{NodeSelector: map[string]string{"Bad_Prefix/pool": "v"}}, "kubernetes.nodeSelector"},
+		{"selector value", &api.KubernetesConfig{NodeSelector: map[string]string{"pool": "a b"}}, "kubernetes.nodeSelector"},
+		{"toleration operator", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Key: "k", Operator: "In"}}}, "kubernetes.tolerations"},
+		{"toleration effect", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Key: "k", Operator: "Exists", Effect: "NoRun"}}}, "kubernetes.tolerations"},
+		{"toleration empty key without Exists", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Operator: "Equal", Value: "v"}}}, "kubernetes.tolerations"},
+		{"toleration Exists with value", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Key: "k", Operator: "Exists", Value: "v"}}}, "kubernetes.tolerations"},
+		{"toleration key", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Key: "bad key", Operator: "Exists"}}}, "kubernetes.tolerations"},
+		{"toleration Equal value", &api.KubernetesConfig{Tolerations: []api.K8sToleration{{Key: "k", Operator: "Equal", Value: "a b"}}}, "kubernetes.tolerations"},
+		{"runtime class", &api.KubernetesConfig{RuntimeClassName: "GVisor"}, "kubernetes.runtimeClassName"},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			pod, err := rt.buildPod("default", placementRunConfig(tc.k))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("buildPod error = %v, want an error naming %s", err, tc.want)
+			}
+			if pod != nil {
+				t.Fatalf("buildPod returned a pod with an error")
+			}
+		})
+	}
+
+	t.Run("copies the node selector", func(t *testing.T) {
+		selector := map[string]string{"pool": "agents"}
+		pod, err := rt.buildPod("default", placementRunConfig(&api.KubernetesConfig{NodeSelector: selector}))
+		if err != nil {
+			t.Fatalf("buildPod: %v", err)
+		}
+		pod.Spec.NodeSelector["pool"] = "mutated"
+		pod.Spec.NodeSelector["added"] = "mutated"
+		if !reflect.DeepEqual(selector, map[string]string{"pool": "agents"}) {
+			t.Fatalf("pod spec shares the caller's node selector map: %v", selector)
+		}
+	})
+}
+
+// PB1 (accepted values): a placement the API server accepts is still
+// accepted by buildPod and copied to the pod spec unchanged.
+func TestBuildPod_PB1_AcceptsAPIServerValidPlacement(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	k := &api.KubernetesConfig{
+		RuntimeClassName: "gvisor",
+		NodeSelector: map[string]string{
+			"pool":                          "agents",
+			"cloud.google.com/gke-nodepool": "scion-agents",
+			"node.kubernetes.io/instance":   "n2.standard-8",
+			"example.com/empty-value":       "",
+		},
+		Tolerations: []api.K8sToleration{
+			{Operator: "Exists"},
+			{Key: "dedicated", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+			{Key: "dedicated", Value: "agents", Effect: "PreferNoSchedule"},
+			{Key: "nvidia.com/gpu", Operator: "Exists", Effect: "NoExecute"},
+			{Key: "scion-workload", Operator: "Equal", Value: "agents", Effect: ""},
+		},
+	}
+	pod, err := rt.buildPod("default", placementRunConfig(k))
+	if err != nil {
+		t.Fatalf("buildPod rejected a valid placement: %v", err)
+	}
+	if !reflect.DeepEqual(pod.Spec.NodeSelector, k.NodeSelector) {
+		t.Fatalf("node selector = %v, want %v", pod.Spec.NodeSelector, k.NodeSelector)
+	}
+	if len(pod.Spec.Tolerations) != len(k.Tolerations) {
+		t.Fatalf("tolerations = %v, want %d entries", pod.Spec.Tolerations, len(k.Tolerations))
+	}
+	for i, want := range k.Tolerations {
+		got := pod.Spec.Tolerations[i]
+		if got.Key != want.Key || string(got.Operator) != want.Operator || got.Value != want.Value || string(got.Effect) != want.Effect {
+			t.Fatalf("tolerations[%d] = %+v, want %+v", i, got, want)
+		}
+	}
+	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
+		t.Fatalf("runtime class = %v, want gvisor", pod.Spec.RuntimeClassName)
+	}
+}
+
+// NK0: without ApplyPlacement, the pod spec is byte-identical to today: the
+// agent's own node selector, tolerations (duplicates kept, in order) and
+// runtime class are copied as they are, and nothing else changes.
+func TestBuildPod_NK0_LegacyPlacementUnchanged(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	legacy := &api.KubernetesConfig{
+		ServiceAccountName: "agent-sa",
+		RuntimeClassName:   "kata",
+		NodeSelector:       map[string]string{"pool": "agents", "cloud.google.com/gke-nodepool": "scion"},
+		Tolerations: []api.K8sToleration{
+			{Key: "dedicated", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+			{Key: "dedicated", Value: "agents", Effect: "NoSchedule"},
+			{Key: "dedicated", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+			{Operator: "Exists"},
+		},
+	}
+	withPlacement, err := rt.buildPod("default", placementRunConfig(legacy))
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+
+	withoutPlacement, err := rt.buildPod("default", placementRunConfig(&api.KubernetesConfig{ServiceAccountName: "agent-sa"}))
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	// Today's copy rules, written out.
+	runtimeClass := "kata"
+	withoutPlacement.Spec.RuntimeClassName = &runtimeClass
+	withoutPlacement.Spec.NodeSelector = map[string]string{"pool": "agents", "cloud.google.com/gke-nodepool": "scion"}
+	withoutPlacement.Spec.Tolerations = append(withoutPlacement.Spec.Tolerations,
+		corev1.Toleration{Key: "dedicated", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+		corev1.Toleration{Key: "dedicated", Value: "agents", Effect: "NoSchedule"},
+		corev1.Toleration{Key: "dedicated", Operator: "Equal", Value: "agents", Effect: "NoSchedule"},
+		corev1.Toleration{Operator: "Exists"},
+	)
+
+	got, err := json.Marshal(withPlacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(withoutPlacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("pod spec differs from today's:\n got: %s\nwant: %s", got, want)
 	}
 }

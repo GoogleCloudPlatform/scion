@@ -3016,6 +3016,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if config.Kubernetes != nil {
+		// Validate the merged placement values before they reach the pod
+		// spec; the rules match the API server's, so only values that pod
+		// creation would reject fail here.
+		if err := validateKubernetesPlacement(config.Kubernetes); err != nil {
+			return nil, err
+		}
 		if config.Kubernetes.ServiceAccountName != "" {
 			pod.Spec.ServiceAccountName = config.Kubernetes.ServiceAccountName
 		}
@@ -3023,7 +3029,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			pod.Spec.RuntimeClassName = &config.Kubernetes.RuntimeClassName
 		}
 		if len(config.Kubernetes.NodeSelector) > 0 {
-			pod.Spec.NodeSelector = config.Kubernetes.NodeSelector
+			// Copy the map so later changes to the pod spec never reach
+			// the caller's configuration.
+			pod.Spec.NodeSelector = maps.Clone(config.Kubernetes.NodeSelector)
 		}
 		if len(config.Kubernetes.Tolerations) > 0 {
 			for _, t := range config.Kubernetes.Tolerations {
