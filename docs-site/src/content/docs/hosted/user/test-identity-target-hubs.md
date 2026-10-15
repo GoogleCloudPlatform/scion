@@ -333,7 +333,7 @@ scion hub test-identity issue-admin --admin-role hub-admin --purpose "admin jour
 
 It needs a hub profile in every mode: there is no path through your own sign-in. In agent mode
 it runs only with a profile for another hub. The token goes only to the run cache (mode
-`0600`); the output carries the identity's ID, email, role and expiry and the cache file, never
+`0600`); the output carries the identity's ID, email, kind, role and expiry and the cache file, never
 the token. `--purpose` is required (the hub records it on every admin identity). `--lifetime`
 and `--ttl` follow the kind's limits: a test hub-admin lives at most 60 minutes (token at most
 30), a test super-admin at most 30 minutes (token at most 15). A delegation issues only its own
@@ -349,7 +349,10 @@ token through the admin delegation that issued it, and commands that act `--as a
 re-issue it within 5 minutes of its expiry. The target re-issues only for identities the same
 delegation issued (any other identity gets `404`), within the kind's token limit and never past
 the identity's expiry or its kind's maximum lifetime: re-issue never extends an identity. If
-the profile no longer holds that delegation, the token is used until it expires.
+the profile no longer holds that delegation, the token is used until it expires. Re-issue is
+bounded by the delegation's test identity rate limit only (there is no separate admin limit).
+Each re-issue adds a live token, and earlier tokens stay valid until they expire, but no token
+outlives the identity's kind lifetime (at most an hour).
 
 **Web-login code.** `scion hub test-identity web-code <id> --admin-role hub-admin --out
 <file>` mints a code through the admin delegation, under the same rules as the member flow

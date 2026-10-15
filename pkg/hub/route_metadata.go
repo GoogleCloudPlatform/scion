@@ -81,7 +81,10 @@ type RouteMetadata struct {
 	// the handler, which decides the requested kind's capability; POST
 	// /api/v1/test-identities/{id}/web-login-code admits both admin kinds'
 	// capabilities, and its handler requires the one the identity's kind
-	// needs (WS4).
+	// needs (WS4); POST /api/v1/test-identities/{id}/token admits both
+	// admin kinds' capabilities so that an admin-scope workload delegation
+	// reaches handleIssueTestAdminTokenThroughDelegation (X4b), while every
+	// other caller gets 409 for an admin-kind identity or 404.
 	AlsoPermits []string
 }
 

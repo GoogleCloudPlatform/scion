@@ -223,6 +223,7 @@ func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 	r, err := e.run(t, append(append([]string{"--hub-profile", "t9"}, base...), "--admin-role", "super-admin", "--as", "s1")...)
 	require.NoError(t, err, r.stdout+r.stderr)
 	assert.Contains(t, r.stdout, "Issued test identity ")
+	assert.Contains(t, r.stdout, "  Kind:          "+hubprofile.KindTestSuperAdmin+"\n", "the plain-text output names the kind")
 	assertAdminIssuerAuthorization(t, e.lastTargetRequest(t, "POST", "/api/v1/test-identities/admin"), hubprofiletest.SuperAdminDelegation)
 	e.assertClean(t)
 }

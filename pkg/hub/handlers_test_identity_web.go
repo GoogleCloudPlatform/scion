@@ -348,9 +348,10 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	// workload delegation (ptone/scion#4240, X3b) reaches only the
 	// member-tier identities it issued itself, an admin-scope one (X4b)
 	// only the admin-kind identities of its kind it issued itself
-	// (canManageTestIdentity, workloadWebCodeAdmitted). An admin-kind identity is admitted only
-	// while its kind's web sessions are on (testIdentityWebKindAdmitted,
-	// WS4); a member-tier identity needs test_identity.issue.
+	// (canManageTestIdentity, workloadWebCodeAdmitted). An admin-kind
+	// identity is admitted only while its kind's web sessions are on
+	// (testIdentityWebKindAdmitted, WS4); a member-tier identity needs
+	// test_identity.issue.
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!s.testIdentityWebKindAdmitted(u) ||
 		!s.canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u) || (u.IsTestFixture() && !allowed[permissionTestIdentityIssue]))) {
 		NotFound(w, "test identity")

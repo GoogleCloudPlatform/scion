@@ -74,7 +74,7 @@ super-admin=<id>) and the target's admin issuer service account
 own login. In agent mode it runs only with a profile for another hub.
 
 The token goes only to the run cache (mode 0600); only the identity's ID,
-email, role, expiry and the cache file are printed. --purpose is required
+email, kind, role, expiry and the cache file are printed. --purpose is required
 by the hub (8 to 200 characters with the run tag the CLI adds).
 
 Lifetimes are the kind's: a test hub-admin lives at most 60 minutes (token
@@ -220,6 +220,7 @@ func printProfileEntry(out io.Writer, verb string, e *hubprofile.CacheEntry, cac
 	}
 	_, _ = fmt.Fprintf(out, "%s test identity %s as %q (run %s, profile %s)\n", verb, e.IdentityID, e.Alias, e.Run, e.Profile)
 	_, _ = fmt.Fprintf(out, "  Email:         %s\n", e.Email)
+	_, _ = fmt.Fprintf(out, "  Kind:          %s\n", e.Kind)
 	_, _ = fmt.Fprintf(out, "  Role:          %s\n", e.Role)
 	_, _ = fmt.Fprintf(out, "  Expires:       %s\n", formatTestIdentityTime(e.ExpiresAt))
 	_, _ = fmt.Fprintf(out, "  Token expires: %s\n", formatTestIdentityTime(e.TokenExpiresAt))

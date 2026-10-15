@@ -47,7 +47,9 @@ import (
 //
 // Both take the kind's issuer checks (testAdminCredentialIssuer: the
 // capability, a live super-admin grantor through current bindings), and
-// inside the mint transaction re-check the delegation (DEC-3 C2, C3),
+// inside the mint transaction re-check the delegation's liveness
+// (checkDelegationLive through recheckWorkloadDelegation: the
+// workload-delegation analogue of DEC-3 C2, C3),
 // the grantor (C1, recheckTestAdminDelegationGrantor) and the identity
 // row. Each writes a mutation audit record with the delegation part and a
 // test admin audit sink line carrying the delegation id. Everything else
@@ -241,7 +243,8 @@ func (s *Server) handleIssueTestAdminTokenThroughDelegation(w http.ResponseWrite
 	var token string
 	var expiresIn int64
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		// Under the issuance lock, as issuance: the delegation (C2, C3),
+		// Under the issuance lock, as issuance: the delegation's liveness
+		// (checkDelegationLive, the workload-delegation analogue of C2, C3),
 		// the grantor (C1) and the identity row are re-read in this
 		// transaction, so a revocation, demotion, delete or revoke-all
 		// since the request authenticated mints nothing.
