@@ -285,7 +285,7 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		case listErr != nil:
 			refusal = fmt.Errorf("--purge-local skipped: could not list hub connections (%v)", listErr)
 		case stateDirErr != nil:
-			refusal = fmt.Errorf("--purge-local skipped: cannot resolve the broker state directory (%v); nothing was removed. Fix %s, then run 'scion runtime-broker deregister --purge-local' again", stateDirErr, brokerStateDirSetting)
+			refusal = fmt.Errorf("--purge-local skipped: cannot resolve the broker state directory (%v); no broker-local state was removed. Fix %s, then run 'scion runtime-broker deregister --purge-local' again", stateDirErr, brokerStateDirSetting)
 		case len(remaining) > 0:
 			refusal = remainingConnectionsError(credsDir, remaining)
 		case brokerRunning:
@@ -296,17 +296,28 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		default:
 			return purgeBrokerLocalState(left, out)
 		}
+		if stateDirErr != nil {
+			printStateDirGuessNote(out, stateDirErr)
+		}
 		printLeftInPlace(out, left)
 		return refusal
 	}
 	if stateDirErr != nil {
-		_, _ = fmt.Fprintf(out, "Warning: cannot resolve the broker state directory (%v); the state directory listed is the default and may not be the one the broker uses\n", stateDirErr)
+		printStateDirGuessNote(out, stateDirErr)
 	}
 	printLeftInPlace(out, left)
-	if len(left) > 0 && listErr == nil && len(remaining) == 0 {
+	if stateDirErr != nil {
+		_, _ = fmt.Fprintf(out, "Fix %s, then remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.\n", brokerStateDirSetting)
+	} else if len(left) > 0 && listErr == nil && len(remaining) == 0 {
 		_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
 	}
 	return nil
+}
+
+// printStateDirGuessNote warns that server.broker.state_dir could not be
+// resolved, so the state directory listed is only the default.
+func printStateDirGuessNote(out io.Writer, stateDirErr error) {
+	_, _ = fmt.Fprintf(out, "Warning: cannot resolve the broker state directory (%v); the state directory listed is the default and may not be the one the broker uses\n", stateDirErr)
 }
 
 // printLeftInPlace lists the broker-local state paths that were not removed.
