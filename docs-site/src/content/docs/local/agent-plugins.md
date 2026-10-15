@@ -139,7 +139,7 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 | :--- | :--- | :--- | :--- | :--- |
 | `codex` | partial | 0.147.0 | 0.162.1 | Installed through a Scion-owned local marketplace. Codex skips `sse` MCP servers. |
 | `copilot` | yes | 1.0.74 | 1.0.97 | Installed with `copilot plugin install <dir>`. See the [copilot notes](#copilot). |
-| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7 | Skills install natively with `muse plugins install`. muse 1.4.7 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
+| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7 | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier (latest checked) keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
 | `claude` | partial | 2.1.157 (approximate) | 2.1.296 | Installed as a skills-dir plugin with a generated manifest. See the [claude notes](#claude). |
 | `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
 
@@ -163,7 +163,7 @@ If the harness CLI in the image is older than the minimum, the harness skips plu
 ### muse-code
 
 - Scion runs `muse plugins install <dir> --scope user --json`, and `muse plugins remove <name> --json` to remove. It runs `muse plugins approve` or `muse plugins enable` only when the install result asks for it.
-- muse's own diagnostics are copied to `agent.log`. On muse 1.4.7 and earlier, every MCP server of a plugin produces `Agent Plugins MCP server "<s>" is not supported in this release; it stays visible and inactive`.
+- muse's own diagnostics are copied to `agent.log`. On muse 1.4.9 and earlier (latest checked), every MCP server of a plugin produces `Agent Plugins MCP server "<s>" is not supported in this release; it stays visible and inactive`. The harness capability reason still says "muse <=1.4.7 keeps Agent Plugins MCP servers inactive"; the same behaviour was also observed on 1.4.9.
 - muse refuses a bundle that has no usable skill, such as an MCP-only bundle.
 - The installer reads muse's registry under `$XDG_DATA_HOME/muse/plugins/` (default `~/.local/share/muse/plugins/`). A template `env` that sets `XDG_DATA_HOME` is not visible to the installer, so plugins would be installed in the default location while muse looks in the other one. Do not set `XDG_DATA_HOME` for muse-code agents that use plugins.
 - The `muse-code` harness-config's `provisioner.timeout` is 60s.
