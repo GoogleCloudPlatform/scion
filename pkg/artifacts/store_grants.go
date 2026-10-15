@@ -97,6 +97,9 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
 		return GrantPutUnchanged, err
 	}
+	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
+		return GrantPutUnchanged, err
+	}
 	if reviewHome != "" {
 		var home, ownerKind string
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
@@ -270,6 +273,9 @@ func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u Arti
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return nil, err
+	}
+	if err := s.refuseAttachmentTx(ctx, tx, artifactID); err != nil {
 		return nil, err
 	}
 	if err := s.checkExpect(ctx, tx, artifactID, u.Actor); err != nil {

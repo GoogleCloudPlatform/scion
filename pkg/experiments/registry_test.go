@@ -451,6 +451,28 @@ func TestChatThreadGroups_RegisteredDefaultOff(t *testing.T) {
 	}
 }
 
+// TestAttachmentArtifacts_RegisteredDefaultOff pins hub.attachment_artifacts
+// (ptone/scion#4595): it gates the hub's attachment upload path and the web
+// surfaces of later phases, so it has both layers, and it ships off.
+func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
+	entry, ok := Default().Lookup(AttachmentArtifacts)
+	if !ok {
+		t.Fatalf("compiled registry entry %q absent", AttachmentArtifacts)
+	}
+	if entry.Name != "hub.attachment_artifacts" {
+		t.Errorf("Name = %q, want hub.attachment_artifacts", entry.Name)
+	}
+	if entry.Default {
+		t.Error("Default = true, want false")
+	}
+	if len(entry.Layers) != 2 || !entry.HasLayer(LayerWeb) || !entry.HasLayer(LayerServer) {
+		t.Errorf("Layers = %v, want exactly LayerWeb and LayerServer", entry.Layers)
+	}
+	if entry.Stage != StageAlpha || entry.Issue != "ptone/scion#4594" || entry.Owner != "artifacts" {
+		t.Errorf("attachment artifacts experiment metadata mismatch: %+v", entry)
+	}
+}
+
 // TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
 // changes what the hub sends to brokers, so it is server-layer only (the
 // web form opts in unconditionally), and it ships off.

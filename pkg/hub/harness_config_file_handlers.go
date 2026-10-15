@@ -16,8 +16,6 @@ package hub
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -104,6 +102,28 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 
 	ctx := r.Context()
 
+	raw := r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream")
+
+	// A raw read that names a hash serves that blob of this harness-config
+	// (the local-storage download URLs of a blob row carry it). The hash
+	// does not have to be in the current manifest, so a hydration that
+	// started before a commit still gets the version it began with
+	// (ptone/scion#4219).
+	if hash := r.URL.Query().Get("hash"); raw && hash != "" && isHarnessConfigBlobLayout(hc) {
+		hex, ok := templateBlobHex(hash)
+		if !ok {
+			BadRequest(w, "Invalid hash")
+			return
+		}
+		stor := s.GetStorage()
+		if stor == nil {
+			RuntimeError(w, "Storage not configured")
+			return
+		}
+		s.streamHarnessConfigObject(w, r, stor, templateBlobPath(hc.StoragePath, hex), filePath)
+		return
+	}
+
 	var found *store.TemplateFile
 	for i := range hc.Files {
 		if hc.Files[i].Path == filePath {
@@ -120,35 +140,13 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 	// handleHarnessConfigDownload rewrites file:// to). Serves exactly the
 	// file the lookup above resolved; it only skips the JSON envelope and
 	// the inline size limit. Mirrors handleTemplateFileRead.
-	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
+	if raw {
 		stor := s.GetStorage()
 		if stor == nil {
 			RuntimeError(w, "Storage not configured")
 			return
 		}
-
-		objectPath := hc.StoragePath + "/" + filePath
-		reader, obj, err := stor.Download(ctx, objectPath)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				NotFound(w, "Harness config file")
-				return
-			}
-			RuntimeError(w, "Failed to read file from storage")
-			return
-		}
-		defer func() { _ = reader.Close() }()
-
-		safeName := filepath.Base(filePath)
-		contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeName})
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", contentDisposition)
-		setDownloadContentLength(w, obj)
-		w.WriteHeader(http.StatusOK)
-		if _, err := io.Copy(w, reader); err != nil {
-			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
-		}
+		s.streamHarnessConfigObject(w, r, stor, s.harnessConfigObjectPath(hc, *found), filePath)
 		return
 	}
 
@@ -164,7 +162,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	objectPath := hc.StoragePath + "/" + filePath
+	objectPath := s.harnessConfigObjectPath(hc, *found)
 	reader, _, err := stor.Download(ctx, objectPath)
 	if err != nil {
 		if err == storage.ErrNotFound {
@@ -198,6 +196,35 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+// streamHarnessConfigObject streams one stored object as a raw file download
+// named after filePath.
+func (s *Server) streamHarnessConfigObject(w http.ResponseWriter, r *http.Request, stor storage.Storage, objectPath, filePath string) {
+	reader, obj, err := stor.Download(r.Context(), objectPath)
+	if err != nil || reader == nil {
+		if err == nil || errors.Is(err, storage.ErrNotFound) {
+			NotFound(w, "Harness config file")
+			return
+		}
+		RuntimeError(w, "Failed to read file from storage")
+		return
+	}
+	defer func() { _ = reader.Close() }()
+
+	safeName := filepath.Base(filePath)
+	contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeName})
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", contentDisposition)
+	setDownloadContentLength(w, obj)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, reader); err != nil {
+		slog.Error("Error streaming file to client", "path", objectPath, "error", err)
+	}
+}
+
+// handleHarnessConfigFileWrite writes one file and commits it, or, with
+// ?uploadId= (the local-storage upload URLs), only stages it for a later
+// finalize.
 func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
@@ -208,6 +235,14 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	filePath = path.Clean(filePath)
 
 	ctx := r.Context()
+
+	// An upload URL (?uploadId=) only stages the file: finalize hashes and
+	// commits the whole upload in one compare-and-swap, so nothing here
+	// touches the row or what readers see (ptone/scion#4219).
+	if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+		s.stageHarnessConfigUpload(w, r, hc, filePath, uploadID)
+		return
+	}
 
 	// Limit request body size for both JSON and raw content paths.
 	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
@@ -254,23 +289,18 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	if isHarnessConfigYAMLPath(filePath) && refuseUnusableProvisionerYAML(w, hc.Name, content) {
 		return
 	}
-	objectPath := hc.StoragePath + "/" + filePath
-	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
-		ContentType: "text/plain; charset=utf-8",
-	})
+	// Store the content as a blob, then commit it.
+	fileHash, blobPath, err := s.writeHarnessConfigFileBlob(ctx, stor, hc, content)
 	if err != nil {
 		RuntimeError(w, "Failed to write file to storage")
 		return
 	}
-
-	sum := sha256.Sum256(content)
-	fileHash := "sha256:" + hex.EncodeToString(sum[:])
 	fileSize := int64(len(content))
 
 	next := upsertTemplateFile(hc.Files, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: "0644"})
 	if err := s.commitHarnessConfigFiles(ctx, hc, next, harnessConfigCommitOpts{
 		content: map[string][]byte{filePath: content},
-		written: map[string]bool{filePath: true},
+		written: map[string]bool{blobPath: true},
 	}); err != nil {
 		writeHarnessConfigCommitError(w, err)
 		return
@@ -354,19 +384,16 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		objectPath := hc.StoragePath + "/" + filePath
-		_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{})
+		// Store the content as a blob; the commit below makes it visible.
+		fileHash, blobPath, err := s.writeHarnessConfigFileBlob(ctx, stor, hc, data)
 		if err != nil {
 			RuntimeError(w, "Failed to write file to storage")
 			return
 		}
-
-		sum := sha256.Sum256(data)
-		fileHash := "sha256:" + hex.EncodeToString(sum[:])
 		fileSize := int64(len(data))
 
 		next = upsertTemplateFile(next, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash, Mode: "0644"})
-		written[filePath] = true
+		written[blobPath] = true
 		content[filePath] = data
 
 		entries = append(entries, HarnessConfigFileEntry{
@@ -527,8 +554,9 @@ func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// The commit drops the entry from the manifest, re-derives the index,
-	// and deletes the object only after the row no longer lists it.
+	// The commit drops the entry from the manifest and re-derives the
+	// index. The removed file's blob stays for in-flight hydrations until
+	// the blob garbage collector's grace period has passed.
 	if err := s.commitHarnessConfigFiles(ctx, hc, removeTemplateFile(hc.Files, filePath), harnessConfigCommitOpts{}); err != nil {
 		writeHarnessConfigCommitError(w, err)
 		return
@@ -538,4 +566,38 @@ func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Re
 		"path":    filePath,
 		"message": fmt.Sprintf("Deleted %s", filePath),
 	})
+}
+
+// stageHarnessConfigUpload stores the request body as the staged file
+// filePath of upload uploadID (a local-storage upload URL). It writes
+// nothing but the staged object: the finalize commit hashes and moves it.
+// The body may be as large as a signed-URL upload allows.
+func (s *Server) stageHarnessConfigUpload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath, uploadID string) {
+	if !validTemplateUploadID(uploadID) {
+		BadRequest(w, "Invalid uploadId")
+		return
+	}
+	stor := s.GetStorage()
+	if stor == nil {
+		RuntimeError(w, "Storage not configured")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadFileSize+1)
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "File too large for upload.", nil)
+			return
+		}
+		BadRequest(w, "Failed to read request body")
+		return
+	}
+	if _, err := stor.Upload(r.Context(), s.harnessConfigStagedObjectPath(hc, uploadID, filePath), bytes.NewReader(data), storage.UploadOptions{
+		ContentType: "application/octet-stream",
+	}); err != nil {
+		RuntimeError(w, "Failed to write file to storage")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }

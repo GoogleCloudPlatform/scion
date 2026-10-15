@@ -14,7 +14,10 @@
 
 package artifacts
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Principal kinds returned by Host.Principal.
 const (
@@ -22,11 +25,26 @@ const (
 	PrincipalKindAgent = "agent"
 )
 
-// Scope kinds. In v1 every scope is a scion project, and its ref is the
-// project's stable id.
+// Scope kinds. A project scope's ref is the project's stable id. The two
+// attachment scopes (ptone/scion#4595) hold web-chat attachments: an upload
+// scope's ref is the uploader as PrincipalRef(kind, id), and a message
+// scope's ref is the id of the message the attachment was sent in.
 const (
 	ScopeKindProject = "project"
+	// ScopeKindUpload holds a file uploaded for a message that has not been
+	// sent yet. Only the uploader reads it.
+	ScopeKindUpload = "upload"
+	// ScopeKindMessage holds a file sent in a message. It is readable
+	// exactly by the readers of that message (MessageScopeHost).
+	ScopeKindMessage = "message"
 )
+
+// IsAttachmentScope reports whether kind is one of the attachment scopes.
+// Rows in them are never listed, never shared and never versioned, and the
+// artifact routes answer for them as for an id that does not exist.
+func IsAttachmentScope(kind string) bool {
+	return kind == ScopeKindUpload || kind == ScopeKindMessage
+}
 
 // Permission IDs passed to Host.Authorize. They match the hub permission
 // registry rows of the same name.
@@ -94,11 +112,49 @@ type Host interface {
 
 // ScopeChecker is an optional extension of Host. The artifact list asks it
 // which home projects still exist, so it can mark the rows of artifacts
-// whose project was deleted. A host without it reports none deleted.
+// whose project was deleted. A host without it reports none deleted. The
+// maintenance pass asks it which messages still exist, so it can retire
+// the attachments of messages that are gone (ptone/scion#4595).
 type ScopeChecker interface {
-	// ScopesExist reports, for each project id in refs, whether the
-	// project exists. An id missing from the answer counts as existing.
+	// ScopesExist reports, for each ref, whether its scope exists. A ref
+	// is a project id, or MessageScopeRef(id) for a message, which exists
+	// while it is stored and not deleted. A ref missing from the answer
+	// counts as existing.
 	ScopesExist(ctx context.Context, refs []string) (map[string]bool, error)
+}
+
+// messageRefPrefix marks a message ref in a ScopesExist question. Project
+// ids are UUIDs, so the two kinds of ref never collide.
+const messageRefPrefix = ScopeKindMessage + ":"
+
+// MessageScopeRef is the ScopesExist ref of message messageID.
+func MessageScopeRef(messageID string) string { return messageRefPrefix + messageID }
+
+// ParseMessageScopeRef returns the message id of a ScopesExist ref made by
+// MessageScopeRef, and false for any other ref.
+func ParseMessageScopeRef(ref string) (string, bool) {
+	id, ok := strings.CutPrefix(ref, messageRefPrefix)
+	return id, ok && id != ""
+}
+
+// MessageScopeHost is an optional extension of Host (ptone/scion#4595).
+// The read rule of the attachment scopes asks it about the caller of the
+// request; a host without it makes every upload and message scoped row
+// unreadable (fail closed).
+//
+// Like every Host method, it answers only for the identity of the request
+// whose context is ctx.
+type MessageScopeHost interface {
+	// PermitsMessageRead reports whether the caller's credential allows
+	// reading messages at all. It is asked first, so nothing reaches past
+	// what the credential allows.
+	PermitsMessageRead(ctx context.Context) bool
+
+	// MayReadMessage reports whether the caller may read the message
+	// messageID now: a reader of its conversation, or one of its
+	// addressees. A deleted or unknown message, and any lookup failure,
+	// answer false.
+	MayReadMessage(ctx context.Context, messageID string) bool
 }
 
 // ScopeExplainer is an optional extension of Host. When a credential

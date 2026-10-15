@@ -164,3 +164,37 @@ func TestInstallColocatedSettingsOverlay_StoredCatalogRows(t *testing.T) {
 		})
 	}
 }
+
+// Built-in profile retention (ptone/scion#5113) is enabled only for a
+// legacy co-located broker: without one (a flat host, or a failed
+// registration) the installed overlay behaves as before; with one, it is
+// enabled.
+func TestEnableColocatedProfileReferences(t *testing.T) {
+	t.Run("no legacy co-located broker", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite"
+		srv := newOverlayTestHub(t)
+		require.True(t, installColocatedSettingsOverlay(cfg, srv))
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.False(t, config.GetGlobalSettingsOverlay().RetentionEnabled())
+	})
+	t.Run("legacy co-located broker", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite"
+		srv := newOverlayTestHub(t)
+		srv.SetEmbeddedBrokerID("legacy-broker")
+		require.True(t, installColocatedSettingsOverlay(cfg, srv))
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.True(t, config.GetGlobalSettingsOverlay().RetentionEnabled())
+	})
+	t.Run("no overlay", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		srv := newOverlayTestHub(t)
+		srv.SetEmbeddedBrokerID("legacy-broker")
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.Nil(t, config.GetGlobalSettingsOverlay())
+	})
+}

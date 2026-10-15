@@ -526,12 +526,10 @@ func (r *GitHubSkillResolver) concurrency() int {
 // panic is turned into a per-ref error instead of ending the process. The
 // returned message is generic and carries nothing from the panic value,
 // which may include credential material; the value and stack go to the log.
-// The log names the ref by its URI, which ParseGitHubSkillURI has already
-// accepted: it names at most a secret (?token=NAME), never a secret value,
-// and is the same string returned in ResolveError.URI.
+// The log names the ref by its redacted form (see LoggedSkillRef).
 func panicOutcome(ref api.SkillReference, p any) refOutcome {
 	slog.Error("github: panic during skill resolution",
-		"uri", ref.URI, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+		"uri", LoggedSkillRef(ref.URI), "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 	return refOutcome{rerr: &ResolveError{
 		URI: ref.URI, Code: SkillErrCodeResolveFailed,
 		Message: "internal error during GitHub skill resolution",
@@ -622,14 +620,15 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		// logRef carries no credential-derived material — unlike flightKey and
 		// credID, it is safe to put in a log line or an error message that
 		// might reach a caller (see ResolveWithFetch/coalesceFetch). It names
-		// the ref and the general kind of source that supplied the credential
-		// ("named" or "default"), without the credential's value, its
-		// fingerprint, the secret's own name, or the project/user scope.
+		// the ref in its redacted form (see LoggedSkillRef) and the general
+		// kind of source that supplied the credential ("named" or "default"),
+		// without the credential's value, its fingerprint, the secret's own
+		// name, or the project/user scope.
 		sourceKind := "default"
 		if r.credentialSource(ghRef) != "" {
 			sourceKind = "named"
 		}
-		logRef := ghRef.Raw + " (" + sourceKind + ")"
+		logRef := LoggedSkillRef(ghRef.Raw).String() + " (" + sourceKind + ")"
 
 		// A cached entry loaded from disk has no file content, so install
 		// downloads its files using the credential the install context's
@@ -930,7 +929,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	if token == "" {
 		fmt.Fprintf(os.Stderr, "github: WARNING: no GITHUB_TOKEN configured for %s; "+
 			"making unauthenticated GitHub API call (limit: 60 req/hr per IP). "+
-			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", ghRef.Raw)
+			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", LoggedSkillRef(ghRef.Raw))
 	}
 
 	// Short-circuit: if the ref is already a full 40-char lowercase hex commit SHA,

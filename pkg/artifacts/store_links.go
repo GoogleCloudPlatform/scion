@@ -49,6 +49,9 @@ func (s *sqlStore) CreateLink(ctx context.Context, g *Grant, maxLinks int, now t
 		}
 		return ErrNotFound
 	}
+	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
+		return err
+	}
 	if err := s.checkExpect(ctx, tx, g.ArtifactID, actor); err != nil {
 		return err
 	}
@@ -108,7 +111,7 @@ func (s *sqlStore) ResolveLink(ctx context.Context, tokenHash string, now time.T
 		WHERE g.subject_kind = ? AND g.subject_ref = ? AND g.permission = ?
 		AND g.expires_at > ?
 		AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)
-		AND a.current_seq IS NOT NULL`),
+		AND a.current_seq IS NOT NULL AND `+notAttachmentScope("a.scope_kind")),
 		SubjectLink, tokenHash, GrantRead, at, at).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
 		&expires, &created, &updated,

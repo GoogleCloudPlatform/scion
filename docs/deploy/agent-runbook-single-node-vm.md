@@ -921,7 +921,7 @@ Verify:
 ```bash
 gcloud compute ssh scion-hub-HUB_NAME \
   --zone=ZONE --project=PROJECT_ID \
-  --command='cat /home/scion/.scion/settings.yaml | grep default_gcp_identity_mode'
+  --command='sudo -u scion cat /home/scion/.scion/settings.yaml | grep default_gcp_identity_mode'
 ```
 
 **Expected:** `default_gcp_identity_mode: passthrough`.
@@ -991,16 +991,22 @@ Things to know:
 
 ### 6.4 Container images (if built locally)
 
-If `container_images.source` was `build`, verify images exist on the VM:
+If `container_images.source` was `build`, verify images exist on the VM.
+This is the same check `deploy.sh` runs at the end of Phase 3b. It uses
+`sudo` because the account you SSH in as is not in the VM's `docker` group:
 
 ```bash
 gcloud compute ssh scion-hub-HUB_NAME \
   --zone=ZONE --project=PROJECT_ID \
-  --command='docker images | grep scion'
+  --command="sudo docker images | grep -E 'localhost/scion|core-base|scion-base|scion-antigravity'"
 ```
 
 **Expected:** Rows for `localhost/scion/core-base`, `localhost/scion/scion-base`,
-and `localhost/scion/scion-antigravity`, all tagged `latest`.
+and `localhost/scion/scion-antigravity`, all tagged `latest`. Rows for the
+unprefixed build names (`core-base`, `scion-base`, `scion-antigravity`, also
+`latest`) appear as well, plus `core-base` and `scion-base` rows tagged with
+the short commit SHA of the checkout the images were built from. All of these
+share image IDs with the `localhost/scion` rows.
 
 ### 6.5 IAP access
 
@@ -1081,10 +1087,10 @@ Only when the hybrid tier is on.
 | `Permission denied` on instance create | Insufficient project permissions | User needs `roles/compute.admin` or `roles/editor` on the project |
 | `Quota exceeded` on instance create | Not enough compute CPU quota in the region | Request a quota increase via GCP Console, or try a different region |
 | Cloud-init timeout (script waits > 5 min) | VM is slow to provision | SSH in and check: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo cloud-init status --long'` |
-| `image_registry is not configured` | `settings.yaml` missing `image_registry` field | SSH to VM, verify `/home/scion/.scion/settings.yaml` has `image_registry: "localhost/scion"` for local builds or the registry path for registry builds |
+| `image_registry is not configured` | `settings.yaml` missing `image_registry` field | SSH to VM, verify `/home/scion/.scion/settings.yaml` (read it with `sudo -u scion cat`; see Diagnostic commands below) has `image_registry: "localhost/scion"` for local builds or the registry path for registry builds |
 | IAP proxy deploy fails | IAP API not enabled or missing OAuth consent screen | Run `gcloud services enable iap.googleapis.com --project=PROJECT_ID`. Check the OAuth consent screen is configured in GCP Console > APIs & Services > OAuth consent screen. |
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
-| Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
+| Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo -u scion cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
 | Agents lack `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_LOCATION` | The hub env var write after the Phase 3 health check failed (a warning in the deploy output) | Run the manual `sqlite3` command from that warning, or set both as hub-scoped env vars (injection mode `always`) in the admin UI. See §6.3a. |
 | Admin's `default_gcp_identity_mode` change reverted to `passthrough` after a redeploy | `deploy.sh` rewrites the whole `settings.yaml`, not just the fields it manages | Expected — see §6.3b. Re-apply the change via the admin UI or API after redeploying. |
 | Minting a service account in the hub fails with `Permission 'iam.serviceAccounts.create' denied` | The hub mints service accounts as the hub VM's service account (`scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com`), not as the signed-in user, and that service account lacks `roles/iam.serviceAccountAdmin`. Current `deploy.sh` grants it by default; deploys made before that, or with `hub_sa_minting: false`, do not have it. | Re-run `deploy.sh`, or grant the role by hand (no hub restart; allow a few minutes for IAM to propagate): `gcloud projects add-iam-policy-binding PROJECT_ID --member=serviceAccount:scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com --role=roles/iam.serviceAccountAdmin --condition=None` and `gcloud services enable iamcredentials.googleapis.com --project=PROJECT_ID`. See §6.3c. |
@@ -1258,14 +1264,14 @@ Check settings.yaml:
 ```bash
 gcloud compute ssh scion-hub-HUB_NAME \
   --zone=ZONE --project=PROJECT_ID \
-  --command='cat /home/scion/.scion/settings.yaml'
+  --command='sudo -u scion cat /home/scion/.scion/settings.yaml'
 ```
 
 Check Docker images:
 ```bash
 gcloud compute ssh scion-hub-HUB_NAME \
   --zone=ZONE --project=PROJECT_ID \
-  --command='docker images'
+  --command='sudo docker images'
 ```
 
 ---

@@ -240,6 +240,9 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 	v, files := pendingVersion(a.ID, req, kind, ref, time.Now().UTC(), current)
 	err = b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
 	switch {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyPending):
 		writeError(w, http.StatusConflict, "too_many_pending",
 			fmt.Sprintf("the artifact already has %d versions waiting to be finalized", MaxPendingVersions))

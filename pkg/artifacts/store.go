@@ -85,10 +85,26 @@ var ErrStaleBase = errors.New("artifacts: current version changed")
 // newer than the base is still pending or finalizing.
 var ErrPendingNewer = errors.New("artifacts: a newer version is being published")
 
+// ErrAttachmentNotShareable is returned by every store write that would
+// share, version or change a row of an attachment scope (PutGrant,
+// PutReviewGrant, CreateLink, CreateVersion, UpdateArtifact, SetExpiry):
+// an attachment is exactly as readable as its message, and lives as long.
+var ErrAttachmentNotShareable = errors.New("artifacts: attachments cannot be shared or changed")
+
+// ErrAttachmentNotOwned is returned by BindAttachment when the upload was
+// made by someone other than the sender.
+var ErrAttachmentNotOwned = errors.New("artifacts: the attachment was uploaded by someone else")
+
+// ErrAttachmentBound is returned by BindAttachment when the attachment is
+// no longer an unsent upload: it was already sent in a message.
+var ErrAttachmentBound = errors.New("artifacts: the attachment was already sent")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
 	VersionKindReview  = "review"
+	// VersionKindAttachment is the one version of a web-chat attachment.
+	VersionKindAttachment = "attachment"
 )
 
 // Version states. A version is pending while its files upload (two-step
@@ -530,6 +546,47 @@ type Store interface {
 	// messageIDs, keyed by message id and ordered by artifact id. Messages
 	// without references are absent from the map.
 	ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error)
+
+	// GetAttachment returns the live artifact of an attachment scope whose
+	// id or legacy_attachment_id is id, or ErrNotFound. It is the only
+	// lookup that returns attachment rows: GetArtifact never does.
+	GetAttachment(ctx context.Context, id string) (*Artifact, error)
+
+	// BindAttachment moves the upload artifactID to the message scope of
+	// messageID, under the artifact's row lock. It returns ErrNotFound when
+	// the artifact is absent, deleted or not an attachment,
+	// ErrAttachmentNotOwned when the upload is not scoped to
+	// PrincipalRef(ownerKind, ownerRef) or not owned by that principal, and
+	// ErrAttachmentBound when it is no longer an upload.
+	BindAttachment(ctx context.Context, artifactID, ownerKind, ownerRef, messageID string, now time.Time) error
+
+	// ListMessageAttachments returns the live attachments bound to each of
+	// messageIDs, keyed by message id, each with its one file, ordered by
+	// creation. Messages without attachments are absent from the map.
+	ListMessageAttachments(ctx context.Context, messageIDs []string) (map[string][]AttachmentRow, error)
+
+	// RetireScope soft-deletes, through DeleteArtifact, every live artifact
+	// in the scope (kind, ref), up to limit, recording actor, and returns
+	// how many it deleted.
+	RetireScope(ctx context.Context, kind, ref string, actor *Actor, limit int) (int, error)
+
+	// RetireStaleUploads soft-deletes, through DeleteArtifact (actor
+	// system, authority attachment_unsent), up to limit live artifacts of
+	// the upload scope created before cutoff, and returns how many it
+	// deleted.
+	RetireStaleUploads(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
+	// ListLiveScopeRefs returns up to limit distinct scope refs of live
+	// artifacts of scope kind, in ascending order, strictly after after
+	// ("" = from the start).
+	ListLiveScopeRefs(ctx context.Context, kind, after string, limit int) ([]string, error)
+}
+
+// AttachmentRow is one attachment ListMessageAttachments returns: the
+// artifact and the one file of its current version.
+type AttachmentRow struct {
+	Artifact Artifact
+	File     File
 }
 
 // BlobMark is one listed blob for MarkBlobs.

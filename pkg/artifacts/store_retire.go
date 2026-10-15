@@ -189,6 +189,10 @@ type DeleteOptions struct {
 	// move committed since then makes the delete return ErrNotFound and
 	// change nothing.
 	ScopeRef string
+	// ScopeKind, when set, deletes the artifact only if its scope is still
+	// of this kind (an attachment upload that was sent meanwhile is left
+	// alone).
+	ScopeKind string
 	// Now is when the deletion happens; zero means time.Now().
 	Now time.Time
 }
@@ -259,6 +263,10 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 		q += ` AND scope_ref = ?`
 		args = append(args, opts.ScopeRef)
 	}
+	if opts.ScopeKind != "" {
+		q += ` AND scope_kind = ?`
+		args = append(args, opts.ScopeKind)
+	}
 	if stewardActor(opts.Actor) && !opts.Actor.Expect.set() {
 		return DeleteResult{}, errNoExpect
 	}
@@ -315,7 +323,7 @@ func (s *sqlStore) ListLiveOwners(ctx context.Context, after *Owner, limit int) 
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT owner_kind, owner_ref,
 		COALESCE(SUM(CASE WHEN orphaned_at IS NULL THEN 0 ELSE 1 END), 0),
 		COALESCE(SUM(CASE WHEN orphaned_at IS NULL THEN 1 ELSE 0 END), 0)
-		FROM artifact WHERE deleted_at IS NULL`+where+`
+		FROM artifact WHERE deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+where+`
 		GROUP BY owner_kind, owner_ref ORDER BY owner_kind, owner_ref LIMIT `+strconv.Itoa(limit)), args...)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list owners: %w", err)
@@ -340,7 +348,7 @@ func (s *sqlStore) CountLiveOwners(ctx context.Context, after *Owner) (int, erro
 	where, args := ownersAfter(after)
 	var n int
 	if err := s.db.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM (SELECT DISTINCT owner_kind, owner_ref
-		FROM artifact WHERE deleted_at IS NULL`+where+`) o`), args...).Scan(&n); err != nil {
+		FROM artifact WHERE deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+where+`) o`), args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("artifacts: count owners: %w", err)
 	}
 	return n, nil
@@ -382,7 +390,7 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 		cond, action = `orphaned_at IS NOT NULL`, EventUnorphaned
 	}
 	rows, err := tx.QueryContext(ctx, s.rebind(`SELECT id, scope_ref FROM artifact
-		WHERE owner_kind = ? AND owner_ref = ? AND deleted_at IS NULL AND `+cond+`
+		WHERE owner_kind = ? AND owner_ref = ? AND deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+` AND `+cond+`
 		ORDER BY id LIMIT `+strconv.Itoa(limit)), owner.Kind, owner.Ref)
 	if err != nil {
 		return 0, fmt.Errorf("artifacts: find owner's artifacts: %w", err)
@@ -411,7 +419,7 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 		// The condition is checked again so a concurrent pass cannot mark
 		// one artifact twice.
 		r, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET orphaned_at = ?
-			WHERE id = ? AND deleted_at IS NULL AND `+cond), value, id)
+			WHERE id = ? AND deleted_at IS NULL AND `+notAttachmentScope("scope_kind")+` AND `+cond), value, id)
 		if err != nil {
 			return 0, fmt.Errorf("artifacts: mark orphan: %w", err)
 		}

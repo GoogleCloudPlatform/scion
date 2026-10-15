@@ -30,7 +30,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -40,7 +39,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -112,20 +110,9 @@ func validateAgentLogLevel(raw string, set bool) (string, error) {
 	return spec, nil
 }
 
-// localAgentStartEnv returns the initial agent env for a local start: just
-// SCION_LOG_LEVEL when --agent-log-level was given, else nil. The CLI's own
-// --debug never adds anything here.
-func localAgentStartEnv() map[string]string {
-	lvl := agentLogLevelEnvValue()
-	if lvl == "" {
-		return nil
-	}
-	return map[string]string{loglevel.EnvLogLevel: lvl}
-}
-
 // agentLogLevelEnvValue returns the SCION_LOG_LEVEL value requested with
 // --agent-log-level, or "" when the flag was not given. RunAgent validates
-// the flag before either start path runs.
+// the flag before the hub start runs.
 func agentLogLevelEnvValue() string {
 	return strings.TrimSpace(agentLogLevelFlag)
 }
@@ -699,36 +686,6 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 	return resp.Projects[0].ID, nil
 }
 
-// localResumeDecision mirrors the Hub's resumeInPlaceDecision
-// (pkg/hub/handlers_agent_create_helpers.go) for local (non-Hub) mode, so the
-// two paths present the same contract to the operator.
-//
-// Rules:
-//   - Suspended agents always get harness resume (--continue/--resume), even
-//     when invoked via 'start' (implicit resume).
-//   - Stopped agents always get a fresh session, even when invoked via
-//     'resume'. --force does not change this: a clean shutdown is not a crash.
-//   - Error-phase agents are refused without --force, matching the Hub's 409.
-//     With --force they continue the session interrupted mid-run.
-//
-// Returns the resume flag to hand the harness, plus whether this was an
-// implicit resume or a forced recovery (both purely for operator messaging).
-func localResumeDecision(savedPhase string, resume, force bool, agentName string) (effectiveResume, implicitResume, forcedRecovery bool, err error) {
-	if resume && savedPhase == string(state.PhaseError) && !force {
-		return false, false, false, fmt.Errorf("agent '%s' is in the error phase (e.g. after a host crash) and cannot be resumed without --force", agentName)
-	}
-
-	switch {
-	case savedPhase == string(state.PhaseSuspended):
-		return true, !resume, false, nil
-	case resume && force && savedPhase == string(state.PhaseError):
-		return true, false, true, nil
-	case resume && (savedPhase == string(state.PhaseStopped) || savedPhase == string(state.PhaseHalted)):
-		return false, false, false, nil
-	}
-	return resume, false, false, nil
-}
-
 func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
@@ -794,8 +751,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		}
 	}
 
-	// Check if Hub should be used, excluding the target agent from sync requirements.
-	// Load inline config if --config was specified (needed for both local and Hub paths)
+	// Load inline config if --config was specified.
 	var inlineCfg *api.ScionConfig
 	var inlineConfigDir string
 	if inlineConfigPath != "" {
@@ -830,245 +786,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		inlineCfg.ThinkingLevel = &val
 	}
 
-	// This allows starting/resuming an agent even if it exists on Hub but not locally
-	// (will be created via Hub) or if other agents are out of sync.
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
 
-	if hubCtx != nil {
-		return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
-	}
-
-	// Local mode
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	// Check if already running and we want to attach
-	if attach {
-		agents, err := rt.List(context.Background(), map[string]string{"scion.name": agentName})
-		if err == nil {
-			for _, a := range agents {
-				if strings.EqualFold(a.Name, agentName) || a.ID == agentName || strings.EqualFold(strings.TrimPrefix(a.Name, "/"), agentName) {
-					isRunning := a.Phase == string(state.PhaseRunning)
-					if isRunning {
-						fmt.Printf("Agent '%s' is already running. Attaching...\n", agentName)
-						return rt.Attach(context.Background(), agentName)
-					}
-				}
-			}
-		}
-	}
-
-	// Flag takes ultimate precedence
-	resolvedImage := agentImage
-
-	var detached *bool
-	if attach {
-		val := false
-		detached = &val
-	}
-
-	// Apply inline config overrides to CLI options
-	effectiveBranch := resolveBranch(branch, inlineCfg)
-	effectiveTask := strings.TrimSpace(task)
-	effectiveHarnessConfig := harnessConfigFlag
-	effectiveHarnessAuth := harnessAuthFlag
-
-	if inlineCfg != nil {
-		if effectiveTask == "" && inlineCfg.Task != "" {
-			effectiveTask = inlineCfg.Task
-		}
-		if effectiveHarnessConfig == "" && inlineCfg.HarnessConfig != "" {
-			effectiveHarnessConfig = inlineCfg.HarnessConfig
-		}
-		if effectiveHarnessAuth == "" && inlineCfg.AuthSelectedType != "" {
-			effectiveHarnessAuth = inlineCfg.AuthSelectedType
-		}
-		if resolvedImage == "" && inlineCfg.Image != "" {
-			resolvedImage = inlineCfg.Image
-		}
-	}
-
-	// Determine harness resume behavior from the saved phase.
-	savedPhase := agent.GetSavedPhase(agentName, projectPath)
-	effectiveResume, implicitResume, forcedRecovery, err := localResumeDecision(savedPhase, resume, forceResume, agentName)
-	if err != nil {
-		return err
-	}
-	if implicitResume {
-		statusf("Resuming agent '%s'...\n", agentName)
-	}
-	if forcedRecovery {
-		statusf("Force-resuming agent '%s' (saved phase: %s)...\n", agentName, savedPhase)
-	}
-
-	opts := api.StartOptions{
-		Name:          agentName,
-		Task:          effectiveTask,
-		Template:      templateName,
-		Profile:       profile,
-		HarnessConfig: effectiveHarnessConfig,
-		HarnessAuth:   effectiveHarnessAuth,
-		Image:         resolvedImage,
-		ProjectPath:   projectPath,
-		Resume:        effectiveResume,
-		Detached:      detached,
-		NoAuth:        noAuth,
-		Branch:        effectiveBranch,
-		Workspace:     workspace,
-		InlineConfig:  inlineCfg,
-	}
-
-	// Apply telemetry override from CLI flags
-	if enableTelemetry {
-		val := true
-		opts.TelemetryOverride = &val
-	} else if disableTelemetry {
-		val := false
-		opts.TelemetryOverride = &val
-	}
-
-	// The CLI's own --debug does not reach the agent; --agent-log-level is
-	// the explicit opt-in (ptone/scion#4098).
-	opts.Env = localAgentStartEnv()
-
-	// Thread CLI-resolved hub endpoint so locally-started agents get
-	// hub connectivity. The hub selected for this invocation (--hub, the
-	// environment, a link entry or the current context) is resolved here;
-	// the agent's scion-agent.yaml can override inside Start() via
-	// hub.endpoint or env.SCION_HUB_ENDPOINT.
-	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
-		if !cliSettings.IsHubExplicitlyDisabled() {
-			if ep := invocationHubEndpoint(); ep != "" {
-				if opts.Env == nil {
-					opts.Env = make(map[string]string)
-				}
-				opts.Env["SCION_HUB_ENDPOINT"] = ep
-				opts.Env["SCION_HUB_URL"] = ep
-			}
-		}
-	}
-
-	// Preview auth credentials in debug mode
-	if debugMode && !noAuth {
-		localAuth := harness.GatherAuth()
-		util.Debugf("[auth] local credential preview:")
-		util.Debugf("[auth]   hasGoogleAppCredentials=%t", localAuth.GoogleAppCredentials != "")
-		util.Debugf("[auth]   cloudProject=%q, cloudRegion=%q", localAuth.GoogleCloudProject, localAuth.GoogleCloudRegion)
-		util.Debugf("[auth]   envVarCount=%d, fileCount=%d", len(localAuth.EnvVars), len(localAuth.Files))
-	}
-
-	// We still might want to show some progress in the CLI
-	if resume {
-		statusf("Resuming agent '%s'...\n", agentName)
-	} else {
-		statusf("Starting agent '%s'...\n", agentName)
-	}
-
-	info, err := mgr.Start(context.Background(), opts)
-	if err != nil {
-		return err
-	}
-
-	for _, w := range info.Warnings {
-		fmt.Fprintln(os.Stderr, w)
-	}
-
-	if !info.Detached {
-		statusf("Attaching to agent '%s'...\n", agentName)
-
-		// Use the container ID for exec/attach operations. Container names are
-		// now project-scoped (e.g. "scion--agent") but agentName is just the agent
-		// name. The container ID is the reliable identifier for runtime operations.
-		containerID := info.ContainerID
-		if containerID == "" {
-			containerID = agentName // fallback for runtimes that don't return an ID
-		}
-
-		// Wait for the container to be ready before attaching.
-		// After container start, sciontool init needs time to set up the user,
-		// run pre-start hooks, and launch the child process. The tmux session
-		// must exist before we can attach.
-		if err := waitForTmuxSession(rt, containerID); err != nil {
-			return err
-		}
-
-		return rt.Attach(context.Background(), containerID)
-	}
-
-	displayStatus := "launched"
-	if resume {
-		displayStatus = "resumed"
-	}
-
-	var readyErr error
-	if startWaitReady {
-		var progress io.Writer
-		if !isJSONOutput() {
-			progress = os.Stderr
-		}
-		_, readyErr = waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
-			AgentName: agentName,
-			Get:       localReadyProbe(mgr, agentName),
-			Timeout:   remainingWaitReadyTimeout(time.Now()),
-			Progress:  progress,
-		})
-	}
-
-	if isJSONOutput() {
-		details := map[string]interface{}{
-			"id":       info.ID,
-			"detached": info.Detached,
-		}
-		if startWaitReady {
-			details["ready"] = readyErr == nil
-		}
-		if err := outputJSON(ActionResult{
-			Status:   "success",
-			Command:  cmd.Name(),
-			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' %s successfully.", agentName, displayStatus),
-			Warnings: info.Warnings,
-			Details:  details,
-		}); err != nil {
-			return err
-		}
-		return markWaitReadyReported(readyErr)
-	}
-
-	statusf("Agent '%s' %s successfully (ID: %s)\n", agentName, displayStatus, info.ID)
-	if startWaitReady && readyErr == nil {
-		statusf("Agent '%s' is ready.\n", agentName)
-	}
-
-	return readyErr
-}
-
-// waitForTmuxSession polls the container until the tmux session "scion" is
-// available. After starting a container, sciontool init needs time to
-// synchronize UID/GID, run pre-start hooks, and launch the tmux session.
-// Without this wait, an immediate attach would fail with "no sessions".
-func waitForTmuxSession(rt runtime.Runtime, agentName string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for tmux session in agent '%s' to become ready", agentName)
-		case <-ticker.C:
-			_, err := rt.Exec(ctx, agentName, []string{"tmux", "has-session", "-t", "scion"})
-			if err == nil {
-				return nil
-			}
-			util.Debugf("waiting for tmux session in '%s': %v", agentName, err)
-		}
-	}
+	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
 }
 
 // applyServiceAccountFlag wires the --service-account CLI flag into a
@@ -1454,7 +1177,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	defer cancel()
 
 	// Check whether the agent already exists on the hub. A suspended or
-	// stopped agent is resumed/restarted in place (parity with local mode and
+	// stopped agent is resumed/restarted in place (parity with
 	// `scion resume`, ptone/scion#1911). This check is best-effort — if it
 	// fails (agent doesn't exist yet), we fall through to "Starting".
 	existingCheckStart := time.Now()
