@@ -691,3 +691,95 @@ func TestCountBrokerDispatchHealth_Empty(t *testing.T) {
 	assert.Zero(t, stuck)
 	assert.Zero(t, failed)
 }
+
+// TestExpireAndListStuckPendingMessages checks that the listing expiry
+// flips the same rows as ExpireStuckPendingMessages and returns exactly
+// those rows, oldest first, with ID, recipient and created time
+// (ptone/scion#5211).
+func TestExpireAndListStuckPendingMessages(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	newMsg := func(recipient string, age time.Duration) *store.Message {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: proj.ID,
+			Sender: "user:x", Recipient: recipient, Msg: "body",
+			CreatedAt: time.Now().Add(-age),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m
+	}
+	older := newMsg("agent:older", 30*time.Hour)
+	newer := newMsg("agent:newer", 25*time.Hour)
+	recent := newMsg("agent:recent", 10*time.Minute)
+	userRow := newMsg("user:u", 30*time.Hour)
+
+	reason := store.MessageExpiredStuckPendingReason
+	ttlCutoff := time.Now().Add(-24 * time.Hour)
+	expired, err := cs.ExpireAndListStuckPendingMessages(ctx, ttlCutoff, reason)
+	require.NoError(t, err)
+	require.Len(t, expired, 2)
+	assert.Equal(t, older.ID, expired[0].ID, "oldest first")
+	assert.Equal(t, "agent:older", expired[0].Recipient)
+	assert.True(t, older.CreatedAt.Equal(expired[0].CreatedAt), "created time of the row")
+	assert.Equal(t, newer.ID, expired[1].ID)
+	assert.Equal(t, "agent:newer", expired[1].Recipient)
+	assert.True(t, newer.CreatedAt.Equal(expired[1].CreatedAt))
+
+	for _, m := range []*store.Message{older, newer} {
+		got, err := cs.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+		require.NotNil(t, got.DispatchFailureReason)
+		assert.Equal(t, reason, *got.DispatchFailureReason)
+	}
+	for _, m := range []*store.Message{recent, userRow} {
+		got, err := cs.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchPending, got.DispatchState, "row %s is left pending", m.Recipient)
+	}
+
+	again, err := cs.ExpireAndListStuckPendingMessages(ctx, ttlCutoff, reason)
+	require.NoError(t, err)
+	assert.Empty(t, again, "an already-expired row is not returned again")
+}
+
+// TestExpireAndListStuckPendingMessages_InsideWithTx checks that the method
+// joins the caller's transaction instead of failing to nest one.
+func TestExpireAndListStuckPendingMessages_InsideWithTx(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	stuck := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:a", Msg: "body",
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, stuck))
+
+	var expired []store.ExpiredPendingMessage
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		var err error
+		expired, err = tx.ExpireAndListStuckPendingMessages(ctx, time.Now().Add(-24*time.Hour), store.MessageExpiredStuckPendingReason)
+		return err
+	}))
+	require.Len(t, expired, 1)
+	assert.Equal(t, stuck.ID, expired[0].ID)
+
+	got, err := cs.GetMessage(ctx, stuck.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+}
