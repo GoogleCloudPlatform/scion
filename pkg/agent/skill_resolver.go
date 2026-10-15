@@ -65,12 +65,15 @@ type ResolveResult struct {
 // RetryAfter is a delay in whole seconds, as text, when one is known: for
 // SkillErrCodeRateLimited, the time left on the credential's cooldown; for
 // other causes, the upstream Retry-After header, if any. ProvisionAgent
-// copies it to SkillResolutionError.RetryAfter.
+// copies it to SkillResolutionError.RetryAfter. Status is the HTTP status
+// of the upstream response that failed the resolution, when one is known,
+// else 0; ProvisionAgent copies it to SkillResolutionError.Status.
 type ResolveError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 // Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
@@ -100,6 +103,9 @@ const (
 	// resolved but could not be downloaded, verified or installed into the
 	// agent home. The create path keeps it on the 5xx path.
 	SkillErrCodeInstallFailed = "install_failed"
+	// SkillErrCodeInvalidURI is the code for a skill reference that does
+	// not parse as a URI the resolver accepts.
+	SkillErrCodeInvalidURI = "invalid_uri"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
@@ -111,12 +117,17 @@ const (
 // SkillErrCodeRateLimited, the time left on the credential's cooldown (see
 // GitHubCooldown); for other causes, the upstream Retry-After header, if
 // any. It is empty otherwise. The broker sends it as a Retry-After header
-// only for SkillErrCodeRateLimited.
+// only for SkillErrCodeRateLimited. Status is the HTTP status of the
+// upstream response that failed the resolution, when one is known, else 0.
+//
+// Message is resolver text for the server-side log; it is not shown to the
+// user (the agent runtime stores a fixed reason phrase instead).
 type SkillResolutionError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 func (e *SkillResolutionError) Error() string {
@@ -166,6 +177,31 @@ func publicInstallReason(err error) string {
 		return ie.public
 	}
 	return skillInstallFailedOnBroker
+}
+
+// upstreamStatusError is a resolver error that came from a non-OK upstream
+// HTTP response. Its text is the resolver's full message, for the log.
+type upstreamStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *upstreamStatusError) Error() string           { return e.msg }
+func (e *upstreamStatusError) upstreamHTTPStatus() int { return e.status }
+
+// upstreamStatus returns the HTTP status of the upstream response recorded
+// in err's chain, or 0 when none is known.
+func upstreamStatus(err error) int {
+	var se interface{ upstreamHTTPStatus() int }
+	for err != nil {
+		if errors.As(err, &se) {
+			if st := se.upstreamHTTPStatus(); st != 0 {
+				return st
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return 0
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.

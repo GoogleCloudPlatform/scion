@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -304,8 +305,15 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 	if agent.Phase != "" {
 		vars["AGENT_STATUS"] = agent.Phase
 	}
-	if agent.Message != "" {
+	// A halted hook does not carry the agent's free-text message: a halt is
+	// the platform's finding, described by the exit reason alone.
+	if agent.Message != "" && trigger != store.LifecycleHookTriggerHalted {
 		vars["ERROR_MSG"] = agent.Message
+	}
+	// The exit reason, only when it is one of the known values; it reaches
+	// the request only as a JSON-encoded body value.
+	if agent.ExitReason != "" && state.ExitReason(agent.ExitReason).IsValid() {
+		vars["EXIT_REASON"] = agent.ExitReason
 	}
 
 	return vars

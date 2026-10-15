@@ -684,6 +684,9 @@ deleted.** They were operator settings rather than code, which is why this tier 
 had to carry a workaround for them and never blocked on them — the §1 walkthrough was
 completed end to end on 2026-08-25 with all four open.
 
+As of this change, no such stopgap settings exist in-tree, so nothing remains to
+delete (ptone/scion#1295).
+
 **ptone/scion#1274 remains open** and is the one with a live consequence: a depth-1 workspace
 cannot push to any remote but `origin`. That constrains §1's final step to
 origin-only pushes. It is a real limitation of the tier as shipped, not a

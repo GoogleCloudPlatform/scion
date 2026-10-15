@@ -411,7 +411,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// form (127.0.0.0/8, ::1, ::ffff:127.0.0.1, localhost) qualifies and is
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
-	conduitOn := s.conduitServing()
+	conduitOn := s.conduitRoutable()
 	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
 		switch {
@@ -765,10 +765,11 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 			}
 
 			// An agent's ports are stale if the agent is soft-deleted or in a
-			// terminal phase (stopped, error). We are generous: running,
-			// suspended, provisioning, starting, etc. are left alone.
+			// terminal phase (stopped, error, halted). We are generous:
+			// running, suspended, provisioning, starting, etc. are left alone.
 			isDeleted := !agent.DeletedAt.IsZero()
-			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)
+			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError) ||
+				agent.Phase == string(state.PhaseHalted)
 
 			if !isDeleted && !isTerminal {
 				continue

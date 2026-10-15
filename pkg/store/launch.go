@@ -49,6 +49,12 @@ const (
 	LaunchErrorLaunchStopped  = "launch_stopped"
 	LaunchErrorAgentError     = "agent_error"
 	LaunchErrorHubUnreachable = "hub_unreachable"
+	// LaunchErrorBrokerRestarted: the broker process restarted, or shut
+	// down, while the launch was in flight, and reported the launch failed
+	// itself (from its shutdown drain or, after a crash, from its launch
+	// journal on the next boot; ptone/scion#4668). Broker-confirmed: the
+	// broker reports it only for a launch it ended.
+	LaunchErrorBrokerRestarted = "broker_restarted"
 )
 
 // LaunchReport report-state values (mirrors the broker->Hub wire report's
