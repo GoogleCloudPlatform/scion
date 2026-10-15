@@ -39,9 +39,10 @@ var directServerBoolEnvNames = map[string]bool{
 // parseServerEnvValue parses an env value as the JSON type typ: boolean
 // (strconv.ParseBool: true/false, 1/0, t/f), integer (strconv.ParseInt,
 // base prefixes allowed) or number (strconv.ParseFloat). Any other type
-// returns the value unchanged. Surrounding spaces are ignored.
+// returns the value unchanged. The value is parsed exactly as given, with no
+// trimming, as the GlobalConfig decode reads it, so " true" does not parse.
 func parseServerEnvValue(typ, value string) (interface{}, error) {
-	s := strings.TrimSpace(value)
+	s := value
 	switch typ {
 	case "boolean":
 		return strconv.ParseBool(s)
@@ -168,18 +169,24 @@ func readSettingsEnv(name string, set map[string]bool, isLayer1 func(string) boo
 // integer list server.hub.conduit.tcp_allowed_ports) are not checked here.
 // It also checks each directly-read boolean (SCION_SERVER_ADMIN_MODE) with
 // its reader's parser. The error names each variable and its setting, never
-// the value. An empty or blank value is unset and is not checked.
+// the value. An empty value is unset and is not checked. A table key's value
+// is checked exactly as the loaders read it, so a blank or space-padded value
+// is rejected; only the directly-read names, whose reader trims, treat a
+// blank value as unset.
 func ValidateServerEnv(environ []string, isLayer1 func(string) bool) error {
 	set := settingsEnvSet(environ)
 	var bad []string
 	seen := map[string]bool{}
 	for _, kv := range environ {
 		name, value, _ := strings.Cut(kv, "=")
-		if strings.TrimSpace(value) == "" || seen[name] {
+		if value == "" || seen[name] {
 			continue
 		}
 		seen[name] = true
 		if directServerBoolEnvNames[name] {
+			if strings.TrimSpace(value) == "" {
+				continue // its reader (util.ParseBool) trims: blank is unset
+			}
 			if _, ok := util.ParseBool(value); !ok {
 				bad = append(bad, fmt.Sprintf("%s: the value is not a boolean (true, 1, t, yes, y, on, or false, 0, f, no, n, off)", name))
 			}

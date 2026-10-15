@@ -202,6 +202,19 @@ func TestValidateServerEnv_OnlyValuesARead(t *testing.T) {
 	}, testIsLayer1), "the canonical value is read")
 	assert.Error(t, ValidateServerEnv([]string{"SCION_SEED_SERVER_HUB_AUTOSUSPENDSTALLED=garbage"}, testIsLayer1), "a Layer-1 seed name is read")
 	assert.NoError(t, ValidateServerEnv([]string{"SCION_SERVER_ADMIN_MODE=   "}, testIsLayer1), "a blank ADMIN_MODE is unset")
+	assert.NoError(t, ValidateServerEnv([]string{"SCION_SERVER_ADMIN_MODE= yes "}, testIsLayer1), "ADMIN_MODE's reader trims")
+	// A table key is checked exactly as the loaders read it: a blank or
+	// space-padded value is rejected, naming the variable.
+	for _, v := range []string{"   ", " true", "12 "} {
+		name := "SCION_SERVER_HUB_AUTOSUSPENDSTALLED"
+		if v == "12 " {
+			name = "SCION_SERVER_DEFAULTMAXTURNS"
+		}
+		err := ValidateServerEnv([]string{name + "=" + v}, testIsLayer1)
+		if assert.Error(t, err, "%s=%q", name, v) {
+			assert.Contains(t, err.Error(), name)
+		}
+	}
 	// A seed alias of a setting seeding does not seed gets no deprecation
 	// warning (FindUnmatchedSettingsEnv reports it as matching nothing).
 	e := serverEnvEntry(t, "server.hub.read_timeout")
