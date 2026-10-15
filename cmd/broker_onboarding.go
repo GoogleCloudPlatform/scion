@@ -264,7 +264,13 @@ func purgeBrokerLocalState(paths []string, out io.Writer) error {
 // non-zero exit; connections without a broker ID (which deregister cannot
 // remove) are named by file, to be removed by hand. Without purge it lists
 // what is left behind.
-func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr error, brokerRunning, purge bool, statePaths []string) error {
+//
+// stateDirErr is set when server.broker.state_dir could not be resolved
+// (configuredBrokerStateRoot); statePaths then hold the default state
+// directory, which is only a guess. The purge then refuses, removes nothing
+// and returns an error (fail closed); without --purge-local it is a warning
+// and the default path is listed with a note.
+func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr, stateDirErr error, brokerRunning, purge bool, statePaths []string) error {
 	if listErr == nil && len(remaining) == 0 && credsDir != "" {
 		if removed, err := removeDirIfEmpty(credsDir); err != nil {
 			_, _ = fmt.Fprintf(out, "Warning: failed to remove empty %s: %v\n", credsDir, err)
@@ -278,6 +284,8 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		switch {
 		case listErr != nil:
 			refusal = fmt.Errorf("--purge-local skipped: could not list hub connections (%v)", listErr)
+		case stateDirErr != nil:
+			refusal = fmt.Errorf("--purge-local skipped: cannot resolve the broker state directory (%v); nothing was removed. Fix %s, then run 'scion runtime-broker deregister --purge-local' again", stateDirErr, brokerStateDirSetting)
 		case len(remaining) > 0:
 			refusal = remainingConnectionsError(credsDir, remaining)
 		case brokerRunning:
@@ -290,6 +298,9 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		}
 		printLeftInPlace(out, left)
 		return refusal
+	}
+	if stateDirErr != nil {
+		_, _ = fmt.Fprintf(out, "Warning: cannot resolve the broker state directory (%v); the state directory listed is the default and may not be the one the broker uses\n", stateDirErr)
 	}
 	printLeftInPlace(out, left)
 	if len(left) > 0 && listErr == nil && len(remaining) == 0 {

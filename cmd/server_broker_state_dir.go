@@ -88,24 +88,29 @@ func flatInstancesStateDirWarning(cfg *config.GlobalConfig) string {
 
 // configuredBrokerStateRoot is the base directory of the Runtime Broker's
 // state that 'runtime-broker deregister --purge-local' cleans: the
-// configured server.broker.state_dir when set and valid, else the default
-// under scionHome. A settings load error or an invalid value falls back
-// to the default, with a warning on stderr.
-func configuredBrokerStateRoot(scionHome string) string {
+// configured server.broker.state_dir, or the default under scionHome when
+// it is unset. It reads the global settings and environment of the shell
+// that runs it. When the settings cannot be loaded or the value is invalid
+// it returns the default root together with a non-nil error: the default
+// is only a guess, which may be listed but must not be purged (fail
+// closed; see cleanupAfterDeregister).
+func configuredBrokerStateRoot(scionHome string) (string, error) {
 	def := filepath.Join(scionHome, "runtime-broker-state")
 	cfg, err := loadBrokerStateConfig("")
-	if err != nil || cfg == nil {
-		return def
+	if err != nil {
+		return def, fmt.Errorf("%s could not be read: loading the settings: %w", brokerStateDirSetting, err)
+	}
+	if cfg == nil {
+		return def, fmt.Errorf("%s could not be read: no configuration loaded", brokerStateDirSetting)
 	}
 	root, err := brokerStateRoot(cfg.RuntimeBroker.StateDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v; using the default state directory %s\n", err, def)
-		return def
+		return def, err
 	}
 	if root == "" {
-		return def
+		return def, nil
 	}
-	return root
+	return root, nil
 }
 
 // loadBrokerStateConfig loads the global configuration the way the server
