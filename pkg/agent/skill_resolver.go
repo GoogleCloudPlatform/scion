@@ -900,7 +900,7 @@ func populateSkillCache(cache interface {
 	for _, f := range skill.Files {
 		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
 		if err != nil {
-			util.Debugf("provision: failed to read skill file for caching: %s: %v", f.Path, err)
+			util.Debugf("provision: failed to read skill file for caching: %s: %s", f.Path, ResolverReasonForLog(skill.URI, err.Error()))
 			return
 		}
 		files[f.Path] = content
