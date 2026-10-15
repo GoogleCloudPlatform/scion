@@ -208,8 +208,8 @@ func TestStoreDeleteArtifact(t *testing.T) {
 		if _, err := st.SetExpiry(ctx, x.ID, &past, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if n, err := st.SweepExpired(ctx, time.Now(), 10); err != nil || n != 1 {
-			t.Fatalf("SweepExpired = %d, %v", n, err)
+		if ids, err := st.SweepExpired(ctx, time.Now(), 10); err != nil || len(ids) != 1 {
+			t.Fatalf("SweepExpired = %d, %v", len(ids), err)
 		}
 		e = onlyEvent(t, st, x.ID, EventDeleted, &retentionActor)
 		if e.Detail["grantsRemoved"] != float64(1) {
@@ -355,14 +355,20 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 
 		now := time.Now()
 		owner := Owner{Kind: PrincipalKindAgent, Ref: "a-1"}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || n != 2 {
-			t.Fatalf("first batch = %d, %v; want 2", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 2 {
+			t.Fatalf("first batch = %d, %v; want 2", len(ids), err)
+		} else {
+			for _, ref := range ids {
+				if ref.ScopeRef != gone[0].ScopeRef {
+					t.Errorf("changed %s has scope %q, want %q", ref.ID, ref.ScopeRef, gone[0].ScopeRef)
+				}
+			}
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || n != 1 {
-			t.Fatalf("second batch = %d, %v; want 1", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 1 {
+			t.Fatalf("second batch = %d, %v; want 1", len(ids), err)
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now.Add(time.Hour), 2); err != nil || n != 0 {
-			t.Fatalf("marking again = %d, %v; want 0", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now.Add(time.Hour), 2); err != nil || len(ids) != 0 {
+			t.Fatalf("marking again = %d, %v; want 0", len(ids), err)
 		}
 		for _, a := range gone {
 			got, err := st.GetArtifact(ctx, a.ID)
@@ -384,11 +390,11 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 			t.Errorf("candidates = %+v, %v", cands, err)
 		}
 
-		if n, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || n != 3 {
-			t.Fatalf("clearing = %d, %v; want 3", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || len(ids) != 3 {
+			t.Fatalf("clearing = %d, %v; want 3", len(ids), err)
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || n != 0 {
-			t.Fatalf("clearing again = %d, %v; want 0", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || len(ids) != 0 {
+			t.Fatalf("clearing again = %d, %v; want 0", len(ids), err)
 		}
 		for _, a := range gone {
 			if got, _ := st.GetArtifact(ctx, a.ID); got.OrphanedAt != nil {
@@ -397,8 +403,8 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 			onlyEvent(t, st, a.ID, EventUnorphaned, &reconcilerActor)
 		}
 		// A deleted artifact is never marked.
-		if n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "u-dead"}, true, now, 10); err != nil || n != 0 {
-			t.Errorf("marking a deleted artifact's owner = %d, %v", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "u-dead"}, true, now, 10); err != nil || len(ids) != 0 {
+			t.Errorf("marking a deleted artifact's owner = %d, %v", len(ids), err)
 		}
 		if _, err := st.SetOwnerOrphaned(ctx, owner, true, now, 0); err == nil {
 			t.Error("SetOwnerOrphaned with no limit accepted")
@@ -432,8 +438,8 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		// one with an expiry (for expiry_cleared).
 		marked := seedOwned(t, st, PrincipalKindAgent, "agent-rb-marked")
 		markedAt := time.Now()
-		if n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, true, markedAt, 10); err != nil || n != 1 {
-			t.Fatalf("mark: %d, %v", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, true, markedAt, 10); err != nil || len(ids) != 1 {
+			t.Fatalf("mark: %d, %v", len(ids), err)
 		}
 		expiring := seedOwned(t, st, PrincipalKindUser, "user-rb-exp")
 		keep := time.Now().Add(48 * time.Hour)

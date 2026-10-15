@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"testing"
@@ -272,5 +273,24 @@ func TestHubSkillResolver_EmptyRefs(t *testing.T) {
 	}
 	if len(result.Errors) != 0 {
 		t.Errorf("expected 0 errors, got %d", len(result.Errors))
+	}
+}
+
+// A per-skill error in the Hub's resolve response keeps its upstream
+// status, so the agent runtime's stored text can show it.
+func TestHubResolveResponseToResult_KeepsErrorStatus(t *testing.T) {
+	const body = `{"resolved":[],"errors":[{"uri":"gh://o/r/s","code":"not_found",` +
+		`"message":"skill not found","status":404,"correlationId":"req-1"}]}`
+	var resp hubclient.ResolveSkillsResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatal(err)
+	}
+	result := hubResolveResponseToResult([]api.SkillReference{{URI: "gh://o/r/s"}}, &resp)
+	if len(result.Errors) != 1 {
+		t.Fatalf("errors = %+v, want 1", result.Errors)
+	}
+	want := ResolveError{URI: "gh://o/r/s", Code: "not_found", Message: "skill not found", Status: 404}
+	if result.Errors[0] != want {
+		t.Errorf("error = %+v, want %+v", result.Errors[0], want)
 	}
 }
