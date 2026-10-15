@@ -366,7 +366,7 @@ Each discarded entry has only four fields: `seq`, `state` (`failed`), `reason` a
 
 The Hub writes one structured entry per artifact decision to a dedicated log, `scion-artifacts` (ptone/scion#5120). With direct Cloud Logging (`SCION_CLOUD_LOGGING=true`) it is a separate Cloud Logging log that shares the client and circuit breaker of the request and message logs. Without Cloud Logging the entries go to stdout, like the message log. The request log keeps its redacted artifact paths. The decision log is where an operator finds which artifact a request touched and why it was refused.
 
-**Levels.** Lifecycle decisions are logged at `INFO`. Authorization refusals on management and write routes are logged at `WARN`. A refused review grant, from a caller who may read the artifact but not administer it, is not logged. A read answered with the `404` of a missing artifact, or of one the caller cannot read, is logged at `DEBUG` only, so it costs nothing at the default level. Successful reads are not logged. Entries follow the server log level (`SCION_LOG_LEVEL`).
+**Levels.** Lifecycle decisions are logged at `INFO`. Authorization refusals on management and write routes are logged at `WARN`. A refused `POST /api/v1/artifacts/{id}/grants` from a caller who may read the artifact but not administer it (it is answered by the review-grant path, whatever grant it asks for) is not logged yet. A read answered with the `404` of a missing artifact, or of one the caller cannot read, is logged at `DEBUG` only, so it costs nothing at the default level. Successful reads are not logged. Entries follow the server log level (`SCION_LOG_LEVEL`).
 
 **Actions.** One entry is written per decision:
 
