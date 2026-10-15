@@ -74,6 +74,21 @@ func recordStartFailures(t *testing.T) *[]string {
 	return got
 }
 
+// stubHubRelayStart replaces the hub's in-process relay start for the rest
+// of the test: it records the options it is given and starts nothing (the
+// cmd test hub has no conduit registry database).
+func stubHubRelayStart(t *testing.T) *[]hub.ConduitRelayOptions {
+	t.Helper()
+	got := &[]hub.ConduitRelayOptions{}
+	prev := conduitStartHubRelay
+	conduitStartHubRelay = func(_ context.Context, _ *hub.Server, opts hub.ConduitRelayOptions) error {
+		*got = append(*got, opts)
+		return nil
+	}
+	t.Cleanup(func() { conduitStartHubRelay = prev })
+	return got
+}
+
 // startRelayForSkipTest runs startConduitRelay on a fresh hub with
 // hub.conduit on and no shared signing secret.
 func startRelayForSkipTest(t *testing.T, cfg *config.GlobalConfig, requireHA bool) (*hub.Server, error) {
@@ -124,6 +139,11 @@ func resetForSkipTest(t *testing.T) {
 	oldCaptured := capturedSessionSecret
 	capturedSessionSecret = ""
 	t.Cleanup(func() { capturedSessionSecret = oldCaptured })
+	// Not on GCE, whatever the test host: the node's own service account
+	// must not fill the oidc allow-list.
+	oldOnGCE := conduitOnGCE
+	conduitOnGCE = func() bool { return false }
+	t.Cleanup(func() { conduitOnGCE = oldOnGCE })
 	t.Setenv("K_SERVICE", "")
 	t.Setenv("SCION_SERVER_SESSION_SECRET", "")
 	t.Setenv("SESSION_SECRET", "")
@@ -131,8 +151,10 @@ func resetForSkipTest(t *testing.T) {
 
 // TestStartConduitRelay_NoInternalListenSkipsPeerAuth: a workstation or
 // single-node hub (not hosted HA, no internal listener) starts its relay
-// without relay-peer credentials. It opens no internal listener, logs that
-// the internal relay API is not served, and runs with peer_auth=none.
+// without relay-peer credentials: the relay is started with relay.NoPeerAuth,
+// no internal listener opens, the log says the internal relay API is not
+// served, and the relay runs with peer_auth=none. (A running relay with
+// NoPeerAuth is covered in pkg/hub by TestSkipPath_DialerAdmittedWithoutSecret.)
 func TestStartConduitRelay_NoInternalListenSkipsPeerAuth(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	for name, tc := range noPeerCredentialCases() {
@@ -140,9 +162,12 @@ func TestStartConduitRelay_NoInternalListenSkipsPeerAuth(t *testing.T) {
 			resetForSkipTest(t)
 			logs := captureConduitLog(t)
 			listeners := countInternalListeners(t)
-			srv, err := startRelayForSkipTest(t, tc.config(t), false)
+			starts := stubHubRelayStart(t)
+			_, err := startRelayForSkipTest(t, tc.config(t), false)
 			require.NoError(t, err)
-			assert.NotNil(t, srv.ConduitRelayFatal(), "the relay is running")
+			require.Len(t, *starts, 1, "the relay is started")
+			assert.IsType(t, relay.NoPeerAuth{}, (*starts)[0].PeerAuth)
+			assert.Empty(t, (*starts)[0].InternalEndpoint, "no internal endpoint")
 			assert.Zero(t, *listeners, "no internal listener, so the internal relay API is not served")
 			out := logs.String()
 			assert.Contains(t, out, "internal relay API not served on this node")
@@ -161,14 +186,15 @@ func TestStartConduitRelay_InternalListenStillNeedsPeerAuth(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			resetForSkipTest(t)
 			listeners := countInternalListeners(t)
+			starts := stubHubRelayStart(t)
 			cfg := tc.config(t)
 			cfg.Hub.Conduit.InternalListen = "127.0.0.1:0"
-			srv, err := startRelayForSkipTest(t, cfg, false)
+			_, err := startRelayForSkipTest(t, cfg, false)
 			require.Error(t, err)
 			var se *relay.SettingError
 			require.True(t, errors.As(err, &se), "%v", err)
 			assert.Equal(t, tc.wantKey, se.Key)
-			assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
+			assert.Empty(t, *starts, "refused before any relay start")
 			assert.Zero(t, *listeners, "peer auth is checked before the listener opens")
 		})
 	}

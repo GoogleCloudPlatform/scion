@@ -216,6 +216,14 @@ var (
 	conduitRecordStartFailure = func(hubSrv *hub.Server, setting string) {
 		hubSrv.SetConduitRelayStartFailure(setting)
 	}
+	// conduitOnGCE reports whether this node runs on GCE, where relay-peer
+	// auth may use the node's own service account (metadata.OnGCE).
+	conduitOnGCE = metadata.OnGCE
+	// conduitStartHubRelay starts the hub's in-process relay
+	// (hub.Server.StartConduitRelay).
+	conduitStartHubRelay = func(ctx context.Context, hubSrv *hub.Server, opts hub.ConduitRelayOptions) error {
+		return hubSrv.StartConduitRelay(ctx, opts)
+	}
 )
 
 // trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
@@ -389,7 +397,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 	var auth relay.PeerAuth
 	var mode string
 	if conduitInternalRelayAPIServed(cfg, requireHA) {
-		auth, mode, err = hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
+		auth, mode, err = hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, conduitOnGCE()))
 		if err != nil {
 			return err
 		}
@@ -416,7 +424,7 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 		slog.Info("Conduit internal listener started", "addr", addr.String(), "advertise", endpoint)
 	}
 
-	if err := hubSrv.StartConduitRelay(ctx, hub.ConduitRelayOptions{
+	if err := conduitStartHubRelay(ctx, hubSrv, hub.ConduitRelayOptions{
 		InstanceID:       id,
 		InternalEndpoint: endpoint,
 		RequireHA:        requireHA,
