@@ -17,6 +17,7 @@
     "shared/agent-tree-view.test.ts",
     "shared/deep-active-element.test.ts",
     "pages/chat-palette-shortcut.test.ts",
+    "pages/chat-palette-footer.test.ts",
     "pages/chat-hub-members.test.ts",
     "shared/chat/chat-thread-peer-project.test.ts",
     "shared/chat/chat-space-rail-unread-dms.test.ts",
