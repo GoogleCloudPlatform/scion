@@ -49,6 +49,7 @@ import (
 // clamp, each with its reason.
 var agentScopeCensusExempt = map[string]string{
 	"agenttoken.go:SignAgentToken":                     "copies grant.Scopes; every AgentTokenGrant with scopes is built by AuthorizeAgentToken (pinned below); the empty-grant fallback agent:status:update is allowed (TestTestAdminA3_ScopeCensus)",
+	"conduit_relay_admit.go:writeRelayAdmission":       "relay admission claims of a USER principal: copies a scoped user credential's own scopes (user access token or a human grantor's workload delegation), never an agent token's (the agent branch copies only the credential ID); every later relay operation rebuilds the user and is decided with the test-admin policy applied to that user, so the agent clamp is not the control here",
 	"agent_scope_reissue.go:planAgentDelegatorReissue": "scopes from AuthorizeAgentToken (parentGrant)",
 	"httpdispatcher.go:resolveAsNeededForKeys":         "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z): dispatch-time project-scope injection stays under A2's membership rule (provenance-root membership, SystemAuthorityProof)",
 	"httpdispatcher.go:resolveSecrets":                 "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z), as resolveAsNeededForKeys",
