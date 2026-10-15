@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -58,7 +61,7 @@ func (g *guardFixture) served() []string {
 // newGuardFixture dials a broker session whose Hello lists rpcs and
 // carries incarnation (the fake hub derives the session id from it), and
 // returns once the hub admitted it.
-func newGuardFixture(t *testing.T, incarnation string, rpcs []string) *guardFixture {
+func newGuardFixture(t *testing.T, incarnation string, rpcs []string, mods ...func(*conduitRPCGuard)) *guardFixture {
 	t.Helper()
 	g := &guardFixture{}
 	tree := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -70,8 +73,11 @@ func newGuardFixture(t *testing.T, incarnation string, rpcs []string) *guardFixt
 	// Permissive: unsigned requests would pass this middleware.
 	permissive := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
 	permissive.UpdateKeys([]secretKeyEntry{{hubName: "hub-a", secretKey: []byte(guardKey)}})
-	h := newGuardedConduitRPCHandler(permissive.Middleware(tree), "hub-a", 0, nil,
-		newConduitRPCGuard(guardBrokerID, func() []byte { return []byte(guardKey) }))
+	guard := newConduitRPCGuard(guardBrokerID, func() []byte { return []byte(guardKey) })
+	for _, mod := range mods {
+		mod(guard)
+	}
+	h := newGuardedConduitRPCHandler(permissive.Middleware(tree), "hub-a", 0, nil, guard)
 
 	admitted := make(chan conduit.LocalSession, 1)
 	hub := newFakeConduitHub(t, hubStep{after: func(ls conduit.LocalSession) { admitted <- ls }})
@@ -274,20 +280,95 @@ func TestConduitRPCGuard_RepeatRefused(t *testing.T) {
 	assert.Len(t, g2.served(), 1)
 }
 
-// TestSeenOnce_EvictsAfterWindow: a key is refused until its expiry, and
-// expired keys are dropped, so the store holds one window at most.
+// TestSeenOnce_EvictsAfterWindow: a key is refused until its expiry,
+// inclusive, and dropped once now is after it, so the store holds one
+// window at most.
 func TestSeenOnce_EvictsAfterWindow(t *testing.T) {
 	s := newSeenOnce()
 	t0 := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
 	window := 5 * time.Minute
 	assert.True(t, s.add("k1", t0.Add(window), t0))
 	assert.False(t, s.add("k1", t0.Add(window), t0.Add(time.Minute)), "repeat within the window")
+	assert.False(t, s.add("k1", t0.Add(window), t0.Add(window)), "repeat exactly at the expiry")
 	assert.True(t, s.add("k2", t0.Add(2*window), t0.Add(time.Minute)))
-	assert.True(t, s.add("k3", t0.Add(3*window), t0.Add(window)), "k1 expired")
+	assert.True(t, s.add("k3", t0.Add(3*window), t0.Add(window).Add(time.Nanosecond)), "k1 expired")
 	s.mu.Lock()
 	_, k1 := s.keys["k1"]
 	n := len(s.keys)
 	s.mu.Unlock()
 	assert.False(t, k1, "the expired key was dropped")
 	assert.Equal(t, 2, n)
+}
+
+// passAllChecker serves every request (handler tests that are not about
+// the guard).
+type passAllChecker struct{}
+
+func (passAllChecker) check(context.Context, *wsprotocol.RequestEnvelope) *conduitRPCRefusal {
+	return nil
+}
+
+// TestConduitRPCHandler_NoGuardRefuses: a handler without a guard serves
+// nothing.
+func TestConduitRPCHandler_NoGuardRefuses(t *testing.T) {
+	served := false
+	tree := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		served = true
+		w.WriteHeader(http.StatusOK)
+	})
+	for name, h := range map[string]*conduitRPCHandler{
+		"unguarded constructor": newConduitRPCHandler(tree, "hub-a", 0, nil),
+		"nil guard":             newGuardedConduitRPCHandler(tree, "hub-a", 0, nil, nil),
+		"typed nil guard":       newGuardedConduitRPCHandler(tree, "hub-a", 0, nil, (*conduitRPCGuard)(nil)),
+	} {
+		resp := h.HandleRPC(context.Background(), &conduitv1.RpcRequest{RequestId: "r1", Method: http.MethodGet, Path: "/api/v1/images/status"})
+		require.NotNil(t, resp, name)
+		assert.Equal(t, int32(http.StatusServiceUnavailable), resp.GetStatus(), name)
+	}
+	assert.False(t, served, "no request reached a handler")
+}
+
+// TestConduitRPCGuard_RawPathCanonical: the raw request path itself must
+// be canonical: a fragment, a question mark inside the path, no leading
+// slash (host and port form), percent-encoding, a control character or
+// user info are refused, even where the parsed path would be a listed
+// operation.
+func TestConduitRPCGuard_RawPathCanonical(t *testing.T) {
+	g := newGuardFixture(t, "inc-1", conduit.BrokerRPCs())
+	for _, r := range []struct{ name, method, path string }{
+		{"fragment", http.MethodGet, "/api/v1/images/status#frag"},
+		{"question mark in the path", http.MethodGet, "/api/v1/images/status?short=img"},
+		{"no leading slash (port form)", http.MethodGet, "runtime-broker:80/api/v1/images/status"},
+		{"no leading slash", http.MethodGet, "api/v1/images/status"},
+		{"percent-encoding", http.MethodGet, "/api/v1/images/st%61tus"},
+		{"control character", http.MethodGet, "/api/v1/images/status\t"},
+		{"newline", http.MethodGet, "/api/v1/agents/a1\n/logs"},
+		{"user info", http.MethodGet, "@evil.example/api/v1/images/status"},
+		{"user info after the host", http.MethodGet, "user:pw@runtime-broker/api/v1/images/status"},
+	} {
+		// Signed for the canonical form; the raw path sent differs from it.
+		headers := g.signedHeaders(t, r.method, "/api/v1/images/status", "", nil, signOpts{})
+		resp := g.call(t, r.method, r.path, "", headers, nil)
+		assert.Equal(t, int32(http.StatusNotFound), resp.GetStatus(), r.name)
+	}
+	assert.Empty(t, g.served(), "no variant reached a handler")
+}
+
+// TestConduitRPCGuard_RepeatAtWindowEdgeRefused: a request repeated at
+// exactly its timestamp plus the 5-minute window is still refused.
+func TestConduitRPCGuard_RepeatAtWindowEdgeRefused(t *testing.T) {
+	var nowNanos atomic.Int64
+	g := newGuardFixture(t, "inc-1", conduit.BrokerRPCs(), func(guard *conduitRPCGuard) {
+		guard.now = func() time.Time { return time.Unix(0, nowNanos.Load()) }
+	})
+	const path = "/api/v1/images/status"
+	headers := g.signedHeaders(t, http.MethodGet, path, "", nil, signOpts{})
+	ts, err := strconv.ParseInt(headers[apiclient.HeaderTimestamp], 10, 64)
+	require.NoError(t, err)
+	edge := time.Unix(ts, 0).Add(5 * time.Minute)
+	nowNanos.Store(edge.UnixNano())
+
+	assert.Equal(t, int32(http.StatusOK), g.call(t, http.MethodGet, path, "", headers, nil).GetStatus(), "first use, at the edge of the window")
+	assert.Equal(t, int32(http.StatusUnauthorized), g.call(t, http.MethodGet, path, "", headers, nil).GetStatus(), "repeat at the edge")
+	assert.Len(t, g.served(), 1)
 }

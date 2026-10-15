@@ -49,10 +49,9 @@ type conduitRPCHandler struct {
 	// onQueued, if set (tests), runs when a request starts waiting for a
 	// dispatch slot.
 	onQueued func(requestID string)
-	// guard, when set, decides whether a request is served at all
-	// (conduit_rpc_guard.go). The production handler always has one
-	// (newGuardedConduitRPCHandler).
-	guard *conduitRPCGuard
+	// guard decides whether a request is served at all
+	// (conduit_rpc_guard.go). Without one every request is refused.
+	guard conduitRPCChecker
 }
 
 var _ conduit.RPCHandler = (*conduitRPCHandler)(nil)
@@ -77,9 +76,11 @@ func newConduitRPCHandler(handlers http.Handler, connectionName string, slots in
 
 // newGuardedConduitRPCHandler is newConduitRPCHandler with guard, which
 // every request must pass before it is queued or dispatched.
-func newGuardedConduitRPCHandler(handlers http.Handler, connectionName string, slots int, log *slog.Logger, guard *conduitRPCGuard) *conduitRPCHandler {
+func newGuardedConduitRPCHandler(handlers http.Handler, connectionName string, slots int, log *slog.Logger, guard conduitRPCChecker) *conduitRPCHandler {
 	h := newConduitRPCHandler(handlers, connectionName, slots, log)
-	h.guard = guard
+	if g, ok := guard.(*conduitRPCGuard); !ok || g != nil {
+		h.guard = guard
+	}
 	return h
 }
 
@@ -88,16 +89,19 @@ func (h *conduitRPCHandler) HandleRPC(ctx context.Context, req *conduitv1.RpcReq
 	h.wg.Add(1)
 	defer h.wg.Done()
 
+	// Without a guard nothing is served (fail closed).
+	ref := &conduitRPCRefusal{http.StatusServiceUnavailable, "conduit requests are not served"}
 	if h.guard != nil {
-		if ref := h.guard.check(ctx, envelope.RPCToRequest(req)); ref != nil {
-			h.log.Warn("Conduit request refused", "status", ref.status, "reason", ref.message, "method", req.GetMethod())
-			body := fmt.Sprintf(`{"error":{"code":"broker_auth_failed","message":%q}}`, ref.message)
-			if ref.status == http.StatusNotFound {
-				body = `{"error":{"code":"not_found","message":"not found"}}`
-			}
-			return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(ref.status),
-				Headers: map[string]string{"Content-Type": "application/json"}, Body: []byte(body)}
+		ref = h.guard.check(ctx, envelope.RPCToRequest(req))
+	}
+	if ref != nil {
+		h.log.Warn("Conduit request refused", "status", ref.status, "reason", ref.message, "method", req.GetMethod())
+		body := fmt.Sprintf(`{"error":{"code":"broker_auth_failed","message":%q}}`, ref.message)
+		if ref.status == http.StatusNotFound {
+			body = `{"error":{"code":"not_found","message":"not found"}}`
 		}
+		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(ref.status),
+			Headers: map[string]string{"Content-Type": "application/json"}, Body: []byte(body)}
 	}
 
 	if h.onQueued != nil {

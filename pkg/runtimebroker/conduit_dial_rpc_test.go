@@ -36,7 +36,7 @@ import (
 func TestConduitHelloAdvertisesRPCs(t *testing.T) {
 	hub := newFakeConduitHub(t, hubStep{})
 	_, _, stop := startTestDialer(t, hub.srv.URL, clock.Real(), maxRand, func(c *ConduitDialConfig) {
-		c.RPCHandler = newConduitRPCHandler(http.NotFoundHandler(), "hub-a", 0, nil)
+		c.RPCHandler = newGuardedConduitRPCHandler(http.NotFoundHandler(), "hub-a", 0, nil, passAllChecker{})
 	})
 	hello := waitHello(t, hub)
 	require.NoError(t, stop())
@@ -67,7 +67,7 @@ func TestConduitSessionServesRPCs(t *testing.T) {
 		answered <- resp
 	}})
 	_, _, stop := startTestDialer(t, hub.srv.URL, clock.Real(), maxRand, func(c *ConduitDialConfig) {
-		c.RPCHandler = newConduitRPCHandler(handler, "hub-a", 0, nil)
+		c.RPCHandler = newGuardedConduitRPCHandler(handler, "hub-a", 0, nil, passAllChecker{})
 	})
 	select {
 	case resp := <-answered:
@@ -89,7 +89,7 @@ func TestConduitSessionServesRPCs(t *testing.T) {
 func TestConduitHelloWithoutRPCHandlerListsNone(t *testing.T) {
 	hub := newFakeConduitHub(t, hubStep{})
 	_, _, stop := startTestDialer(t, hub.srv.URL, clock.Real(), maxRand, func(c *ConduitDialConfig) {
-		c.Session.RPCHandler = newConduitRPCHandler(http.NotFoundHandler(), "hub-a", 0, nil)
+		c.Session.RPCHandler = newGuardedConduitRPCHandler(http.NotFoundHandler(), "hub-a", 0, nil, passAllChecker{})
 	})
 	hello := waitHello(t, hub)
 	require.NoError(t, stop())
