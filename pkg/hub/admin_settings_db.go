@@ -225,6 +225,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
 	resp.Server.Hub.TestIdentities = nil
+	// Nor is the relay-peer secret, which is never returned.
+	if c := resp.Server.Hub.Conduit; c != nil {
+		c.PeerSecret = ""
+	}
+	// Likewise the proxy driver settings (WS2).
+	hideNeverAPIWritableProxyKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -906,7 +912,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused in DB and workstation mode alike,
 	// before the Layer-0 / workstation file split below.
+	// An empty relay-peer secret is ignored; any other value is refused. A
+	// body that held nothing else is not an empty request: it still
+	// answers as an update that changes nothing.
+	sentBody := rawBody
+	rawBody = dropEmptyPeerSecret(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
+		return
+	}
+	// Test identities with admin roles write no settings (test-admin
+	// policy), in DB and workstation mode alike.
+	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
 		return
 	}
 	var req ServerConfigUpdateDBRequest
@@ -914,7 +930,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
-	if isEmptySettingsBody(rawBody) {
+	if isEmptySettingsBody(sentBody) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "No settings provided", nil)
 		return
 	}
@@ -1267,7 +1283,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if gcpIAMNext == gcpIAMCur {
 			delete(sectionDocs, gcpIAMSection)
 		} else {
-			if !requireGCPIAMHubAdmin(w, r.Context()) {
+			if !s.requireGCPIAMHubAdmin(w, r.Context()) {
 				return
 			}
 			pendingAssign := false

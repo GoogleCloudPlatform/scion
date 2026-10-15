@@ -67,8 +67,8 @@ The command refuses to run if this host already has credentials for the hub
 connection, or if its settings already name a different broker ID, unless
 --force is given. With --force those credentials and settings are replaced.
 
-The Hub endpoint is resolved as for 'register': SCION_HUB_ENDPOINT, hub.endpoint
-in settings, or --hub.
+The Hub is resolved as for every hub command: --hub, SCION_HUB_ENDPOINT, the
+hub of a linked project directory, or the current hub ('scion use --hub <name>').
 
 This command will:
 1. Check whether the local broker server is running (a warning only, so the
@@ -236,9 +236,9 @@ func runBrokerJoin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured; configure via SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or --hub flag")
+		return errHubNotConfigured
 	}
 
 	// The broker server does not have to be running yet: a provisioning

@@ -368,14 +368,14 @@ func TestDownloadSkillFile_HTTPSOnly(t *testing.T) {
 	// The httptest server uses HTTP, not HTTPS, and is not localhost from URL perspective
 	// but the URL will be http://127.0.0.1:PORT which is localhost
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{})
 	// 127.0.0.1 is localhost, so HTTP is allowed
 	if err != nil {
 		t.Errorf("expected HTTP to localhost to be allowed, got: %v", err)
 	}
 
 	// Non-localhost HTTP should fail
-	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize, "")
+	err = downloadSkillFile(context.Background(), "http://example.com/file", dest, defaultMaxFileSize, gitHubCredential{})
 	if err == nil {
 		t.Fatal("expected error for non-HTTPS non-localhost URL")
 	}
@@ -397,7 +397,7 @@ func TestDownloadSkillFile_SizeLimit(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50, "") // 50 byte limit
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, 50, gitHubCredential{}) // 50 byte limit
 	if err == nil {
 		t.Fatal("expected error for oversized file")
 	}
@@ -423,7 +423,7 @@ func TestDownloadSkillFile_CrossHostRedirect(t *testing.T) {
 	defer func() { http.DefaultTransport = origTransport }()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "")
+	err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{})
 	if err == nil {
 		t.Fatal("expected error for cross-host redirect")
 	}
@@ -927,7 +927,7 @@ func TestDownloadSkillFile_TokenNotSentToNonGitHubHost(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "test.txt")
-	if err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, "secret-token"); err != nil {
+	if err := downloadSkillFile(context.Background(), srv.URL+"/file", dest, defaultMaxFileSize, gitHubCredential{token: "secret-token", source: gitHubCredSourceDefault}); err != nil {
 		t.Fatalf("downloadSkillFile: %v", err)
 	}
 	if gotAuth != "" {

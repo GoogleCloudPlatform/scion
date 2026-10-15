@@ -127,14 +127,23 @@ func HeldClaimFromAgent(a *Agent) *ClaimHeldError {
 type StartClaimHolds struct {
 	// Default applies to every kind except create and stop.
 	Default time.Duration
-	// Create applies to create and stop claims: a new agent has no earlier
-	// session to protect, and a stop has no start to wait for.
+	// Create applies to create claims: a new agent has no earlier session
+	// to protect.
 	Create time.Duration
+	// Stop applies to stop claims (a queued stop being applied): a stop
+	// has no start to wait for. Zero means Create, as before Stop existed.
+	Stop time.Duration
 }
 
 // For returns the hold for kind.
 func (h StartClaimHolds) For(kind StartClaimKind) time.Duration {
-	if kind == StartClaimCreate || kind == StartClaimStop {
+	switch kind {
+	case StartClaimCreate:
+		return h.Create
+	case StartClaimStop:
+		if h.Stop > 0 {
+			return h.Stop
+		}
 		return h.Create
 	}
 	return h.Default

@@ -356,12 +356,24 @@ type Server struct {
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
 	launchInstanceID string
+	// launchJournal persists this process's in-flight async launches so a
+	// restarted process can report and clean them up (launch_journal.go,
+	// launch_recovery.go; design wave 3 §1 C-a). Nil (disabled) without a
+	// state dir.
+	launchJournal *launchJournal
+	// launchDrain is the shutdown drain and recovery state
+	// (launch_drain.go; design wave 3 §1 C-c, C-e).
+	launchDrain launchDrainState
 
 	// launchTimingOverride replaces the launch sender's default retry
 	// backoffs (and, when its keepaliveInterval is positive, the per-launch
 	// keepalive interval) for every sender built on this server (see
 	// newLaunchSender). Nil in production; only tests set it.
 	launchTimingOverride *launchTimings
+
+	// launchRecoveryTTL, when positive, replaces recoveryTerminalTTL for
+	// boot recovery's sends. Zero in production; only tests set it.
+	launchRecoveryTTL time.Duration
 
 	// createSupersedeWait overrides defaultCreateSupersedeWait when
 	// positive (see beginCreateRegistration). Zero in production.
@@ -446,9 +458,19 @@ type Server struct {
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
 	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
-	// one key into a single call. Failed resolutions are not stored.
+	// one key into a single call. Failed runtime resolutions are not stored.
 	agentOwnRuntimes     sync.Map
 	agentOwnRuntimeGroup singleflight.Group
+	// savedProfileFailures memoises a saved profile that does not resolve in
+	// the loaded profile catalog, keyed by project dir and profile, and
+	// savedProfileWarned records, per project dir, agent and profile, the
+	// catalog whose failure was last logged at warn level (see
+	// ensureAgentOwnRuntime).
+	savedProfileFailures sync.Map
+	savedProfileWarned   sync.Map
+	// resolveProfileRuntime, when set, replaces VersionedSettings.ResolveRuntime
+	// in ensureAgentOwnRuntime. Tests set it to count resolutions.
+	resolveProfileRuntime func(vs *config.VersionedSettings, profile string) (config.V1RuntimeConfig, string, error)
 
 	// workspaceLocks serializes operations on shared local paths (worktree
 	// provisioning, project and agent file cleanup) with every server of
@@ -622,6 +644,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 				WorkspaceLock: srv.locks().Lock})
 		}
 	}
+	srv.launchJournal = newLaunchJournal(srv.stateDir, srv.launchInstanceID, srv.agentLifecycleLog)
 	if srv.stateDir != "" {
 		if err := srv.initStateStore(); err != nil {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
@@ -1478,6 +1501,12 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 		s.startCredentialWatcher(ctx)
 	}
 
+	// Report and clean up the async launches a previous process of this
+	// broker left in its journal (design wave 3 §1 C-c). After the hub
+	// connections start, which the reports go out on, and after auxiliary
+	// runtime discovery, which resolves their managers.
+	s.recoverLaunches()
+
 	return nil
 }
 
@@ -1577,6 +1606,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// One deadline covers both this wait and the HTTP drain below.
 	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
 	defer cancel()
+	// First refuse new creates, starts and restarts and report the async
+	// launches in flight as broker_restarted, within launchDrainMax of the
+	// same deadline (design wave 3 §1 C-e). What is not delivered by then
+	// stays in the launch journal for the next boot.
+	s.DrainLaunches(ctx, launchDrainMax)
+	defer s.launchJournal.Close()
 	if !s.startsInFlight.cancelAllAndWait(ctx) {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}

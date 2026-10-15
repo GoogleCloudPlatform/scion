@@ -594,7 +594,7 @@ func TestBootstrapBundledResources_DeletedBuiltinStaysDeleted(t *testing.T) {
 	for i := range configs.Items {
 		c := configs.Items[i]
 		c.ContentHash = "stale-" + c.Slug
-		if err := s.UpdateHarnessConfig(ctx, &c); err != nil {
+		if err := setHarnessConfigContentForTest(ctx, s, &c); err != nil {
 			t.Fatalf("stale %q: %v", c.Slug, err)
 		}
 	}
@@ -654,7 +654,7 @@ func TestBootstrapBundledResources_DeletedDefaultTemplateStaysDeleted(t *testing
 	for i := range configsBefore.Items {
 		c := configsBefore.Items[i]
 		c.ContentHash = "stale-" + c.Slug
-		if err := s.UpdateHarnessConfig(ctx, &c); err != nil {
+		if err := setHarnessConfigContentForTest(ctx, s, &c); err != nil {
 			t.Fatal(err)
 		}
 	}

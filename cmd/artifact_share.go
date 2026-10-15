@@ -52,13 +52,13 @@ Examples:
   scion artifact share scion://artifact/5f1c2d3e-... --revoke <link-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		settings, client, err := requireArtifactHubClient()
+		_, client, endpoint, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 		defer cancel()
-		return shareArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), args[0],
+		return shareArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), endpoint, args[0],
 			artifactShareTTL, artifactShareList, artifactShareRevoke)
 	},
 }

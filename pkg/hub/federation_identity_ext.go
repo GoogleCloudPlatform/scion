@@ -106,6 +106,9 @@ type FederatedUserIdentity struct {
 	displayName string
 	role        string
 	scopes      []AgentTokenScope
+	// emailVerified is the token's email_verified claim, nil when the
+	// issuer did not provide one.
+	emailVerified *bool
 }
 
 // NewFederatedUserIdentity constructs a new FederatedUserIdentity.
@@ -141,6 +144,15 @@ func (f *FederatedUserIdentity) IssuerURL() string { return f.issuerURL }
 
 // Subject returns the OIDC subject claim.
 func (f *FederatedUserIdentity) Subject() string { return f.subject }
+
+// EmailVerifiedClaim returns the token's email_verified claim and whether
+// the token carried one.
+func (f *FederatedUserIdentity) EmailVerifiedClaim() (verified, present bool) {
+	if f.emailVerified == nil {
+		return false, false
+	}
+	return *f.emailVerified, true
+}
 
 // Scopes returns the configured default scopes for this issuer.
 func (f *FederatedUserIdentity) Scopes() []AgentTokenScope { return f.scopes }
