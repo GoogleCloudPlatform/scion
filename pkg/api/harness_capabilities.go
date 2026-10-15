@@ -79,5 +79,10 @@ type HarnessAdvancedCapabilities struct {
 	Resume    CapabilityField              `json:"resume" yaml:"resume" koanf:"resume"`
 	// AgentPlugins describes native Agent Plugins install support. An empty
 	// Support (a harness-config that predates the capability) is treated as no.
+	// Harness-configs declare it in the agent-plugins.yaml bundle file
+	// (config.AgentPluginsSidecarFile), which the loaders copy here. The
+	// capabilities.agent_plugins key of config.yaml is deprecated: binaries
+	// built before it reject it (ptone/scion#5196). It is still read as the
+	// fallback when the bundle has no sidecar.
 	AgentPlugins CapabilityField `json:"agent_plugins" yaml:"agent_plugins" koanf:"agent_plugins"`
 }

@@ -147,6 +147,15 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 
 If the harness CLI in the image is older than the minimum, the harness skips plugin install with a warning and changes nothing. The claude minimum is approximate: only 2.1.296 has been tested.
 
+Each harness-config declares its support level in an `agent-plugins.yaml` file next to its `config.yaml`, for example:
+
+```yaml
+support: "partial"
+reason: "Native install via local marketplace; Codex skips sse MCP servers"
+```
+
+The file belongs to the harness-config's provisioner: `scion harness-config reset` and `scion harness-config upgrade` refresh it together with `provision.py`. A harness-config without it is reported as predating Agent Plugins support. Harness-configs from the first Agent Plugins release declared the level as `capabilities.agent_plugins` in `config.yaml`; Scion still reads that key when there is no `agent-plugins.yaml`, but it is deprecated, because hubs, brokers and CLIs built before Agent Plugins reject a `config.yaml` that contains it.
+
 ### codex
 
 - Scion keeps a local marketplace named `scion-agent-plugins` in `~/.scion/agent-plugins/` and runs `codex plugin marketplace add`, `codex plugin add <name>@scion-agent-plugins` and `codex plugin remove`. The local marketplace path does not clone or download the bundle; a fully offline install is not yet verified end to end.
@@ -275,7 +284,7 @@ These lines are logged at INFO level, so `SCION_LOG_LEVEL=warn` hides them; see 
 
 ### Old harness-configs
 
-Harness-configs installed before plugin support have no plugin code in their provisioner and no `agent_plugins` capability. Scion stages the bundles but does not install them, and the start prints:
+Harness-configs installed before plugin support have no plugin code in their provisioner and do not declare Agent Plugins support. Scion stages the bundles but does not install them, and the start prints:
 
 ```text
 agent_plugins: harness-config "codex" predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset codex for the bundled defaults, or scion harness-config upgrade codex to keep local edits)
@@ -283,7 +292,7 @@ agent_plugins: harness-config "codex" predates Agent Plugins support; plugins st
 
 To fix this:
 
-- For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts (with a backup) and adds the capability, but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
+- For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts and `agent-plugins.yaml` (with a backup), but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
 - Harness-configs stored on a Hub must be updated there: install an updated source over it with `scion harness-config install --force <source>`, or upload a fixed local copy with `scion harness-config sync <name>`.
 - Copies of a harness-config bundled inside templates must be updated too.
 
