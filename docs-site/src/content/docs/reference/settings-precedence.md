@@ -474,12 +474,15 @@ They differ in exactly one structural property, and it explains everything else:
 "`runtime_broker < hub`" is a well-formed, true statement about environment variables and a
 statement with **no truth value** about `resources`.
 
-:::note[Do not overstate the parallel — these are different execution paths]
-The three-ranks-in-one-file shape appears on both axes, but not in the same mode. The env
-injection in `pkg/agent/run.go` is gated on `!opts.BrokerMode`, so the env sub-ladder in A3 is the
-**CLI / local** path. The `resources` interleave in
-[System B](#resources-interleaves-and-cannot-be-given-one-rank) is the **broker / provisioning**
-path. Same shape, different modes, and **only one of them interleaves with the hub tier.**
+:::note[Do not overstate the parallel — same path, different shape]
+The three-ranks-in-one-file shape appears on both axes. The env injection in `pkg/agent/run.go`
+(`resolveAuthEnvOverlay`) is no longer gated on `!opts.BrokerMode`: it runs on broker starts too,
+and it only fills keys the start's env (hub-supplied values included) has not already set. The
+CLI no longer takes a non-broker path (local mode was removed); every agent now starts through a
+broker. So the env sub-ladder in A3 and the `resources` interleave in
+[System B](#resources-interleaves-and-cannot-be-given-one-rank) both run on the **broker /
+provisioning** path. They differ in shape, not in mode: the env sub-ladder collapses into one
+only-if-absent tier, and **only `resources` interleaves with the hub tier.**
 :::
 
 ### A5. Secrets rank `user` and `project` in the opposite direction
@@ -668,7 +671,8 @@ knowing which is which:
 | `ResolveHarnessConfig` | **Resolution** — the values actually injected into the agent | **Filtered.** Only the override belonging to the harness config you selected is applied. |
 | `(*Server).extractRequiredEnvKeys` | **Secret discovery** — deciding which keys must be looked up or prompted for | **Unfiltered.** Every `harness_overrides` entry on the profile is walked, whichever harness config it belongs to. |
 
-The second reader is **broker-only**: it does not run in the local, non-broker path. Its
+The second reader is **broker-only**, which since the removal of local mode covers every agent
+start. Its
 over-collection is recorded separately under
 [the required-secret scan gap](#known-gap--the-required-secret-scan-collects-keys-from-config-the-agent-will-never-use)
 — the downstream effect of a spuriously-required key has **not** been traced, so that entry
@@ -942,13 +946,13 @@ harness-config files resolved with the recorded profile and template, or from th
 digest), the registry rewrite, the pull policy or the profile override:
 
 - `requestImage`: the user's explicit request image. A plain restart replays it at the top tier, so
-  a first start and a later restart rank it identically, locally and via the Hub.
+  a first start and a later restart rank it identically.
 - `inlineImage` / `inlineImagePullPolicy`: the create-time inline values, used when the current
   request's inline config doesn't set the field.
 - `profile`: the settings profile the agent was provisioned with. Only this profile is used to look
   up the profile `harness_overrides` image and pull policy (and the settings-tier values that
-  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart,
-  local or broker. The profile a restart passes, or the one saved in `agent-info.json`, does not
+  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart.
+  The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
   then applies, as for any settings lookup without a profile. Broker start/restart also classify
   the runtime with this profile rather than the one saved in `agent-info.json`, both for the
@@ -958,7 +962,7 @@ digest), the registry rewrite, the pull policy or the profile override:
   `image_registry` prefix is applied). If the two ever disagree, the start or restart is refused
   with `409 Conflict`. Other uses of the saved profile are unchanged.
 - `template`: the template the agent was provisioned from. When a start carries no absolute
-  template path (every local restart, and every hub start or restart), the harness-config
+  template path (every Hub start or restart), the harness-config
   directories searched for the file tier come from this template.
 - `templateImage` / `templateImagePullPolicy`: read-only legacy fields. New agents record none,
   because a template no longer sets an image. For an agent provisioned before this release they
@@ -1001,10 +1005,10 @@ including reading those `agent-info.json` fields: its create-time inline image r
 tier, its saved or requested profile drives the override lookup, and the merged
 `scion-agent.json` value stands in for an unresolvable template.
 
-On a local restart, the Hub-settings tier itself is resolved against the profile the agent was
-actually created with when the restart supplies none (`opts.Profile == ""`), matching the
-broker's own restart-dispatch behavior (`agent.GetSavedProfile`) — not silently against whatever
-profile happens to be active on the machine at restart time. For the image and pull-policy tiers of an agent with
+On a restart that supplies no profile (`opts.Profile == ""`), the Runtime Broker resolves the
+Hub-settings tier against the profile the agent was actually created with
+(`agent.GetSavedProfile`), not against whatever profile happens to be active on the broker at
+restart time. For the image and pull-policy tiers of an agent with
 broker-side image provenance, the recorded provisioned profile is used instead, as described
 above.
 
@@ -1067,7 +1071,7 @@ the user's explicit request image ranks above it, and every replacement is logge
 explicitly set profile `image_pull_policy` moves up with it. Profile and settings pins are never
 baked into the record `Start` falls back to for an unresolvable template, so removing a pin takes
 effect on the next start or restart. A user's explicit image stays the top tier on every start and
-restart, locally and via the Hub. The Hub sends only the user's explicit image as the top tier
+restart. The Hub sends only the user's explicit image as the top tier
 (see above), so a template image is resolved at the template tier everywhere and the broker's
 reported image no longer freezes. The plain `harness_configs.<name>` defaults still rank below the
 template. The broker's provision-only response reports the image `Start` will run; the reincarnate
