@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -154,6 +155,31 @@ func TestReport_FailedConfirmingReapWritesLaunchStep(t *testing.T) {
 			require.Equal(t, api.LaunchCodeImagePullFailed, updated.LaunchError)
 			require.Equal(t, store.LaunchEndReasonTimedOut, updated.LaunchEndReason)
 			assertLaunchStep(t, ctx, s, a.ID, api.LaunchStepContainerCreate)
+		})
+	}
+}
+
+// TestReport_ErrorByAnotherWriter_NonFailedKeepsLaunchStep: on a row another
+// writer moved to error, only a failed report writes its step. A progress
+// report there ends the launch (409 stale_launch) and leaves the recorded
+// step.
+func TestReport_ErrorByAnotherWriter_NonFailedKeepsLaunchStep(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range stepTestLaunches {
+		t.Run(tc.name, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginStepTestLaunch(t, ctx, s, projectID, "step-error-progress", tc)
+			setRowPhaseAndMemory(t, ctx, s, a.ID, "error", "")
+
+			answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+				LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateProgress, Seq: 2,
+				Step: api.LaunchStepContainerCreate, Message: "preparing the container (image pull, volume mounts)",
+			})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusConflict, answer.HTTPStatus)
+			require.Equal(t, store.LaunchReportCodeStaleLaunch, answer.Code)
+			require.Equal(t, store.LaunchEndReasonFailed, updated.LaunchEndReason)
+			assertLaunchStep(t, ctx, s, a.ID, api.LaunchStepScheduling)
 		})
 	}
 }
