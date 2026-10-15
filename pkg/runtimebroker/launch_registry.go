@@ -64,6 +64,15 @@ type launchRecord struct {
 	ownerHub string // the connection whose answer the sender has pinned to (rule 4)
 
 	cancel context.CancelFunc
+	// shutdown cancels the launch's ctx' with errBrokerShutdown as its
+	// cause, so runLaunch reports broker_restarted instead of treating the
+	// cancel as a local stop (design wave 3 §1 C-e). Nil for records that
+	// are not async launches.
+	shutdown func()
+
+	// journal is the launch's journal entry (launch_journal.go), or nil
+	// when the launch is not journalled. Its methods are nil-safe.
+	journal *journalEntry
 
 	// ownedRun is the flat instance's ownership key of this launch's run,
 	// set before Manager.Start returns; launch cleanup finishes that run
@@ -156,6 +165,27 @@ func (r *launchRegistry) Begin(key launchKey, rec *launchRecord) (supersededDone
 	return old.done
 }
 
+// TryBegin registers rec under key only if no record holds key, and reports
+// whether it did. Unlike Begin it never replaces or cancels a record: boot
+// recovery uses it for the short slot in which it deletes a dead launch's
+// name-addressed resources, so it can never supersede or delay a newer
+// start of the name that is already registered (design wave 3 §1 C-c step
+// 5). A start that registers with Begin during the slot cancels rec and
+// waits on its done channel as for any other record; release the slot with
+// Finish.
+func (r *launchRegistry) TryBegin(key launchKey, rec *launchRecord) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.records[key] != nil {
+		return false
+	}
+	r.records[key] = rec
+	return true
+}
+
 // Handoff replaces from, the record currently held for key, with to,
 // without cancelling either and without anything to wait on: to continues
 // the same create under the name from has already waited for (an async
@@ -239,6 +269,18 @@ func (r *launchRegistry) otherRunInFlightID(key launchKey, runID string) (string
 		return rec.RunID, true
 	}
 	return "", false
+}
+
+// anyInFlight reports whether any launch or create is registered under
+// key, whatever its run or agent ID (a purge of retained files refuses
+// then, ptone/scion#4744). False for a nil registry.
+func (r *launchRegistry) anyInFlight(key launchKey) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.records[key] != nil
 }
 
 // runInFlight reports whether the launch registered under key is of run

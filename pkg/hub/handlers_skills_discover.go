@@ -162,7 +162,7 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	cachePath, err := s.fetchRemoteForImport(ctx, req.ProjectID, base)
+	cachePath, err := s.fetchRemoteForImport(ctx, store.TemplateScopeProject, req.ProjectID, base)
 	if err != nil {
 		// Never echo err: the sparse-checkout fallback shells out to git with a
 		// "https://x-access-token:<TOKEN>@github.com/..." remote, and git's stderr

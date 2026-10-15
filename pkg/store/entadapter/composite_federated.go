@@ -224,3 +224,91 @@ func (c *CompositeStore) GetFederatedUserBySubject(ctx context.Context, issuer, 
 	}
 	return u, nil
 }
+
+// LinkPendingFederatedUser links (issuer, subject) to the pending
+// federated account userID and activates it, in one transaction (see
+// store.Store.LinkPendingFederatedUser).
+//
+// Every outcome that means "another first contact got there first" returns
+// ErrAlreadyExists: the account is already active and linked, already has a
+// federation binding, the pair is already bound, an insert hits either
+// unique index, or the conditional status update finds the account no
+// longer pending. The caller then re-reads by subject.
+func (c *CompositeStore) LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*store.User, error) {
+	issuer = store.NormalizeFederatedIssuer(issuer)
+	email = store.NormalizeFederatedEmail(email)
+	if issuer == "" || strings.TrimSpace(subject) == "" || email == "" {
+		return nil, fmt.Errorf("%w: an issuer, a subject and an email are required", store.ErrInvalidInput)
+	}
+	var linked *store.User
+	err := c.WithTx(ctx, func(tx store.Store) error {
+		txc, ok := tx.(*CompositeStore)
+		if !ok {
+			return fmt.Errorf("link pending federated user: unexpected transactional store %T", tx)
+		}
+		u, err := txc.GetUser(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if !u.IsFederated() {
+			return fmt.Errorf("%w: user %s is not a federated account", store.ErrInvalidInput, userID)
+		}
+		if u.HomeIssuer == nil || *u.HomeIssuer != issuer {
+			return fmt.Errorf("%w: issuer does not match the account's home issuer", store.ErrInvalidInput)
+		}
+		if u.FederatedEmail == nil || *u.FederatedEmail != email {
+			return fmt.Errorf("%w: email does not match the account's email", store.ErrInvalidInput)
+		}
+		existing, err := txc.GetExternalIdentitiesByUserID(ctx, u.ID)
+		if err != nil {
+			return err
+		}
+		for _, b := range existing {
+			if b.Provider == store.FederationIdentityProvider {
+				return store.ErrAlreadyExists
+			}
+		}
+		if u.Status != store.UserStatusPending {
+			return fmt.Errorf("%w: the federated account is not pending", store.ErrInvalidInput)
+		}
+		if _, err := txc.GetExternalIdentity(ctx, store.FederationIdentityProvider, issuer, subject); err == nil {
+			return store.ErrAlreadyExists
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err := txc.insertFederationBinding(ctx, &store.ExternalIdentityBinding{
+			ID:       uuid.NewString(),
+			Provider: store.FederationIdentityProvider,
+			Issuer:   issuer,
+			Subject:  subject,
+			UserID:   u.ID,
+			Email:    email,
+		}); err != nil {
+			return err
+		}
+		uid, err := uuid.Parse(u.ID)
+		if err != nil {
+			return fmt.Errorf("%w: invalid user ID %q", store.ErrInvalidInput, u.ID)
+		}
+		n, err := txc.client.User.Update().
+			Where(
+				user.IDEQ(uid),
+				user.KindEQ(user.KindFederated),
+				user.StatusEQ(user.StatusPending),
+			).
+			SetStatus(user.StatusActive).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n != 1 {
+			return store.ErrAlreadyExists
+		}
+		linked, err = txc.GetUser(ctx, u.ID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return linked, nil
+}

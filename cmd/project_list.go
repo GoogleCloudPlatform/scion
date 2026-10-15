@@ -62,7 +62,8 @@ Scripts that parse the output of 'scion project list' should use
 before it listed projects across hubs, JSON included.
 
 --local flags orphaned project directories (where the workspace no longer
-exists). Use 'scion project prune' to clean them up.`,
+exists, or the recorded workspace is itself a scion .scion directory). Use
+'scion project prune' to clean them up.`,
 	RunE: runProjectList,
 }
 
@@ -464,7 +465,7 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		endpoint := c.Hubs[name].Endpoint
 		// A hub gets only a credential bound to it unless it was given with
 		// --hub or is the effective hub (hubGetsFullChain).
-		fanOut := !hubGetsFullChain(settings, endpoint, onlyHub != "")
+		fanOut := !hubGetsFullChain(endpoint, onlyHub != "")
 		if !hubUsable(settings, endpoint, fanOut) {
 			results[i].skipped = true
 			continue

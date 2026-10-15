@@ -1,0 +1,51 @@
+{
+  "profile_map": {
+    "dev": "docker"
+  },
+  "findings": [
+    {
+      "code": "field_not_valid_for_target_type",
+      "severity": "notice",
+      "path": "profiles.dev.home_storage_backend",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.home_storage_backend is not valid for runtime target type docker"
+      ]
+    },
+    {
+      "code": "field_not_valid_for_target_type",
+      "severity": "notice",
+      "path": "profiles.dev.shared_dir_size",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "profiles.dev.shared_dir_size is not valid for runtime target type docker"
+      ]
+    },
+    {
+      "code": "field_not_valid_for_target_type",
+      "severity": "notice",
+      "path": "runtimes.local.namespace",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.local.namespace is not valid"
+      ]
+    },
+    {
+      "code": "field_not_valid_for_target_type",
+      "severity": "notice",
+      "path": "runtimes.local.safe_to_evict",
+      "profiles": [
+        "dev"
+      ],
+      "message_contains": [
+        "runtimes.local.safe_to_evict is not valid"
+      ]
+    }
+  ]
+}

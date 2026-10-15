@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID, contextProjectSlug, hubFlagName = "", "", "", "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
 	contextWarned = false
 }
 
@@ -105,6 +105,16 @@ func makeDirProject(t *testing.T, endpoint string) string {
 	return root
 }
 
+// useHubForTest makes endpoint the hub of the invocation, as the --hub
+// flag would (resolveInvocationTarget leaves it in hubEndpoint), for tests
+// that call a command's RunE directly, and restores the previous value.
+func useHubForTest(t *testing.T, endpoint string) {
+	t.Helper()
+	origEP, origSrc := hubEndpoint, hubSource
+	t.Cleanup(func() { hubEndpoint, hubSource = origEP, origSrc })
+	hubEndpoint, hubSource = endpoint, ""
+}
+
 func findCommand(t *testing.T, args ...string) *cobra.Command {
 	t.Helper()
 	c, _, err := rootCmd.Find(args)
@@ -166,9 +176,10 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "directory project with an endpoint beats the context",
+			name:  "an unlinked directory project's hub.endpoint is not read: the context hub applies",
 			setup: func(t *testing.T) { makeDirProject(t, "http://dir.example.com") },
 			cmd:   []string{"list"},
+			want:  hubOnly,
 		},
 		{
 			name:  "directory project without an endpoint uses the context hub but not its project",
@@ -177,18 +188,25 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want:  hubOnly,
 		},
 		{
-			name: "global settings endpoint inside a directory project counts as the directory's",
+			name: "the global settings endpoint is not read inside a directory project",
 			setup: func(t *testing.T) {
 				writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n")
 				makeDirProject(t, "")
 			},
-			cmd: []string{"list"},
+			cmd:  []string{"list"},
+			want: hubOnly,
 		},
 		{
-			name:  "outside a project the context hub beats the global settings endpoint",
+			name:  "the global settings endpoint is not read outside a project",
 			setup: func(t *testing.T) { writeHomeGlobalSettings(t, "hub:\n  endpoint: http://global.example.com\n") },
 			cmd:   []string{"list"},
 			want:  filled,
+		},
+		{
+			name:  "with the imports off, a linked project's settings endpoint is not read",
+			setup: func(t *testing.T) { makeLinkedDirProject(t, "http://dir.example.com") },
+			cmd:   []string{"list"},
+			want:  hubOnly,
 		},
 		{
 			name:  "--global is not injected",
@@ -222,21 +240,27 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "--no-hub ignores the context",
-			setup: func(t *testing.T) { noHub = true },
-			cmd:   []string{"list"},
-		},
-		{
 			name: "server subtree ignores the context",
 			cmd:  []string{"server", "start"},
 		},
 		{
-			name: "runtime-broker subtree ignores the context",
+			name: "runtime-broker commands see the context hub",
 			cmd:  []string{"runtime-broker", "status"},
+			want: hubOnly,
 		},
 		{
-			name: "broker alias ignores the context",
+			name: "runtime-broker start (the broker process) ignores the context",
+			cmd:  []string{"runtime-broker", "start"},
+		},
+		{
+			name: "runtime-broker join sees the context hub",
+			cmd:  []string{"runtime-broker", "join"},
+			want: hubOnly,
+		},
+		{
+			name: "broker alias sees the context hub",
 			cmd:  []string{"broker", "register"},
+			want: hubOnly,
 		},
 		{
 			name: "hub auth login sees the context hub",
@@ -383,8 +407,7 @@ func TestPersistentPreRun_ContextProjectSatisfiesProjectRequirement(t *testing.T
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	assert.Equal(t, ctxTestProjectID, projectPath)
 	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.True(t, isContextProject(projectPath))
-	assert.False(t, isContextProject("some-other-ref"))
+	assert.Equal(t, targetSourceContext, projectSource)
 }
 
 // TestPersistentPreRun_AgentContainerIgnoresContext covers the acceptance
@@ -418,10 +441,12 @@ func TestCommandRequiresProject_TopLevelUse(t *testing.T) {
 	assert.True(t, commandRequiresProject(nested))
 }
 
-// TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint: a config
-// subcommand's own --global counts as --global for the hook, so the global
-// settings endpoint beats the context hub, as with the root --global.
-func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T) {
+// TestPersistentPreRun_ConfigSubcommandGlobalCountsAsGlobal: a config
+// subcommand's own --global counts as --global for the hook, as the root
+// --global does: the global project is the target and no context project
+// is injected. The hub is the current hub; the global settings'
+// hub.endpoint is not read.
+func TestPersistentPreRun_ConfigSubcommandGlobalCountsAsGlobal(t *testing.T) {
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	resetConfigSetFlags(t)
@@ -430,8 +455,11 @@ func TestPersistentPreRun_ConfigSubcommandGlobalSeesGlobalEndpoint(t *testing.T)
 
 	rootCmd.SetArgs([]string{"config", "set", "--global", "image_registry", "registry.example.test/team"})
 	require.NoError(t, rootCmd.Execute())
-	assert.Empty(t, hubEndpoint, "the context hub must not fill in under --global")
-	assert.Empty(t, hubSource)
+	assert.True(t, globalMode, "the config subcommand's --global counts as the root --global")
+	assert.Equal(t, "global", projectPath)
+	assert.Empty(t, projectSource, "no context project is injected under --global")
+	assert.Equal(t, ctxTestHub, hubEndpoint, "the current hub applies; the settings endpoint is not read")
+	assert.Equal(t, targetSourceContext, hubSource)
 }
 
 // TestPersistentPreRun_ConfigOutsideProjectKeepsError: outside any project,

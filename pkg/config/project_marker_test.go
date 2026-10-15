@@ -15,6 +15,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,6 +95,49 @@ func TestProjectMarker_ExternalProjectPath(t *testing.T) {
 	want := filepath.Join(tmpHome, ".scion", "project-configs", "my-project__550e8400", ".scion")
 	if got != want {
 		t.Errorf("ExternalProjectPath() = %q, want %q", got, want)
+	}
+}
+
+// A marker without a project slug is refused and nothing is written: no new
+// file, and an existing marker keeps its content.
+func TestWriteProjectMarker_RefusesEmptySlug(t *testing.T) {
+	const id = "550e8400-e29b-41d4-a716-446655440000"
+	for _, marker := range []*ProjectMarker{
+		{ProjectID: id, ProjectName: "Test Project"},
+		{ProjectID: id},
+		nil,
+	} {
+		dir := t.TempDir()
+		markerPath := filepath.Join(dir, DotScion)
+		err := WriteProjectMarker(markerPath, marker)
+		if !errors.Is(err, ErrEmptyProjectSlug) {
+			t.Errorf("WriteProjectMarker(%+v) error = %v, want ErrEmptyProjectSlug", marker, err)
+		}
+		if _, statErr := os.Lstat(markerPath); !os.IsNotExist(statErr) {
+			t.Errorf("WriteProjectMarker(%+v) created %s (stat err %v)", marker, markerPath, statErr)
+		}
+		if entries, readErr := os.ReadDir(dir); readErr != nil || len(entries) != 0 {
+			t.Errorf("WriteProjectMarker(%+v) left entries %v in the directory (err %v)", marker, entries, readErr)
+		}
+	}
+
+	markerPath := filepath.Join(t.TempDir(), DotScion)
+	if err := WriteProjectMarker(markerPath, &ProjectMarker{ProjectID: id, ProjectName: "p", ProjectSlug: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteProjectMarker(markerPath, &ProjectMarker{ProjectID: id}); !errors.Is(err, ErrEmptyProjectSlug) {
+		t.Errorf("overwrite with an empty slug: error = %v, want ErrEmptyProjectSlug", err)
+	}
+	after, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("existing marker changed:\nbefore: %q\nafter:  %q", before, after)
 	}
 }
 
@@ -668,6 +713,27 @@ func TestGetProjectName_ExternalDir(t *testing.T) {
 		got := GetProjectName(tt.dir)
 		if got != tt.want {
 			t.Errorf("GetProjectName(%q) = %q, want %q", tt.dir, got, tt.want)
+		}
+	}
+}
+
+func TestProjectMarker_HasCanonicalDirName(t *testing.T) {
+	for _, tc := range []struct {
+		slug, id string
+		want     bool
+	}{
+		{"my-project", "0a1b2c3d-1111-2222-3333-444455556666", true},
+		{"a", "x", true},
+		{"", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"My-Project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project-", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my/project", "0a1b2c3d-1111-2222-3333-444455556666", false},
+		{"my-project", "", false},
+		{"my-project", "bad id!", false},
+	} {
+		m := ProjectMarker{ProjectID: tc.id, ProjectSlug: tc.slug}
+		if got := m.HasCanonicalDirName(); got != tc.want {
+			t.Errorf("HasCanonicalDirName(slug %q, id %q) = %v, want %v", tc.slug, tc.id, got, tc.want)
 		}
 	}
 }

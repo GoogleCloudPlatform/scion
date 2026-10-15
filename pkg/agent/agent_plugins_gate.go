@@ -167,7 +167,7 @@ func agentPluginsCapabilityMissing(h api.Harness) bool {
 func unsupportedAgentPluginsMessage(harnessName string, h api.Harness) string {
 	c := h.AdvancedCapabilities().AgentPlugins
 	if c.Support == "" {
-		return fmt.Sprintf("agent_plugins: harness-config %q predates Agent Plugins support; plugins staged but not installed (reinstall it with scion harness-config install --force)", harnessName)
+		return fmt.Sprintf("agent_plugins: harness-config %q predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset %s for the bundled defaults, or scion harness-config upgrade %s to keep local edits)", harnessName, harnessName, harnessName)
 	}
 	reason := c.Reason
 	if reason == "" {

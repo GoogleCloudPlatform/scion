@@ -416,6 +416,15 @@ type QuotaSettings struct {
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
 }
 
+// HubObservabilitySettings holds the Layer-1 switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset and keeps the rule that applied before the switch existed. Both
+// apply at the next hub start.
+type HubObservabilitySettings struct {
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty"`
+	TracingEnabled *bool `json:"tracing_enabled,omitempty"`
+}
+
 // GCPIAMSettings holds the Layer-1 GCP service-account permission-check
 // settings. Both keys are reloadable: a saved value is applied on every hub
 // replica without a restart. Values are validated on save; a stored value
@@ -494,7 +503,7 @@ type ProfilingSettings struct {
 //
 // DB-only (runtime state), no settings.yaml representation: experiment names
 // contain dots, and koanf uses "." as its key delimiter, so a koanf-backed
-// map keyed by experiment name would split "web.terminal_workspace" into
+// map keyed by experiment name would split "web.agent_edit" into
 // nested keys (ptone/scion#2217).
 type ExperimentsSettings struct {
 	Overrides map[string]bool `json:"overrides,omitempty"`

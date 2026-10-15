@@ -405,6 +405,37 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     vi.unstubAllGlobals();
   });
 
+  it('renders Name before the Start from chooser, with or without a template', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE, SHARED_TEMPLATE] });
+    element = el;
+
+    const nameFirst = (): boolean => {
+      const name = q(el, '#name');
+      const startFrom = q(el, '#startFrom');
+      expect(name).not.toBeNull();
+      expect(startFrom).not.toBeNull();
+      return Boolean(name!.compareDocumentPosition(startFrom!) & Node.DOCUMENT_POSITION_FOLLOWING);
+    };
+
+    expect(nameFirst()).toBe(true);
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    expect(nameFirst()).toBe(true);
+  });
+
+  it('gives the Name field initial focus once the form renders', async () => {
+    const proto = (customElements.get('sl-input')?.prototype ?? HTMLElement.prototype) as {
+      focus: (options?: FocusOptions) => void;
+    };
+    const focusSpy = vi.spyOn(proto, 'focus');
+
+    const { el } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    const name = q(el, '#name');
+    expect(name).not.toBeNull();
+    expect(focusSpy.mock.contexts[0]).toBe(name);
+  });
+
   it('defaults to Blank with Shared workspace directory, listing templates', async () => {
     const { el, requests } = await createForm({ templates: [GIT_TEMPLATE, SHARED_TEMPLATE] });
     element = el;

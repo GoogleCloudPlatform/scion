@@ -59,6 +59,10 @@
     "harness_configs": [
       "harness_configs"
     ],
+    "hub_observability": [
+      "server.hub.observability.metrics_enabled",
+      "server.hub.observability.tracing_enabled"
+    ],
     "lifecycle": [
       "server.hub.auto_suspend_stalled",
       "server.hub.stalled_threshold",
@@ -157,14 +161,14 @@
     "server.message_broker",
     "server.plugins",
     "server.native_chat",
-    "server.hub.async_agent_launch",
     "server.hub.launch_timeout",
     "server.hub.launch_keepalive_seconds",
     "server.hub.perf_trace",
     "server.hub.membership_sweep_report_only",
     "server.hub.missing_agent_grace",
     "server.hub.conduit",
-    "server.hub.port_proxy"
+    "server.hub.port_proxy",
+    "server.relay"
   ],
   "file_keys": [
     "active_profile",

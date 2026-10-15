@@ -134,6 +134,11 @@ func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
 	return c.entry.ResolvedDelivery()
 }
 
+// ReadySpec returns the config's ready block with defaults applied.
+func (c *ContainerScriptHarness) ReadySpec() api.ReadySpec {
+	return c.entry.ResolvedReady()
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
@@ -602,6 +607,37 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 
 	if err := writeHookWrapper(agentHome, bundleContainerPath); err != nil {
 		return fmt.Errorf("stage lifecycle hook wrapper: %w", err)
+	}
+	return nil
+}
+
+// SetManifestAgentWorkspace records containerWorkspace as agent_workspace in
+// the manifest staged under agentHome. The provisioner runs inside the
+// container, where the workspace is mounted at a container path (for example
+// /repo-root/<relative path> for a worktree under the repo root) rather than
+// at the host path Provision receives, so Start calls this once the
+// container-side workspace is known. A missing manifest (no container-script
+// bundle staged) is not an error.
+func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
+	manifestPath := filepath.Join(agentHome, ".scion", "harness", "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read manifest.json: %w", err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest.json: %w", err)
+	}
+	manifest.AgentWorkspace = containerWorkspace
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil
 }

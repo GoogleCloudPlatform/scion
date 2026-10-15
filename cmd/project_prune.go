@@ -32,8 +32,9 @@ var projectPruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Remove orphaned project configs",
 	Long: `Detect and remove project configs in ~/.scion/project-configs/ whose
-workspaces no longer exist. This cleans up leftover configuration from
-deleted or moved projects.
+workspaces no longer exist, or whose recorded workspace is itself a scion
+.scion directory. This cleans up leftover configuration from deleted or
+moved projects.
 
 Any running agent containers belonging to orphaned projects will be stopped
 and removed before the project config is deleted.

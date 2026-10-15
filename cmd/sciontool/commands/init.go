@@ -1005,15 +1005,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	}, 1)
 
 	// Start a new harness-readiness run before tmux starts: drop the previous
-	// run's files and record a fresh nonce and mode. The agent runtime waits
-	// on these before pasting a buffered message. Failure only means the
-	// runtime falls back to its session-age check, so it is not fatal.
-	readyNonce, err := writeInitRunFile(os.Getenv("SCION_HARNESS"))
+	// run's files and record a fresh nonce and the ready spec the broker
+	// passed in. The agent runtime waits on these before pasting a buffered
+	// message. Failure only means the runtime falls back to its session-age
+	// check, so it is not fatal.
+	readySpec := hooks.LoadReadySpec(os.Getenv)
+	readyNonce, err := writeInitRunFile(readySpec)
 	if err != nil {
 		log.Warn("Harness readiness: writing init-run file: %v", err)
 		readyNonce = ""
 	}
-	readyMode := hooks.HarnessReadyMode(os.Getenv("SCION_HARNESS"))
+	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1113,7 +1115,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 			Nonce:         readyNonce,
 			Mode:          readyMode,
 			Start:         harnessLaunchedAt,
-			MarkerReady:   harnessReadyMarkerMatches,
+			Settle:        readySpec.Settle,
+			Deadline:      readySpec.Timeout,
+			MarkerTime:    harnessReadyMarkerTime,
 			LocalActivity: statusHandler.CurrentActivity,
 			ReplaceLocal:  statusHandler.ReplaceActivityIf,
 		}
@@ -3213,21 +3217,13 @@ func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, c
 // resolveIsSharedGitWorkspace returns true when the agent is in a shared-plain
 // git workspace and should configure git credentials accordingly.
 //
-// Prefers the new canonical workspace mode env vars (SCION_WORKSPACE_MODE +
-// SCION_WORKSPACE_GIT) emitted by brokers >= workspace-mode-env release.
-// Falls back to the legacy SCION_SHARED_WORKSPACE var for older broker versions
-// that don't yet emit the new vars.
-//
-// Deprecated: SCION_SHARED_WORKSPACE — use SCION_WORKSPACE_MODE + SCION_WORKSPACE_GIT.
-// Removal is tracked in https://github.com/ptone/scion/issues/575.
+// SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT are the only inputs. When
+// SCION_WORKSPACE_MODE is absent (for example, a broker that predates it), the
+// workspace is not treated as a shared git workspace. The legacy
+// SCION_SHARED_WORKSPACE var was removed (ptone/scion#575) and is ignored.
 func resolveIsSharedGitWorkspace() bool {
-	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
-		// New path: broker emits canonical workspace mode vars.
-		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
-		return workspaceMode == "shared-plain" && util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
-	}
-	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
-	return util.ParseBoolEnv("SCION_SHARED_WORKSPACE", false)
+	return os.Getenv("SCION_WORKSPACE_MODE") == "shared-plain" &&
+		util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
 }
 
 // errSharedWorkspaceGitPrivilegeDropRequired is returned when

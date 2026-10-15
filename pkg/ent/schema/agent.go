@@ -265,9 +265,9 @@ func (Agent) Fields() []ent.Field {
 
 		// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
 		// launch_async_opt_in records whether the client that created (or is
-		// finalizing) this agent opted into non-blocking launch. The Hub flag
-		// hub.asyncAgentLaunch is the kill switch; this is the per-request
-		// half of the gate.
+		// finalizing) this agent opted into non-blocking launch. The Hub
+		// experiment hub.async_agent_launch is the switch; this is the
+		// per-request half of the gate.
 		field.Bool("launch_async_opt_in").
 			Default(false),
 		// launch_id is the current or most recent launch's identity. It is
@@ -369,6 +369,14 @@ func (Agent) Fields() []ent.Field {
 		// agent that has ever run is never treated as an incomplete create
 		// again, whatever happens to it later.
 		field.String("launch_error").
+			Optional().
+			Default(""),
+		// launch_cause is the fixed runtime cause code
+		// (api.BrokerRuntimeCause*, e.g. runtime_forbidden) a broker's
+		// failed launch report gave for the runtime_error in launch_error
+		// (ptone/scion#4666), or "". It is written with launch_error by a
+		// failed report and cleared wherever launch_error is cleared.
+		field.String("launch_cause").
 			Optional().
 			Default(""),
 

@@ -283,7 +283,7 @@ func (e *agentKeysEventSpy) PublishAgentPorts(_ context.Context, _ *store.Agent)
 func (e *agentKeysEventSpy) PublishAllowListChanged(_ context.Context, _, _ string) {
 	e.record("PublishAllowListChanged")
 }
-func (e *agentKeysEventSpy) PublishInviteChanged(_ context.Context, _, _, _ string) {
+func (e *agentKeysEventSpy) PublishInviteChanged(_ context.Context, _, _ string) {
 	e.record("PublishInviteChanged")
 }
 func (e *agentKeysEventSpy) PublishDispatchDone(_ context.Context, _ string) {

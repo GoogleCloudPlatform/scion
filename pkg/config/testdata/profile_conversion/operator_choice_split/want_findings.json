@@ -1,0 +1,8 @@
+{
+  "profile_map": {
+    "fast": "k8s-agents-fast",
+    "other": "k8s-agents",
+    "slow": "k8s-agents"
+  },
+  "findings": []
+}

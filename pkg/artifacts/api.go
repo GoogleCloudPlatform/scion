@@ -91,6 +91,11 @@ type ArtifactResponse struct {
 	// under the artifact's lock and can still be refused, for example for an
 	// existing admin grant or a concurrent move.
 	CanGrantReview bool `json:"canGrantReview,omitempty"`
+	// ScopeDeleted, on a GET of the artifact or of one of its versions, is
+	// true when the artifact's home project no longer exists, as on list
+	// rows. It is advisory: when the host cannot tell, it is left unset
+	// (see scopeDeleted).
+	ScopeDeleted bool `json:"scopeDeleted,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an

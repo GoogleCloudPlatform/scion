@@ -536,7 +536,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			writeError(w, http.StatusBadRequest, "bad_request", "scopeRef must be a project id")
 			return
 		}
-		if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
+		if !canCreateIn(ctx, s.host, scope) {
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}

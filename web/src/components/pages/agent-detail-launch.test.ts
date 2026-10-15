@@ -161,6 +161,27 @@ describe('agent page for a create that did not complete', () => {
     );
   });
 
+  it('shows no cause line when the launch has no cause', () => {
+    const host = renderBanner(failed);
+    expect(host.querySelector('[data-testid="launch-error-cause"]')).toBeNull();
+  });
+
+  it('shows the runtime cause the hub reported', () => {
+    const host = renderBanner(
+      makeAgent({
+        phase: 'error',
+        message: 'launching: Failed to create agent',
+        launch: failedLaunch({ cause: 'runtime_forbidden' }),
+      })
+    );
+    expect(text(host.querySelector('[data-testid="launch-error-code"]'))).toBe(
+      'runtime_error — failed'
+    );
+    expect(text(host.querySelector('[data-testid="launch-error-cause"]'))).toBe(
+      'Cause: runtime forbidden'
+    );
+  });
+
   it('shows the template and task to create it again with', () => {
     const banner = renderBanner(failed).querySelector('.error-recreate');
 

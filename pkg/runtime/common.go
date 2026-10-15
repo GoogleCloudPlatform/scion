@@ -303,8 +303,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	hostHome, _ := os.UserHomeDir()
 	expandPath := func(path string, isTarget bool) string {
-		// Expand environment variables first (e.g., ${GOPATH}, $HOME)
-		expanded, _ := util.ExpandEnv(path)
+		// Expand environment variables first (e.g., ${GOPATH}, $HOME).
+		// Mount paths are visible to the agent, so names refused for
+		// agents expand to empty.
+		expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
+		for _, name := range refused {
+			slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		}
 
 		// Then handle tilde expansion
 		if strings.HasPrefix(expanded, "~/") {
@@ -611,7 +616,9 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 		if len(parts) == 2 {
 			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
-		} else {
+		} else if !util.IsAgentRefusedHostEnvName(e) {
+			// A bare name makes the container CLI copy the value from
+			// this process's env; names refused for agents never are.
 			addArg("-e", e)
 		}
 	}

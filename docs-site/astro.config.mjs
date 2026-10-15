@@ -27,6 +27,7 @@ const hostedUserGuide = {
 	label: 'User Guide',
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
+		{ label: 'Working with Several Hubs', slug: 'hosted/user/multiple-hubs' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
@@ -130,7 +131,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Local Mode',
+					label: 'Agents on Your Machine',
 					items: [
 						{ label: 'Local Configuration', slug: 'local/local-governance' },
 						{ label: 'Working with Agents', slug: 'local/agent-lifecycle' },
@@ -194,6 +195,7 @@ export default defineConfig({
 								{ label: 'Multi-Broker Setup', slug: 'hosted/ha/multi-broker' },
 								{ label: 'Identity & Access (RBAC)', slug: 'hosted/ha/permissions' },
 								{ label: 'Proxy Auth (IAP)', slug: 'hosted/ha/auth-proxy-iap' },
+								{ label: 'Separate Conduit Relays', slug: 'hosted/ha/separate-relay' },
 								{ label: 'Lifecycle Hooks', slug: 'hosted/ha/lifecycle-hooks' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
 								{ label: 'Metrics', slug: 'hosted/single-node/metrics' },
