@@ -362,6 +362,11 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 	if err != nil {
 		return nil, fmt.Errorf("failed to complete broker join: %w", err)
 	}
+	// The broker ID names the broker's state directory; refuse one that is
+	// not a single path element before saving anything.
+	if err := brokercredentials.ValidateBrokerIDPathElement(joinResp.BrokerID); err != nil {
+		return nil, fmt.Errorf("failed to complete broker join: %w", err)
+	}
 
 	// Resolve transport config from flags, then env
 	transportMode := p.TransportMode

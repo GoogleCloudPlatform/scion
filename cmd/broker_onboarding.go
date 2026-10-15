@@ -189,7 +189,7 @@ func removeDirIfEmpty(dir string) (bool, error) {
 // directory the broker keeps its state under (~/.scion).
 func brokerLocalStatePaths(globalDir, scionHome, brokerID string) []string {
 	paths := []string{daemon.GetLogPath(globalDir)}
-	if brokerID != "" && brokerID == filepath.Base(brokerID) && brokerID != "." && brokerID != ".." {
+	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
 		paths = append(paths, filepath.Join(scionHome, "runtime-broker-state", brokerID))
 	}
 	return append(paths, filepath.Join(scionHome, "cache", "templates"))
