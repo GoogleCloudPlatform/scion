@@ -310,6 +310,12 @@ type ServerConfig struct {
 	// HubID is the unique hub instance ID used for secret namespacing.
 	// If empty, secrets are looked up/stored with an empty scope ID.
 	HubID string
+	// HubIDPinned is true when HubID was configured explicitly
+	// (server.hub.hub_id or SCION_SERVER_HUB_HUBID) rather than derived from
+	// the hostname, the persisted ~/.scion/hub-id file or K_SERVICE. Every
+	// replica of one logical hub must share one pinned id. Every --test-mode
+	// level but off requires it (ValidateTestModeConfig).
+	HubIDPinned bool
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
 	// MonitoringDashboardURL is the optional external monitoring dashboard

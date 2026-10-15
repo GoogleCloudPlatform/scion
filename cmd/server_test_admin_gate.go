@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -62,7 +63,7 @@ var (
 func registerTestModeFlags(c *cobra.Command) {
 	c.Flags().StringVar(&testModeValue, testModeFlag, "",
 		"Test identity level of a designated test hub: off, member, admin or super-admin, written <level>:<hub id> (the hub id must be this hub's resolved hub id). "+
-			"Every level but off requires server.hub.class: test, a test infrastructure marker for this hub id and no --production; admin also requires a non-workstation hub, no federation and hub-local signing keys. "+
+			"Every level but off requires an explicitly configured server.hub.hub_id (or SCION_SERVER_HUB_HUBID), server.hub.class: test, a test infrastructure marker for this hub id and no --production; admin also requires a non-workstation hub, no federation and hub-local signing keys. "+
 			"A level whose requirements are not all met, or an unrecognised value, refuses to start; empty means off (do not use in production)")
 	for _, name := range removedTestFlags {
 		c.Flags().StringVar(&removedTestFlagValue, name, "", "Replaced by --"+testModeFlag)
@@ -133,6 +134,31 @@ func validateTestModeRequiresHub(hubEnabled bool) error {
 	return nil
 }
 
+// hubIDPinned reports whether the hub id was configured explicitly, in
+// server.hub.hub_id or SCION_SERVER_HUB_HUBID, rather than derived by
+// config.ResolveHubIDFromEnv from K_SERVICE or the hostname (persisted in
+// ~/.scion/hub-id). The resolved hub id is the logical hub's identity: every
+// replica of one hub must share it, which only an explicit value
+// guarantees. The env var is checked directly as well as through the
+// settings overlay, because config.ResolveHubIDFromEnv reads it directly.
+func hubIDPinned(cfg *config.GlobalConfig) bool {
+	return cfg != nil && (!cfg.Hub.IsHubIDUnconfigured() || os.Getenv(hubIDEnvVar) != "")
+}
+
+// hubIDEnvVar is the environment equivalent of server.hub.hub_id.
+const hubIDEnvVar = "SCION_SERVER_HUB_HUBID"
+
+// validateTestModeHubIDPinned refuses any --test-mode level but off when the
+// hub id is derived rather than pinned (G2). It runs right after config is
+// loaded, before the store is opened; resolveTestMode and hub.New check the
+// same condition again.
+func validateTestModeHubIDPinned(cfg *config.GlobalConfig) error {
+	if testModeRequested() && !hubIDPinned(cfg) {
+		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestModeHubIDNotPinned)
+	}
+	return nil
+}
+
 // testModeInputs are the inputs of resolveTestMode.
 type testModeInputs struct {
 	// Level and BindingHubID are the parsed --test-mode value.
@@ -143,6 +169,7 @@ type testModeInputs struct {
 	HubEnabled    bool
 	HasUserStore  bool
 	ResolvedHubID string
+	HubIDPinned   bool // the resolved hub id is configured, not derived (hubIDPinned)
 	Workstation   bool
 	HubClass      string
 	Federation    config.FederationConfig
@@ -173,10 +200,10 @@ type testModeResolution struct {
 // resolveTestMode checks every precondition of the requested level and
 // returns the hub configuration it grants. Every level but off ANDs the
 // member preconditions (G1 hub and user store, G5 no explicit
-// --production, G2 hub id binding, G4 hub class, G6 marker); admin adds G10
-// (not a workstation hub), G8 (no federation) and G7 (no shared or
-// pre-configured signing key); super-admin is refused unless the
-// test-admin policy classification is complete (G3). Any unmet
+// --production, G2 hub id binding and a pinned hub id, G4 hub class, G6
+// marker); admin adds G10 (not a workstation hub), G8 (no federation) and
+// G7 (no shared or pre-configured signing key); super-admin is refused
+// unless the test-admin policy classification is complete (G3). Any unmet
 // precondition refuses startup with a named error (hub.Err*): a level is
 // never lowered. Off returns the zero resolution. hub.New re-checks the
 // result and verifies the actual signing-key sources (G7) before it
@@ -219,6 +246,11 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 	// G2: the binding is this hub's resolved id.
 	if in.BindingHubID == "" || in.ResolvedHubID == "" || in.BindingHubID != in.ResolvedHubID {
 		return refuse(fmt.Errorf("%w: --test-mode hub id %q, resolved hub id %q", hub.ErrTestAdminHubIDMismatch, in.BindingHubID, in.ResolvedHubID))
+	}
+	// G2: the resolved id is pinned (server.hub.hub_id or
+	// SCION_SERVER_HUB_HUBID), so every replica of the hub shares it.
+	if !in.HubIDPinned {
+		return refuse(fmt.Errorf("%w: resolved hub id %q", hub.ErrTestModeHubIDNotPinned, in.ResolvedHubID))
 	}
 	// G4: a positive, exact hub class.
 	if !config.IsTestHubClass(in.HubClass) {
@@ -299,6 +331,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		HubEnabled:              enableHub,
 		HasUserStore:            hasStore,
 		ResolvedHubID:           hubCfg.HubID,
+		HubIDPinned:             hubCfg.HubIDPinned,
 		Workstation:             hubCfg.Workstation,
 		HubClass:                cfg.Hub.HubClass,
 		Federation:              hubCfg.Federation,

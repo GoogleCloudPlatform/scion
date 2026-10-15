@@ -84,6 +84,7 @@ func TestTestMode_MemberEachPreconditionRefused(t *testing.T) {
 		{"no hub id binding", func(in *testModeInputs) { in.BindingHubID = "" }, hub.ErrTestAdminHubIDMismatch},
 		{"binding differs from the resolved hub id", func(in *testModeInputs) { in.BindingHubID = "another-hub" }, hub.ErrTestAdminHubIDMismatch},
 		{"no resolved hub id", func(in *testModeInputs) { in.ResolvedHubID = "" }, hub.ErrTestAdminHubIDMismatch},
+		{"hub id not pinned", func(in *testModeInputs) { in.HubIDPinned = false }, hub.ErrTestModeHubIDNotPinned},
 		{"hub class absent", func(in *testModeInputs) { in.HubClass = "" }, hub.ErrTestAdminHubClassNotTest},
 		{"hub class case", func(in *testModeInputs) { in.HubClass = "Test" }, hub.ErrTestAdminHubClassNotTest},
 		{"marker absent", func(in *testModeInputs) {
@@ -256,6 +257,7 @@ func TestTestMode_CapabilityEquivalenceWithOldFlags(t *testing.T) {
 			// accepts the resolved configuration.
 			assert.NoError(t, hub.ValidateTestModeConfig(hub.ServerConfig{
 				HubID:                in.ResolvedHubID,
+				HubIDPinned:          in.HubIDPinned,
 				EnableTestIdentities: res.EnableTestIdentities,
 				TestAdminGate:        res.TestAdminGate,
 				TestMode:             res.TestMode,
@@ -298,4 +300,76 @@ func TestTestMode_DaemonParentRefuses(t *testing.T) {
 		}
 		assert.ErrorIs(t, err, tc.want, tc.args)
 	}
+}
+
+// TM-h: every level but off refuses a derived (unpinned) hub id at each cmd
+// layer, the post-config check (validateTestModeHubIDPinned) and
+// resolveTestMode, with the named error that names server.hub.hub_id; a
+// pinned id, from settings or from SCION_SERVER_HUB_HUBID, starts as
+// before, and off starts with a derived id. hub.New's re-check is
+// pkg/hub TestTestMode_NewRefusesUnpinnedHubIDAtEveryNonOffLevel.
+func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
+	t.Cleanup(resetTestModeFlags)
+	t.Setenv(hubIDEnvVar, "")
+	// buildHubServerConfig resolves a derived id, which may persist
+	// ~/.scion/hub-id: keep that out of the real home.
+	t.Setenv("HOME", t.TempDir())
+	derived := &config.GlobalConfig{}
+	pinned := &config.GlobalConfig{}
+	pinned.Hub.HubID = tiaCmdHubID
+
+	assert.False(t, hubIDPinned(derived), "no settings hub_id and no env: derived")
+	assert.False(t, hubIDPinned(nil))
+	assert.True(t, hubIDPinned(pinned), "settings hub_id")
+	assert.False(t, buildHubServerConfig(derived, "", "", nil, false, "", nil).HubIDPinned)
+	assert.True(t, buildHubServerConfig(pinned, "", "", nil, false, "", nil).HubIDPinned)
+
+	for _, level := range []hub.TestMode{hub.TestModeMember, hub.TestModeAdmin, hub.TestModeSuperAdmin} {
+		t.Run(string(level), func(t *testing.T) {
+			t.Cleanup(resetTestModeFlags)
+			require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode="+string(level)+":"+tiaCmdHubID)))
+			// The post-config check, before the store is opened.
+			err := validateTestModeHubIDPinned(derived)
+			require.ErrorIs(t, err, hub.ErrTestModeHubIDNotPinned)
+			assert.Contains(t, err.Error(), "--test-mode="+string(level))
+			assert.Contains(t, err.Error(), "server.hub.hub_id")
+			assert.Contains(t, err.Error(), "hub_id_not_pinned")
+			assert.NoError(t, validateTestModeHubIDPinned(pinned))
+
+			// resolveTestMode.
+			in := tiaValidInputs()
+			in.Level = level
+			in.HubIDPinned = false
+			res, err := resolveTestMode(in)
+			require.ErrorIs(t, err, hub.ErrTestModeHubIDNotPinned)
+			assert.Contains(t, err.Error(), "server.hub.hub_id")
+			var named *hub.TestAdminGateError
+			require.True(t, errors.As(err, &named), "the error is named")
+			assert.Equal(t, testModeResolution{}, res, "a refused level is never lowered")
+			in.HubIDPinned = true
+			res, err = resolveTestMode(in)
+			require.NoError(t, err, "pinned: the level starts as before")
+			assert.Equal(t, level, res.TestMode.Level)
+			assert.Contains(t, res.TestMode.Preconditions, hub.TestModePreconditionHubIDPinned)
+		})
+	}
+
+	t.Run("env pins the id", func(t *testing.T) {
+		t.Cleanup(resetTestModeFlags)
+		t.Setenv(hubIDEnvVar, tiaCmdHubID)
+		assert.True(t, hubIDPinned(derived))
+		require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, "--hosted", "--test-mode=member:"+tiaCmdHubID)))
+		assert.NoError(t, validateTestModeHubIDPinned(derived))
+	})
+
+	t.Run("off starts with a derived id", func(t *testing.T) {
+		for _, args := range [][]string{nil, {"--test-mode=off"}, {"--test-mode="}} {
+			resetTestModeFlags()
+			require.NoError(t, validateTestModeFlagsEarly(tiaStartCmd(t, args...)), args)
+			assert.NoError(t, validateTestModeHubIDPinned(derived), args)
+			res, err := resolveTestMode(testModeInputs{Level: testModeLevel, ResolvedHubID: "derived-id"})
+			require.NoError(t, err, args)
+			assert.Equal(t, testModeResolution{}, res, args)
+		}
+	})
 }

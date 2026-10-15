@@ -289,6 +289,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateHostedHAPreflight(cfg); err != nil {
 		return err
 	}
+	if err := validateTestModeHubIDPinned(cfg); err != nil {
+		return err
+	}
 	if err := validateServerPreflight(cfg); err != nil {
 		return err
 	}
@@ -2453,6 +2456,7 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
 	return hub.ServerConfig{
 		HubID:                        cfg.Hub.ResolveHubID(),
+		HubIDPinned:                  hubIDPinned(cfg),
 		HubName:                      cfg.Hub.ResolveHubName(),
 		DisableLegacyStorageFallback: cfg.Hub.DisableLegacyStorageFallback,
 		Port:                         cfg.Hub.Port,
