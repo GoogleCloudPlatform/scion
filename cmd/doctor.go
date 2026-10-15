@@ -362,8 +362,8 @@ func (r *doctorReport) platformHealthSection(ph doctorPlatformHealth) {
 
 // localSettingsChecks runs the checks that read only this machine: D5
 // NFS mounts, D10 Kubernetes block ServiceAccount, D11 server hub endpoint
-// deprecation (server hosts only), D6 telemetry, D7 container images and
-// D8 broker credentials. They are reported with the
+// deprecation (server hosts only), D12 inotify limits, D6 telemetry, D7
+// container images and D8 broker credentials. They are reported with the
 // Hub checks, as before.
 func (r *doctorReport) localSettingsChecks() {
 	// D5: NFS Mount Status (local check against this host's global
@@ -398,6 +398,10 @@ func (r *doctorReport) localSettingsChecks() {
 	if d11, ok := checkDoctorServerHubEndpointHere(); ok {
 		r.add(&r.HubChecks, d11)
 	}
+
+	// D12: inotify limits (local check, read-only): the per-user limits
+	// that a Docker or Podman broker's agents share, and their current use.
+	r.add(&r.HubChecks, checkDoctorInotifyLimitsHere())
 
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())
