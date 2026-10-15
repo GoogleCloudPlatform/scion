@@ -218,6 +218,12 @@ func (_u *GroupMembershipUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if _u.mutation.AddedByCleared() {
 		_spec.ClearField(groupmembership.FieldAddedBy, field.TypeString)
 	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(groupmembership.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(groupmembership.FieldIssuanceID, field.TypeString)
+	}
 	if _u.mutation.GroupCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
@@ -541,6 +547,12 @@ func (_u *GroupMembershipUpdateOne) sqlSave(ctx context.Context) (_node *GroupMe
 	}
 	if _u.mutation.AddedByCleared() {
 		_spec.ClearField(groupmembership.FieldAddedBy, field.TypeString)
+	}
+	if _u.mutation.ExpiresAtCleared() {
+		_spec.ClearField(groupmembership.FieldExpiresAt, field.TypeTime)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(groupmembership.FieldIssuanceID, field.TypeString)
 	}
 	if _u.mutation.GroupCleared() {
 		edge := &sqlgraph.EdgeSpec{

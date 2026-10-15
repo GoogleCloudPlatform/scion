@@ -535,6 +535,7 @@ func entHarnessConfigToStore(e *ent.HarnessConfig) *store.HarnessConfig {
 		StorageURI:           e.StorageURI,
 		StorageBucket:        e.StorageBucket,
 		StoragePath:          e.StoragePath,
+		Layout:               e.Layout,
 		SourceURL:            e.SourceURL,
 		Status:               string(e.Status),
 		ImageStatus:          string(e.ImageStatus),
@@ -583,6 +584,7 @@ func (s *TemplateStore) CreateHarnessConfig(ctx context.Context, hc *store.Harne
 		SetStorageURI(hc.StorageURI).
 		SetStorageBucket(hc.StorageBucket).
 		SetStoragePath(hc.StoragePath).
+		SetLayout(hc.Layout).
 		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
@@ -633,7 +635,7 @@ func (s *TemplateStore) GetHarnessConfigBySlug(ctx context.Context, slug, scope,
 
 // UpdateHarnessConfig updates an existing harness config's metadata. It
 // leaves the content columns (files, content_hash, harness, config, status)
-// and the storage columns (storage_path, storage_bucket, storage_uri) alone,
+// and the storage columns (layout, storage_path, storage_bucket, storage_uri) alone,
 // and never writes built_image; see store.HarnessConfigStore.UpdateHarnessConfig.
 func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.HarnessConfig) error {
 	uid, err := parseUUID(hc.ID)
@@ -669,9 +671,12 @@ func (s *TemplateStore) UpdateHarnessConfig(ctx context.Context, hc *store.Harne
 }
 
 // UpdateHarnessConfigContent writes the content columns of hc only if the
-// stored row still has the expected content hash. It is one conditional
-// UPDATE (UPDATE ... WHERE id = ? AND content_hash = ?), so two concurrent
-// commits that read the same row cannot both succeed (ptone/scion#4219).
+// stored row still has the expected content hash, layout and storage path.
+// It is one conditional UPDATE (UPDATE ... WHERE id = ? AND content_hash = ?
+// AND layout = ? AND storage_path = ?), so two concurrent commits that read
+// the same row cannot both succeed, and a commit that read the row before it
+// moved (a layout migration or a storage migration) cannot write the old
+// location back (ptone/scion#4219).
 func (s *TemplateStore) UpdateHarnessConfigContent(ctx context.Context, hc *store.HarnessConfig, expected store.HarnessConfigContentPrecondition) error {
 	uid, err := parseUUID(hc.ID)
 	if err != nil {
@@ -684,6 +689,14 @@ func (s *TemplateStore) UpdateHarnessConfigContent(ctx context.Context, hc *stor
 	if expected.ContentHash == "" {
 		hashMatches = entharnessconfig.Or(entharnessconfig.ContentHashEQ(""), entharnessconfig.ContentHashIsNil())
 	}
+	layoutMatches := entharnessconfig.LayoutEQ(expected.Layout)
+	if expected.Layout == "" {
+		layoutMatches = entharnessconfig.Or(entharnessconfig.LayoutEQ(""), entharnessconfig.LayoutIsNil())
+	}
+	pathMatches := entharnessconfig.StoragePathEQ(expected.StoragePath)
+	if expected.StoragePath == "" {
+		pathMatches = entharnessconfig.Or(entharnessconfig.StoragePathEQ(""), entharnessconfig.StoragePathIsNil())
+	}
 
 	// Only the columns a commit owns are written: the files, what is
 	// derived from them, where they are stored, the lifecycle status and the
@@ -692,13 +705,14 @@ func (s *TemplateStore) UpdateHarnessConfigContent(ctx context.Context, hc *stor
 	// built_image to UpdateHarnessConfigBuiltImage, so a commit computed
 	// from an older read cannot revert either.
 	n, err := s.client.HarnessConfig.Update().
-		Where(entharnessconfig.IDEQ(uid), hashMatches).
+		Where(entharnessconfig.IDEQ(uid), hashMatches, layoutMatches, pathMatches).
 		SetHarness(hc.Harness).
 		SetConfig(marshalJSONString(hc.Config)).
 		SetContentHash(hc.ContentHash).
 		SetStorageURI(hc.StorageURI).
 		SetStorageBucket(hc.StorageBucket).
 		SetStoragePath(hc.StoragePath).
+		SetLayout(hc.Layout).
 		SetFiles(marshalJSONString(hc.Files)).
 		SetSourceURL(hc.SourceURL).
 		SetStatus(entharnessconfig.Status(hc.Status)).
@@ -837,6 +851,12 @@ func (s *TemplateStore) ListHarnessConfigs(ctx context.Context, filter store.Har
 			entharnessconfig.NameContainsFold(filter.Search),
 			entharnessconfig.DescriptionContainsFold(filter.Search),
 		))
+	}
+	if filter.StoragePath != "" {
+		query.Where(entharnessconfig.StoragePathEQ(filter.StoragePath))
+	}
+	if filter.StoragePathPrefix != "" {
+		query.Where(entharnessconfig.StoragePathHasPrefix(filter.StoragePathPrefix))
 	}
 
 	totalCount := 0

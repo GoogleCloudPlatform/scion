@@ -351,6 +351,21 @@ func LaunchCause(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchCause, v))
 }
 
+// LaunchPriorPhase applies equality check predicate on the "launch_prior_phase" field. It's identical to LaunchPriorPhaseEQ.
+func LaunchPriorPhase(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchPriorPhase, v))
+}
+
+// LaunchRevokeOnFail applies equality check predicate on the "launch_revoke_on_fail" field. It's identical to LaunchRevokeOnFailEQ.
+func LaunchRevokeOnFail(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchRevokeOnFail, v))
+}
+
+// LaunchResumePhase applies equality check predicate on the "launch_resume_phase" field. It's identical to LaunchResumePhaseEQ.
+func LaunchResumePhase(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchResumePhase, v))
+}
+
 // DeletionState applies equality check predicate on the "deletion_state" field. It's identical to DeletionStateEQ.
 func DeletionState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDeletionState, v))
@@ -4074,6 +4089,166 @@ func LaunchCauseEqualFold(v string) predicate.Agent {
 // LaunchCauseContainsFold applies the ContainsFold predicate on the "launch_cause" field.
 func LaunchCauseContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchCause, v))
+}
+
+// LaunchPriorPhaseEQ applies the EQ predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseNEQ applies the NEQ predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseIn applies the In predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchPriorPhase, vs...))
+}
+
+// LaunchPriorPhaseNotIn applies the NotIn predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchPriorPhase, vs...))
+}
+
+// LaunchPriorPhaseGT applies the GT predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseGTE applies the GTE predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseLT applies the LT predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseLTE applies the LTE predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseContains applies the Contains predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseHasPrefix applies the HasPrefix predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseHasSuffix applies the HasSuffix predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseIsNil applies the IsNil predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchPriorPhase))
+}
+
+// LaunchPriorPhaseNotNil applies the NotNil predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchPriorPhase))
+}
+
+// LaunchPriorPhaseEqualFold applies the EqualFold predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchPriorPhase, v))
+}
+
+// LaunchPriorPhaseContainsFold applies the ContainsFold predicate on the "launch_prior_phase" field.
+func LaunchPriorPhaseContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchPriorPhase, v))
+}
+
+// LaunchRevokeOnFailEQ applies the EQ predicate on the "launch_revoke_on_fail" field.
+func LaunchRevokeOnFailEQ(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchRevokeOnFail, v))
+}
+
+// LaunchRevokeOnFailNEQ applies the NEQ predicate on the "launch_revoke_on_fail" field.
+func LaunchRevokeOnFailNEQ(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchRevokeOnFail, v))
+}
+
+// LaunchResumePhaseEQ applies the EQ predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseNEQ applies the NEQ predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseIn applies the In predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchResumePhase, vs...))
+}
+
+// LaunchResumePhaseNotIn applies the NotIn predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchResumePhase, vs...))
+}
+
+// LaunchResumePhaseGT applies the GT predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseGTE applies the GTE predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseLT applies the LT predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseLTE applies the LTE predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseContains applies the Contains predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseHasPrefix applies the HasPrefix predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseHasSuffix applies the HasSuffix predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseIsNil applies the IsNil predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchResumePhase))
+}
+
+// LaunchResumePhaseNotNil applies the NotNil predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchResumePhase))
+}
+
+// LaunchResumePhaseEqualFold applies the EqualFold predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchResumePhase, v))
+}
+
+// LaunchResumePhaseContainsFold applies the ContainsFold predicate on the "launch_resume_phase" field.
+func LaunchResumePhaseContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchResumePhase, v))
 }
 
 // DeletionStateEQ applies the EQ predicate on the "deletion_state" field.

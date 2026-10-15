@@ -38,6 +38,8 @@ const (
 	FieldMembershipKind = "membership_kind"
 	// FieldSourceRuleID holds the string denoting the source_rule_id field in the database.
 	FieldSourceRuleID = "source_rule_id"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
 	// EdgeRoleDefinition holds the string denoting the role_definition edge name in mutations.
 	EdgeRoleDefinition = "role_definition"
 	// Table holds the table name of the rolebinding in the database.
@@ -65,6 +67,7 @@ var Columns = []string{
 	FieldCreated,
 	FieldMembershipKind,
 	FieldSourceRuleID,
+	FieldIssuanceID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -196,6 +199,11 @@ func ByMembershipKind(opts ...sql.OrderTermOption) OrderOption {
 // BySourceRuleID orders the results by the source_rule_id field.
 func BySourceRuleID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSourceRuleID, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
 }
 
 // ByRoleDefinitionField orders the results by role_definition field.

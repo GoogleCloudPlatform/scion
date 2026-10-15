@@ -190,6 +190,9 @@ func (s *MutationAuditStore) ListMutationAudits(ctx context.Context, filter stor
 	if filter.CorrelationID != "" {
 		query = query.Where(mutationaudit.CorrelationIDEQ(filter.CorrelationID))
 	}
+	if filter.ExecutorID != "" {
+		query = query.Where(mutationaudit.ExecutorIDEQ(filter.ExecutorID))
+	}
 	if !filter.Since.IsZero() {
 		query = query.Where(mutationaudit.TimestampGTE(filter.Since))
 	}

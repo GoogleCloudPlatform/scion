@@ -155,6 +155,20 @@ func (_c *RoleBindingCreate) SetNillableSourceRuleID(v *uuid.UUID) *RoleBindingC
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *RoleBindingCreate) SetIssuanceID(v string) *RoleBindingCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *RoleBindingCreate) SetNillableIssuanceID(v *string) *RoleBindingCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *RoleBindingCreate) SetID(v uuid.UUID) *RoleBindingCreate {
 	_c.mutation.SetID(v)
@@ -330,6 +344,10 @@ func (_c *RoleBindingCreate) createSpec() (*RoleBinding, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SourceRuleID(); ok {
 		_spec.SetField(rolebinding.FieldSourceRuleID, field.TypeUUID, value)
 		_node.SourceRuleID = &value
+	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(rolebinding.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
 	}
 	if nodes := _c.mutation.RoleDefinitionIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -560,6 +578,9 @@ func (u *RoleBindingUpsertOne) UpdateNewValues() *RoleBindingUpsertOne {
 		}
 		if _, exists := u.create.mutation.SourceRuleID(); exists {
 			s.SetIgnore(rolebinding.FieldSourceRuleID)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(rolebinding.FieldIssuanceID)
 		}
 	}))
 	return u
@@ -941,6 +962,9 @@ func (u *RoleBindingUpsertBulk) UpdateNewValues() *RoleBindingUpsertBulk {
 			}
 			if _, exists := b.mutation.SourceRuleID(); exists {
 				s.SetIgnore(rolebinding.FieldSourceRuleID)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(rolebinding.FieldIssuanceID)
 			}
 		}
 	}))

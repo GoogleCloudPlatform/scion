@@ -41,6 +41,8 @@ type RoleBinding struct {
 	MembershipKind *string `json:"membership_kind,omitempty"`
 	// SourceRuleID holds the value of the "source_rule_id" field.
 	SourceRuleID *uuid.UUID `json:"source_rule_id,omitempty"`
+	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
+	IssuanceID *string `json:"issuance_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the RoleBindingQuery when eager-loading is set.
 	Edges        RoleBindingEdges `json:"edges"`
@@ -74,7 +76,7 @@ func (*RoleBinding) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case rolebinding.FieldRoleDefinitionID, rolebinding.FieldSourceRuleID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy, rolebinding.FieldMembershipKind:
+		case rolebinding.FieldPrincipalType, rolebinding.FieldPrincipalID, rolebinding.FieldScopeType, rolebinding.FieldScopeID, rolebinding.FieldCreatedBy, rolebinding.FieldMembershipKind, rolebinding.FieldIssuanceID:
 			values[i] = new(sql.NullString)
 		case rolebinding.FieldNotBefore, rolebinding.FieldExpiresAt, rolebinding.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -172,6 +174,13 @@ func (_m *RoleBinding) assignValues(columns []string, values []any) error {
 				_m.SourceRuleID = new(uuid.UUID)
 				*_m.SourceRuleID = *value.S.(*uuid.UUID)
 			}
+		case rolebinding.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -254,6 +263,11 @@ func (_m *RoleBinding) String() string {
 	if v := _m.SourceRuleID; v != nil {
 		builder.WriteString("source_rule_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')
 	return builder.String()

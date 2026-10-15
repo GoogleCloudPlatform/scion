@@ -364,6 +364,22 @@ type Store interface {
 	// Truncated reports whether any kind had more.
 	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
 
+	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
+	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
+	// bindings, group memberships, role definitions, invite codes and
+	// broker join tokens, in that order, each kind by ID. Only the stamp
+	// selects. At most limit rows of each kind are returned (limit <= 0:
+	// no limit); truncated reports whether any kind had more. An empty
+	// issuanceID returns ErrInvalidInput.
+	ListIssuanceStampedGrants(ctx context.Context, issuanceID string, limit int) (grants []IssuanceStampedGrant, truncated bool, err error)
+
+	// DeleteIssuanceStampedGrant deletes the row g names when it still
+	// carries issuanceID, and reports whether it deleted it (false: gone,
+	// or no longer that issuance's row, for example a join token minted
+	// again since). A role definition still referenced by any role
+	// binding is not deleted: ErrStampedRoleInUse.
+	DeleteIssuanceStampedGrant(ctx context.Context, g IssuanceStampedGrant, issuanceID string) (bool, error)
+
 	// Agent operations
 	AgentStore
 
@@ -843,17 +859,31 @@ type AgentStore interface {
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
 
-	// BeginLaunch starts a new launch for agentID. A create start claim on the
+	// BeginLaunch starts a new create launch for agentID. A create start claim on the
 	// row is linked to the new launch (see SettleEndedLaunchClaim). The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
 	// previous active launch on the row becomes implicitly superseded (its ID
-	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
-	// any other value returns an error wrapping ErrInvalidInput (start and
-	// restart are P6, design §3.13). Returns ErrInvalidPhase when the
-	// agent's current phase is not eligible for kind (P1a: phase must be
-	// created or provisioning). Returns ErrNotFound if the agent doesn't
+	// no longer matches launch_id). kind must be LaunchKindCreate; any
+	// other value returns an error wrapping ErrInvalidInput (start and
+	// restart use BeginStartLaunch). It resets launch_prior_phase and
+	// launch_revoke_on_fail, so an earlier start launch's values never
+	// carry over. Returns ErrInvalidPhase when the agent's current phase is
+	// not created or provisioning. Returns ErrNotFound if the agent doesn't
 	// exist.
 	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
+
+	// BeginStartLaunch starts a new start or restart launch for agentID
+	// (ptone/scion#4669), with BeginLaunch's other rules. kind must be
+	// LaunchKindStart or LaunchKindRestart; any other value returns an error
+	// wrapping ErrInvalidInput. A start is accepted only on phase starting
+	// (the phase the start dispatch wrote); a restart on starting, running
+	// or stopped, and it moves the phase to starting, bumping state_version
+	// when that changes the phase. Any other phase returns ErrInvalidPhase.
+	// It writes opts into launch_prior_phase and launch_revoke_on_fail and
+	// leaves the resume memory (launch_resume_phase) untouched. A user
+	// start claim (for a start) or a restart claim (for a restart) on the
+	// row is linked to the new launch, so its end settles that claim.
+	BeginStartLaunch(ctx context.Context, agentID, kind string, timeout time.Duration, opts BeginLaunchOptions) (launchID string, err error)
 
 	// MarkLaunchAccepted records that a broker (owner) has claimed launchID:
 	// if owner is currently empty on the row, sets it, and if phase is
@@ -1003,12 +1033,14 @@ type AgentStore interface {
 	// agent has no active launch.
 	ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (released bool, err error)
 
-	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a create
+	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a start
 	// claim (claimID) linked to the agent's launch (the launch the claim was
-	// linked to at BeginLaunch), when that launch has ended without settling
-	// it. No-op when the launch is active, the claim changed, the claim is
-	// not linked to the agent's current launch, or the end reason settles
-	// nothing. A claim taken after a launch ended is never linked to it.
+	// linked to at BeginLaunch or BeginStartLaunch: a create claim to a create
+	// launch, a user claim to a start, a restart claim to a restart), when
+	// that launch has ended without settling it. No-op when the launch is
+	// active, the claim changed, the claim is not linked to the agent's
+	// current launch, or the end reason settles nothing. A claim taken after
+	// a launch ended is never linked to it.
 	SettleEndedLaunchClaim(ctx context.Context, agentID, claimID string) (changed bool, err error)
 
 	// ListAgentsWithStartClaim returns every non-deleted agent that holds a
@@ -1850,8 +1882,19 @@ type TemplateContentPrecondition struct {
 // ContentHash is the content hash the caller read before computing its new
 // manifest. An empty ContentHash matches a row that has never been
 // committed (no content hash yet).
+//
+// Layout and StoragePath are the storage layout and storage path the caller
+// read (ptone/scion#4219). A row can change either without changing its
+// content hash: a commit migrates a legacy row to the blob layout and a new
+// row-unique path, and the storage migration moves a legacy row to a
+// hub-namespaced path (and may then delete the old tree). A commit that read
+// the old location must not write it back, so both are part of the
+// predicate. An empty Layout matches a legacy row, and an empty StoragePath
+// matches a row without one.
 type HarnessConfigContentPrecondition struct {
 	ContentHash string
+	Layout      string
+	StoragePath string
 }
 
 // TemplateFilter defines criteria for filtering templates.
@@ -1890,8 +1933,8 @@ type HarnessConfigStore interface {
 	// UpdateHarnessConfig updates an existing harness config's metadata
 	// (name, slug, display name, description, scope, owner, source URL,
 	// image status and the audit fields). It does not write the content
-	// columns (Files, ContentHash, Harness, Config, Status, StorageURI,
-	// StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
+	// columns (Files, ContentHash, Harness, Config, Status, Layout,
+	// StorageURI, StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
 	// change only through UpdateHarnessConfigContent and
 	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
 	// cannot revert a commit.
@@ -1899,7 +1942,7 @@ type HarnessConfigStore interface {
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
 
 	// UpdateHarnessConfigContent writes the content columns of hc (Files,
-	// ContentHash, Harness, Config, Status, StorageURI, StorageBucket,
+	// ContentHash, Harness, Config, Status, Layout, StorageURI, StorageBucket,
 	// StoragePath, SourceURL, UpdatedBy) in one conditional update, only if
 	// the stored row still matches expected. It never writes the metadata
 	// columns or BuiltImage. Returns ErrHarnessConfigConflict when the row
@@ -1939,6 +1982,13 @@ type HarnessConfigFilter struct {
 	Status      string
 	ImageStatus string
 	Search      string // Full-text search on name/description
+	// StoragePath, when set, matches harness-configs whose storage path is
+	// exactly this value (used to find rows sharing a legacy path).
+	StoragePath string
+	// StoragePathPrefix, when set, matches harness-configs whose storage
+	// path starts with this value (used to find legacy rows nested under a
+	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
+	StoragePathPrefix string
 }
 
 // UserStore defines user persistence operations.

@@ -285,48 +285,60 @@ func init() {
 	agentDescLaunchCause := agentFields[64].Descriptor()
 	// agent.DefaultLaunchCause holds the default value on creation for the launch_cause field.
 	agent.DefaultLaunchCause = agentDescLaunchCause.Default.(string)
+	// agentDescLaunchPriorPhase is the schema descriptor for launch_prior_phase field.
+	agentDescLaunchPriorPhase := agentFields[65].Descriptor()
+	// agent.DefaultLaunchPriorPhase holds the default value on creation for the launch_prior_phase field.
+	agent.DefaultLaunchPriorPhase = agentDescLaunchPriorPhase.Default.(string)
+	// agentDescLaunchRevokeOnFail is the schema descriptor for launch_revoke_on_fail field.
+	agentDescLaunchRevokeOnFail := agentFields[66].Descriptor()
+	// agent.DefaultLaunchRevokeOnFail holds the default value on creation for the launch_revoke_on_fail field.
+	agent.DefaultLaunchRevokeOnFail = agentDescLaunchRevokeOnFail.Default.(bool)
+	// agentDescLaunchResumePhase is the schema descriptor for launch_resume_phase field.
+	agentDescLaunchResumePhase := agentFields[67].Descriptor()
+	// agent.DefaultLaunchResumePhase holds the default value on creation for the launch_resume_phase field.
+	agent.DefaultLaunchResumePhase = agentDescLaunchResumePhase.Default.(string)
 	// agentDescDeletionState is the schema descriptor for deletion_state field.
-	agentDescDeletionState := agentFields[65].Descriptor()
+	agentDescDeletionState := agentFields[68].Descriptor()
 	// agent.DefaultDeletionState holds the default value on creation for the deletion_state field.
 	agent.DefaultDeletionState = agentDescDeletionState.Default.(string)
 	// agentDescDeletionClaim is the schema descriptor for deletion_claim field.
-	agentDescDeletionClaim := agentFields[66].Descriptor()
+	agentDescDeletionClaim := agentFields[69].Descriptor()
 	// agent.DefaultDeletionClaim holds the default value on creation for the deletion_claim field.
 	agent.DefaultDeletionClaim = agentDescDeletionClaim.Default.(int64)
 	// agentDescDeletionCode is the schema descriptor for deletion_code field.
-	agentDescDeletionCode := agentFields[70].Descriptor()
+	agentDescDeletionCode := agentFields[73].Descriptor()
 	// agent.DefaultDeletionCode holds the default value on creation for the deletion_code field.
 	agent.DefaultDeletionCode = agentDescDeletionCode.Default.(string)
 	// agentDescDeletionError is the schema descriptor for deletion_error field.
-	agentDescDeletionError := agentFields[71].Descriptor()
+	agentDescDeletionError := agentFields[74].Descriptor()
 	// agent.DefaultDeletionError holds the default value on creation for the deletion_error field.
 	agent.DefaultDeletionError = agentDescDeletionError.Default.(string)
 	// agentDescDeletionPrior is the schema descriptor for deletion_prior field.
-	agentDescDeletionPrior := agentFields[72].Descriptor()
+	agentDescDeletionPrior := agentFields[75].Descriptor()
 	// agent.DefaultDeletionPrior holds the default value on creation for the deletion_prior field.
 	agent.DefaultDeletionPrior = agentDescDeletionPrior.Default.(string)
 	// agentDescDeletionRequest is the schema descriptor for deletion_request field.
-	agentDescDeletionRequest := agentFields[73].Descriptor()
+	agentDescDeletionRequest := agentFields[76].Descriptor()
 	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
 	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
 	// agentDescStartClaimKind is the schema descriptor for start_claim_kind field.
-	agentDescStartClaimKind := agentFields[78].Descriptor()
+	agentDescStartClaimKind := agentFields[81].Descriptor()
 	// agent.DefaultStartClaimKind holds the default value on creation for the start_claim_kind field.
 	agent.DefaultStartClaimKind = agentDescStartClaimKind.Default.(string)
 	// agentDescStartClaimState is the schema descriptor for start_claim_state field.
-	agentDescStartClaimState := agentFields[79].Descriptor()
+	agentDescStartClaimState := agentFields[82].Descriptor()
 	// agent.DefaultStartClaimState holds the default value on creation for the start_claim_state field.
 	agent.DefaultStartClaimState = agentDescStartClaimState.Default.(string)
 	// agentDescStartClaimOwner is the schema descriptor for start_claim_owner field.
-	agentDescStartClaimOwner := agentFields[80].Descriptor()
+	agentDescStartClaimOwner := agentFields[83].Descriptor()
 	// agent.DefaultStartClaimOwner holds the default value on creation for the start_claim_owner field.
 	agent.DefaultStartClaimOwner = agentDescStartClaimOwner.Default.(string)
 	// agentDescStartClaimTarget is the schema descriptor for start_claim_target field.
-	agentDescStartClaimTarget := agentFields[81].Descriptor()
+	agentDescStartClaimTarget := agentFields[84].Descriptor()
 	// agent.DefaultStartClaimTarget holds the default value on creation for the start_claim_target field.
 	agent.DefaultStartClaimTarget = agentDescStartClaimTarget.Default.(string)
 	// agentDescStartClaimLaunchID is the schema descriptor for start_claim_launch_id field.
-	agentDescStartClaimLaunchID := agentFields[86].Descriptor()
+	agentDescStartClaimLaunchID := agentFields[89].Descriptor()
 	// agent.DefaultStartClaimLaunchID holds the default value on creation for the start_claim_launch_id field.
 	agent.DefaultStartClaimLaunchID = agentDescStartClaimLaunchID.Default.(string)
 	// agentDescID is the schema descriptor for id field.
@@ -1415,16 +1427,20 @@ func init() {
 	harnessconfigDescScope := harnessconfigFields[8].Descriptor()
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
+	// harnessconfigDescLayout is the schema descriptor for layout field.
+	harnessconfigDescLayout := harnessconfigFields[13].Descriptor()
+	// harnessconfig.DefaultLayout holds the default value on creation for the layout field.
+	harnessconfig.DefaultLayout = harnessconfigDescLayout.Default.(string)
 	// harnessconfigDescBuiltImage is the schema descriptor for built_image field.
-	harnessconfigDescBuiltImage := harnessconfigFields[17].Descriptor()
+	harnessconfigDescBuiltImage := harnessconfigFields[18].Descriptor()
 	// harnessconfig.DefaultBuiltImage holds the default value on creation for the built_image field.
 	harnessconfig.DefaultBuiltImage = harnessconfigDescBuiltImage.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[22].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[23].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[23].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[24].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.
