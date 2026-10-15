@@ -116,13 +116,9 @@ func (w haltDispatchWiring) triggers() []string {
 }
 
 // matches reports whether the watcher's statuses and the fired hook
-// triggers equal the wanted ones (a nil wantStatuses skips the statuses),
-// and describes what was observed.
+// triggers equal the wanted ones, and describes what was observed.
 func (w haltDispatchWiring) matches(wantStatuses, wantTriggers []string) (bool, string) {
 	gotTriggers := w.triggers()
-	if wantStatuses == nil {
-		return assert.ObjectsAreEqual(wantTriggers, gotTriggers), fmt.Sprintf("triggers %v", gotTriggers)
-	}
 	gotStatuses, err := w.watcherStatuses()
 	if err != nil {
 		return false, fmt.Sprintf("reading notifications: %v (triggers %v)", err, gotTriggers)
@@ -143,6 +139,24 @@ func (w haltDispatchWiring) waitMatch(t *testing.T, wantStatuses, wantTriggers [
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("want statuses %v triggers %v; last saw %s", wantStatuses, wantTriggers, got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitTriggers polls the fired hook triggers on the test goroutine until
+// they equal want, failing the test with the last observation after 3s.
+// It does not read the store.
+func (w haltDispatchWiring) waitTriggers(t *testing.T, want []string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := w.triggers()
+		if assert.ObjectsAreEqual(want, got) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("want triggers %v; last saw %v", want, got)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -186,7 +200,7 @@ func TestHaltedDispatch_ErrorUpgradeOverPlainStop(t *testing.T) {
 	w.watch(t, f.agent.ID, f.project.ID, "ERROR")
 
 	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped"}))
-	w.waitMatch(t, nil, []string{"stopped"})
+	w.waitTriggers(t, []string{"stopped"})
 
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitReason: "preempted", RunID: "run-1"})
 	require.Equal(t, "halted", f.get(t).Phase)
@@ -241,7 +255,7 @@ func TestHaltedDispatch_SelfReportedStopThenRuntimeReason(t *testing.T) {
 	w.watch(t, f.agent.ID, f.project.ID, "HALTED")
 
 	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitCode": 0}))
-	w.waitMatch(t, nil, []string{"stopped"})
+	w.waitTriggers(t, []string{"stopped"})
 
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", RunID: "run-1"})
 	require.Equal(t, "halted", f.get(t).Phase)
