@@ -32,7 +32,6 @@ import (
 type templateTestState struct {
 	home        string
 	globalMode  bool
-	noHub       bool
 	autoConfirm bool
 	projectPath string
 }
@@ -41,7 +40,6 @@ func saveTemplateTestState() templateTestState {
 	return templateTestState{
 		home:        os.Getenv("HOME"),
 		globalMode:  globalMode,
-		noHub:       noHub,
 		autoConfirm: autoConfirm,
 		projectPath: projectPath,
 	}
@@ -50,7 +48,6 @@ func saveTemplateTestState() templateTestState {
 func (s templateTestState) restore() {
 	_ = os.Setenv("HOME", s.home)
 	globalMode = s.globalMode
-	noHub = s.noHub
 	autoConfirm = s.autoConfirm
 	projectPath = s.projectPath
 }
@@ -203,7 +200,6 @@ func TestRunTemplateDelete_HubOnly_AutoConfirm(t *testing.T) {
 	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint) }()
 	globalMode = true
 	autoConfirm = true
-	noHub = false
 
 	// Create empty local templates so FindTemplate doesn't find anything
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".scion", "templates"), 0755))
@@ -241,7 +237,6 @@ func TestRunTemplateDelete_Both_AutoConfirm(t *testing.T) {
 	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint2) }()
 	globalMode = true
 	autoConfirm = true
-	noHub = false
 
 	templateDir := createTestTemplate(t, tmpHome, "both-tpl")
 
@@ -376,7 +371,6 @@ func TestRunTemplateSync_UpdatesExistingTemplate(t *testing.T) {
 	defer func() { _ = os.Setenv("SCION_HUB_ENDPOINT", origHubEndpoint) }()
 	globalMode = true
 	autoConfirm = true
-	noHub = false
 
 	// Create a local template
 	createTestTemplate(t, tmpHome, "update-tpl")

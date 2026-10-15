@@ -589,7 +589,9 @@ Displays the logs of an agent.
 **Usage:** `scion logs <agent-name> [flags]`
 
 - **Flags:**
-    - `-f, --follow`: Stream logs.
+    - `-n, --tail <lines>`: Number of lines from the end (default 100).
+
+`--follow` was removed: it only worked for local agents, which were removed with local mode.
 
 ### `scion look`
 
@@ -653,7 +655,7 @@ The Hub may answer `202` when teardown is still running (see [`DELETE /agents/:i
 
 Synchronizes the agent workspace between the host and the container.
 
-**Usage:** `scion sync [to|from] <agent-name> [flags]`
+**Usage:** `scion sync to|from <agent-name> [flags]` (agent workspace; the direction is required), or `scion sync [push|pull]` (project workspace on the Hub)
 
 - **Flags:**
     - `--dry-run`: Preview changes without syncing.

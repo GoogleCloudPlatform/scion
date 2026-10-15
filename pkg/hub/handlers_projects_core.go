@@ -1974,7 +1974,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -2089,7 +2089,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 			LinkedBy:   linkedByForProvider(callerUser),
 		}
 
-		if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+		if err := s.linkProjectProvider(ctx, provider); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -3710,9 +3710,10 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 			}
 		}
 	}
-	for _, hc := range harnesses {
+	for i := range harnesses {
+		hc := &harnesses[i]
 		if hc.StoragePath != "" {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(hc.StoragePath)); err != nil {
+			if err := s.deleteHarnessConfigStorage(ctx, stor, hc); err != nil {
 				s.projectsLogger().Warn("failed to delete harness config storage files",
 					"project_id", projectID, "harnessConfig", hc.ID, "path", hc.StoragePath, "error", err)
 			}
