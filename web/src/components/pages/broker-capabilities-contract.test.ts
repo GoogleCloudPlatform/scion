@@ -42,6 +42,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'agentMove',
   'asyncLaunch',
   'emptyPerAgentWorkspace',
+  'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',
   'startsInFlight',

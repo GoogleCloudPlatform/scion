@@ -180,7 +180,7 @@ profiles:
 	overlay.Update(nil, map[string]config.V1ProfileConfig{
 		"gke":       {Runtime: "gke-autopilot"},
 		"local-nfs": {Runtime: "gke-autopilot"},
-	}, nil, "")
+	}, nil)
 	overlay.SetProfileReferences(config.ProfileReferences{Agents: map[string]int{"local": 2}})
 	config.SetGlobalSettingsOverlay(overlay)
 

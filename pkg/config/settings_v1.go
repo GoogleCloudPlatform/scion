@@ -600,12 +600,12 @@ func ValidateSharedDirSize(size string) error {
 //
 // A profile-level entry for gsaEmail takes precedence over a runtime-level
 // entry for the same gsaEmail — the same profile-overrides precedence
-// ResolveImageRegistry already applies, here evaluated per map key instead of
+// SettingsImageRegistry already applies, here evaluated per map key instead of
 // as a whole-value override, since this setting is a map rather than a
 // scalar. A profile with no entry for gsaEmail (including an empty-string
 // value, treated as unset) falls through to the runtime-level entry, rather
 // than that GSA having no mapping at all. profileName "" resolves to
-// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// vs.ActiveProfile, matching ResolveRuntime and SettingsImageRegistry. If
 // ResolveRuntime cannot resolve profileName's runtime (unknown profile or
 // runtime), this returns false, the same as no mapping being found — callers
 // that need to distinguish "no mapping" from "settings error" should call
@@ -1195,33 +1195,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsImageRegistryConfigured returns true if image_registry is set at any level
-// (top-level or in any profile).
-func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
-	return vs.ResolveImageRegistry(profileName) != ""
-}
-
-// ResolveImageRegistry returns the effective image_registry for the given profile.
-// Profile-level image_registry takes precedence over the top-level setting.
-// On a flat instance view (ForFlatInstance) the instance's
-// agent_defaults.image_registry takes the profile's place, over the same
-// top-level setting.
-func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
-	if vs != nil && vs.flat != nil {
-		if r := vs.flat.Defaults.ImageRegistry; r != "" {
-			return r
-		}
-		return vs.ImageRegistry
-	}
-	if profileName == "" {
-		profileName = vs.ActiveProfile
-	}
-	if profile, ok := vs.Profiles[profileName]; ok && profile.ImageRegistry != "" {
-		return profile.ImageRegistry
-	}
-	return vs.ImageRegistry
-}
-
 // The Tier* accessors read the Runtime Broker Profile tier for the callers
 // that used to index Profiles directly. In legacy resolution each runs the
 // former call site's profile lookup, including its guard (an empty name,
@@ -1483,6 +1456,11 @@ type VersionedSettings struct {
 	// non-empty stored runtimes lack them (ptone/scion#5113); nil when none
 	// were. It is not serialized.
 	retainedRuntimeNames []string
+	// imageRegistryHub is the co-located hub's image_registry layers
+	// (managed database values, file tier, profile catalog), set by the
+	// settings overlay; nil elsewhere. It is not serialized; see
+	// ImageRegistryLayers.
+	imageRegistryHub *ImageRegistryHubInputs
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -3955,12 +3933,18 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
 // directly; left mapped they would land on hub.profile and hub.run, which
 // are not settings.
+//
+// SCION_IMAGE_REGISTRY is the node env layer of image_registry, which beats
+// every settings value (ptone/scion#3916). Folded into the top-level
+// image_registry it would rank below a profile value and could be written
+// back into a settings file, so it is read only by ImageRegistryFromEnv.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
 	"SCION_HUB_PROFILE",
 	"SCION_HUB_RUN",
+	EnvImageRegistry,
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
