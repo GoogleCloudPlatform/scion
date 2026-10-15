@@ -22,6 +22,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -370,14 +371,58 @@ func TestAsyncStartExecDispatchStart_PassesAsync(t *testing.T) {
 // not blocked by an unconfirmed claim.
 func TestAsyncStartBrokerDraining_LifecycleStartReleasesClaim(t *testing.T) {
 	f, d, a := newClaimFixture(t)
-	d.start = func(context.Context, *store.Agent) error { return drainingErr("5") }
+	d.start = func(context.Context, *store.Agent) error { return drainingErr("7") }
 
-	code, body := lifecycle(t, f, a.ID, "start")
-	require.Equal(t, http.StatusServiceUnavailable, code, body)
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "7", rec.Header().Get("Retry-After"), "the broker's Retry-After")
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	gotCode, _ := errorDetails(body)
 	assert.Equal(t, api.BrokerErrCodeBrokerDraining, gotCode)
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID, "the claim is released, not kept unconfirmed")
 
 	_, err := f.s.ClaimAgentStart(context.Background(), a.ID, "hub-next", store.StartClaimUser, "docker", time.Minute)
 	assert.NoError(t, err, "a retry can claim the start")
+}
+
+// TestHubInstanceRegistry_TickWritesAsyncStartFeature pins the production
+// wiring of async_start_v1 (design D-a, Nit-1): the server's own snapshot
+// carries it, and one registry tick stores it in this instance's row, so a
+// node that turns asynchronous start on can read it back.
+func TestHubInstanceRegistry_TickWritesAsyncStartFeature(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	assert.Contains(t, srv.hubInstanceSnapshot(ctx, "x").Stats.Features, api.HubInstanceFeatureAsyncStartV1,
+		"the server's snapshot advertises async_start_v1")
+
+	srv.newHubInstanceRegistry().tick(ctx)
+	rows, _, err := s.ListHubInstances(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	var stats api.HubInstanceStats
+	require.NoError(t, json.Unmarshal(rows[0].Stats, &stats))
+	assert.Equal(t, []string{api.HubInstanceFeatureAsyncStartV1}, stats.Features, "the stored row advertises async_start_v1")
+}
+
+// TestAsyncStartBrokerDraining_LifecycleRestartReleasesClaim is the restart
+// half of Optional-2: the stop leg succeeds, the start leg gets 503
+// broker_draining; the restart answers a retryable 503 with the broker's
+// Retry-After, releases its claim and records the agent stopped.
+func TestAsyncStartBrokerDraining_LifecycleRestartReleasesClaim(t *testing.T) {
+	f, d, _ := newClaimFixture(t)
+	a := f.addAgent("drain-restart", "running", "", func(a *store.Agent) { a.RunID = "run-1" })
+	d.start = func(context.Context, *store.Agent) error { return drainingErr("9") }
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Equal(t, "9", rec.Header().Get("Retry-After"))
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	gotCode, _ := errorDetails(body)
+	assert.Equal(t, api.BrokerErrCodeBrokerDraining, gotCode)
+	assert.EqualValues(t, 1, d.stops.Load(), "the stop leg ran")
+	got := getAgent(t, f.s, a.ID)
+	assert.Empty(t, got.StartClaimID, "the restart claim is released")
+	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the stopped container is recorded")
 }

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -401,36 +402,54 @@ func TestHubInstanceSnapshot_Features(t *testing.T) {
 	assert.NotEqual(t, string(snap.material()), string(without.material()), "Features is material")
 }
 
-// asyncStartPhaseReadAllowlist is the reviewed number of reads of
-// agent.Phase / existingAgent.Phase per function in the five start-path
-// files (design D-T12(k)). Each remaining read is either a quota or display
-// read, a write-back guard, or treats error and every remembered phase the
-// same way (design D-c, "Sweep"). A branch selector must read
-// store.EffectiveRestingPhase instead.
+// asyncStartPhaseReadAllowlist is the reviewed set of reads of an agent's
+// stored phase (X.Phase for the agent variable names in phaseReadRe) in the
+// five start-path files (design D-T12(k)), keyed by file, function and the
+// whitespace-normalised source line, with the number of reads on that line.
+// Each is a quota or display read, a write-back or broker-set-phase check,
+// or treats error and every remembered phase the same way (design D-c,
+// "Sweep"). A read that picks how to start an agent must use
+// store.EffectiveRestingPhase (resume memory) instead.
 var asyncStartPhaseReadAllowlist = map[string]int{
-	"handlers_agent_create_helpers.go:handleExistingAgent":  7, // log field, storedPhase, post-start "broker set no phase" checks
-	"handlers_agent_lifecycle.go:disruptionSettled":         2, // stopped and error alike
-	"handlers_agent_lifecycle.go:guardAgentPhaseTransition": 1, // status guard, not a branch selector
-	"handlers_agent_lifecycle.go:handleAgentLifecycle":      8, // forced recovery needs a stored error, quota, suspend guards, broker-set phase
-	"handlers_agent_lifecycle.go:handleStopAllAgents":       2, // stop-all status reads the stored phase on purpose
-	"handlers_agent_lifecycle.go:updateAgentStatus":         1, // quota reconcile on the stored phase
-	"start_claim.go:startAgentCore":                         1, // hadEphemeral: error and every remembered phase differ from running
-	"start_claim.go:writeStartedStatus":                     1, // maps error and every remembered phase to running
-	"start_dispatch.go:beginStartDispatch":                  3, // stored phase: rollback target, quota, IfPhase
+	"handlers_agent_create_helpers.go:handleExistingAgent: \"existing_phase\", existingAgent.Phase,":                                                                          1,
+	"handlers_agent_create_helpers.go:handleExistingAgent: existingAgent.Phase == storedPhase {":                                                                              1,
+	"handlers_agent_create_helpers.go:handleExistingAgent: existingAgent.Phase == string(state.PhaseProvisioning) ||":                                                         1,
+	"handlers_agent_create_helpers.go:handleExistingAgent: if existingAgent.Phase == string(state.PhaseCreated) ||":                                                           1,
+	"handlers_agent_create_helpers.go:handleExistingAgent: if existingAgent.Phase == string(state.PhaseSuspended) || existingAgent.Phase == storedPhase {":                    2,
+	"handlers_agent_create_helpers.go:handleExistingAgent: storedPhase := existingAgent.Phase":                                                                                1,
+	"handlers_agent_lifecycle.go:disruptionSettled: return agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)":                              2,
+	"handlers_agent_lifecycle.go:guardAgentPhaseTransition: currentPhase := state.Phase(agent.Phase)":                                                                         1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: fmt.Sprintf(\"Cannot suspend agent in phase %q. Only running agents can be suspended.\", agent.Phase), nil)":           1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: forcedRecovery := agent.Phase == string(state.PhaseError) && rest == string(state.PhaseError) && startReq.ForceResume": 1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: if agent.Phase != string(state.PhaseRunning) {":                                                                        1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: if agent.Phase != string(state.PhaseSuspended) {":                                                                      1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: isBrokerQuotaCountedPhase(agent.Phase) && agent.DeletedAt.IsZero() && !deletionActive(agent) {":                        1,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: newPhase = agent.Phase":                                                                                                2,
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: startFromRest = !isBrokerQuotaCountedPhase(agent.Phase)":                                                               1,
+	"handlers_agent_lifecycle.go:handleStopAllAgents: if agent.Phase != string(state.PhaseRunning) {":                                                                         1,
+	"handlers_agent_lifecycle.go:handleStopAllAgents: if startInFlightPhase(agent.Phase) {":                                                                                   1,
+	"handlers_agent_lifecycle.go:updateAgentStatus: oldPhase := agent.Phase":                                                                                                  1,
+	"start_claim.go:startAgentCore: (agent.Phase != string(state.PhaseRunning) || opts.Kind == store.StartClaimRestart)":                                                      1,
+	"start_claim.go:writeStartedStatus: phase := agent.Phase":                                                                                                                 1,
+	"start_dispatch.go:beginStartDispatch: IfPhase: agent.Phase,":                                                                                                             1,
+	"start_dispatch.go:beginStartDispatch: if !isBrokerQuotaCountedPhase(agent.Phase) {":                                                                                      1,
+	"start_dispatch.go:beginStartDispatch: priorPhase: agent.Phase,":                                                                                                          1,
 }
 
 var (
 	phaseReadFuncRe = regexp.MustCompile(`^func (?:\([^)]*\) )?([A-Za-z0-9_]+)`)
-	phaseReadRe     = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:agent|existingAgent)\.Phase(?:[^A-Za-z0-9_]|$)`)
-	phaseAssignRe   = regexp.MustCompile(`^[ \t]*=[^=]`)
+	// phaseReadRe matches X.Phase for the names an agent row goes by in
+	// these files and their helpers.
+	phaseReadRe   = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(?:agent|existingAgent|a|row|cur|current|fresh)\.Phase(?:[^A-Za-z0-9_]|$)`)
+	phaseAssignRe = regexp.MustCompile(`^[ \t]*=[^=]`)
 )
 
-// countAgentPhaseReads counts, per function, the reads (not assignments)
-// of agent.Phase and existingAgent.Phase in file, skipping comment lines and
-// trailing " // " comments.
-func countAgentPhaseReads(t *testing.T, file string) map[string]int {
+// countAgentPhaseReads returns the reads (not assignments) of X.Phase in
+// the file at path, keyed "name:function: line" with the line's whitespace
+// collapsed, skipping comment lines and trailing " // " comments.
+func countAgentPhaseReads(t *testing.T, path, name string) map[string]int {
 	t.Helper()
-	f, err := os.Open(file)
+	f, err := os.Open(path)
 	require.NoError(t, err)
 	defer f.Close()
 	counts := map[string]int{}
@@ -448,52 +467,87 @@ func countAgentPhaseReads(t *testing.T, file string) map[string]int {
 		if i := strings.Index(line, " // "); i >= 0 {
 			line = line[:i]
 		}
+		key := name + ":" + fn + ": " + strings.Join(strings.Fields(line), " ")
+		rest := line
 		for {
-			loc := phaseReadRe.FindStringIndex(line)
+			loc := phaseReadRe.FindStringIndex(rest)
 			if loc == nil {
 				break
 			}
-			// The match ends with the delimiter after "Phase" (or at the
-			// end of the line); continue from that delimiter.
+			// The match may end with the delimiter after "Phase"; continue
+			// from that delimiter.
 			end := loc[1]
-			if end > loc[0] && end <= len(line) && !strings.HasSuffix(line[loc[0]:end], "Phase") {
+			if !strings.HasSuffix(rest[loc[0]:end], "Phase") {
 				end--
 			}
-			if !phaseAssignRe.MatchString(line[end:]) {
-				counts[file+":"+fn]++
+			if !phaseAssignRe.MatchString(rest[end:]) {
+				counts[key]++
 			}
-			line = line[end:]
+			rest = rest[end:]
 		}
 	}
 	require.NoError(t, sc.Err())
 	return counts
 }
 
+// TestCountAgentPhaseReads_Fixture pins the scanner: reads count (two on
+// one line count twice, a read on an assignment's right side counts),
+// assignments, == comparisons on either side, comment lines, trailing
+// comments, other receivers and longer names are handled as documented.
+func TestCountAgentPhaseReads_Fixture(t *testing.T) {
+	src := `package x
+
+func (s *Server) pick(agent, a *store.Agent) {
+	if agent.Phase == "error" || a.Phase != "x" {
+	}
+	agent.Phase = "running"
+	agent.Phase  =  rest
+	old := existingAgent.Phase
+	// agent.Phase == "comment line"
+	x := 1 // agent.Phase in a trailing comment
+	status.Phase = agent.Phase
+	_ = agent.PhaseX
+	_ = myagent.Phase
+}
+
+func other(row *store.Agent) bool { return row.Phase == "stopped" }
+`
+	path := filepath.Join(t.TempDir(), "fixture.go")
+	require.NoError(t, os.WriteFile(path, []byte(src), 0o600))
+	got := countAgentPhaseReads(t, path, "f.go")
+	assert.Equal(t, map[string]int{
+		`f.go:pick: if agent.Phase == "error" || a.Phase != "x" {`:                        2,
+		"f.go:pick: old := existingAgent.Phase":                                           1,
+		"f.go:pick: status.Phase = agent.Phase":                                           1,
+		`f.go:other: func other(row *store.Agent) bool { return row.Phase == "stopped" }`: 1,
+	}, got)
+}
+
 // TestAsyncStartPhaseReadsReviewed is the source scan of design D-T12(k):
-// a new read of agent.Phase or existingAgent.Phase in the five start-path
+// a new or changed read of an agent's stored phase in the five start-path
 // files fails here until it is reviewed. If the read picks how to start an
 // agent, it must use store.EffectiveRestingPhase (resume memory); otherwise
-// add it to asyncStartPhaseReadAllowlist with the reason.
+// add its line to asyncStartPhaseReadAllowlist with the reason.
 func TestAsyncStartPhaseReadsReviewed(t *testing.T) {
 	got := map[string]int{}
 	for _, file := range []string{"start_claim.go", "start_dispatch.go", "wake_dm.go", "handlers_agent_lifecycle.go", "handlers_agent_create_helpers.go"} {
-		for k, v := range countAgentPhaseReads(t, file) {
+		for k, v := range countAgentPhaseReads(t, file, file) {
 			got[k] = v
 		}
 	}
 	var diffs []string
 	for k, v := range got {
 		if asyncStartPhaseReadAllowlist[k] != v {
-			diffs = append(diffs, k)
+			diffs = append(diffs, fmt.Sprintf("%s (reads %d, allowed %d)", k, v, asyncStartPhaseReadAllowlist[k]))
 		}
 	}
 	for k := range asyncStartPhaseReadAllowlist {
 		if _, ok := got[k]; !ok {
-			diffs = append(diffs, k)
+			diffs = append(diffs, k+" (gone)")
 		}
 	}
 	sort.Strings(diffs)
-	assert.Empty(t, diffs, "agent.Phase reads changed (got %v); a branch selector must read store.EffectiveRestingPhase", got)
+	assert.Empty(t, diffs, "agent.Phase reads changed; a branch selector must read store.EffectiveRestingPhase")
 }
 
 // TestWaitForLifecycleOutcome_LaunchResultEndsWait is the requester side

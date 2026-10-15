@@ -206,7 +206,7 @@ Asynchronous start, resume and restart of an existing agent is the `hub.async_ag
 - **Needs both experiments.** It applies only while `hub.async_agent_launch` is on too.
 - **Turn it on only after every Hub node runs a version that supports it.** Each such node advertises `async_start_v1` in its hub-instance registry row (the one the health summary lists). Nodes on an older version neither handle start launches nor advertise it.
 - **Rolling back.** Turn the experiment off, then wait at least `launch_timeout` plus 15 seconds before you downgrade any Hub node, so start launches already in flight end under the newer code.
-- **Resume memory.** When an asynchronous start from `suspended`, `created`, `provisioning` or `halted` fails, the agent shows `error` and remembers the phase it started from (`launch.resumePhase` in the API). A later plain `scion start` or `scion resume`, the web Start button, or a message with `--wake` then behaves as it would have for that phase. Turning the experiment off does not clear this memory; any later phase other than `starting` or `error` does.
+- **Resume memory (once asynchronous start ships).** When an asynchronous start from `suspended`, `created`, `provisioning` or `halted` fails, the agent will show `error` and remember the phase it started from (`launch.resumePhase` in the API). A later plain `scion start` or `scion resume`, the web Start button, or a message with `--wake` will then behave as it would have for that phase. Turning the experiment off will not clear this memory; any later phase other than `starting` or `error` will.
 
 #### Request performance tracing
 
