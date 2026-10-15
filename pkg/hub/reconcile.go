@@ -267,7 +267,6 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	// (ptone/scion#4669). Both calls stay in this function, which the
 	// call-site and run-intent guards list.
 	var res *StartDispatchResult
-	var err error
 	if od, ok := dispatcher.(startOptionsDispatcher); ok {
 		res, err = od.DispatchAgentStartWithOptions(ctx, agent, task, resume, opts)
 	} else {
