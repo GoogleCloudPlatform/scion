@@ -197,6 +197,33 @@ func TestResolveBrokerID_RecoveredIDNotPathElementRefuses(t *testing.T) {
 	assert.Equal(t, "11111111-2222-3333-4444-555555555555", got)
 }
 
+// TestResolveBrokerID_ConfiguredIDNotPathElementRefuses: a configured or
+// deterministic broker ID that is not a single path element stops broker ID
+// resolution, and no settings are written.
+func TestResolveBrokerID_ConfiguredIDNotPathElementRefuses(t *testing.T) {
+	bad := "../x"
+	for name, tc := range map[string]struct {
+		cfg       *config.GlobalConfig
+		settings  *config.Settings
+		vsBroker  *config.V1BrokerConfig
+		defaultID string
+	}{
+		"settings":              {&config.GlobalConfig{}, &config.Settings{Hub: &config.HubClientConfig{BrokerID: bad}}, nil, ""},
+		"server broker config":  {&config.GlobalConfig{}, &config.Settings{}, &config.V1BrokerConfig{BrokerID: bad}, ""},
+		"global config":         {&config.GlobalConfig{RuntimeBroker: config.RuntimeBrokerConfig{BrokerID: bad}}, &config.Settings{}, nil, ""},
+		"deterministic default": {&config.GlobalConfig{}, &config.Settings{}, nil, bad},
+	} {
+		t.Run(name, func(t *testing.T) {
+			globalDir := t.TempDir()
+			got, err := resolveBrokerID(context.Background(), tc.cfg, tc.settings, tc.vsBroker, globalDir, tc.defaultID, nil)
+			require.Error(t, err, "broker ID resolution returned %q", got)
+			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
+			assert.Empty(t, got)
+			assertNothingWritten(t, globalDir, "settings written for configured broker ID %q", bad)
+		})
+	}
+}
+
 // TestPersistBrokerHubSettings_BrokerIDPathElement: a broker ID that is not
 // a single path element leaves the settings file unchanged: no broker ID,
 // hub endpoint or hub connection is written.

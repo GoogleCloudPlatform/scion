@@ -4305,7 +4305,7 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 	}
 	if brokerID == "" && defaultBrokerID != "" {
 		log.Printf("Using deterministic logical broker ID: %s", defaultBrokerID)
-		return defaultBrokerID, nil
+		brokerID = defaultBrokerID
 	}
 
 	// Recover from DB: if exactly one embedded broker exists, reuse its ID.
@@ -4327,6 +4327,11 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 		} else {
 			log.Printf("Generated and persisted new broker ID: %s", brokerID)
 		}
+	}
+	// Every source of the ID (configured, deterministic default, recovered,
+	// generated) is checked before it is used.
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", fmt.Errorf("broker ID: %w", err)
 	}
 	return brokerID, nil
 }
