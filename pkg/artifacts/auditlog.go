@@ -137,8 +137,6 @@ const (
 	logAuthorityOwner                 = AuthorityOwner
 	logAuthorityAdminGrant            = AuthorityAdminGrant
 	logAuthorityCustodianProjectAdmin = AuthorityCustodianProjectAdmin
-	logAuthorityStewardProjectOwner   = AuthorityStewardProjectOwner
-	logAuthorityStewardDelegator      = AuthorityStewardDelegator
 )
 
 // SetLogger sets the function that yields the artifact decision logger.
