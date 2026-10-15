@@ -271,13 +271,14 @@ func (t *routedBrokerTunnel) tunnel(ctx context.Context, brokerID string, req *w
 	if errors.As(err, &perm) {
 		return nil, perm.err
 	}
-	if errors.Is(err, router.ErrRegistryUnavailable) {
-		t.fallback(brokerID, spec.op, brokerRPCFallbackRegistryUnavailable, err)
-	}
 	if st.written {
 		// An idempotent request reached a session that was lost, and
 		// nothing else served it: the budget is exhausted.
 		return nil, fmt.Errorf("%w: %w", errBrokerRoutedUnavailable, err)
+	}
+	if errors.Is(err, router.ErrRegistryUnavailable) {
+		// Counted only here, where the fallback actually runs.
+		t.fallback(brokerID, spec.op, brokerRPCFallbackRegistryUnavailable, err)
 	}
 	return nil, fmt.Errorf("%w: %w", errBrokerNotRouted, err)
 }

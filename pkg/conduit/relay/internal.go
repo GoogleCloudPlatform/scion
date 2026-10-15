@@ -260,7 +260,12 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 	ctx, cancel := context.WithTimeout(req.Context(), r.cfg.RPCTimeout)
 	defer cancel()
 	resp, err := ls.Call(ctx, rpc)
+	// Broker targets only: for them a draining target, or a request the
+	// target never received, is a stale route for that session, so the
+	// caller re-resolves. Every other target keeps the 502 below.
+	broker := ls.Info().PrincipalKind == registry.PrincipalBroker
 	switch {
+	case !broker:
 	case errors.Is(err, conduit.ErrDraining):
 		// The target session refused before sending: a stale route for
 		// this session only, so the caller re-resolves (the replacement
