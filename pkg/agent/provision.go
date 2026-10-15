@@ -34,6 +34,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -2061,7 +2062,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				errorURIs[re.URI] = true
 				ref := requestedURIs[re.URI]
 				if ref == nil || !ref.Optional {
-					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
+					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
 				}
 				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
 					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
@@ -2131,6 +2132,46 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			inputPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "resolved-skills.json")
 			if err := os.MkdirAll(filepath.Dir(inputPath), 0755); err == nil {
 				_ = os.WriteFile(inputPath, recordData, 0644)
+			}
+		}
+	}
+
+	// Step 3c: Stage agent plugins (hub.agent_plugins). Bundles are staged
+	// into inputs/plugins/ even when this harness cannot install them, so a
+	// later harness-config switch at Start works without a re-provision.
+	templatePlugins := hasAgentPlugins(chain)
+	if !templatePlugins && inlineCfg != nil && len(inlineCfg.AgentPlugins) > 0 {
+		// Only the inline config declares agent_plugins: nothing to stage,
+		// but say why it is ignored.
+		if !agentPluginsEnabled(ctx, settings) {
+			addStartWarning(ctx, "agent_plugins: ignored: experiment hub.agent_plugins is off")
+		} else {
+			warnInlineAgentPlugins(ctx, inlineCfg, nil)
+		}
+	}
+	if templatePlugins {
+		switch {
+		case !agentPluginsEnabled(ctx, settings):
+			addStartWarning(ctx, "agent_plugins: ignored: experiment hub.agent_plugins is off")
+		case !isContainerScriptHarness(h):
+			addStartWarning(ctx, fmt.Sprintf("agent_plugins: ignored: harness %q is not a container-script harness", harnessConfigName))
+		default:
+			sources := agentPluginTemplateSources(chain)
+			warnInlineAgentPlugins(ctx, inlineCfg, sources)
+			res, err := agentplugin.Stage(ctx, agentplugin.StageRequest{
+				Chain:              sources,
+				AgentHome:          agentHome,
+				ReservedSkillNames: reservedSkillNames(sortedKeys(templateSkillNames), platformSkillNames(), resolvedSkillNames(resolvedSkillsRecord)),
+				Limits:             agentplugin.DefaultLimits,
+			})
+			if err != nil {
+				return "", "", nil, fmt.Errorf("agent plugins: %w", err)
+			}
+			for _, d := range res.Diagnostics {
+				addStartWarning(ctx, d.String())
+			}
+			if res.Index != nil && agentPluginsCapabilityMissing(h) {
+				addStartWarning(ctx, unsupportedAgentPluginsMessage(harnessConfigName, h))
 			}
 		}
 	}
@@ -2805,24 +2846,74 @@ func injectPlatformSkills(
 	return nil
 }
 
+// SavedProfileState says where SavedProfileOnDisk found an agent's profile.
+type SavedProfileState int
+
+const (
+	// SavedProfileMissing: the agent has no agent-info.json (it was never
+	// provisioned on this host, or projectPath does not resolve).
+	SavedProfileMissing SavedProfileState = iota
+	// SavedProfileFound: the profile is the Profile in agent-info.json.
+	SavedProfileFound
+	// SavedProfileUnreadable: agent-info.json exists but could not be read
+	// or parsed; the profile is the provisioned one from the image
+	// provenance record when there is one, else "".
+	SavedProfileUnreadable
+)
+
+// SavedProfileOnDisk returns the saved profile of the agent agentName in
+// projectPath on this host, as the start path would see it, for the hub's
+// built-in profile reference count (ptone/scion#5113). It reads
+// agent-info.json exactly as GetSavedProfile does (GetResolvedProjectDir,
+// then GetAgentHomePath). When that file exists but cannot be used, the
+// start path's runtime selection would use the provisioned profile from the
+// image provenance record (ProvisionedProfile), so that is returned instead.
+// sharedWorkspace and hubProjectID are passed to ProvisionedProfile.
+//
+// It is read-only and has no other side effects (no writes, no caches, no
+// logging), so the rebuild preflight can call it directly.
+func SavedProfileOnDisk(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) (string, SavedProfileState) {
+	info, state := readSavedAgentInfo(agentName, projectPath)
+	switch state {
+	case SavedProfileFound:
+		return info.Profile, SavedProfileFound
+	case SavedProfileUnreadable:
+		if profile, ok, err := ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, false); err == nil && ok {
+			return profile, SavedProfileUnreadable
+		}
+		return "", SavedProfileUnreadable
+	default:
+		return "", SavedProfileMissing
+	}
+}
+
 func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
+	info, _ := readSavedAgentInfo(agentName, projectPath)
+	return info
+}
+
+// readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
+// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// look at the same file. info is non-nil only when state is
+// SavedProfileFound.
+func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
 	if _, err := os.Stat(agentInfoPath); err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
 	var info api.AgentInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
-	return &info
+	return &info, SavedProfileFound
 }
 
 // hasRuntimeEntry reports whether the runtime holds an entry for opts.Name

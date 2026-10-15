@@ -1362,21 +1362,36 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
 			map[string]any{"name": "tsa-pr-psecret-" + generateID()[:8], "scopeType": "project", "permissions": []string{"agent.read", "secret.use"}})
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with secret.use: %s", who, rec.Body.String())
-		// project.manage_visitors (held by project-owner and project-admin)
-		// is grantable at project scope too. The test hub-admin does not hold
-		// it, so the ordinary CanDelegate ceiling refuses that kind first
-		// (not the test-admin policy; see the direct cases below).
+		// project.manage_visitors is held by project-owner, project-admin
+		// and, since GoogleCloudPlatform/scion#3660 (hub-admin role revision
+		// 8), hub-admin. So both kinds hold it, the ordinary CanDelegate
+		// ceiling admits, and the test-admin policy's project-scope exemption
+		// admits: a project-scope custom role holding it is created, exactly
+		// as for a human hub-admin (the control below).
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
 			map[string]any{"name": "tsa-pr-pvis-" + generateID()[:8], "scopeType": "project", "permissions": []string{"project.manage_visitors"}})
-		if who == "test_super_admin" {
-			assert.Less(t, rec.Code, 300, "%s project-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
-		} else {
-			assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
-			assert.NotContains(t, rec.Body.String(), "test-admin policy", "%s: the ceiling refuses, not the test-admin policy", who)
-		}
+		assert.Equal(t, http.StatusCreated, rec.Code, "%s project-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
+		// Holding project.manage_visitors through the role grants no use of
+		// it: the permission is deny-classified, so the test-admin policy
+		// (step 0c) refuses the project-scope request for both kinds. The
+		// human hub-admin control below is allowed.
+		visDecision := srv.authzService.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(tsaIdentity(t, s, k.Identity.ID)), Credential: credentialContextForIdentity(tsaIdentity(t, s, k.Identity.ID)),
+			Resource: Resource{Type: "project", ID: projectID}, Action: ActionManageVisitors, Permission: "project.manage_visitors",
+		})
+		assert.False(t, visDecision.Allowed, "%s use of project.manage_visitors on the project: %s", who, visDecision.Reason)
+		assert.Equal(t, DeniedByTestAdminPolicy, visDecision.DeniedBy, "%s use of project.manage_visitors: the test-admin policy refuses (%s)", who, visDecision.Reason)
+		// The exemption is project scope only, and set-complete: at system
+		// scope, or together with another deny-classified permission, the
+		// test-admin policy refuses it for both kinds.
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
 			map[string]any{"name": "tsa-pr-svis-" + generateID()[:8], "scopeType": "system", "permissions": []string{"project.manage_visitors"}})
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s system-scope custom role with project.manage_visitors: %s", who, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "test-admin policy", "%s system-scope project.manage_visitors: the test-admin policy refuses", who)
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-pvismixed-" + generateID()[:8], "scopeType": "project", "permissions": []string{"project.manage_visitors", "secret.use"}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with project.manage_visitors and secret.use: %s", who, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "test-admin policy", "%s project.manage_visitors with secret.use: the test-admin policy refuses", who)
 		// Set-complete, not any-match: one of the four together with
 		// another deny-classified permission is still refused.
 		for _, extra := range []string{"secret.use", "hub.config.update"} {
@@ -1434,8 +1449,21 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 	// refused by the same project.manage check.
 	humanHubAdmin := taUser(t, s, "tsa-pr-human-hub-admin", store.SystemRoleHubAdmin)
 	humanTok := taTokenFor(t, srv, humanHubAdmin)
+	// Same parity for project.manage_visitors (GoogleCloudPlatform/scion#3660):
+	// the human hub-admin creates a project-scope custom role holding it,
+	// like the test hub-admin above.
+	pvisRec := doRequestWithToken(t, srv, humanTok, http.MethodPost, "/api/v1/admin/roles",
+		map[string]any{"name": "tsa-pr-human-pvis-" + generateID()[:8], "scopeType": "project", "permissions": []string{"project.manage_visitors"}})
+	assert.Equal(t, http.StatusCreated, pvisRec.Code, "human hub-admin project-scope custom role with project.manage_visitors: %s", pvisRec.Body.String())
 	controlProject := tid("tsa-pr-project-human")
 	taProject(t, s, controlProject, owner.ID)
+	// The human hub-admin uses project.manage_visitors on the project
+	// (control for the test-admin policy refusal above).
+	humanVis := srv.authzService.Decide(ctx, AuthzRequest{
+		Principal: principalContextForIdentity(tsaIdentity(t, s, humanHubAdmin.ID)), Credential: credentialContextForIdentity(tsaIdentity(t, s, humanHubAdmin.ID)),
+		Resource: Resource{Type: "project", ID: controlProject}, Action: ActionManageVisitors, Permission: "project.manage_visitors",
+	})
+	assert.True(t, humanVis.Allowed, "human hub-admin use of project.manage_visitors on the project: %s", humanVis.Reason)
 	for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
 		u := taUser(t, s, "tsa-pr-human-"+tc.role, store.SystemRoleHubMember)
 		rec := doRequestWithToken(t, srv, humanTok, http.MethodPost, "/api/v1/projects/"+controlProject+"/members",

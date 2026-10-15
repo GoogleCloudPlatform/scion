@@ -252,6 +252,8 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			msg = fmt.Sprintf("Agent %q is suspended.", agent.Slug)
 		case state.PhaseStopped:
 			msg = fmt.Sprintf("Agent %q is stopped.", agent.Slug)
+		case state.PhaseHalted:
+			msg = fmt.Sprintf("Agent %q is halted.", agent.Slug)
 		case state.PhaseError:
 			msg = fmt.Sprintf("Agent %q is in error state.", agent.Slug)
 		default:

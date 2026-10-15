@@ -347,7 +347,7 @@ func runningResultFromPhase(phase string) runningResult {
 	switch state.Phase(phase) {
 	case state.PhaseRunning:
 		return runningYes
-	case state.PhaseStopped, state.PhaseError:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		return runningNo
 	default:
 		return runningUnknown

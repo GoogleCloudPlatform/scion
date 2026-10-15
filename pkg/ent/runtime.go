@@ -1413,12 +1413,16 @@ func init() {
 	harnessconfigDescScope := harnessconfigFields[8].Descriptor()
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
+	// harnessconfigDescBuiltImage is the schema descriptor for built_image field.
+	harnessconfigDescBuiltImage := harnessconfigFields[17].Descriptor()
+	// harnessconfig.DefaultBuiltImage holds the default value on creation for the built_image field.
+	harnessconfig.DefaultBuiltImage = harnessconfigDescBuiltImage.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[21].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[22].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[22].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[23].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.
