@@ -78,6 +78,7 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Not yet implemented" }
   resume: { support: "yes" }
+  agent_plugins: { support: "no", reason: "The Agent Plugins adapter is not in the hermes-agent release the image installs; not yet supported" }
 
 no_auth:
   behavior: drop-to-shell

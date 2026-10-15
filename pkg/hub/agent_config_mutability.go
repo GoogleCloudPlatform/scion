@@ -117,6 +117,7 @@ const (
 	editReasonImmutable      = "Fixed when the agent was created; no transition applies a change."
 	editReasonWorkspace      = "The workspace is provisioned when the agent is created; no transition applies a change."
 	editReasonInternal       = "Managed by Scion; not user-editable."
+	editReasonTemplatePlugin = "Declared by the template; change the template's agent_plugins and reincarnate the agent."
 	editReasonDeleted        = "The agent is deleted."
 	editReasonNotOnResume    = "The task is not sent again when a suspended agent resumes."
 	editReasonRoleCreated    = "The role cannot change before the first start. Delete and recreate the agent, or reincarnate it after it has started."
@@ -178,6 +179,10 @@ var agentEditFields = []agentEditField{
 	{Key: "config.branch", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.clone_depth", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.explicit_workspace", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
+	// Provisioning resolves only each template's own agent_plugins (inline
+	// entries are ignored with a start warning), so an edit of the agent's
+	// copy would do nothing. T2 once inline or hub-sourced plugins exist.
+	{Key: "config.agent_plugins", Tier: EditTierImmutable, LockedReason: editReasonTemplatePlugin},
 	{Key: "config.empty_per_agent_workspace", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
 	{Key: "config.harness", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "config.harness_config", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
@@ -230,7 +235,7 @@ func editDisposition(f agentEditField, phase string, deleted bool) (EditDisposit
 	}
 	var noContainer, liveOrTransitional bool
 	switch p {
-	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		noContainer = true
 	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
 		liveOrTransitional = true

@@ -429,6 +429,8 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
+	// assignDeactErr fails DeactivateAgentServiceAccountAssignments.
+	assignDeactErr error
 	// outerDeleteErr fails DeleteAgent outside a transaction, and every
 	// FinalizeAgentDeletion (the conditional compensation's row delete).
 	outerDeleteErr error
@@ -2789,6 +2791,13 @@ func (s *createTxFaultStore) DeactivateDelegationEdgesForDelegate(ctx context.Co
 		return 0, s.deactErr
 	}
 	return s.Store.DeactivateDelegationEdgesForDelegate(ctx, delegateType, delegateID, d)
+}
+
+func (s *createTxFaultStore) DeactivateAgentServiceAccountAssignments(ctx context.Context, agentID string, d store.Deactivation) (int, error) {
+	if s.assignDeactErr != nil {
+		return 0, s.assignDeactErr
+	}
+	return s.Store.DeactivateAgentServiceAccountAssignments(ctx, agentID, d)
 }
 
 // createWithRequestID issues the fixture's create with request metadata
