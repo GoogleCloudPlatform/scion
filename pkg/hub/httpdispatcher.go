@@ -3440,8 +3440,23 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
-// (suspended → resume).
-func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
+// (suspended → resume). It is DispatchAgentStartWithOptions with no options.
+func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	_, err := d.DispatchAgentStartWithOptions(ctx, agent, task, resume, StartDispatchOptions{})
+	return err
+}
+
+// DispatchAgentStartWithOptions is DispatchAgentStart with per-call options
+// (ptone/scion#4669). This release accepts opts but does not act on them:
+// the start is always synchronous and the result is nil. Asynchronous start
+// adds its branch here.
+func (d *HTTPAgentDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, _ StartDispatchOptions) (*StartDispatchResult, error) {
+	return nil, d.dispatchAgentStart(ctx, agent, task, resume)
+}
+
+// dispatchAgentStart is the synchronous start dispatch behind
+// DispatchAgentStart and DispatchAgentStartWithOptions.
+func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.start")
 	defer span.End()
 	span.SetAttributes(

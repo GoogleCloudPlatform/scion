@@ -16,6 +16,7 @@ package api
 
 import (
 	"encoding/json"
+	"slices"
 	"sort"
 )
 
@@ -34,6 +35,12 @@ type HubInstanceStats struct {
 	// IntegrationsTruncated is true when CapHubInstanceStats cut
 	// Integrations to keep the payload within its size cap.
 	IntegrationsTruncated bool `json:"integrations_truncated,omitempty"`
+	// Features lists the capabilities this hub process implements that
+	// other hub nodes may depend on, such as HubInstanceFeatureAsyncStartV1.
+	// Sorted and deduplicated, at most HubInstanceMaxFeatures entries of
+	// [a-z0-9_]{1,HubInstanceMaxFeatureBytes}. CapHubInstanceStats never
+	// trims it: a dropped entry would read as a node without the feature.
+	Features []string `json:"features,omitempty"`
 }
 
 // HubInstanceDBStats is one hub instance's database connection pool.
@@ -78,6 +85,15 @@ const (
 	HubInstanceMaxIntegrationNameChars = 64
 	// HubInstanceMaxIntegrationVersionBytes caps an integration version.
 	HubInstanceMaxIntegrationVersionBytes = 32
+	// HubInstanceMaxFeatures caps the features kept in stats.
+	HubInstanceMaxFeatures = 16
+	// HubInstanceMaxFeatureBytes caps one feature name.
+	HubInstanceMaxFeatureBytes = 32
+	// HubInstanceFeatureAsyncStartV1 is written by every hub process that
+	// handles asynchronous start launches (ptone/scion#4669): the kind-aware
+	// launch report, claim settlement and self-report guard. Asynchronous
+	// start stays off while any live hub instance lacks it.
+	HubInstanceFeatureAsyncStartV1 = "async_start_v1"
 )
 
 // hubInstanceIntegrationHealth is the vocabulary for integration health.
@@ -101,6 +117,9 @@ var hubInstanceIntegrationHealth = map[string]bool{
 //     depend on the input order. The list is cut to
 //     HubInstanceMaxIntegrations.
 //   - IntegrationsTruncated is kept as given; CapHubInstanceStats sets it.
+//   - Features that fail [a-z0-9_]{1,HubInstanceMaxFeatureBytes} are
+//     dropped; the rest are sorted, deduplicated and cut to
+//     HubInstanceMaxFeatures.
 func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 	out := HubInstanceStats{IntegrationsTruncated: s.IntegrationsTruncated}
 	if s.DB != nil {
@@ -137,6 +156,7 @@ func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 	if len(out.Integrations) > HubInstanceMaxIntegrations {
 		out.Integrations = out.Integrations[:HubInstanceMaxIntegrations]
 	}
+	out.Features = normalizeHubInstanceFeatures(s.Features)
 	return out
 }
 
@@ -144,8 +164,10 @@ func NormalizeHubInstanceStats(s HubInstanceStats) HubInstanceStats {
 // cut so the encoding is at most maxBytes long. When it is longer, the
 // integrations are dropped from the end of the (sorted) list, one at a
 // time, and IntegrationsTruncated is set. The DB block is fixed-size and
-// never cut. The registry writer passes the room left in
-// HubInstanceRowMaxBytes after the payload's other fields.
+// never cut, and neither is Features (bounded by normalisation): a
+// dropped feature would read as a node without it. The registry writer
+// passes the room left in HubInstanceRowMaxBytes after the payload's
+// other fields.
 func CapHubInstanceStats(s HubInstanceStats, maxBytes int) (HubInstanceStats, json.RawMessage) {
 	s = NormalizeHubInstanceStats(s)
 	// A struct of bounded strings, ints and bools always marshals.
@@ -211,6 +233,41 @@ func printableASCII(s string, max int) bool {
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeHubInstanceFeatures returns the valid entries of features,
+// sorted and deduplicated, at most HubInstanceMaxFeatures; nil when none.
+func normalizeHubInstanceFeatures(features []string) []string {
+	var out []string
+	for _, f := range features {
+		if validHubInstanceFeature(f) {
+			out = append(out, f)
+		}
+	}
+	sort.Strings(out)
+	out = slices.Compact(out)
+	if len(out) > HubInstanceMaxFeatures {
+		out = out[:HubInstanceMaxFeatures]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// validHubInstanceFeature reports whether f matches
+// ^[a-z0-9_]{1,HubInstanceMaxFeatureBytes}$.
+func validHubInstanceFeature(f string) bool {
+	if f == "" || len(f) > HubInstanceMaxFeatureBytes {
+		return false
+	}
+	for i := 0; i < len(f); i++ {
+		c := f[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
 			return false
 		}
 	}

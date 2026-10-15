@@ -251,6 +251,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	}
 	var task string
 	var resume bool
+	var opts StartDispatchOptions
 	if d.Args != "" {
 		args, err := UnmarshalStartArgs(d.Args)
 		if err != nil {
@@ -258,12 +259,14 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		}
 		task = args.Task
 		resume = args.Resume
+		opts.Async = args.Async
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	if err := dispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+	res, err := dispatchAgentStartWithOptions(ctx, dispatcher, agent, task, resume, opts)
+	if err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, res.AcceptedLaunch()), nil
 }
 
 // lifecycleDispatchResult is the result a completed start or restart row
@@ -272,10 +275,13 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 // otherwise never see, and whether a delete won after the broker start
 // landed. The requester answers 409 delete_in_progress from its own re-read;
 // DeleteWon only ends its wait for a success phase that will not come.
-func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings) string {
+// launch is the asynchronous launch the start was accepted as, or nil for a
+// synchronous start (ptone/scion#4669); it also ends the requester's wait.
+func (s *Server) lifecycleDispatchResult(ctx context.Context, agentID string, warns *dispatchWarnings, launch *LaunchAccepted) string {
 	return marshalLifecycleResult(LifecycleDispatchResult{
 		Warnings:  warns.Warnings(),
 		DeleteWon: s.deleteWonAfterLanding(ctx, agentID),
+		Launch:    launch,
 	})
 }
 
@@ -410,7 +416,7 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch restart: %w", err)
 	}
-	return s.lifecycleDispatchResult(ctx, agent.ID, warns), nil
+	return s.lifecycleDispatchResult(ctx, agent.ID, warns, nil), nil
 }
 
 func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch) (string, error) {
