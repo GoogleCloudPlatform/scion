@@ -101,11 +101,10 @@ func (d *DeclarativeGenericHarness) AdvancedCapabilities() api.HarnessAdvancedCa
 		caps = g.AdvancedCapabilities()
 	}
 	caps.Harness = d.entry.Harness
-	// agent_plugins comes from the bundle sidecar when present, so a bundle
-	// with only a sidecar keeps the Generic defaults above.
-	if d.entry.AgentPluginsSidecar != nil {
-		caps.AgentPlugins = *d.entry.AgentPluginsSidecar
-	}
+	// agent_plugins: the bundle sidecar, else config.yaml's deprecated key;
+	// the other capabilities keep the Generic defaults above when config.yaml
+	// has no capabilities block.
+	caps.AgentPlugins = d.entry.AgentPluginsCapability()
 	return caps
 }
 
