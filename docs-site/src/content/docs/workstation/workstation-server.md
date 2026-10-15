@@ -91,6 +91,10 @@ If you are using other runtimes, you may need to ensure that the containers can 
 
 To set the address agents use to reach the Hub, set `server.broker.container_hub_endpoint` in `settings.yaml` (for example `http://host.containers.internal:8080`). See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution).
 
+## Running Many Agents on Linux
+
+With Docker or Podman, every agent runs as your user, so all agents share your user's inotify limits. The kernel default (`fs.inotify.max_user_instances=128`) can run out at around 150 agents. A workstation server does not warn at startup; run `scion doctor` to see the limits and their current use, and see [Scaling a Broker Host: inotify Limits](/scion/hosted/ha/runtime-broker/#scaling-a-broker-host-inotify-limits) for how to raise them.
+
 ## Next Steps
 
 While the Workstation Server is a powerful local tool, the concepts it uses—such as API tokens, Hub connections, and the Web Dashboard—are identical to those used in a full team deployment.

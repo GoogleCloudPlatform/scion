@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -182,7 +183,7 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
 		if vs.storedProfileNames != nil {
-			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames, Retained: vs.retainedProfileNames}
 		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
@@ -1392,28 +1393,6 @@ func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (strin
 	return "", ""
 }
 
-// RequireImageRegistry checks that image_registry is configured and returns an
-// actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(projectPath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(projectPath)
-	if err != nil {
-		// Can't load settings — let other code handle this error
-		return nil
-	}
-	if vs == nil {
-		return nil
-	}
-	if vs.IsImageRegistryConfigured(profileName) {
-		return nil
-	}
-	return fmt.Errorf("image_registry is not configured.\n\n" +
-		"Scion requires container images to run agents. To get started:\n\n" +
-		"  1. Build your images:  image-build/scripts/build-images.sh --registry <your-registry> --push\n" +
-		"     See image-build/README.md for detailed instructions.\n\n" +
-		"  2. Configure scion:   scion config set --global image_registry <your-registry>\n" +
-		"     Example:           scion config set --global image_registry ghcr.io/myorg")
-}
-
 // RewriteImageRegistry replaces the registry prefix of a container image reference
 // with newRegistry for any short-form (non-fully-qualified) image.
 // If newRegistry is empty, the original image is returned unchanged.
@@ -1474,6 +1453,12 @@ type VersionedSettings struct {
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
+	// LocalExperiments enables experiments for solo/local (non-broker)
+	// provisioning, where no hub decides. Only experiments the local
+	// provisioning path consults take effect (hub.agent_plugins); a broker
+	// never reads it. Unknown names are logged once and ignored.
+	LocalExperiments []string `json:"local_experiments,omitempty" yaml:"local_experiments,omitempty" koanf:"local_experiments"`
+
 	// activeProfileErr is set by the hub settings overlay when it replaced
 	// Profiles, ActiveProfile is not one of them, and there is not exactly
 	// one stored profile to use instead (see resolveOverlaidActiveProfile).
@@ -1488,6 +1473,16 @@ type VersionedSettings struct {
 	// settings overlay replaced Profiles (non-nil exactly then); nil
 	// otherwise. It is not serialized.
 	storedProfileNames []string
+	// retainedProfileNames is the sorted list of built-in default profiles
+	// the hub settings overlay retained beside the stored ones because they
+	// are referenced (ptone/scion#5113); nil when none were. Disjoint from
+	// storedProfileNames. It is not serialized.
+	retainedProfileNames []string
+	// retainedRuntimeNames is the sorted list of built-in runtimes the
+	// overlay retained because an effective profile names them and the
+	// non-empty stored runtimes lack them (ptone/scion#5113); nil when none
+	// were. It is not serialized.
+	retainedRuntimeNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -1829,6 +1824,9 @@ type V1PluginEntry struct {
 // settings layout.
 type V1TestIdentitiesConfig struct {
 	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
+	// (see TestIdentitiesConfig.AdminWebSessions).
+	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -3139,6 +3137,12 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+
+	// AgentPluginsSidecar is the agent_plugins capability read from the
+	// bundle's agent-plugins.yaml (AgentPluginsSidecarFile), nil when the
+	// bundle has none. It is not part of config.yaml. Read the effective value
+	// with AgentPluginsCapability.
+	AgentPluginsSidecar *api.CapabilityField `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessThinkingConfig maps the canonical 0-100 thinking level
@@ -3774,6 +3778,19 @@ func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.K
 	return k, nil
 }
 
+// warnUnknownLocalExperiments logs, once per name and process, each
+// local_experiments entry that is not a registered experiment. Unknown names
+// are never an error.
+func warnUnknownLocalExperiments(names []string) {
+	reg := experiments.Default()
+	for _, n := range names {
+		if _, ok := reg.Lookup(n); ok {
+			continue
+		}
+		warnUnparseableSettingOnce("local_experiments."+n, "settings: local_experiments names an unknown experiment; ignoring it")
+	}
+}
+
 // unmarshalVersionedSettings decodes k into settings after normalizing
 // every profiles.NAME.clone_depth value with api.CloneDepthFromValue. The
 // koanf decoder is weakly typed and would turn clone_depth: true into "1";
@@ -3801,10 +3818,14 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	if err := k.Unmarshal("", settings); err == nil {
-		return nil
+	err := k.Unmarshal("", settings)
+	if err != nil {
+		err = unmarshalSkippingBadSettings(k, settings)
 	}
-	return unmarshalSkippingBadSettings(k, settings)
+	if err == nil {
+		warnUnknownLocalExperiments(settings.LocalExperiments)
+	}
+	return err
 }
 
 // unmarshalSkippingBadSettings handles a decode failure in
@@ -4370,7 +4391,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{}
+			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4820,7 +4841,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{}
+		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}

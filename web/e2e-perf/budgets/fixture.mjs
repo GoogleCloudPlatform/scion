@@ -168,6 +168,7 @@ export function buildFixture() {
       body: {
         experiments: {
           'hub.artifacts': false,
+          'hub.attachment_artifacts': false,
           'hub.chat_thread_groups': false,
           'web.agent_edit': false,
           'web.chat_scheduled_send': false,
@@ -217,6 +218,7 @@ export function buildFixture() {
         testSuperAdmin: false,
         testIdentityWebSessions: false,
         testIdentityWebSessionsUnavailableReason: '',
+        testAdminWebSessions: false,
         testIssuerAudience: '',
       },
     },

@@ -1091,6 +1091,51 @@ func TestBackfill_SinglePageNoCheckpoint(t *testing.T) {
 		"single-page run should have empty checkpoint (all data processed)")
 }
 
+// countingMessageStore records the ListOptions of every ListMessages call
+// so a test can tell which pages asked the store for a total count.
+type countingMessageStore struct {
+	*mockMessageStore
+	pages        int
+	countedPages int
+}
+
+func (c *countingMessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	c.pages++
+	if !opts.SkipTotalCount {
+		c.countedPages++
+	}
+	return c.mockMessageStore.ListMessages(ctx, filter, opts)
+}
+
+// TestBackfill_NoPerPageTotalCount checks that the scan does not ask the
+// store for a total count on any page. Nothing reads the count, and the
+// store runs a COUNT over every matching message for it on each page.
+func TestBackfill_NoPerPageTotalCount(t *testing.T) {
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	userID := uuid.NewString()
+	agentID := uuid.NewString()
+
+	now := time.Now()
+	var msgs []store.Message
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs, newTestMessage(projectID, "user:alice", userID, "agent:bot", agentID, now.Add(time.Duration(i)*time.Second)))
+	}
+
+	for _, dryRun := range []bool{true, false} {
+		msgStore := &countingMessageStore{mockMessageStore: &mockMessageStore{messages: append([]store.Message(nil), msgs...)}}
+		svc := NewBackfillService(&mockConversationStore{}, msgStore, &mockAgentLookup{})
+
+		result, err := svc.Run(ctx, BackfillConfig{ProjectID: projectID, BatchSize: 2, DryRun: dryRun})
+		require.NoError(t, err)
+
+		assert.Equal(t, 5, result.TotalProcessed, "dryRun=%v", dryRun)
+		assert.Equal(t, 5, result.Attributed, "dryRun=%v", dryRun)
+		assert.Equal(t, 3, msgStore.pages, "dryRun=%v: 5 messages at batch size 2 should take 3 pages", dryRun)
+		assert.Equal(t, 0, msgStore.countedPages, "dryRun=%v: no page should request a total count", dryRun)
+	}
+}
+
 // TestBackfill_SameTimestampMessages is the service-level regression test for
 // the cursor-based checkpoint fix. It uses a manually constructed checkpoint
 // (a message ID, which is the mock store's cursor format) on FRESH data — no

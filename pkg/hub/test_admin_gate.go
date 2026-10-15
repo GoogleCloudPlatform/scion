@@ -403,6 +403,7 @@ func (s *Server) emitTestAdminGateStart() error {
 		"marker_created_at":   markerAt,
 		"signing_key_sources": sources,
 		"federation":          "off",
+		"admin_web_sessions":  s.testAdminWeb.on,
 		"test_mode":           string(s.TestModeLevel()),
 		"preconditions":       s.testModePreconditions(),
 	}); err != nil {

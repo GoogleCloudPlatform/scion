@@ -202,9 +202,8 @@ func validateTestAdminUser(u *store.User) error {
 	if u.IssuerCredentialID != nil && strings.TrimSpace(*u.IssuerCredentialID) == "" {
 		return fmt.Errorf("%w: an empty issuer credential ID must be omitted", store.ErrInvalidInput)
 	}
-	if u.IssuerDelegationID != nil {
-		// Workload issuer delegations cover the member tier only (phase X2).
-		return fmt.Errorf("%w: an admin-kind test identity is never issued through a workload delegation", store.ErrInvalidInput)
+	if u.IssuerDelegationID != nil && strings.TrimSpace(*u.IssuerDelegationID) == "" {
+		return fmt.Errorf("%w: an issuer delegation ID must not be empty", store.ErrInvalidInput)
 	}
 	if store.TestIdentityEmailKind(u.Email) != u.Kind {
 		return fmt.Errorf("%w: a %s user requires an email in %s", store.ErrInvalidInput, u.Kind, store.TestAdminEmailDomain(u.Kind))
@@ -229,6 +228,9 @@ func (s *UserStore) createTestAdminRow(ctx context.Context, u *store.User) error
 		}
 		if u.IssuerCredentialID != nil {
 			create.SetIssuerCredentialID(*u.IssuerCredentialID)
+		}
+		if u.IssuerDelegationID != nil {
+			create.SetIssuerDelegationID(*u.IssuerDelegationID)
 		}
 	})
 }

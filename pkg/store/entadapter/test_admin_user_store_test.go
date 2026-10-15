@@ -171,8 +171,8 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 		"ordinary domain":   func(u *store.User) { u.Email = "x-" + uuid.NewString()[:8] + "@example.com" },
 		"admin role":        func(u *store.User) { u.Role = store.UserRoleAdmin },
 		"viewer role":       func(u *store.User) { u.Role = store.UserRoleViewer },
-		"delegation stamp": func(u *store.User) {
-			d := uuid.NewString()
+		"blank delegation stamp": func(u *store.User) {
+			d := ""
 			u.IssuerDelegationID = &d
 		},
 	}
@@ -182,8 +182,7 @@ func TestCreateTestAdminUser_Validation(t *testing.T) {
 		_, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
 		assert.ErrorIs(t, err, store.ErrInvalidInput, name)
 		// Nothing is written for any refused shape, including an
-		// admin-kind row carrying a workload delegation stamp (workload
-		// delegations issue the member tier only).
+		// admin-kind row carrying an empty workload delegation stamp.
 		_, err = cs.GetUser(ctx, u.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound, name)
 	}
@@ -442,6 +441,148 @@ func TestTestAdminCaps_SerializeCountAndCreate(t *testing.T) {
 		n, err := cs.CountLiveTestAdminUsers(ctx, "", issuer, time.Now())
 		require.NoError(t, err)
 		assert.LessOrEqual(t, n, issuerCap)
+	}
+}
+
+// Phase X4: an admin-kind row issued through a workload delegation keeps its
+// delegation stamp, and CountLiveTestAdminUsersByDelegation counts the live
+// admin-kind rows of one delegation only: never another delegation's,
+// never an unstamped row, never a member fixture of the same delegation,
+// never an expired row.
+func TestTestAdminUsers_DelegationStampAndCount(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	rd := newTestAdminSystemRole(t, cs, store.SystemRoleHubAdmin)
+	now := time.Now()
+	issuer := uuid.NewString()
+	d1, d2 := uuid.NewString(), uuid.NewString()
+	stamped := func(kind, d string, exp time.Time) *store.User {
+		u := newTestAdminUser(kind, issuer, exp)
+		id := d
+		u.IssuerDelegationID = &id
+		return u
+	}
+	first := stamped(store.UserKindTestHubAdmin, d1, now.Add(time.Hour))
+	for _, u := range []*store.User{
+		first,
+		stamped(store.UserKindTestHubAdmin, d1, now.Add(time.Hour)),
+		stamped(store.UserKindTestHubAdmin, d1, now.Add(-time.Minute)), // expired
+		stamped(store.UserKindTestHubAdmin, d2, now.Add(time.Hour)),
+		newTestAdminUser(store.UserKindTestHubAdmin, issuer, now.Add(time.Hour)), // no stamp
+	} {
+		_, err := cs.CreateTestAdminUser(ctx, u, rd.ID)
+		require.NoError(t, err)
+	}
+	fx := newFixtureUser(issuer, now.Add(time.Hour))
+	fx.IssuerDelegationID = &d1
+	require.NoError(t, cs.CreateTestFixtureUser(ctx, fx))
+
+	got, err := cs.GetUser(ctx, first.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.IssuerDelegationID, "the stamp round-trips through GetUser")
+	assert.Equal(t, d1, *got.IssuerDelegationID)
+
+	for _, tc := range []struct {
+		d    string
+		want int
+	}{{d1, 2}, {d2, 1}, {uuid.NewString(), 0}} {
+		n, err := cs.CountLiveTestAdminUsersByDelegation(ctx, tc.d, now)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, n, "delegation %s", tc.d)
+	}
+	n, err := cs.CountLiveTestFixtureUsersByDelegation(ctx, d1, now)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "the member count of the same delegation sees only the fixture")
+	_, err = cs.CountLiveTestAdminUsersByDelegation(ctx, "", now)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// Phase X4 T5: parallel admin-kind issuance across three delegations, each
+// counting its own per-delegation cap (2), under the hub-wide caps (4 admin
+// kinds, 1 test super-admin), in one locked transaction per attempt, never
+// over-issues: exactly 4 rows, no delegation above 2, at most 1 test
+// super-admin. On SQLite the single writer serializes; on Postgres the
+// advisory lock does (this file also runs there, -tags integration).
+func TestTestAdminCaps_PerDelegationUnderHubCapsAtomic(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	hubRD := newTestAdminSystemRole(t, cs, store.SystemRoleHubAdmin)
+	superRD := newTestAdminSystemRole(t, cs, store.SystemRoleSuperAdmin)
+	const perDelegation, hubCap, superCap, workers = 2, 4, 1, 24
+	issuer := uuid.NewString()
+	delegations := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+
+	errCap := errors.New("cap")
+	var wg sync.WaitGroup
+	results := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		d := delegations[i%len(delegations)]
+		kind, rdID := store.UserKindTestHubAdmin, hubRD.ID
+		if i%4 == 3 {
+			kind, rdID = store.UserKindTestSuperAdmin, superRD.ID
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- retryBusy(func() error {
+				return cs.WithTx(ctx, func(tx store.Store) error {
+					if err := tx.LockTestFixtureIssuance(ctx); err != nil {
+						return err
+					}
+					now := time.Now()
+					n, err := tx.CountLiveTestAdminUsersByDelegation(ctx, d, now)
+					if err != nil {
+						return err
+					}
+					if n >= perDelegation {
+						return errCap
+					}
+					if n, err = tx.CountLiveTestAdminUsers(ctx, "", "", now); err != nil {
+						return err
+					}
+					if n >= hubCap {
+						return errCap
+					}
+					if kind == store.UserKindTestSuperAdmin {
+						if n, err = tx.CountLiveTestAdminUsers(ctx, kind, "", now); err != nil {
+							return err
+						}
+						if n >= superCap {
+							return errCap
+						}
+					}
+					u := newTestAdminUser(kind, issuer, now.Add(time.Hour))
+					u.IssuerDelegationID = &d
+					_, err = tx.CreateTestAdminUser(ctx, u, rdID)
+					return err
+				})
+			})
+		}()
+	}
+	wg.Wait()
+	close(results)
+	ok := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, errCap):
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	now := time.Now()
+	assert.Equal(t, hubCap, ok, "exactly the hub-wide cap is issued")
+	n, err := cs.CountLiveTestAdminUsers(ctx, "", "", now)
+	require.NoError(t, err)
+	assert.Equal(t, hubCap, n)
+	n, err = cs.CountLiveTestAdminUsers(ctx, store.UserKindTestSuperAdmin, "", now)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, n, superCap)
+	for _, d := range delegations {
+		n, err := cs.CountLiveTestAdminUsersByDelegation(ctx, d, now)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, n, perDelegation, "delegation %s", d)
 	}
 }
 

@@ -730,7 +730,7 @@ func conduitTunnelOpenError(err error) error {
 func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity, forRelay bool) (conduitAdmission, bool) {
 	rt := s.conduit.Load()
 	if rt == nil && !forRelay {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
+		s.writeConduitRelayNotRunning(w)
 		return conduitAdmission{}, false
 	}
 	expiry, err := s.conduitCredentialExpiry(r)

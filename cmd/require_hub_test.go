@@ -206,6 +206,7 @@ func TestRequireHub(t *testing.T) {
 func TestNoHubFlagRemoved(t *testing.T) {
 	setupNoProjectPreRun(t)
 	noHub = true
+	t.Cleanup(func() { noHub = false })
 	err := rootCmd.PersistentPreRunE(versionCmd, []string{})
 	require.ErrorIs(t, err, errNoHubRemoved)
 	assert.Contains(t, err.Error(), "--no-hub was removed together with local-only mode; scion always uses a hub")

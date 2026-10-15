@@ -21,6 +21,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
 	// Table holds the table name of the brokerjointoken in the database.
 	Table = "broker_join_tokens"
 )
@@ -32,6 +34,7 @@ var Columns = []string{
 	FieldExpiresAt,
 	FieldCreatedBy,
 	FieldCreated,
+	FieldIssuanceID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -79,4 +82,9 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
 }
