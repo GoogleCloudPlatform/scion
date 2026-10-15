@@ -438,10 +438,16 @@ func (s *BrokerDispatchStore) FailPendingMessagesWithMissingRecipient(ctx contex
 	return affected, nil
 }
 
-// ExpireAndListStuckPendingMessages transitions messages stuck in pending
-// state past the given cutoff to failed, recording the reason, and returns
-// the rows it transitioned, oldest first. It matches the same rows as
-// ExpireStuckPendingMessages (agent recipients only). Each row is flipped by
+// expirePageSize bounds how many rows one ExpireAndListStuckPendingMessages
+// call expires, so a large backlog cannot outlast the sweep's context and
+// roll back every sweep; later sweeps drain the rest. A var (not const) so
+// tests can shrink it.
+var expirePageSize = 500
+
+// ExpireAndListStuckPendingMessages transitions up to expirePageSize messages
+// stuck in pending state past the given cutoff to failed, recording the
+// reason, and returns the rows it transitioned, oldest first. It matches the
+// same rows as ExpireStuckPendingMessages (agent recipients only). Each row is flipped by
 // its own compare-and-swap on dispatch_state inside one transaction, so a row
 // that a concurrent writer dispatched after the select is neither expired nor
 // returned. Inside WithTx it runs in the caller's transaction.
@@ -476,6 +482,7 @@ func expireAndListStuckPending(ctx context.Context, c *ent.Client, before time.T
 			message.RecipientHasPrefix("agent:"),
 		).
 		Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
+		Limit(expirePageSize).
 		Select(message.FieldID, message.FieldRecipient, message.FieldCreated).
 		All(ctx)
 	if err != nil {

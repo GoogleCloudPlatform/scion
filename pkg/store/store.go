@@ -1713,8 +1713,9 @@ type BrokerDispatchStore interface {
 	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
 
 	// ExpireAndListStuckPendingMessages does what ExpireStuckPendingMessages
-	// does and also returns the rows it expired, oldest first, so the sweep
-	// can name them in its log line (ptone/scion#5211). It runs in one
+	// does for at most one page of the oldest rows (500 in the Ent store; later
+	// calls expire the rest) and returns the rows it expired, oldest first, so
+	// the sweep can name them in its log line (ptone/scion#5211). It runs in one
 	// transaction, and a row is returned only if this call changed it from
 	// pending to failed. A row dispatched concurrently is neither expired
 	// nor returned.

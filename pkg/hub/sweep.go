@@ -65,12 +65,12 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 
 		expireNow := time.Now().UTC()
 		expireCutoff := expireNow.Add(-stuckMessageExpireTTL)
+		// A failed expiry is logged and does not stop the sweep: the
+		// missing-recipient step below must still run (ptone/scion#5211).
 		expired, err := s.store.ExpireAndListStuckPendingMessages(ctx, expireCutoff, store.MessageExpiredStuckPendingReason)
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: expire stuck pending messages failed", "error", err)
-			return
-		}
-		if len(expired) > 0 {
+		} else if len(expired) > 0 {
 			s.agentLifecycleLog.Info("sweep: expired stuck pending messages",
 				expiredPendingLogAttrs(expired, expireNow, expiredMessageLogIDCap)...)
 		}
@@ -154,9 +154,6 @@ const expiredMessageLogIDCap = 20
 // identifiers and the routing target are logged, never a body.
 func expiredPendingLogAttrs(expired []store.ExpiredPendingMessage, now time.Time, limit int) []any {
 	named := expired
-	if limit < 0 {
-		limit = 0
-	}
 	if len(named) > limit {
 		named = named[:limit]
 	}

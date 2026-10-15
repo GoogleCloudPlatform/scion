@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -783,4 +784,110 @@ func TestExpireAndListStuckPendingMessages_InsideWithTx(t *testing.T) {
 	got, err := cs.GetMessage(ctx, stuck.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState, "the expiry inside WithTx is committed with it")
+}
+
+// TestExpireAndListStuckPendingMessages_OnePagePerCall checks that one call
+// expires at most expirePageSize rows, oldest first, and the next call
+// expires the rest, so a large backlog drains across sweeps instead of
+// timing out in one transaction.
+func TestExpireAndListStuckPendingMessages_OnePagePerCall(t *testing.T) {
+	origPageSize := expirePageSize
+	expirePageSize = 2
+	t.Cleanup(func() { expirePageSize = origPageSize })
+
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	var ids []string
+	for _, age := range []time.Duration{30 * time.Hour, 29 * time.Hour, 28 * time.Hour} {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: proj.ID,
+			Sender: "user:x", Recipient: "agent:a", Msg: "body",
+			CreatedAt: time.Now().Add(-age),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		ids = append(ids, m.ID)
+	}
+	expiredIDs := func(rows []store.ExpiredPendingMessage) []string {
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	first, err := cs.ExpireAndListStuckPendingMessages(ctx, cutoff, store.MessageExpiredStuckPendingReason)
+	require.NoError(t, err)
+	assert.Equal(t, ids[:2], expiredIDs(first), "the first call expires one page, oldest first")
+	gotLast, err := cs.GetMessage(ctx, ids[2])
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, gotLast.DispatchState, "the row past the page is left for the next call")
+
+	second, err := cs.ExpireAndListStuckPendingMessages(ctx, cutoff, store.MessageExpiredStuckPendingReason)
+	require.NoError(t, err)
+	assert.Equal(t, ids[2:], expiredIDs(second), "the next call expires the rest")
+}
+
+// TestExpireAndListStuckPendingMessages_SkipsRowDispatchedConcurrently
+// checks the compare-and-swap: a row that leaves pending after the select
+// (here, dispatched by a hook just before the first expiry update) is
+// neither expired nor returned.
+func TestExpireAndListStuckPendingMessages_SkipsRowDispatchedConcurrently(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	newMsg := func(age time.Duration) *store.Message {
+		m := &store.Message{
+			ID: uuid.NewString(), ProjectID: proj.ID,
+			Sender: "user:x", Recipient: "agent:a", Msg: "body",
+			CreatedAt: time.Now().Add(-age),
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m
+	}
+	older := newMsg(30 * time.Hour)
+	raced := newMsg(25 * time.Hour)
+
+	// Before the first expiry update runs, dispatch the newer row in the same
+	// transaction, as a concurrent dispatcher would after the select.
+	racedUID := uuid.MustParse(raced.ID)
+	fired := false
+	client.Message.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			mm, ok := m.(*ent.MessageMutation)
+			if ok && !fired && mm.Op().Is(ent.OpUpdate) {
+				fired = true
+				if err := mm.Client().Message.Update().
+					Where(message.IDEQ(racedUID)).
+					SetDispatchState(store.MessageDispatchDispatched).
+					Exec(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	expired, err := cs.ExpireAndListStuckPendingMessages(ctx, time.Now().Add(-24*time.Hour), store.MessageExpiredStuckPendingReason)
+	require.NoError(t, err)
+	require.True(t, fired, "the hook ran inside the expiry")
+	require.Len(t, expired, 1, "the row dispatched after the select is not returned")
+	assert.Equal(t, older.ID, expired[0].ID)
+
+	gotRaced, err := cs.GetMessage(ctx, raced.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, gotRaced.DispatchState, "the dispatched row is not overwritten to failed")
 }
