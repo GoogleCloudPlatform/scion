@@ -312,6 +312,26 @@ func (_u *HarnessConfigUpdate) ClearImageStatusCheckedAt() *HarnessConfigUpdate 
 	return _u
 }
 
+// SetBuiltImage sets the "built_image" field.
+func (_u *HarnessConfigUpdate) SetBuiltImage(v string) *HarnessConfigUpdate {
+	_u.mutation.SetBuiltImage(v)
+	return _u
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableBuiltImage(v *string) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetBuiltImage(*v)
+	}
+	return _u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (_u *HarnessConfigUpdate) ClearBuiltImage() *HarnessConfigUpdate {
+	_u.mutation.ClearBuiltImage()
+	return _u
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_u *HarnessConfigUpdate) SetOwnerID(v string) *HarnessConfigUpdate {
 	_u.mutation.SetOwnerID(v)
@@ -558,6 +578,12 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	}
 	if _u.mutation.ImageStatusCheckedAtCleared() {
 		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+	}
+	if _u.mutation.BuiltImageCleared() {
+		_spec.ClearField(harnessconfig.FieldBuiltImage, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)
@@ -890,6 +916,26 @@ func (_u *HarnessConfigUpdateOne) ClearImageStatusCheckedAt() *HarnessConfigUpda
 	return _u
 }
 
+// SetBuiltImage sets the "built_image" field.
+func (_u *HarnessConfigUpdateOne) SetBuiltImage(v string) *HarnessConfigUpdateOne {
+	_u.mutation.SetBuiltImage(v)
+	return _u
+}
+
+// SetNillableBuiltImage sets the "built_image" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableBuiltImage(v *string) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetBuiltImage(*v)
+	}
+	return _u
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (_u *HarnessConfigUpdateOne) ClearBuiltImage() *HarnessConfigUpdateOne {
+	_u.mutation.ClearBuiltImage()
+	return _u
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (_u *HarnessConfigUpdateOne) SetOwnerID(v string) *HarnessConfigUpdateOne {
 	_u.mutation.SetOwnerID(v)
@@ -1166,6 +1212,12 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.ImageStatusCheckedAtCleared() {
 		_spec.ClearField(harnessconfig.FieldImageStatusCheckedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.BuiltImage(); ok {
+		_spec.SetField(harnessconfig.FieldBuiltImage, field.TypeString, value)
+	}
+	if _u.mutation.BuiltImageCleared() {
+		_spec.ClearField(harnessconfig.FieldBuiltImage, field.TypeString)
 	}
 	if value, ok := _u.mutation.OwnerID(); ok {
 		_spec.SetField(harnessconfig.FieldOwnerID, field.TypeString, value)

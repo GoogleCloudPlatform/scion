@@ -54,7 +54,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 
 	t.Run("marks running agent", func(t *testing.T) {
 		a := create("target", nil)
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "error", got.Phase)
@@ -81,7 +81,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 		t.Run("keeps a "+reason+" exit reason", func(t *testing.T) {
 			a := create("kept-"+reason, nil)
 			setExit(t, a.ID, reason, 137, "node "+reason+" the pod")
-			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 			require.NoError(t, err)
 			require.NotNil(t, got)
 			assert.Equal(t, "error", got.Phase)
@@ -98,7 +98,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	// never arrived) is reconciled like a running one.
 	t.Run("marks stopping agent", func(t *testing.T) {
 		a := create("stopping", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "error", got.Phase)
@@ -109,7 +109,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	t.Run("keeps a preempted exit reason on a stopping agent", func(t *testing.T) {
 		a := create("stopping-preempted", func(a *store.Agent) { a.Phase = "stopping"; a.Activity = "" })
 		setExit(t, a.ID, "preempted", 143, "Agent pod was preempted")
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "error", got.Phase)
@@ -120,7 +120,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	t.Run("replaces another exit reason", func(t *testing.T) {
 		a := create("replaced-reason", nil)
 		setExit(t, a.ID, "crashed", 1, "earlier crash")
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "container_missing", got.ExitReason)
@@ -167,7 +167,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 				before, err := s.client.Agent.Get(ctx, uuid.MustParse(a.ID))
 				require.NoError(t, err)
 
-				got, err := s.MarkAgentContainerMissing(ctx, a.ID, tc.broker, cutoff, "gone")
+				got, err := s.MarkAgentContainerMissing(ctx, a.ID, tc.broker, cutoff, "", "gone")
 				require.NoError(t, err)
 				assert.Nil(t, got)
 
@@ -184,7 +184,7 @@ func TestAgentStore_MarkAgentContainerMissing(t *testing.T) {
 	}
 
 	t.Run("unknown agent", func(t *testing.T) {
-		got, err := s.MarkAgentContainerMissing(ctx, "00000000-0000-0000-0000-00000000dead", "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, "00000000-0000-0000-0000-00000000dead", "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		assert.Nil(t, got)
 	})
@@ -214,7 +214,7 @@ func TestAgentStore_MarkAgentContainerMissing_GuardsInUpdate(t *testing.T) {
 	})
 	s := NewAgentStore(ent.NewClient(ent.Driver(drv)))
 
-	got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", time.Now().Add(-5*time.Minute), "gone")
+	got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", time.Now().Add(-5*time.Minute), "", "gone")
 	require.NoError(t, err)
 	require.NotNil(t, got)
 

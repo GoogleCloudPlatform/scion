@@ -662,7 +662,7 @@ func heldAgentNeedsStop(a *store.Agent) bool {
 		return false
 	}
 	switch state.Phase(a.Phase) {
-	case state.PhaseSuspended, state.PhaseStopped, state.PhaseCreated, state.PhaseError:
+	case state.PhaseSuspended, state.PhaseStopped, state.PhaseCreated, state.PhaseError, state.PhaseHalted:
 		return false
 	}
 	return true
