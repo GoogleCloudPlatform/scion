@@ -225,12 +225,18 @@ func (x exclusions) excluded(rec registry.SessionRecord) bool {
 
 func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (Resolved, error) {
 	if req.Kind == registry.PrincipalBroker {
-		if r.cfg.Brokers != nil && !brokerRPCOverConduit(req) {
-			return r.resolveLegacyBroker(ctx, req, exclude)
-		}
-		var err error
-		if req, err = r.withBrokerIncarnation(ctx, req); err != nil {
-			return Resolved{}, err
+		if !brokerRPCOverConduit(req) {
+			if r.cfg.Brokers != nil {
+				return r.resolveLegacyBroker(ctx, req, exclude)
+			}
+		} else {
+			if err := validateShape(req); err != nil {
+				return Resolved{}, err
+			}
+			var err error
+			if req, err = r.withBrokerIncarnation(ctx, req); err != nil {
+				return Resolved{}, err
+			}
 		}
 	}
 	wants, err := r.wants(req)

@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/envelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -657,24 +658,38 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 }
 
 // TestRoutedBrokerRPC_EncodeFailureFailsOnlyThatRPC (no regression of
-// #4333 on the routed path): a request that cannot be encoded fails
-// alone, without a fallback; the session stays up and serves the next
-// request.
+// #4333 on the routed path): a routed attempt whose request cannot be
+// encoded fails alone, without a fallback or a retry; the broker's
+// session stays up and serves the next request. The envelope already
+// replaces invalid UTF-8, so the unencodable request is given to the
+// routed attempt directly, on the real hub-side session.
 func TestRoutedBrokerRPC_EncodeFailureFailsOnlyThatRPC(t *testing.T) {
 	f := newRoutedBrokerFixture(t, nil)
 	b := f.dialRoutedBroker(t, routedBrokerOpts{})
+	rt := f.srv.conduit.Load()
+	require.NotNil(t, rt)
+	hubSide, rec, ok := rt.relay.Local(context.Background(), b.sessionID)
+	require.True(t, ok, "the hub holds the broker session")
 	tun := f.srv.newRoutedBrokerTunnel()
-	ctx := withBrokerRPC(context.Background(), conduit.RPCAgentLogs, true)
-	_, err := tun.TunnelRequest(ctx, f.brokerID,
-		wsprotocol.NewRequestEnvelope("bad", http.MethodGet, "/api/v1/agents/\xff/logs", "", nil, nil))
+	spec := brokerRPC{op: conduit.RPCAgentLogs, idempotent: true}
+	res := router.Resolved{Session: hubSide, Record: rec, Local: true}
+
+	var st routedAttempt
+	bad := &conduitv1.RpcRequest{Method: http.MethodGet, Path: "/api/v1/agents/\xff/logs"}
+	_, err := tun.attempt(context.Background(), res, bad, spec, &st)
 	require.ErrorIs(t, err, conduit.ErrRPCEncode)
-	assert.False(t, routedBrokerFallback(err), "an unencodable request does not fall back")
+	var perm *routedPermanentError
+	require.ErrorAs(t, err, &perm, "an unencodable request ends the request: no re-resolve, no fallback")
+	assert.False(t, st.written, "nothing was sent")
 	select {
+	case <-hubSide.Done():
+		t.Fatalf("the hub-side session ended: %v", hubSide.Err())
 	case <-b.ls.Done():
 		t.Fatalf("the broker session ended: %v", b.ls.Err())
 	default:
 	}
-	resp, err := tun.TunnelRequest(ctx, f.brokerID,
+
+	resp, err := tun.TunnelRequest(withBrokerRPC(context.Background(), conduit.RPCAgentLogs, true), f.brokerID,
 		wsprotocol.NewRequestEnvelope("good", http.MethodGet, "/api/v1/agents/a/logs", "", nil, nil))
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)

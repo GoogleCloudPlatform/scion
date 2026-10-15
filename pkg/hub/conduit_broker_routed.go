@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -217,7 +218,10 @@ func (t *routedBrokerTunnel) tunnel(ctx context.Context, brokerID string, req *w
 	}
 	scope, err := t.execScope(ctx, brokerID)
 	if err != nil {
-		t.fallback(brokerID, spec.op, brokerRPCFallbackBrokerUnreadable, err)
+		// A broker that is no longer registered is not a hub-side fault.
+		if !errors.Is(err, store.ErrNotFound) {
+			t.fallback(brokerID, spec.op, brokerRPCFallbackBrokerUnreadable, err)
+		}
 		return nil, fmt.Errorf("%w: reading broker %s: %w", errBrokerNotRouted, brokerID, err)
 	}
 	if req.Headers == nil {
