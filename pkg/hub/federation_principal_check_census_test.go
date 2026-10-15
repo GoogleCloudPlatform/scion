@@ -30,7 +30,7 @@ import (
 const (
 	// fedCensusAcceptor accepts federation credentials from requests: it
 	// must verify them through AuthenticateWithOptions and pass this hub's
-	// platform service account in the options.
+	// platform service account and proxy driver principals in the options.
 	fedCensusAcceptor = "acceptor"
 	// fedCensusVerifier is the one verifier: it must run
 	// federationPrincipalRefusal.
@@ -74,6 +74,10 @@ var fedCredentialCensus = map[string]string{
 	"operational_settings.go:ApplySnapshot":                      fedCensusNoCredential,
 	"server.go:New":                                              fedCensusNoCredential,
 	"test_admin_gate.go:(*Server).VerifyTestAdminFederationOff":  fedCensusNoCredential,
+	// Reads the federation header only to leave such a request unchanged;
+	// it verifies a proxy driver's Google ID token, never a federation
+	// credential.
+	"test_identity_web_driver.go:(*WebServer).fixtureSessionBearer": fedCensusNoCredential,
 }
 
 // fedCensusMarkers are the identifiers whose use makes a function a census
@@ -144,7 +148,7 @@ func setsOptionsField(fn *ast.FuncDecl, field string) bool {
 // TestFederationPrincipalCheckCensus: every pkg/hub function that touches
 // federation credential acceptance is classified, and its class holds:
 // acceptors verify through AuthenticateWithOptions with this hub's platform
-// service account, the verifier runs federationPrincipalRefusal, the check
+// service account and proxy driver principals, the verifier runs federationPrincipalRefusal, the check
 // applies each principal rule, and no other function verifies a federation
 // credential. No entry is stale.
 func TestFederationPrincipalCheckCensus(t *testing.T) {
@@ -176,13 +180,15 @@ func TestFederationPrincipalCheckCensus(t *testing.T) {
 		switch class {
 		case fedCensusAcceptor:
 			assert.Positive(t, s.calls["AuthenticateWithOptions"], "%s: an acceptor must verify through AuthenticateWithOptions", key)
-			assert.True(t, setsOptionsField(s.fn, "PlatformAuthSA"), "%s: an acceptor must pass PlatformAuthSA in FederationAuthOptions", key)
+			for _, field := range []string{"PlatformAuthSA", "DriverPrincipals"} {
+				assert.True(t, setsOptionsField(s.fn, field), "%s: an acceptor must pass %s in FederationAuthOptions", key, field)
+			}
 		case fedCensusVerifier:
 			assert.Positive(t, s.calls["federationPrincipalRefusal"], "%s: the verifier must run federationPrincipalRefusal", key)
 		case fedCensusWrapper:
 			assert.Positive(t, s.calls["AuthenticateWithOptions"], "%s: a wrapper must delegate to AuthenticateWithOptions", key)
 		case fedCensusCheck:
-			for _, rule := range []string{"IsReservedTestIdentityEmail", "IsFederatedSyntheticEmail", "isReservedPlatformIdentity"} {
+			for _, rule := range []string{"IsReservedTestIdentityEmail", "IsFederatedSyntheticEmail", "isTransportIdentity"} {
 				assert.Positive(t, s.calls[rule], "%s: the check must call %s", key, rule)
 			}
 		case fedCensusRefuses:

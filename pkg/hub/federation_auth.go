@@ -93,6 +93,11 @@ type FederationAuthOptions struct {
 	// account is refused (federationPrincipalRefusal). Empty leaves that
 	// part of the check inert.
 	PlatformAuthSA string
+	// DriverPrincipals is this hub's proxy driver principal set
+	// (AuthConfig.DriverPrincipals). A federated identity whose email is
+	// one of them is refused (federationPrincipalRefusal). Empty leaves
+	// that part of the check inert.
+	DriverPrincipals driverPrincipalSet
 }
 
 // isGoogleUserIssuerMissingAudience reports whether issuer is the Google
@@ -427,7 +432,7 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 // when the verified identity must be refused, and "" otherwise.
 //
 // Invariant (ptone/scion#5080): every endpoint that accepts federation
-// credentials refuses test identities and the platform service account,
+// credentials refuses test identities and this hub's transport identities,
 // whatever the credential's own claims say (its kind, its email_verified,
 // the issuer's flags). AuthenticateWithOptions is the only place a
 // federation credential is verified, and it runs this check last, so every
@@ -441,14 +446,14 @@ func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, op
 //     (store.IsReservedTestIdentityEmail);
 //   - an email of the federated account synthetic shape
 //     (store.IsFederatedSyntheticEmail);
-//   - this hub's platform service account (isReservedPlatformIdentity with
-//     opts.PlatformAuthSA).
+//   - a transport identity of this hub: its platform service account or
+//     one of its proxy driver principals (AuthConfig.isTransportIdentity
+//     with opts.PlatformAuthSA and opts.DriverPrincipals), the same
+//     predicate every user-facing path of the hub checks.
 //
-// When the hub gains a configured list of test driver principals
-// (GoogleCloudPlatform/scion#3535), its emails belong in this check too,
-// passed in FederationAuthOptions like PlatformAuthSA. A peer hub's own
-// list is not known here; extractHubUserClaims refuses any email in the
-// gserviceaccount.com domain on a peer hub user access credential.
+// A peer hub's own transport identities are not known here;
+// extractHubUserClaims refuses any email in the gserviceaccount.com domain
+// on a peer hub user access credential.
 func federationPrincipalRefusal(identity FederatedIdentity, opts FederationAuthOptions) string {
 	var email string
 	switch id := identity.(type) {
@@ -459,13 +464,14 @@ func federationPrincipalRefusal(identity FederatedIdentity, opts FederationAuthO
 	default:
 		return ""
 	}
+	transport := AuthConfig{PlatformAuthSA: opts.PlatformAuthSA, DriverPrincipals: opts.DriverPrincipals}
 	switch {
 	case store.IsReservedTestIdentityEmail(email):
 		return "credential names a test identity"
 	case store.IsFederatedSyntheticEmail(email):
 		return "credential names a federated account address"
-	case isReservedPlatformIdentity(email, opts.PlatformAuthSA):
-		return "credential names the platform service account"
+	case transport.isTransportIdentity(email):
+		return "credential names a transport identity of this hub"
 	}
 	return ""
 }

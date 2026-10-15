@@ -119,6 +119,67 @@ func TestFederationPrincipalCheck_PlatformServiceAccountRefused(t *testing.T) {
 	})
 }
 
+// peerTokDriverPrincipal and peerTokDriverPrincipalSA are proxy driver
+// principals of the receiving hub in these tests: one outside and one inside
+// the gserviceaccount.com domain.
+const (
+	peerTokDriverPrincipal   = "iap-driver@corp.example.com"
+	peerTokDriverPrincipalSA = "iap-driver@hub-recv.iam.gserviceaccount.com"
+)
+
+// A credential naming one of this hub's proxy driver principals is refused
+// with the uniform federation refusal (email compared case-insensitively),
+// on the peer hub user access path and for an issuer_type user issuer; a
+// normal user's credential and other service account emails are still
+// accepted with drivers configured.
+func TestFederationPrincipalCheck_DriverPrincipalRefused(t *testing.T) {
+	f := newPeerTokFixture(t, nil)
+	f.srv.authConfig.DriverPrincipals = newDriverPrincipalSet([]string{peerTokDriverPrincipal, peerTokDriverPrincipalSA})
+
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-driver", peerTokDriverPrincipal)))
+	assertPeerTokRefused(t, f, f.signAsPeer(t, peerUserClaims("sub-driver-upper", "IAP-Driver@Corp.Example.com")))
+
+	assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-human", "human@corp.com")), "sub-human", "human@corp.com")
+
+	userIssuerToken := func(subject, email string) string {
+		now := time.Now()
+		return f.signUser(t, map[string]interface{}{
+			"iss":   peerTokUserIssuerURL,
+			"sub":   subject,
+			"aud":   []string{federationTokenAudience},
+			"iat":   now.Add(-time.Minute).Unix(),
+			"exp":   now.Add(10 * time.Minute).Unix(),
+			"email": email,
+		})
+	}
+
+	t.Run("issuer_type user: driver principal", func(t *testing.T) {
+		assertPeerTokRefused(t, f, userIssuerToken("idp-driver", peerTokDriverPrincipal))
+	})
+	t.Run("issuer_type user: service account driver principal", func(t *testing.T) {
+		assertPeerTokRefused(t, f, userIssuerToken("idp-driver-sa", peerTokDriverPrincipalSA))
+	})
+	t.Run("issuer_type user: other service account accepted", func(t *testing.T) {
+		identity, _, rec := f.through(t, userIssuerToken("idp-worker", "worker@proj.iam.gserviceaccount.com"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		fu, ok := identity.(*FederatedUserIdentity)
+		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+		assert.Equal(t, "worker@proj.iam.gserviceaccount.com", fu.Email())
+	})
+
+	// Control: with no driver principals configured, the same emails are
+	// accepted, so the refusals above come from the driver principal rule.
+	t.Run("no drivers configured: same emails accepted", func(t *testing.T) {
+		f.srv.authConfig.DriverPrincipals = nil
+		assertPeerTokUser(t, f, f.signAsPeer(t, peerUserClaims("sub-driver-ctl", peerTokDriverPrincipal)), "sub-driver-ctl", peerTokDriverPrincipal)
+		identity, _, rec := f.through(t, userIssuerToken("idp-driver-sa-ctl", peerTokDriverPrincipalSA))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		fu, ok := identity.(*FederatedUserIdentity)
+		require.True(t, ok, "identity = %T, want *FederatedUserIdentity", identity)
+		assert.Equal(t, peerTokDriverPrincipalSA, fu.Email())
+	})
+}
+
 // A credential minted by the peer for a normal human user is still accepted
 // with the platform service account configured, and agent credentials are
 // unchanged.
@@ -135,8 +196,13 @@ func TestFederationPrincipalCheck_HumanAndAgentAccepted(t *testing.T) {
 
 // federationPrincipalRefusal by identity type: it reads the email of user
 // and service account identities, and never refuses an agent identity.
+// The platform service account and proxy driver principals are refused
+// through AuthConfig.isTransportIdentity.
 func TestFederationPrincipalRefusal(t *testing.T) {
-	opts := FederationAuthOptions{PlatformAuthSA: peerTokPlatformAuthSA}
+	opts := FederationAuthOptions{
+		PlatformAuthSA:   peerTokPlatformAuthSA,
+		DriverPrincipals: newDriverPrincipalSet([]string{peerTokDriverPrincipal}),
+	}
 	const iss = "https://issuer.example.com"
 	for _, tc := range []struct {
 		name     string
@@ -151,6 +217,9 @@ func TestFederationPrincipalRefusal(t *testing.T) {
 		{"service: platform service account, none configured", NewFederatedServiceIdentity(iss, "s5", peerTokPlatformAuthSA, nil), FederationAuthOptions{}, false},
 		{"service: other service account", NewFederatedServiceIdentity(iss, "s6", "worker@proj.iam.gserviceaccount.com", nil), opts, false},
 		{"service: test identity", NewFederatedServiceIdentity(iss, "s7", "x@scion-test-hub-admin.invalid", nil), opts, true},
+		{"user: driver principal", NewFederatedUserIdentity(iss, "s8", peerTokDriverPrincipal, "D", "viewer", nil), opts, true},
+		{"service: driver principal", NewFederatedServiceIdentity(iss, "s9", "IAP-Driver@corp.example.com", nil), opts, true},
+		{"user: driver principal, none configured", NewFederatedUserIdentity(iss, "s10", peerTokDriverPrincipal, "D", "viewer", nil), FederationAuthOptions{}, false},
 		{"agent", NewFederatedAgentIdentity(iss, "agent-1", "project-a", "worker", "user:root", []string{"user:root"}, nil), opts, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -27,3 +27,8 @@ Date: 2026-10-14. Branch: scion/mmr-fed-p1-6b (ptone/scion#4868, tracked in pton
 
 ## Later merge of upstream main (8900c9cb4, with GoogleCloudPlatform/scion#3660)
 - accept_user_tokens and allow_visitor_grants are kept side by side on trusted issuers (schema, both config structs in the same order, tests); the user access credential check reads the now optional email_verified claim and still refuses a credential whose claim is absent or false.
+
+## Later merge of upstream main (e134c2d55, with GoogleCloudPlatform/scion#3535)
+- No conflicts; the merged tree equals upstream main plus item 6B's own diff (8900c9cb4..f94e35562) applied to it.
+- The federation principal check now refuses this hub's transport identities through `AuthConfig.isTransportIdentity` (platform service account and proxy driver principals, passed in `FederationAuthOptions`); the reserved test identity domains, synthetic federated addresses and the gserviceaccount.com rule on peer hub user access credentials are unchanged. `fixtureSessionBearer` is classified in the federation credential census: it reads the federation header only to leave such a request unchanged.
+- Open: the transport identity invariant test lists a `fedAuth.Authenticate` call in `UnifiedAuthMiddleware`; item 6B verifies through `AuthenticateWithOptions`, so that entry needs a decision on the verifier's name.
