@@ -113,7 +113,7 @@ func TestRetain_ReferencedBuiltinResolves(t *testing.T) {
 
 	mustResolveType(t, vs, "local", "docker")
 	mustResolveType(t, vs, "", "docker")
-	mustNotFound(t, vs, "remote")
+	_ = mustNotFound(t, vs, "remote")
 	if got := vs.RetainedProfileNames(); !reflect.DeepEqual(got, []string{"local"}) {
 		t.Fatalf("RetainedProfileNames = %v, want [local]", got)
 	}
@@ -135,7 +135,7 @@ func TestRetain_BuiltinDefinitionAndNoFileOnly(t *testing.T) {
 	if got := vs.Profiles["local"]; got.Runtime != "docker" || got.DefaultTemplate != "" {
 		t.Fatalf("retained local = %+v, want the built-in definition", got)
 	}
-	mustNotFound(t, vs, "fp")
+	_ = mustNotFound(t, vs, "fp")
 }
 
 // A stored entry always wins over the same-named built-in.
@@ -198,14 +198,14 @@ func TestRetain_DisabledUntilEnabled(t *testing.T) {
 	vs := fileSettings("local")
 	o.Apply(vs)
 
-	mustNotFound(t, vs, "local")
+	_ = mustNotFound(t, vs, "local")
 	if _, _, err := vs.ResolveRuntime(""); !errors.As(err, new(*ActiveProfileError)) {
 		t.Fatalf("ResolveRuntime(\"\") = %v, want *ActiveProfileError", err)
 	}
 	o.AddProjectReference("local")
 	vs = fileSettings("gke")
 	o.Apply(vs)
-	mustNotFound(t, vs, "local")
+	_ = mustNotFound(t, vs, "local")
 }
 
 // Runtime retention for stored and retained profiles.
@@ -410,7 +410,7 @@ func TestRetain_Conservative(t *testing.T) {
 	vs := fileSettings("gke")
 	logs := captureLogs(t, func() { o.Apply(vs) })
 	mustResolveType(t, vs, "local", "docker")
-	mustNotFound(t, vs, "remote")
+	_ = mustNotFound(t, vs, "remote")
 	if _, ok := vs.Runtimes["kubernetes"]; ok {
 		t.Fatal("kubernetes retained in conservative mode")
 	}
