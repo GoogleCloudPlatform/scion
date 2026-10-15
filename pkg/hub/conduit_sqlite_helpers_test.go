@@ -175,7 +175,9 @@ func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, 
 // fixtures. The deadline runs on the fixtures' fake relay clock, so it sits
 // far above any single Advance a test makes: an advance of
 // conduit.DefaultWriteWait or more would otherwise fire the deadline of a
-// write in flight and close the session (ptone/scion#5210).
+// write in flight and close the session (ptone/scion#5210). It also
+// stretches the relay's backstop after a GoAway from the agent (drain
+// deadline + WriteWait); no fixture test relies on that backstop.
 const conduitFixtureWriteWait = 7 * 24 * time.Hour
 
 // setConduitExperiment overrides hub.conduit on srv the way an admin toggle
