@@ -145,7 +145,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
+	logCleanups, requestLogger, messageLogger, artifactLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
@@ -431,7 +431,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, artifactLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
@@ -1036,7 +1036,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 }
 
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
-func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
+func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, messageLogger, artifactLogger *slog.Logger, err error) {
 	useGCP := parseBoolEnv("SCION_LOG_GCP")
 	if cloudrunenv.IsService() {
 		useGCP = true
@@ -1154,7 +1154,33 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		cleanups = append(cleanups, msgLogCleanup)
 	}
 
-	return cleanups, requestLogger, messageLogger, nil
+	// Initialize the artifact decision logger (hub only; the broker serves
+	// no artifacts).
+	if enableHub {
+		artLogCfg := logging.ArtifactLoggerConfig{
+			Component: component,
+			HubName:   hubName,
+			HubID:     hubID,
+			UseGCP:    useGCP,
+			Level:     logging.ResolveLogLeveler(enableDebug),
+		}
+		if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
+			artLogCfg.CloudClient = ch.Client()
+			artLogCfg.CircuitOpen = ch.CircuitOpen
+		}
+		var artLogCleanup func()
+		var artErr error
+		artifactLogger, artLogCleanup, artErr = logging.NewArtifactLogger(artLogCfg)
+		if artErr != nil {
+			slog.Warn("Failed to initialize artifact logger", "error", artErr)
+			artifactLogger = nil
+		}
+		if artLogCleanup != nil {
+			cleanups = append(cleanups, artLogCleanup)
+		}
+	}
+
+	return cleanups, requestLogger, messageLogger, artifactLogger, nil
 }
 
 // applyServerLogLevelSetting applies the server.log_level setting to the
@@ -2703,7 +2729,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	warnNonConformingHubName(cfg.Hub.HubName)
@@ -2832,6 +2858,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubSrv.SetIntegrationHA(cfg.Database.Driver, entClient, cfg.Database.URL)
 	if messageLogger != nil {
 		hubSrv.SetMessageLogger(messageLogger)
+	}
+	if artifactLogger != nil {
+		hubSrv.SetArtifactLogger(artifactLogger)
 	}
 
 	// Load notification channels from versioned settings. With operational

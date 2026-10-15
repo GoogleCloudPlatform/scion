@@ -138,6 +138,12 @@ type Artifact struct {
 	OrphanedAt *time.Time
 }
 
+// ArtifactRef names an artifact and its home scope.
+type ArtifactRef struct {
+	ID       string
+	ScopeRef string
+}
+
 // Version is a row of the artifact_version table.
 type Version struct {
 	ID            string
@@ -426,8 +432,9 @@ type Store interface {
 
 	// SweepExpired soft-deletes up to limit live artifacts whose expiry is
 	// at or before now through DeleteArtifact (actor system, authority
-	// retention), and returns how many it deleted.
-	SweepExpired(ctx context.Context, now time.Time, limit int) (int, error)
+	// retention), and returns those it deleted, each with the home scope
+	// it had when the sweep found it.
+	SweepExpired(ctx context.Context, now time.Time, limit int) ([]ArtifactRef, error)
 
 	// DeleteArtifact is the one soft delete of an artifact. In one
 	// transaction it sets deleted_at, removes every grant and share link of
@@ -454,8 +461,9 @@ type Store interface {
 	// limit live artifacts of owner that are not marked, or clears it
 	// (orphaned false) on up to limit that are, recording one orphaned or
 	// unorphaned event per artifact in the same transaction. It returns
-	// how many it changed; fewer than limit means none is left.
-	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) (int, error)
+	// those it changed, each with its home scope; fewer than limit means none
+	// is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
 
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.

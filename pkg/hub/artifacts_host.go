@@ -184,9 +184,19 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 	return decision.Allowed
 }
 
-// MayGrantReview implements artifacts.ReviewGrantAuthority (design D24,
-// ptone/scion#4014): whether the calling user may give a user review access
-// (a write grant) on an artifact owned by agent ownerAgentID and homed in
+// MayGrantReview implements artifacts.ReviewGrantAuthority:
+// ReviewGrantClause != "".
+func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope) != ""
+}
+
+var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
+
+// ReviewGrantClause implements artifacts.ReviewGrantClauser (and, through
+// MayGrantReview, artifacts.ReviewGrantAuthority; design D24,
+// ptone/scion#4014, ptone/scion#5120): which clause, if any, lets the
+// calling user give a user review access (a review grant)
+// on an artifact owned by agent ownerAgentID and homed in
 // project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
 //     admins, and super-admins), decided by AuthzService.CheckAccess like any
@@ -199,36 +209,41 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 //     resolves to no one). The agent's stored owner or creator links are
 //     never consulted.
 //
-// Only users are answered; every other identity, a missing authz service,
-// and every lookup error answer false.
-func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+// The first clause that holds is named: artifacts.ReviewClauseProjectAdmin,
+// checked first, then artifacts.ReviewClauseDelegatingUser. Only users are
+// answered; every other identity, a missing authz service, and every lookup
+// error answer "".
+func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
 	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
-		return false
+		return ""
 	}
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
-		return false
+		return ""
 	}
 	var userID string
 	switch id := identity.(type) {
 	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
 		userID = id.ID()
 	default:
-		return false
+		return ""
 	}
 	if userID == "" {
-		return false
+		return ""
 	}
 	if h.AdministersScope(ctx, homeScope) {
-		return true
+		return artifacts.ReviewClauseProjectAdmin
 	}
 	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
 	if err != nil {
 		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
 			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
-		return false
+		return ""
 	}
-	return root.RootUser != nil && root.RootUser.ID == userID
+	if root.RootUser != nil && root.RootUser.ID == userID {
+		return artifacts.ReviewClauseDelegatingUser
+	}
+	return ""
 }
 
 // MemberScopes returns the projects the caller belongs to: for a user (a
@@ -567,7 +582,7 @@ var _ artifacts.ScopeAdministrator = (*artifactHost)(nil)
 // project administration, so a scoped token's own limits apply. Only users
 // are answered; every other identity and a missing authz service answer
 // false. It is the first custodian clause of the delete route and the
-// project-admin half of MayGrantReview.
+// project-admin half of ReviewGrantClause.
 func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bool {
 	if h.server == nil || h.server.authzService == nil || scopeRef == "" {
 		return false

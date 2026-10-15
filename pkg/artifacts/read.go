@@ -190,6 +190,7 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 	}
 	a, err := b.store.GetArtifact(r.Context(), id)
 	if errors.Is(err, ErrNotFound) {
+		s.logHidden(r, &Artifact{ID: id}, logReasonNotFound)
 		writeNotFound(w)
 		return b, nil, false
 	}
@@ -205,6 +206,7 @@ func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id st
 		return b, nil, false
 	}
 	if !readable {
+		s.logHidden(r, a, logReasonHidden)
 		writeNotFound(w)
 		return b, nil, false
 	}
