@@ -134,6 +134,14 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// AttachmentArtifacts gates storing web-chat attachments as message-scoped
+// artifacts (ptone/scion#4595): while it is on, POST /api/v1/chat/attachments
+// stores each file through the artifact service, which must be installed
+// with its settings section enabled (hub.artifacts need not be on). The hub
+// checks it on every upload. Attachments stored while it was on stay
+// readable after it is turned off.
+const AttachmentArtifacts = "hub.attachment_artifacts"
+
 // ChatScheduledSend gates scheduled send in native web chat: the Schedule
 // send menu item and pending-message banners in the web UI, the hub's
 // /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
@@ -172,6 +180,13 @@ const FederationProjectVisitors = "federation.project_visitors"
 // personal groups into project groups, and the web rail's project groups.
 // Turning it off hides the feature but keeps every stored group.
 const ChatThreadGroups = "hub.chat_thread_groups"
+
+// AgentPlugins gates native install of Agent Plugins 1.0.0 bundles declared
+// in a template's agent_plugins. The hub sends it to the broker at each
+// dispatch; outside broker mode the settings key local_experiments decides.
+// It is checked at provisioning and at every start, so turning it off
+// removes Scion-installed plugins at the next start.
+const AgentPlugins = "hub.agent_plugins"
 
 // AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
 // hub sends a create to the broker as an async launch only while it is on
@@ -273,6 +288,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-05",
 	},
 	{
+		Name:        AttachmentArtifacts,
+		Title:       "Attachments as artifacts",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: each one is readable exactly by the readers of that message, and is removed when the message is deleted. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4594",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-12",
+	},
+	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
 		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
@@ -315,6 +341,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#4424",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-11",
+	},
+	{
+		Name:        AgentPlugins,
+		Title:       "Agent Plugins (native install)",
+		Description: "Installs Agent Plugins 1.0.0 bundles declared in a template's agent_plugins into harnesses that support them natively (codex, copilot, muse-code, claude). While off, agent_plugins is ignored with a start warning and previously installed plugins are removed at the next start.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4933",
+		Owner:       "harness",
+		ReviewBy:    "2027-01-13",
 	},
 }
 

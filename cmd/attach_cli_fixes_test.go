@@ -18,18 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -593,67 +589,4 @@ func TestAttachHubSession_CleanDetachReturnsNil(t *testing.T) {
 
 	err := attachHubSession(context.Background(), &HubContext{Endpoint: "http://hub.invalid"}, hubAttachTarget{Name: "a1", ID: "id-1"})
 	assert.NoError(t, err)
-}
-
-// --- #3311: local not-found message ---
-
-// fakeEmptyRuntimeBinary writes a runtime binary that prints out for every
-// call, standing in for a runtime whose container list is empty.
-func fakeEmptyRuntimeBinary(t *testing.T, out string) string {
-	t.Helper()
-	bin := filepath.Join(t.TempDir(), "fake-runtime")
-	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' '"+out+"'\n"), 0o700))
-	return bin
-}
-
-// TestLocalAttachError_RealRuntimeErrors feeds each local runtime's own
-// Attach "not found" error (produced by the real runtime code against an
-// empty container list) through localAttachError, so a runtime rewording
-// its error fails this test instead of silently hiding the friendly message.
-func TestLocalAttachError_RealRuntimeErrors(t *testing.T) {
-	const id = "c0ffee"
-	tests := []struct {
-		name string
-		rt   runtime.Runtime
-	}{
-		{"docker", &runtime.DockerRuntime{Command: fakeEmptyRuntimeBinary(t, "")}},
-		{"podman", &runtime.PodmanRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
-		{"apple container", &runtime.AppleContainerRuntime{Command: fakeEmptyRuntimeBinary(t, "[]")}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rtErr := tc.rt.Attach(context.Background(), id)
-			require.Error(t, rtErr)
-			got := localAttachError(rtErr, id, "a1", "proj")
-			assert.Contains(t, got.Error(), "agent 'a1' not found in project 'proj'",
-				"runtime error %q was not recognised as not-found", rtErr)
-		})
-	}
-}
-
-func TestLocalAttachError(t *testing.T) {
-	const id = "c0ffee"
-	tests := []struct {
-		name     string
-		in       error
-		friendly bool
-	}{
-		// Current wording from pkg/runtime docker.go/podman.go/apple_container.go.
-		{"container not found", fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id), true},
-		{"pod not found", fmt.Errorf("agent '%s' pod not found, it may have been deleted", id), true},
-		{"plain not found", fmt.Errorf("agent '%s' not found", id), true},
-		{"other ID", fmt.Errorf("agent '%s' container not found, it may have exited and been removed", "other"), false},
-		{"not running", fmt.Errorf("agent '%s' is not running (status: exited)", id), false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := localAttachError(tc.in, id, "a1", "proj")
-			if tc.friendly {
-				assert.Contains(t, got.Error(), "agent 'a1' not found in project 'proj'")
-			} else {
-				assert.Same(t, tc.in, got)
-			}
-		})
-	}
-	assert.NoError(t, localAttachError(nil, id, "a1", "proj"))
 }

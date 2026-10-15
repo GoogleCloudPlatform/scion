@@ -97,8 +97,9 @@ type migratableResource struct {
 	slug          string
 	files         []store.TemplateFile
 	kind          storage.ResourceKind
-	// layout is the template storage layout; blob-layout templates are
-	// never migrated (their path is already row-unique and hub-namespaced).
+	// layout is the storage layout of a template or harness-config;
+	// blob-layout rows are never migrated (their path is already row-unique
+	// and hub-namespaced).
 	layout string
 }
 
@@ -169,6 +170,7 @@ func (s *Server) migrateResourceKind(ctx context.Context, kind storage.ResourceK
 					slug:          hc.Slug,
 					files:         hc.Files,
 					kind:          kind,
+					layout:        hc.Layout,
 				})
 			}
 			if result.NextCursor == "" {
@@ -323,8 +325,9 @@ func (s *Server) countStorageObjects(ctx context.Context, stor storage.Storage, 
 	return len(objects.Objects)
 }
 
-// errStorageMigrationConflict reports a template that a commit changed (or
-// moved to the blob layout) between the migration's list and its update.
+// errStorageMigrationConflict reports a template or harness-config that a
+// commit changed (or moved to the blob layout) between the migration's list
+// and its update.
 var errStorageMigrationConflict = errors.New("resource changed during storage migration")
 
 // updateResourceStoragePath updates the DB record for a resource with the new namespaced path.
@@ -361,13 +364,18 @@ func (s *Server) updateResourceStoragePath(ctx context.Context, res migratableRe
 		if hc == nil {
 			return nil
 		}
+		if isHarnessConfigBlobLayout(hc) {
+			return errStorageMigrationConflict
+		}
 		// The storage path is content state (ptone/scion#4219): it is
-		// written through the compare-and-swap with the row as read, so a
-		// concurrent commit is not reverted. A lost race leaves the row as
-		// the commit wrote it.
+		// written through the compare-and-swap with the row as read
+		// (content hash, layout and storage path), so a concurrent commit
+		// that migrated the row to blobs is not pointed back at a legacy
+		// path. A lost race leaves the row as the commit wrote it.
+		expected := harnessConfigCommitPrecondition(hc)
 		hc.StoragePath = newPath
 		hc.StorageURI = newURI
-		err = s.store.UpdateHarnessConfigContent(ctx, hc, store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash})
+		err = s.store.UpdateHarnessConfigContent(ctx, hc, expected)
 		if errors.Is(err, store.ErrHarnessConfigConflict) {
 			return errStorageMigrationConflict
 		}

@@ -193,7 +193,6 @@ func TestRunHarnessConfigInstall_RecordsSourceURL(t *testing.T) {
 			require.NoError(t, os.Setenv("HOME", tmpHome))
 			globalMode = tc.global
 			autoConfirm = true
-			noHub = false
 
 			const projectID = "proj-3853"
 			rec := &hcScopeRecorder{}

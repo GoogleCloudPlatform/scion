@@ -62,7 +62,6 @@ func saPathHub(t *testing.T, body string) *string {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Unsetenv("SCION_HUB_ENDPOINT")
-	noHub = false
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	data, err := json.Marshal(map[string]interface{}{

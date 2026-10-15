@@ -21,7 +21,7 @@ provisioner:
   interface_version: 1
   lib: vendored
   command: ["python3", "/home/scion/.scion/harness/provision.py"]
-  timeout: 30s
+  timeout: 60s
   lifecycle_events:
     - pre-start
   required_image_tools:
@@ -90,6 +90,7 @@ capabilities:
     sse: { support: "yes", reason: "Copilot maps SSE to its http transport type" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.mcp.json) not implemented; entries demoted to global" }
+  agent_plugins: { support: "yes" }
 
 no_auth:
   behavior: drop-to-shell
