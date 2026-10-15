@@ -15,9 +15,13 @@
 package config
 
 import (
+	"context"
 	"errors"
+	"log"
+	"log/slog"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -153,8 +157,28 @@ func TestIdentityGroups_GT2(t *testing.T) {
 			"a": {Type: "kubernetes", Context: "ctx-a", Namespace: "ns"},
 		}
 		const detail = "open /distinctive/path/kubeconfig-7f3a: permission denied"
+		callbackErr := errors.New(detail)
+		capture := capturePlacementSlog(t)
 		calls := 0
-		groups, warnings := IdentityGroups(runtimes, hostContext("", KubeConnKubeconfig, errors.New(detail), &calls), "ns")
+		groups, warnings := IdentityGroups(runtimes, hostContext("", KubeConnKubeconfig, callbackErr, &calls), "ns")
+		records := capture.snapshot()
+		if len(records) != 1 {
+			t.Fatalf("slog records = %+v, want exactly one", records)
+		}
+		rec := records[0]
+		if rec.level != slog.LevelWarn {
+			t.Fatalf("slog level = %v, want WARN", rec.level)
+		}
+		if rec.msg != "Kubernetes placement: could not read the current context to group runtime entries" {
+			t.Fatalf("slog message = %q", rec.msg)
+		}
+		logged, ok := rec.attrs["error"]
+		if !ok {
+			t.Fatalf("slog attrs = %v, want an error attribute", rec.attrs)
+		}
+		if loggedErr, isErr := logged.Any().(error); !isErr || loggedErr != callbackErr {
+			t.Fatalf("slog error attribute = %v, want the callback error", logged)
+		}
 		if !reflect.DeepEqual(groups, [][]string{{"a", "u"}}) {
 			t.Fatalf("groups = %v, want [[a u]]", groups)
 		}
@@ -180,4 +204,59 @@ func TestIdentityGroups_GT2(t *testing.T) {
 			t.Fatalf("IdentityGroups = %v, %v; want %v and one warning", groups, warnings, want)
 		}
 	})
+}
+
+// placementLogRecord is one captured slog record.
+type placementLogRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]slog.Value
+}
+
+// placementLogCapture is a slog.Handler that keeps every record it handles.
+type placementLogCapture struct {
+	mu      sync.Mutex
+	records []placementLogRecord
+}
+
+func (c *placementLogCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *placementLogCapture) Handle(_ context.Context, r slog.Record) error {
+	rec := placementLogRecord{level: r.Level, msg: r.Message, attrs: map[string]slog.Value{}}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value
+		return true
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, rec)
+	return nil
+}
+
+func (c *placementLogCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+
+func (c *placementLogCapture) WithGroup(string) slog.Handler { return c }
+
+func (c *placementLogCapture) snapshot() []placementLogRecord {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]placementLogRecord(nil), c.records...)
+}
+
+// capturePlacementSlog installs a capturing default slog logger for the
+// test and restores the previous logger, and the log package output that
+// slog.SetDefault redirects, on cleanup. It swaps process-wide state, so a
+// test that calls it must not use t.Parallel().
+func capturePlacementSlog(t *testing.T) *placementLogCapture {
+	t.Helper()
+	prevLogger := slog.Default()
+	prevWriter, prevFlags := log.Writer(), log.Flags()
+	capture := &placementLogCapture{}
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+	return capture
 }
