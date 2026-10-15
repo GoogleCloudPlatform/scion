@@ -144,9 +144,10 @@ func TestProvisionAgent_SharedModeWithoutWorktree_ClearError(t *testing.T) {
 //
 // The gitfile-removed subcase keeps the worktree directory but removes its
 // .git file, so git still lists the worktree (prunable) and the directory
-// check alone would accept it. Only the prune before the lookup drops that
-// registration; without it the lookup attaches to a directory that is no
-// longer a worktree.
+// check alone would accept it. The lookup also requires the .git entry, so
+// it does not attach to a directory that is no longer a worktree; the
+// create path removes that directory and the agent's own entry, and no
+// other entry (ptone/scion#5071).
 func TestProvisionAgent_StaleWorktreeRegistrationRecreated(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

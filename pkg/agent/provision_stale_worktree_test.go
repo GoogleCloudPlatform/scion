@@ -16,7 +16,7 @@ import (
 
 // isolateGitTestEnv gives git a private HOME and no system config, and
 // clears the SCION_* and git variables that redirect repository discovery
-// (SCION_HOST_UID would otherwise turn worktree pruning into a no-op).
+// (SCION_HOST_UID would otherwise turn worktree entry removal into a no-op).
 func isolateGitTestEnv(t *testing.T) string {
 	t.Helper()
 	isolateTestEnv(t)
@@ -67,10 +67,10 @@ func worktreeAdminDir(repo, name string) string {
 	return filepath.Join(repo, ".git", "worktrees", name)
 }
 
-// With prune set and no workspace path (a shared-workspace agent), no
-// worktree prune runs in the repository of the process's current directory:
-// a stale worktree entry there survives (ptone/scion#4511).
-func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *testing.T) {
+// With no workspace path (a shared-workspace agent), nothing is removed from
+// the repository of the process's current directory: a stale worktree entry
+// there survives (ptone/scion#4511).
+func TestRemoveAgentDirAndWorktreeEntry_EmptyWorkspaceLeavesCwdRepo(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	cwdRepo := filepath.Join(base, "caller")
 	initTestRepo(t, cwdRepo)
@@ -86,7 +86,7 @@ func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *te
 		t.Fatal(err)
 	}
 
-	removeAgentDirAndPruneWorktrees(agentDir, "", true)
+	removeAgentDirAndWorktreeEntry(agentDir, "")
 
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
@@ -96,9 +96,9 @@ func TestRemoveAgentDirAndPruneWorktrees_EmptyWorkspaceDoesNotPruneCwdRepo(t *te
 	}
 }
 
-// With prune set and a workspace path, the worktrees of the repository
-// holding the workspace are still pruned, wherever the process runs.
-func TestRemoveAgentDirAndPruneWorktrees_WorkspacePrunesItsRepo(t *testing.T) {
+// With a workspace path, the workspace's own entry is removed from the
+// repository holding it, wherever the process runs.
+func TestRemoveAgentDirAndWorktreeEntry_RemovesWorkspaceEntry(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	repo := filepath.Join(base, "project")
 	initTestRepo(t, repo)
@@ -114,13 +114,13 @@ func TestRemoveAgentDirAndPruneWorktrees_WorkspacePrunesItsRepo(t *testing.T) {
 	}
 	t.Chdir(elsewhere)
 
-	removeAgentDirAndPruneWorktrees(agentDir, ws, true)
+	removeAgentDirAndWorktreeEntry(agentDir, ws)
 
 	if _, err := os.Stat(agentDir); !os.IsNotExist(err) {
 		t.Fatalf("expected the agent dir to be removed (stat err=%v)", err)
 	}
 	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
-		t.Fatalf("expected the removed workspace's worktree entry to be pruned (stat err=%v)", err)
+		t.Fatalf("expected the removed workspace's worktree entry to be removed (stat err=%v)", err)
 	}
 }
 
@@ -495,10 +495,10 @@ func TestHandleAgentDirWithoutConfig_EmptyPlainWorkspaceIsRemoved(t *testing.T) 
 	}
 }
 
-// pruneWorktreesForWorkspace with an empty workspace prunes nothing, even
-// when the current directory is a repository with a stale worktree entry,
-// and reports that it found no repository (ptone/scion#4511).
-func TestPruneWorktreesForWorkspace_EmptyWorkspaceDoesNotPrune(t *testing.T) {
+// removeWorkspaceWorktreeEntry with an empty workspace removes nothing, even
+// when the current directory is a repository with a stale worktree entry
+// (ptone/scion#4511).
+func TestRemoveWorkspaceWorktreeEntry_EmptyWorkspaceRemovesNothing(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	cwdRepo := filepath.Join(base, "caller")
 	initTestRepo(t, cwdRepo)
@@ -509,17 +509,16 @@ func TestPruneWorktreesForWorkspace_EmptyWorkspaceDoesNotPrune(t *testing.T) {
 	}
 	t.Chdir(cwdRepo)
 
-	if pruneWorktreesForWorkspace("") {
-		t.Error("pruneWorktreesForWorkspace(\"\") = true, want false")
-	}
+	removeWorkspaceWorktreeEntry("")
 	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
 		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
 	}
 }
 
-// pruneWorktreesForWorkspace with a workspace path prunes the repository
-// holding it, wherever the process runs, and reports that it found it.
-func TestPruneWorktreesForWorkspace_WorkspacePrunesItsRepo(t *testing.T) {
+// removeWorkspaceWorktreeEntry with a workspace path removes that
+// workspace's entry from the repository holding it, wherever the process
+// runs.
+func TestRemoveWorkspaceWorktreeEntry_RemovesItsEntry(t *testing.T) {
 	base := isolateGitTestEnv(t)
 	repo := filepath.Join(base, "project")
 	initTestRepo(t, repo)
@@ -534,21 +533,29 @@ func TestPruneWorktreesForWorkspace_WorkspacePrunesItsRepo(t *testing.T) {
 	}
 	t.Chdir(elsewhere)
 
-	if !pruneWorktreesForWorkspace(stale) {
-		t.Error("pruneWorktreesForWorkspace = false, want true for a workspace in a repository")
-	}
+	removeWorkspaceWorktreeEntry(stale)
 	if _, err := os.Stat(worktreeAdminDir(repo, "workspace")); !os.IsNotExist(err) {
-		t.Fatalf("expected the stale worktree entry to be pruned (stat err=%v)", err)
+		t.Fatalf("expected the stale worktree entry to be removed (stat err=%v)", err)
 	}
 }
 
-// A workspace outside any repository has nothing to prune: the helper
-// reports false, so the provision call site falls back as before.
-func TestPruneWorktreesForWorkspace_NoRepoReportsFalse(t *testing.T) {
+// A workspace outside any repository has no entry to remove, and nothing
+// falls back to the repository of the process's current directory: a stale
+// entry there survives (ptone/scion#5071).
+func TestRemoveWorkspaceWorktreeEntry_NoRepoLeavesCwdRepo(t *testing.T) {
 	base := isolateGitTestEnv(t)
-	t.Chdir(base)
-	if pruneWorktreesForWorkspace(filepath.Join(base, "agents", "a", "workspace")) {
-		t.Error("pruneWorktreesForWorkspace = true, want false outside a repository")
+	cwdRepo := filepath.Join(base, "caller")
+	initTestRepo(t, cwdRepo)
+	stale := filepath.Join(base, "stale-wt")
+	runGitT(t, cwdRepo, "worktree", "add", "-q", "-b", "stale", stale)
+	if err := os.RemoveAll(stale); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwdRepo)
+
+	removeWorkspaceWorktreeEntry(filepath.Join(base, "agents", "a", "workspace"))
+	if _, err := os.Stat(worktreeAdminDir(cwdRepo, "stale-wt")); err != nil {
+		t.Fatalf("expected the stale worktree entry in the current directory's repository to survive: %v", err)
 	}
 }
 
@@ -1278,7 +1285,7 @@ func TestHandleAgentDirWithoutConfig_UnreadableUntrackedDirIsKept(t *testing.T) 
 
 // A link inside the removed dir that points to a file outside it is removed
 // with the dir, and the target's mode is left unchanged.
-func TestRemoveAgentDirAndPruneWorktrees_LinkTargetModeUnchanged(t *testing.T) {
+func TestRemoveAgentDirAndWorktreeEntry_LinkTargetModeUnchanged(t *testing.T) {
 	base := t.TempDir()
 	target := filepath.Join(base, "outside.txt")
 	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
@@ -1293,7 +1300,7 @@ func TestRemoveAgentDirAndPruneWorktrees_LinkTargetModeUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removeAgentDirAndPruneWorktrees(agentDir, "", false)
+	removeAgentDirAndWorktreeEntry(agentDir, "")
 
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
 		t.Fatalf("expected the link to be removed (lstat err=%v)", err)
