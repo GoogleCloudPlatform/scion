@@ -373,7 +373,7 @@ does not issue member identities (`403`). A member delegation reaches no admin i
 `delete --as <admin alias>` is refused by the CLI, and `teardown` reports an admin alias as
 `left-to-expire` and removes its cache file: the identity ends at its expiry (at most an hour),
 or earlier through `POST /api/v1/test-identities/admin/revoke-all` by a human super-admin, a
-purge (`delete --purge`) by the grantor's own sign-in or a super-admin, or a restart without the
+purge (`delete --purge`) by the grantor's own sign-in or a human super-admin, or a restart without the
 admin level.
 
 **Audit.** The identity records the delegation id. The `test_admin_issue` audit record names the
