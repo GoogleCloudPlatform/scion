@@ -979,7 +979,13 @@ There are two exceptions to the pattern:
 - Every setting under `server.broker` uses the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT` and `server.broker.broker_id` -> `SCION_SERVER_RUNTIMEBROKER_BROKERID`.
 - `server.hub.public_url` is set by `SCION_SERVER_HUB_ENDPOINT`. `SCION_SERVER_HUB_PUBLICURL` and `SCION_SERVER_HUB_PUBLIC_URL` set nothing.
 
-Earlier spellings still set the same key: the spelling that keeps a field's underscores (`SCION_SERVER_HUB_ADMIN_EMAILS`), the broker names under the `BROKER` segment (`SCION_SERVER_BROKER_PORT`, `SCION_SERVER_BROKER_BROKER_ID`) and the flattened CORS names (`SCION_SERVER_HUB_CORSENABLED`). Prefer the names above.
+Other spellings of a key are accepted as aliases and set the same key: the spelling that keeps a field's underscores (`SCION_SERVER_HUB_ADMIN_EMAILS`), the broker names under the `BROKER` segment (`SCION_SERVER_BROKER_PORT`, `SCION_SERVER_BROKER_BROKER_ID`) and the flattened CORS names (`SCION_SERVER_HUB_CORSENABLED`). Prefer the names above. When a key's name and one of its aliases are both set, the name above wins; when only aliases are set, the alias that sorts first wins.
+
+:::caution[Upgrade note]
+Many alias spellings, for example `SCION_SERVER_HUB_ADMIN_EMAILS`, `SCION_SERVER_BROKER_PORT`, `SCION_SERVER_HUB_CORS_ENABLED` and `SCION_SERVER_LOG_LEVEL`, used to be ignored by the Hub and reported at startup as matching no setting. They now take effect. Before upgrading, remove any such variable that you do not want applied.
+
+The env also now overrides the settings that live at the top level of `settings.yaml` (`telemetry`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_harness_config`, `quotas`, `agent_secrets`, `project_defaults`) and `server.workspace_storage` and `server.native_chat`, for example `SCION_SERVER_DEFAULTTIMEZONE`. A value that does not parse for one of these keys (for example `SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS=maybe`) makes the server fail to load its configuration at startup, as it already did for the other `SCION_SERVER_*` keys.
+:::
 
 `server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.
 

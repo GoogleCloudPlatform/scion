@@ -230,3 +230,169 @@ telemetry:
 	require.NoError(t, err)
 	assert.Equal(t, "Europe/Paris", gc.DefaultTimezone)
 }
+
+// writeServerSettings writes a settings.yaml with a server key under home
+// (the settings.yaml load path of LoadGlobalConfig).
+func writeServerSettings(t *testing.T, home, extra string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+		[]byte("schema_version: \"1\"\nserver:\n  mode: workstation\n"+extra), 0o644))
+}
+
+// TestServerEnvTable_DirectNamesNotMapped: a name read directly with
+// os.Getenv (directServerEnvNames) never binds a setting, so a value only
+// its direct reader accepts (SCION_SERVER_ADMIN_MODE=yes) does not fail
+// LoadGlobalConfig on either load path.
+func TestServerEnvTable_DirectNamesNotMapped(t *testing.T) {
+	for _, mode := range []string{"legacy", "settings"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			if mode == "settings" {
+				writeServerSettings(t, home, "")
+			}
+			t.Setenv("SCION_SERVER_ADMIN_MODE", "yes")
+			t.Setenv("SCION_SERVER_MAINTENANCE_MESSAGE", "down for maintenance")
+			gc, err := LoadGlobalConfig(t.TempDir())
+			require.NoError(t, err)
+			assert.False(t, gc.AdminMode, "the env var is read directly at startup, not through GlobalConfig")
+		})
+	}
+	for name := range directServerEnvNames {
+		if _, _, ok := KeyForServerEnv(name); ok {
+			continue // also a table setting (HUB_HUBNAME, HUB_HUBID)
+		}
+		rest := strings.TrimPrefix(name, serverEnvPrefix)
+		assert.Equal(t, "", envKeyToConfigKey(rest), name)
+		assert.Equal(t, "", serverEnvToOpsettingsKey(rest), name)
+		assert.Equal(t, "", versionedEnvKeyMapper(name), name)
+	}
+}
+
+// setEnvInOrder unsets names, then sets them in the given order, so they
+// appear in os.Environ in that order.
+func setEnvInOrder(t *testing.T, kv [][2]string) {
+	t.Helper()
+	for _, p := range kv {
+		t.Setenv(p[0], "")
+		require.NoError(t, os.Unsetenv(p[0]))
+	}
+	for _, p := range kv {
+		t.Setenv(p[0], p[1])
+	}
+}
+
+// TestServerEnvTable_CanonicalBeatsAlias: when a canonical name and its
+// alias are both set, the canonical value wins in every consumer, whatever
+// their order in the process environment; among aliases the first in sort
+// order wins.
+func TestServerEnvTable_CanonicalBeatsAlias(t *testing.T) {
+	const canon, alias = "SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ADMIN_EMAILS"
+	orders := map[string][][2]string{
+		"canonical first": {{canon, "canon@example.com"}, {alias, "legacy@example.com"}},
+		"alias first":     {{alias, "legacy@example.com"}, {canon, "canon@example.com"}},
+	}
+	for name, kv := range orders {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			setEnvInOrder(t, kv)
+			assert.Equal(t, "canon@example.com", LoadEnvKoanf().String("server.hub.admin_emails"), "opsettings env layer")
+			gc, err := LoadGlobalConfig(t.TempDir())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"canon@example.com"}, gc.Hub.AdminEmails, "GlobalConfig (legacy path)")
+			writeServerSettings(t, home, "")
+			gc, err = LoadGlobalConfig(t.TempDir())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"canon@example.com"}, gc.Hub.AdminEmails, "GlobalConfig (settings path)")
+			vs, err := LoadVersionedSettings("")
+			require.NoError(t, err)
+			require.NotNil(t, vs.Server)
+			require.NotNil(t, vs.Server.Hub)
+			assert.Equal(t, []string{"canon@example.com"}, vs.Server.Hub.AdminEmails, "VersionedSettings")
+
+			var seed [][2]string
+			for _, p := range kv {
+				seed = append(seed, [2]string{"SCION_SEED_SERVER_" + strings.TrimPrefix(p[0], serverEnvPrefix), p[1]})
+			}
+			setEnvInOrder(t, seed)
+			assert.Equal(t, "canon@example.com", LoadSeedEnvKoanf().String("server.hub.admin_emails"), "seed layer")
+		})
+	}
+
+	// koanf:"-" settings: the canonical name wins in the overlay too.
+	t.Run("outside koanf", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		writeServerSettings(t, home, "")
+		setEnvInOrder(t, [][2]string{{"SCION_SERVER_DEFAULT_TIMEZONE", "Europe/Paris"}, {"SCION_SERVER_DEFAULTTIMEZONE", "America/New_York"}})
+		gc, err := LoadGlobalConfig(t.TempDir())
+		require.NoError(t, err)
+		assert.Equal(t, "America/New_York", gc.DefaultTimezone)
+	})
+
+	// Two aliases, no canonical name: the alias that sorts first wins.
+	e := serverEnvEntry(t, "server.broker.hub_endpoint")
+	require.Contains(t, e.Aliases, "SCION_SERVER_BROKER_HUBENDPOINT")
+	require.Contains(t, e.Aliases, "SCION_SERVER_BROKER_HUB_ENDPOINT")
+	for name, kv := range map[string][][2]string{
+		"aliases, sorted first set first": {{"SCION_SERVER_BROKER_HUBENDPOINT", "http://first:8080"}, {"SCION_SERVER_BROKER_HUB_ENDPOINT", "http://second:8080"}},
+		"aliases, sorted first set last":  {{"SCION_SERVER_BROKER_HUB_ENDPOINT", "http://second:8080"}, {"SCION_SERVER_BROKER_HUBENDPOINT", "http://first:8080"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			setEnvInOrder(t, kv)
+			assert.Equal(t, "http://first:8080", LoadEnvKoanf().String("server.broker.hub_endpoint"))
+		})
+	}
+}
+
+// TestServerEnvTable_OutsideKoanfBadValueFails: an unparseable value of a
+// setting GlobalConfig holds in a koanf:"-" field fails LoadGlobalConfig,
+// with an error that names the environment, as an unparseable koanf field
+// value does.
+func TestServerEnvTable_OutsideKoanfBadValueFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeServerSettings(t, home, "")
+	t.Setenv("SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS", "not-a-bool")
+	_, err := LoadGlobalConfig(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SCION_SERVER_* environment")
+}
+
+// TestServerEnvTable_OutsideKoanfLegacyPath: on the legacy load path (no
+// server key in settings.yaml) the env still overrides a koanf:"-" setting
+// read from the top-level settings.yaml sections, and the rest of the
+// section stays.
+func TestServerEnvTable_OutsideKoanfLegacyPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(`schema_version: "1"
+telemetry:
+  cloud:
+    endpoint: file.example.com:4317
+    protocol: grpc
+`), 0o644))
+	t.Setenv("SCION_SERVER_TELEMETRY_CLOUD_ENDPOINT", "env.example.com:4317")
+	gc, err := LoadGlobalConfig(t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, gc.TelemetryConfig)
+	require.NotNil(t, gc.TelemetryConfig.Cloud)
+	assert.Equal(t, "env.example.com:4317", gc.TelemetryConfig.Cloud.Endpoint)
+	assert.Equal(t, "grpc", gc.TelemetryConfig.Cloud.Protocol)
+}
+
+// TestServerEnvTable_ImageRegistryNotVersioned: the SCION_SERVER_* and
+// SCION_SEED_* spellings of image_registry are hub file-tier bootstrap
+// values (the opsettings env layer and the seed layer); they never set the
+// VersionedSettings image_registry key.
+func TestServerEnvTable_ImageRegistryNotVersioned(t *testing.T) {
+	for _, name := range []string{"SCION_SERVER_IMAGEREGISTRY", "SCION_SERVER_IMAGE_REGISTRY", "SCION_SEED_IMAGEREGISTRY", "SCION_SEED_IMAGE_REGISTRY"} {
+		assert.NotEqual(t, "image_registry", versionedEnvKeyMapper(name), name)
+	}
+	assert.Equal(t, "image_registry", serverEnvToOpsettingsKey("IMAGEREGISTRY"))
+	assert.Equal(t, "image_registry", seedEnvToOpsettingsKey("IMAGEREGISTRY"))
+}

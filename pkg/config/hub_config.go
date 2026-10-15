@@ -1647,21 +1647,33 @@ func parseCommaSeparatedList(s string) []string {
 // envKeyToConfigKey maps a SCION_SERVER_* env name (after the prefix) to its
 // GlobalConfig koanf path through the env mapping table (server_env_table.go):
 // a canonical name or an alias lands on the entry's GlobalConfig path, and
-// "" (dropped) when GlobalConfig has no koanf field for the setting. A name
-// the table does not hold resolves against GlobalConfig's koanf tags
-// (serverEnvResidue), else to its lower-case segments joined with ".".
+// "" (dropped) when GlobalConfig has no koanf field for the setting or the
+// alias is overridden (resolveServerEnv). A name read directly with
+// os.Getenv (directServerEnvNames) is dropped. Any other name resolves
+// against GlobalConfig's koanf tags one segment per field, else to its
+// lower-case segments joined with ".".
 // Example: HUB_ADMINEMAILS -> hub.adminEmails
 func envKeyToConfigKey(envKey string) string {
 	name := serverEnvPrefix + envKey
 	if isServerEnvInert(name) {
 		return ""
 	}
-	if e, _, ok := lookupServerEnv(name); ok {
-		return e.GlobalConfig
+	if _, _, ok := lookupServerEnv(name); ok {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.GlobalConfig
+		}
+		return "" // an alias the canonical name (or an earlier alias) overrides
 	}
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return "" // read directly with os.Getenv, never a GlobalConfig field
+	}
+	// The residue takes one segment per GlobalConfig field (the collapsed
+	// spelling, as before the table): SCION_SERVER_ADMIN_MODE does not
+	// become adminMode.
 	segs := strings.Split(strings.ToLower(envKey), "_")
-	if p, ok := serverEnvResidue(reflect.TypeOf(GlobalConfig{}), segs, ownsGlobalConfigEnvPath); ok {
-		return p
+	if p, end, ok := koanfTagPathEnd(reflect.TypeOf(GlobalConfig{}), segs); ok && !isObjectListType(end) &&
+		!ownsGlobalConfigEnvPath(strings.Join(p, ".")) {
+		return strings.Join(p, ".")
 	}
 	return strings.Join(segs, ".")
 }
@@ -1678,8 +1690,14 @@ func serverEnvToOpsettingsKey(envKey string) string {
 	if isServerEnvInert(name) {
 		return ""
 	}
-	if e, _, ok := lookupServerEnv(name); ok {
-		return e.Path
+	if _, _, ok := lookupServerEnv(name); ok {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.Path
+		}
+		return ""
+	}
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return ""
 	}
 	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), true, true)
 }
@@ -1698,12 +1716,18 @@ func seedEnvToOpsettingsKey(envKey string) string {
 			return ""
 		}
 		if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
-			return e.Path
+			if e, ok := resolveServerEnv(seedEnvPrefix+up, true); ok {
+				return e.Path
+			}
+			return ""
 		}
 		return settingsEnvResidue(strings.Split(strings.ToLower(rest), "_"), true, false)
 	}
 	if e, _, ok := lookupServerEnv(serverEnvPrefix + up); ok && !strings.HasPrefix(e.Path, "server.") {
-		return e.Path
+		if e, ok := resolveServerEnv(seedEnvPrefix+up, true); ok {
+			return e.Path
+		}
+		return ""
 	}
 	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), false, true)
 }
@@ -2152,7 +2176,8 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 
 // globalConfigEnvOverlay holds the GlobalConfig settings kept in koanf:"-"
 // fields (filled from settings.yaml by applyTopLevelSettingsSections and
-// ConvertV1ServerToGlobalConfig), keyed by their settings paths.
+// ConvertV1ServerToGlobalConfig), keyed by their settings paths. Keep it in
+// step with globalConfigOutsideKoanf in the opsettings env contract test.
 type globalConfigEnvOverlay struct {
 	Telemetry       *V1TelemetryConfig `koanf:"telemetry"`
 	ProjectDefaults struct {
@@ -2182,7 +2207,7 @@ type globalConfigEnvOverlay struct {
 func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	k := koanf.New(".")
 	_ = k.Load(nonEmptyEnvProvider(serverEnvPrefix, func(rest string) string {
-		if e, _, ok := lookupServerEnv(serverEnvPrefix + rest); ok {
+		if e, ok := resolveServerEnv(serverEnvPrefix+rest, false); ok {
 			return e.Path
 		}
 		return ""
@@ -2195,7 +2220,7 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
-		return err
+		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage

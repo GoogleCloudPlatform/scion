@@ -442,7 +442,8 @@ func structTypeHas(t reflect.Type, path string) bool {
 	return structTagPath(t, path) != ""
 }
 
-// globalConfigOutsideKoanf maps the keys GlobalConfig holds outside koanf to
+// globalConfigOutsideKoanf (keep in step with globalConfigEnvOverlay in
+// pkg/config/hub_config.go) maps the keys GlobalConfig holds outside koanf to
 // the field that holds them, which must be tagged koanf:"-". A key is
 // either listed itself or sits under a listed prefix, in which case the
 // rest of the key is the koanf path inside the field's struct

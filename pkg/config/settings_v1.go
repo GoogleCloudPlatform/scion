@@ -4037,7 +4037,13 @@ func serverEnvToVersionedKey(name string) string {
 		return ""
 	}
 	if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
-		return e.Path
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.Path
+		}
+		return "" // an alias the canonical name (or an earlier alias) overrides
+	}
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return "" // read directly with os.Getenv
 	}
 	rest := strings.ToLower(name[len(serverEnvPrefix):])
 	return settingsEnvResidue(strings.Split(rest, "_"), true, false)

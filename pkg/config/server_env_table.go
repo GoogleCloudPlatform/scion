@@ -17,6 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -208,6 +209,62 @@ func lookupServerEnv(name string) (ServerEnvEntry, bool, bool) {
 		return ServerEnvEntry{}, false, false
 	}
 	return t.entries[n.idx], n.alias, true
+}
+
+// resolveServerEnv returns the table entry a SCION_SERVER_* name sets, as
+// the env consumers apply it: false for a name the table does not hold, and
+// false for an alias another name of the same setting takes precedence
+// over. The canonical name wins over every alias, and among aliases the one
+// that sorts first wins, so the result never depends on the order of the
+// process environment. With seed true, name is a SCION_SEED_* name and
+// precedence is checked among the SCION_SEED_* spellings.
+func resolveServerEnv(name string, seed bool) (ServerEnvEntry, bool) {
+	lookup := name
+	if seed {
+		lookup = serverEnvNameForSeed(name)
+	}
+	e, alias, ok := lookupServerEnv(lookup)
+	if !ok {
+		return ServerEnvEntry{}, false
+	}
+	if !alias {
+		return e, true
+	}
+	spell := func(n string) string {
+		if seed {
+			return seedEnvNameFor(e, n)
+		}
+		return n
+	}
+	if os.Getenv(spell(e.Canonical)) != "" {
+		return ServerEnvEntry{}, false
+	}
+	self := strings.ToUpper(lookup)
+	for _, a := range e.Aliases {
+		if a < self && os.Getenv(spell(a)) != "" {
+			return ServerEnvEntry{}, false
+		}
+	}
+	return e, true
+}
+
+// serverEnvNameForSeed returns the SCION_SERVER_* spelling of a SCION_SEED_*
+// name: SCION_SEED_SERVER_<x> is SCION_SERVER_<x>, and SCION_SEED_<x> is
+// SCION_SERVER_<x>.
+func serverEnvNameForSeed(name string) string {
+	rest := strings.ToUpper(strings.TrimPrefix(strings.ToUpper(name), seedEnvPrefix))
+	return serverEnvPrefix + strings.TrimPrefix(rest, "SERVER_")
+}
+
+// seedEnvNameFor returns the SCION_SEED_* spelling of the SCION_SERVER_* name
+// n of entry e: SCION_SEED_SERVER_<x> for a server setting, SCION_SEED_<x>
+// otherwise.
+func seedEnvNameFor(e ServerEnvEntry, n string) string {
+	rest := strings.TrimPrefix(n, serverEnvPrefix)
+	if strings.HasPrefix(e.Path, "server.") {
+		return seedEnvPrefix + "SERVER_" + rest
+	}
+	return seedEnvPrefix + rest
 }
 
 // isServerEnvInert reports whether a SCION_SERVER_* name is listed in
@@ -475,6 +532,13 @@ func fieldByNormTag(t reflect.Type, want string) (reflect.StructField, string, b
 // koanfTagPath follows segs (one per field, matched by normEnvKey) through
 // t and returns the exact koanf tags. A map consumes one segment as its key.
 func koanfTagPath(t reflect.Type, segs []string) ([]string, bool) {
+	tags, _, ok := koanfTagPathEnd(t, segs)
+	return tags, ok
+}
+
+// koanfTagPathEnd is koanfTagPath that also returns the type the path ends
+// on.
+func koanfTagPathEnd(t reflect.Type, segs []string) ([]string, reflect.Type, bool) {
 	out := make([]string, 0, len(segs))
 	for _, seg := range segs {
 		t = derefType(t)
@@ -482,7 +546,7 @@ func koanfTagPath(t reflect.Type, segs []string) ([]string, bool) {
 		case reflect.Struct:
 			f, tag, ok := fieldByNormTag(t, normEnvKey(seg))
 			if !ok {
-				return nil, false
+				return nil, nil, false
 			}
 			out = append(out, tag)
 			t = f.Type
@@ -490,10 +554,10 @@ func koanfTagPath(t reflect.Type, segs []string) ([]string, bool) {
 			out = append(out, seg)
 			t = t.Elem()
 		default:
-			return nil, false
+			return nil, nil, false
 		}
 	}
-	return out, true
+	return out, t, true
 }
 
 // envSegmentsKoanfPath resolves env segments (an env name after its prefix,
