@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 // Log the declared skill reference in its redacted form (ptone/scion#5150).
@@ -50,6 +51,8 @@ const (
 	refLogSchemeRedacted = "(redacted URL)"
 	// refLogWithheld replaces the reason when the reference is redacted.
 	refLogWithheld = "(resolver message withheld)"
+	// refLogNameWithheld replaces a skill name when the reference is redacted.
+	refLogNameWithheld = "(skill name withheld)"
 	// refLogPlainRef is a public reference, logged as it is.
 	refLogPlainRef = "gh://owner/repo/plain-skill@v1"
 )
@@ -245,23 +248,27 @@ func TestSkillRefLog_ProvisionRequiredMissingFromResponse(t *testing.T) {
 func TestSkillRefLog_DestNameCollision(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
+		winnerRef     string
+		wantWinner    string
 		loserOptional bool
 		msg           string
 	}{
-		{"required loser", false, "skill destination-name collision resolved"},
-		{"optional loser", true, "skill destination-name collision resolved (optional skill dropped)"},
+		{"required loser", refLogGHRef, refLogSchemeRedacted, false, "skill destination-name collision resolved"},
+		{"optional loser", refLogGHRef, refLogSchemeRedacted, true, "skill destination-name collision resolved (optional skill dropped)"},
+		{"redacted loser only", refLogPlainRef, refLogPlainRef, false, "skill destination-name collision resolved"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			records := captureSlog(t)
 			skills := []ResolvedSkill{
 				{Name: "dup", URI: refLogHTTPRef, Scope: "hub", Optional: tc.loserOptional},
-				{Name: "dup", URI: refLogGHRef, Scope: "template"},
+				{Name: "dup", URI: tc.winnerRef, Scope: "template"},
 			}
 			deduplicateByDestName(context.Background(), skills)
 
 			_, attrs := refLogFind(t, *records, tc.msg)
-			refLogAssertAttr(t, attrs, "winner_uri", refLogSchemeRedacted)
+			refLogAssertAttr(t, attrs, "winner_uri", tc.wantWinner)
 			refLogAssertAttr(t, attrs, "dropped_uri", refLogHTTPRedacted)
+			refLogAssertAttr(t, attrs, "dest_name", refLogNameWithheld)
 			refLogAssertNotLogged(t, *records)
 		})
 	}
@@ -293,6 +300,7 @@ func TestSkillRefLog_InstallFailure(t *testing.T) {
 			refLogAssertAttr(t, attrs, "skill_uri", refLogHTTPRedacted)
 			refLogAssertAttr(t, attrs, "reason", refLogWithheld)
 			refLogAssertAttr(t, attrs, "error", refLogWithheld)
+			refLogAssertAttr(t, attrs, "skill_name", refLogNameWithheld)
 			refLogAssertNotLogged(t, *records)
 		})
 	}
@@ -315,6 +323,7 @@ func TestSkillRefLog_InstallFailureQuotingRef(t *testing.T) {
 	refLogAssertAttr(t, attrs, "skill_uri", refLogHTTPRedacted)
 	refLogAssertAttr(t, attrs, "reason", refLogWithheld)
 	refLogAssertAttr(t, attrs, "error", refLogWithheld)
+	refLogAssertAttr(t, attrs, "skill_name", refLogNameWithheld)
 	refLogAssertNotLogged(t, *records)
 }
 
@@ -326,7 +335,7 @@ func TestSkillRefLog_InstallFailurePublicRefURLInText(t *testing.T) {
 	skillsDest := filepath.Join(agentHome, ".claude", "skills")
 	records := captureSlog(t)
 	skills := []ResolvedSkill{{
-		Name: "https://example.com/n?sig=x", URI: refLogPlainRef, Version: "1.0.0", Optional: true,
+		Name: "pub-skill", As: "https://example.com/n?sig=x", URI: refLogPlainRef, Version: "1.0.0", Optional: true,
 		Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("# Skill")}},
 	}}
 	if _, _, err := installResolvedSkills(context.Background(), skills, skillsDest, agentHome); err != nil {
@@ -334,6 +343,7 @@ func TestSkillRefLog_InstallFailurePublicRefURLInText(t *testing.T) {
 	}
 	_, attrs := refLogFind(t, *records, "optional skill could not be installed; skipped")
 	refLogAssertAttr(t, attrs, "skill_uri", refLogPlainRef)
+	refLogAssertAttr(t, attrs, "skill_name", "pub-skill")
 	const wantPrefix = `invalid skill destination name "https://(redacted URL) `
 	for _, key := range []string{"reason", "error"} {
 		if got, _ := attrs[key].(string); !strings.HasPrefix(got, wantPrefix) {
@@ -391,6 +401,58 @@ func TestSkillRefLog_GitHubStaleServeWarning(t *testing.T) {
 		if strings.Contains(stderr, part) {
 			t.Errorf("stderr %q holds %q", stderr, part)
 		}
+	}
+}
+
+// TestSkillRefLog_ContentCacheRecord checks the content-cache record of an
+// install: the skill name is withheld for a redacted reference and logged
+// as it is for a public one.
+func TestSkillRefLog_ContentCacheRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name, ref, want string
+	}{
+		{"redacted ref", refLogHTTPRef, refLogNameWithheld},
+		{"public ref", refLogPlainRef, "cache-skill"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache, err := templatecache.New(t.TempDir(), 0)
+			if err != nil {
+				t.Fatalf("templatecache.New: %v", err)
+			}
+			ctx := ContextWithSkillCache(context.Background(), cache)
+			agentHome := t.TempDir()
+			skillsDest := filepath.Join(agentHome, ".claude", "skills")
+			records := captureSlog(t)
+			skills := []ResolvedSkill{{
+				Name: "cache-skill", URI: tc.ref, Version: "1.0.0", Hash: "sha256:00", Optional: true,
+				Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("# Cache Skill")}},
+			}}
+			_, _, _ = installResolvedSkills(ctx, skills, skillsDest, agentHome)
+
+			_, attrs := refLogFind(t, *records, "skill_content_cache: cache miss, will download")
+			refLogAssertAttr(t, attrs, "skill", tc.want)
+			refLogAssertNotLogged(t, *records)
+		})
+	}
+}
+
+// TestSkillRefLog_GitHubNoTokenWarning checks the GitHub resolver's stderr
+// line for an unauthenticated request names the reference in its redacted
+// form.
+func TestSkillRefLog_GitHubNoTokenWarning(t *testing.T) {
+	server, _ := newTestGitHubServer(t)
+	r := newTestGitHubResolver(server)
+	r.token = ""
+
+	const uri = "HTTPS://github.com/owner/repo/tree/main/skills/s"
+	stderr := refLogCaptureStderr(t, func() {
+		_, _ = r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
+	})
+	if want := "no GITHUB_TOKEN configured for https://github.com/owner/repo/tree/main/skills/s;"; !strings.Contains(stderr, want) {
+		t.Errorf("stderr %q does not hold %q", stderr, want)
+	}
+	if strings.Contains(stderr, uri) {
+		t.Errorf("stderr %q holds the declared reference", stderr)
 	}
 }
 

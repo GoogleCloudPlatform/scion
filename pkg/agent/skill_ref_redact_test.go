@@ -148,3 +148,15 @@ func TestSkillSchemeRest_ASCIIOnly(t *testing.T) {
 		t.Errorf("RedactSkillRef(percent-encoded colon) = %q, want %q", got, RedactedURL)
 	}
 }
+
+func TestLoggedSkillName(t *testing.T) {
+	if got := LoggedSkillName(redactTestHTTPRef, "a-skill"); got != SkillNameWithheld {
+		t.Errorf("LoggedSkillName(redacted ref) = %q, want %q", got, SkillNameWithheld)
+	}
+	if got := LoggedSkillName(redactTestPlainRef, "a-skill"); got != "a-skill" {
+		t.Errorf("LoggedSkillName(public ref) = %q, want %q", got, "a-skill")
+	}
+	if SkillNameWithheld != "(skill name withheld)" {
+		t.Errorf("SkillNameWithheld = %q", SkillNameWithheld)
+	}
+}
