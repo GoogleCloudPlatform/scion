@@ -246,7 +246,12 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 
 // adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused.
+// artifact and every refusal, and never why this caller was refused. One
+// narrow exception (ptone/scion#5119): a caller that holds review-grant
+// authority on an artifact owned by an agent, asking for a well-formed
+// review grant, learns when the user cannot read the artifact
+// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
+// grant (CodeReviewReplacesAccess); see putReviewGrant.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
 	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 
