@@ -195,16 +195,17 @@ Use --broker-only to only remove the broker record without affecting project pro
 Local state: deregister removes this hub's credentials file, its
 hub_connections entry and (when no connections remain) the empty
 hub-credentials/ directory. Broker-local state stays: the broker daemon log
-(broker.log), the broker's state directory (<server.broker.state_dir>/<broker-id>,
-default ~/.scion/runtime-broker-state/<broker-id>; read from the global settings
-and environment of the shell that runs deregister) and the broker template
-cache (cache/templates). Pass --purge-local to remove
-them as well once the last hub connection is gone and the broker is stopped;
-it also works on a host that is no longer registered. When the purge cannot
-run, the command exits non-zero (after a successful deregister) and says why.
-Only the default locations are cleaned: a broker run with a custom state or
-template cache directory keeps those. Settings files, the hub-id file (it
-belongs to a local hub) and other hubs' credentials are never removed.`,
+(broker.log), the broker's state directory and the broker template cache
+(cache/templates). The state directory is <server.broker.state_dir>/<broker-id>
+(default ~/.scion/runtime-broker-state/<broker-id>), with server.broker.state_dir
+read from the global settings and environment of the shell that runs
+deregister. Pass --purge-local to remove them as well once the last hub
+connection is gone and the broker is stopped; it also works on a host that is
+no longer registered. When the purge cannot run (for example when
+server.broker.state_dir cannot be resolved), the command exits non-zero (after
+a successful deregister) and says why. A broker run with a custom template
+cache directory keeps that cache. Settings files, the hub-id file (it belongs
+to a local hub) and other hubs' credentials are never removed.`,
 	RunE: runBrokerDeregister,
 }
 
