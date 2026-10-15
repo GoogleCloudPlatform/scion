@@ -1192,10 +1192,28 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 // peer agent; a group with no project needs inbox:read on a hub boundary.
 // A project group needs only the project:read check it already passed.
 func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
-	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
+	if !tokenConversationReadNeedsInbox(conv) {
 		return true
 	}
 	return s.authorizeTokenConversation(w, r, token, permInboxRead, conv)
+}
+
+// tokenConversationReadNeedsInbox reports whether a token reading conv
+// needs inbox:read for it (tokenMayUseConversation): every conversation
+// except a project group, which needs only the project:read check every
+// caller passes.
+func tokenConversationReadNeedsInbox(conv *store.Conversation) bool {
+	return conv.Kind == "direct" || conv.ProjectID == nil || *conv.ProjectID == ""
+}
+
+// tokenMayReadConversation is the token rule of authorizeTokenConversationRead
+// without a response: check must be the inbox:read self-scope check of
+// token. A store error is returned.
+func (s *Server) tokenMayReadConversation(ctx context.Context, token *ScopedUserIdentity, check *selfScopeCheck, conv *store.Conversation) (bool, error) {
+	if !tokenConversationReadNeedsInbox(conv) {
+		return true, nil
+	}
+	return s.tokenMayUseConversation(ctx, token, check, conv)
 }
 
 // isConversationParticipant checks whether a principal is an active participant
