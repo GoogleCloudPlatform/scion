@@ -702,7 +702,9 @@ func stepOr(step, def string) string {
 // may have been cut short, and the next boot's recovery finishes both.
 //
 // A launch whose clean-up failed keeps its record too, as cleanup_pending,
-// so the next boot's recovery retries the clean-up (ptone/scion#5177).
+// so the next boot's recovery retries the clean-up (ptone/scion#5177), and
+// so does a launch whose terminal report got no hub answer, as
+// terminal_pending, so the next boot resends it (ptone/scion#5186).
 func (s *Server) endLaunchJournal(rec *launchRecord) {
 	s.untrackAsyncLaunch(rec)
 	if s.drainExpired() {

@@ -79,7 +79,7 @@ func (s *Server) keepRecoveredReport(path string, jr *journalRecord, t journalTe
 	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: failed to update a journal record for a report retry; the record is left as it was",
-			"launch_id", jr.LaunchID)
+			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "instance_id", jr.InstanceID)
 		return
 	}
 	s.agentLifecycleLog.Warn("Launch recovery: the terminal report got no hub answer; its journal record is kept for a retry at the next broker start",
