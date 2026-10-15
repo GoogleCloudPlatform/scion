@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -52,7 +53,9 @@ func brokerStateRoot(setting string) (string, error) {
 // brokerStateDir is the legacy Runtime Broker's runtimebroker.ServerConfig
 // StateDir for brokerID: <root>/<broker-id> ("default" when the ID is
 // empty, as runtimebroker.DefaultStateDir does), or "" when the setting is
-// empty, which leaves the broker on its default directory.
+// empty, which leaves the broker on its default directory (where
+// DefaultStateDir checks the ID). A broker ID that is not a single path
+// element is an error (brokercredentials.ErrBrokerIDNotPathElement).
 func brokerStateDir(setting, brokerID string) (string, error) {
 	root, err := brokerStateRoot(setting)
 	if err != nil || root == "" {
@@ -60,6 +63,11 @@ func brokerStateDir(setting, brokerID string) (string, error) {
 	}
 	if brokerID == "" {
 		brokerID = "default"
+	}
+	// The broker ID names the directory under the configured root, as it
+	// does under the default one (runtimebroker.DefaultStateDir).
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", err
 	}
 	return filepath.Join(root, brokerID), nil
 }
@@ -96,6 +104,9 @@ func flatInstancesStateDirWarning(cfg *config.GlobalConfig) string {
 // closed; see cleanupAfterDeregister).
 func configuredBrokerStateRoot(scionHome string) (string, error) {
 	def := filepath.Join(scionHome, "runtime-broker-state")
+	// An empty path resolves the settings through config.GetGlobalDir, the
+	// same global-dir resolution 'server start' uses, so a custom global
+	// directory is respected.
 	cfg, err := loadBrokerStateConfig("")
 	if err != nil {
 		return def, fmt.Errorf("%s could not be read: loading the settings: %w", brokerStateDirSetting, err)
