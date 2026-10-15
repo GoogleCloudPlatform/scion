@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 296
+**Operations:** 297
 
 ## Table of Contents
 
@@ -64,7 +64,7 @@
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 - [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
 - [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
-- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
 - [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
 - [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
 - [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
@@ -289,10 +289,11 @@
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
-- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
+- [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
-- [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
+- [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
+- [testidentity.admin.residue](#testidentityadminresidue) — Read the residue report of an admin-kind test identity, live or purged: the grants and resources stamped with it, and its changes to rows without its stamp, for a human super-admin session
 - [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
 - [testidentity.delegation.list](#testidentitydelegationlist) — List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
 - [testidentity.delegation.revoke](#testidentitydelegationrevoke) — Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused
@@ -2571,7 +2572,7 @@
 
 **Domain:** artifact
 
-**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
 
 ### Entry Points
 
@@ -2596,7 +2597,7 @@
 - **Kind:** `non_amplification`
 - A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
 
-**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `review_subject_cannot_read`, `review_replaces_access`
 
 ### Tests
 
@@ -10551,7 +10552,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
+**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 
 ### Entry Points
 
@@ -10574,7 +10575,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
 
 ### Audit
 
@@ -10589,6 +10590,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentityWeb_Mint`
+- `pkg/hub:TestAdminWebSessions_RefusedWithoutSetting`
+- `pkg/hub:TestAdminWebSessions_MintNeedsTheKindsIssuerChecks`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
 - `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
@@ -10599,7 +10602,7 @@
 
 **Domain:** testidentity
 
-**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
+**Description:** Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
 
 ### Entry Points
 
@@ -10622,7 +10625,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: the same 200 empty report for any ID the caller may not purge)
+- Only a kind=test_fixture user is deleted; any other user ID answers 404, even for an admin (with ?purge=true: an admin-kind identity too, and the same 200 empty report for any ID the caller may not purge); test identities of every kind are refused as callers
 
 ### Audit
 
@@ -10694,7 +10697,7 @@
 
 **Domain:** testidentity
 
-**Description:** Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
+**Description:** Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
 
 ### Entry Points
 
@@ -10733,6 +10736,45 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestAdmin_RevokeAll`
+- `pkg/hub:TestAdminWebSessions_RevokeAllEndsLiveSession`
+
+---
+
+## testidentity.admin.residue
+
+**Domain:** testidentity
+
+**Description:** Read the residue report of an admin-kind test identity, live or purged: the grants and resources stamped with it, and its changes to rows without its stamp, for a human super-admin session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities/admin/{id}/residue` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `test_identity.issue_admin`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only a human caller holding an active super-admin binding, on an interactive session; only admin-kind identities are reported
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestTestAdminA3_ResidueRoute`
 
 ---
 
