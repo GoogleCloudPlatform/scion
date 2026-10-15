@@ -316,6 +316,8 @@ Two commands issue test hub-admins and test super-admins. They are for different
 
 The human command uses your session, so the authority is yours at that moment. The runner command acts through a delegation that a super-admin created on the target, so the hub re-checks the delegation and its grantor at every mint. `issue --admin-role` refuses a hub profile and agent mode, and `issue-admin` refuses to run without a target-hub profile. The run cache file is created exclusively with mode `0600`, symlinks are refused, an alias that already exists is refused before any request, and the token is never printed. `teardown --run <label>` removes the file.
 
+### Admin delegations through a profile
+
 **Add the admin delegations to the runner's profile.** An admin delegation pins the target's
 admin issuer service account, `<T>-admin-issuer` (see the prerequisites below), so the profile
 names that account with `--admin-issuer-sa`. It must differ from `--issuer-sa`, and is required
