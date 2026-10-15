@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -62,6 +63,9 @@ type separateRelayWorld struct {
 	userTokenB           string
 	relay                *relayserver.Server
 	release              chan struct{} // feeds the app's event stream
+	// regClient is the conduit registry database (each relay opens its own
+	// store on it).
+	regClient *ent.Client
 	// spawnPTY, when set, makes the agent serve pty streams with it.
 	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
 
@@ -117,7 +121,11 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 	cf.srv.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
 	w.hubB.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
 
-	regStore := entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	// One database for the conduit registry. The hubs share one store on it;
+	// each separate relay gets its own store on the same database, as a relay
+	// process has its own registry access.
+	w.regClient = enttest.NewClient(t)
+	regStore := entadapter.NewConduitRegistryStore(w.regClient)
 	replay := testReplayStore(t) // shared by both hubs, as the database is
 	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
 		srv.config.SharedSigningSecret = testRelaySessionSecret
@@ -136,7 +144,7 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 	w.relay, err = relayserver.Start(ctx, relayserver.Config{
 		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
 		PublicListener: publicLn, InternalListen: "127.0.0.1:0",
-		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: regStore, Experiment: conduitAlwaysOn{},
+		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: entadapter.NewConduitRegistryStore(w.regClient), Experiment: conduitAlwaysOn{},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {

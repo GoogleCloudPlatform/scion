@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -64,7 +65,7 @@ func newCrossRelayWorld(t *testing.T) *crossRelayWorld {
 	cw.relay1, err = relayserver.Start(context.Background(), relayserver.Config{
 		InstanceID: "relay-1", PublicURL: "http://" + cw.relay1Addr, HubInternalURL: internalB.URL,
 		PublicListener: ln, InternalListen: "127.0.0.1:0",
-		PeerAuth: externalRelayAuth(t, "relay-1"), Registry: cw.regStore, Experiment: conduitAlwaysOn{},
+		PeerAuth: externalRelayAuth(t, "relay-1"), Registry: entadapter.NewConduitRegistryStore(cw.regClient), Experiment: conduitAlwaysOn{},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
