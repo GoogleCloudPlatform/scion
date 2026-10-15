@@ -181,13 +181,17 @@ func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 	e := newX3bEnv(t)
 	e.saveAdminProfiles(t)
 	base := []string{"hub", "test-identity", "issue-admin", "--purpose", "admin journey", "--run", "r1"}
+	// Without a profile the gate refuses --as and --run first, so these
+	// carry neither.
+	noProfile := []string{"hub", "test-identity", "issue-admin", "--purpose", "admin journey", "--admin-role", "hub-admin"}
 	for _, tc := range []struct {
 		name string
 		args []string
 		is   error
 		want string
 	}{
-		{"agent mode without a profile", append(append([]string{}, base...), "--admin-role", "hub-admin", "--as", "a"), nil, "runs only against a target-hub profile"},
+		{"agent mode without a profile", noProfile, nil, "runs only against a target-hub profile"},
+		{"--as without a profile", append(append([]string{}, base...), "--admin-role", "hub-admin", "--as", "a"), nil, "--as needs a hub profile"},
 		{"a profile for the agent's own hub", append(append([]string{"--hub-profile", "own9"}, base...), "--admin-role", "hub-admin", "--as", "a"), hubprofile.ErrOwnHub, ""},
 		{"no --admin-role", append(append([]string{"--hub-profile", "t9"}, base...), "--as", "a"), nil, "admin-role"},
 		{"an invalid --admin-role", append(append([]string{"--hub-profile", "t9"}, base...), "--admin-role", "admin", "--as", "a"), nil, "invalid --admin-role"},
@@ -211,9 +215,12 @@ func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 
 	// Human mode: still no path without a profile.
 	t.Setenv("SCION_CLI_MODE", "human")
-	_, err = e.run(t, append(append([]string{}, base...), "--admin-role", "hub-admin", "--as", "a")...)
+	_, err = e.run(t, noProfile...)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "issue-admin needs a hub profile")
+	_, err = e.run(t, append(append([]string{}, base...), "--admin-role", "hub-admin", "--as", "a")...)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--as needs a hub profile", "the profile gate refuses --as first")
 	_, err = e.run(t, "hub", "test-identity", "web-code", "x", "--admin-role", "hub-admin", "--out", filepath.Join(t.TempDir(), "c.txt"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--admin-role needs a hub profile")
