@@ -175,7 +175,7 @@ func LiteralSiblingGroups(runtimes map[string]V1RuntimeConfig) [][]string {
 			groups = append(groups, names)
 		}
 	}
-	return sortGroups(groups)
+	return sortNameGroups(groups)
 }
 
 // IdentityGroups groups Kubernetes runtime entries that resolve to the same
@@ -266,12 +266,12 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 			groups = append(groups, group)
 		}
 	}
-	return sortGroups(groups), warnings
+	return sortNameGroups(groups), warnings
 }
 
-// sortGroups sorts the names in each group, sorts the groups, and drops
+// sortNameGroups sorts the names in each group, sorts the groups, and drops
 // duplicate groups.
-func sortGroups(groups [][]string) [][]string {
+func sortNameGroups(groups [][]string) [][]string {
 	for _, g := range groups {
 		sort.Strings(g)
 	}
