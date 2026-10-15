@@ -40,11 +40,13 @@ import (
 // router.MaxReResolves times); the real router is exercised by the
 // fixture tests in conduit_broker_routed_test.go.
 
-// scriptedSession answers every Call with resp or err.
+// scriptedSession answers every Call with resp or err. relayID names the
+// relay that holds it ("" for tests that do not exclude relays).
 type scriptedSession struct {
-	resp  *conduitv1.RpcResponse
-	err   error
-	calls int
+	resp    *conduitv1.RpcResponse
+	err     error
+	calls   int
+	relayID string
 }
 
 func (s *scriptedSession) Call(context.Context, *conduitv1.RpcRequest) (*conduitv1.RpcResponse, error) {
@@ -61,34 +63,53 @@ func (s *scriptedSession) Info() conduit.SessionInfo { return conduit.SessionInf
 func (s *scriptedSession) Close() error { return nil }
 
 // scriptedRouter resolves to its sessions in order, applying router.Do's
-// stale-route rule.
+// rules: a stale route excludes the session, relay.ErrOwnerUnreachable
+// excludes every session of that relay, both within router.MaxReResolves.
 type scriptedRouter struct{ sessions []*scriptedSession }
 
 func (r *scriptedRouter) Do(ctx context.Context, req router.Request, fn func(context.Context, router.Resolved) error) error {
 	excluded := map[int]bool{}
+	excludedRelays := map[string]bool{}
+	var unreachable error
 	for attempt := 0; ; attempt++ {
 		idx := -1
-		for i := range r.sessions {
-			if !excluded[i] {
+		for i, s := range r.sessions {
+			if !excluded[i] && !(s.relayID != "" && excludedRelays[s.relayID]) {
 				idx = i
 				break
 			}
 		}
 		if idx < 0 {
+			if unreachable != nil {
+				return unreachable
+			}
 			return router.ErrNoSession
 		}
 		err := fn(ctx, router.Resolved{
 			Session: r.sessions[idx],
-			Record:  registry.SessionRecord{SessionID: fmt.Sprintf("s%d", idx), PrincipalKind: registry.PrincipalBroker, PrincipalID: req.ID},
-			Want:    req.Want,
+			Record: registry.SessionRecord{SessionID: fmt.Sprintf("s%d", idx), PrincipalKind: registry.PrincipalBroker,
+				PrincipalID: req.ID, RelayInstanceID: r.sessions[idx].relayID},
+			Want: req.Want,
 		})
-		if !errors.Is(err, relay.ErrStaleRoute) {
+		unreachable = nil
+		switch {
+		case errors.Is(err, relay.ErrStaleRoute):
+			if attempt >= router.MaxReResolves {
+				return fmt.Errorf("%w (after %d re-resolutions): %w", router.ErrNoSession, attempt, err)
+			}
+			excluded[idx] = true
+		case errors.Is(err, relay.ErrOwnerUnreachable):
+			if attempt >= router.MaxReResolves {
+				return err
+			}
+			excluded[idx] = true
+			if id := r.sessions[idx].relayID; id != "" {
+				excludedRelays[id] = true
+			}
+			unreachable = err
+		default:
 			return err
 		}
-		if attempt >= router.MaxReResolves {
-			return fmt.Errorf("%w (after %d re-resolutions): %w", router.ErrNoSession, attempt, err)
-		}
-		excluded[idx] = true
 	}
 }
 

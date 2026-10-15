@@ -38,8 +38,12 @@ func TestRoutedBrokerRPC_StaleReasonClosedSet(t *testing.T) {
 			string(registry.ReasonDraining), string(registry.ReasonEpochObsolete),
 			string(registry.ReasonIncarnationMismatch), string(registry.ReasonCapabilityMissing),
 			string(registry.ReasonRelayStale), string(registry.ReasonSessionStale),
+			string(registry.ReasonReadError), string(registry.ReasonRelayMissing), string(registry.ReasonRelaySuperseded),
+			string(registry.ReasonNotFound), string(registry.ReasonNotRoutable), string(registry.ReasonProjectMismatch),
+			string(registry.ReasonExecScopeMismatch),
 		} {
-			s1, s2 := &scriptedSession{err: &relay.StaleRouteError{Reason: reason}}, answered()
+			s1, s2 := &scriptedSession{err: &relay.StaleRouteError{Reason: reason}, relayID: "relay-a"}, answered()
+			s2.relayID = "relay-b"
 			resp, err := tunnelOnce(t, scriptedTunnel(s1, s2), conduit.RPCAgentExec, false)
 			require.NoError(t, err, "reason %q", reason)
 			assert.Equal(t, "served", string(resp.Body), "reason %q", reason)
