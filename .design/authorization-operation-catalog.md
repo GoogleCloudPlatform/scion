@@ -62,14 +62,14 @@
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
-- [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+- [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed
 - [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
-- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
 - [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
 - [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
 - [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
 - [artifact.link.revoke](#artifactlinkrevoke) — Revoke one share link of an artifact
-- [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+- [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee), on an artifact owned by an agent for its stewards (an owner of its home project, or the agent's delegating user who reads there), and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
 - [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
 - [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
@@ -286,7 +286,7 @@
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
@@ -2485,7 +2485,7 @@
 
 **Domain:** artifact
 
-**Description:** Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+**Description:** Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant); a steward may change the expiry but a move from it is refused with 403 steward_action_not_allowed
 
 ### Entry Points
 
@@ -2513,13 +2513,16 @@
 - **After Fields:** newExpiresAt, toScope
 - **Atomic:** Yes
 
-**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `steward_action_not_allowed`
 
 ### Tests
 
 - `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/hub:TestArtifactStewardOnRoutes`
 - `pkg/artifacts:TestPatchExpiry`
 - `pkg/artifacts:TestPatchRehome`
+- `pkg/artifacts:TestStewardBoundedTable`
+- `pkg/artifacts:TestStewardRaceAnswersNotFound`
 
 ---
 
@@ -2553,6 +2556,7 @@
 
 - `pkg/hub:TestArtifactsGrantsOnRoutes`
 - `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestStewardBoundedTable`
 
 ---
 
@@ -2560,7 +2564,7 @@
 
 **Domain:** artifact
 
-**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a steward (on an artifact owned by an agent: an owner of its home project, or the agent's delegating user who reads in the home project) gives read, review or write, and an admin grant from it is refused with 403 steward_action_not_allowed; a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; ReviewGrantClause), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
 
 ### Entry Points
 
@@ -2583,9 +2587,17 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; a steward grants at most write (no stored admin grant can outlive its computed authority), decided from roles and the delegation chain (StewardClause), never from grants the caller holds; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
 
-**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `review_subject_cannot_read`, `review_replaces_access`
+### Audit
+
+- **Event Type:** `artifact_event (grant_created, grant_changed)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** oldPermission
+- **After Fields:** grantId, subjectKind, subjectRef, permission, newPermission
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`, `review_subject_cannot_read`, `review_replaces_access`, `steward_action_not_allowed`
 
 ### Tests
 
@@ -2595,10 +2607,10 @@
 - `pkg/artifacts:TestGrantsAdminGate`
 - `pkg/artifacts:TestReviewGrantAllowed`
 - `pkg/artifacts:TestReviewGrantDenied`
-
-### Exemptions
-
-- **route_guarded:** The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed) (scope: artifact grant creation and change) — waives: `audit_obligation`
+- `pkg/hub:TestArtifactStewardOnRoutes`
+- `pkg/artifacts:TestStewardBoundedTable`
+- `pkg/artifacts:TestStewardEvents`
+- `pkg/artifacts:TestStoreCreationEvents`
 
 ---
 
@@ -2629,7 +2641,7 @@
 ### Governance
 
 - **Kind:** domain_specific
-- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) and, on an artifact owned by an agent, its stewards remove its grants; the home project's grant is refused (409 home_grant)
 - **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
 
 ### Audit
@@ -2709,7 +2721,14 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin
+- A link gives read of the current version only, which the creating manager (the owner or an admin grantee) or steward already holds; it gives no write, review or admin
+
+### Audit
+
+- **Event Type:** `artifact_event (link_created)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **After Fields:** linkId, expiresAt
+- **Atomic:** Yes
 
 **Denial Codes:** `not_found`, `forbidden`
 
@@ -2717,10 +2736,7 @@
 
 - `pkg/hub:TestArtifactsShareLinkOnRoutes`
 - `pkg/artifacts:TestLinkManagePermissions`
-
-### Exemptions
-
-- **route_guarded:** The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked) (scope: artifact share link creation) — waives: `audit_obligation`
+- `pkg/artifacts:TestStewardEvents`
 
 ---
 
@@ -2751,7 +2767,7 @@
 ### Governance
 
 - **Kind:** domain_specific
-- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) and, on an artifact owned by an agent, its stewards revoke its share links
 - **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
 
 ### Audit
@@ -2774,7 +2790,7 @@
 
 **Domain:** artifact
 
-**Description:** Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+**Description:** Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee), on an artifact owned by an agent for its stewards (an owner of its home project, or the agent's delegating user who reads there), and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
 
 ### Entry Points
 
@@ -10444,7 +10460,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
+**Description:** Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 
 ### Entry Points
 
@@ -10467,7 +10483,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
 
 ### Audit
 
@@ -10482,6 +10498,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentityWeb_Mint`
+- `pkg/hub:TestAdminWebSessions_RefusedWithoutSetting`
+- `pkg/hub:TestAdminWebSessions_MintNeedsTheKindsIssuerChecks`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
 - `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
 - `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
@@ -10626,6 +10644,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestAdmin_RevokeAll`
+- `pkg/hub:TestAdminWebSessions_RevokeAllEndsLiveSession`
 
 ---
 

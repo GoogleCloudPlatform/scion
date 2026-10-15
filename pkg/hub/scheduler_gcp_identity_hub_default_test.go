@@ -654,10 +654,12 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 	tests := []struct {
 		name           string
 		brokerDefault  string
+		untranslatable bool // the broker has nothing registered to translate to
 		wantTranslated bool
 	}{
 		{name: "docker broker default stays passthrough", brokerDefault: "local"},
 		{name: "cloudrun-sandbox broker default is translated", brokerDefault: "sandbox", wantTranslated: true},
+		{name: "cloudrun-sandbox broker default the broker cannot translate stays passthrough", brokerDefault: "sandbox", untranslatable: true},
 	}
 
 	for _, tc := range tests {
@@ -675,6 +677,9 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			b.DefaultProfile = tc.brokerDefault
 			b.GCPHostServiceAccountEmail = hostSAEmail
 			b.GCPHostProjectID = hostProjectID
+			if tc.untranslatable {
+				b.GCPHostServiceAccountEmail = ""
+			}
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
 			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
 
@@ -689,6 +694,12 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 
 			assignments, err := f.store.GetActiveAgentServiceAccountAssignments(ctx, got.ID)
 			require.NoError(t, err)
+
+			// The profile the mode was decided on is recorded, whichever way
+			// the mode went, so later starts and reincarnations use it.
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.Profile)
+			require.NotNil(t, got.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.CreateInputs.Profile)
 
 			if !tc.wantTranslated {
 				assert.Equal(t, store.GCPMetadataModePassthrough, gcp.MetadataMode)

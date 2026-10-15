@@ -51,6 +51,13 @@ type TestIdentitiesConfig struct {
 	// issuer may pin an issuer delegation to (phase X2). It is read once at
 	// startup and is never writable through the API.
 	WorkloadIssuers []TestIdentityWorkloadIssuer `json:"workloadIssuers,omitempty" yaml:"workloadIssuers,omitempty" koanf:"workloadIssuers"`
+	// AdminWebSessions turns on browser web sessions for the admin test
+	// identity kinds (phase WS4). Its value is the hub id the setting is
+	// bound to, and it must equal this hub's resolved (persistent) hub id;
+	// empty means off. It is read once at startup, is never writable
+	// through the API, and is refused at startup unless --test-mode is
+	// admin or super-admin.
+	AdminWebSessions string `json:"adminWebSessions,omitempty" yaml:"adminWebSessions,omitempty" koanf:"adminWebSessions"`
 }
 
 // TestIdentityWorkloadIssuer is one workload_issuers entry: a pinned Google
@@ -97,6 +104,20 @@ func (c *TestIdentitiesConfig) workloadIssuers() []TestIdentityWorkloadIssuer {
 		return nil
 	}
 	return c.WorkloadIssuers
+}
+
+// TestIdentityAdminWebSessionsKey is the settings key of the admin web
+// session binding (TestIdentitiesConfig.AdminWebSessions).
+const TestIdentityAdminWebSessionsKey = TestIdentitiesKey + ".admin_web_sessions"
+
+// TestIdentityAdminWebSessions returns the hub id the admin web session
+// setting (server.hub.test_identities.admin_web_sessions) is bound to, or
+// "" when it is not set.
+func (h HubServerConfig) TestIdentityAdminWebSessions() string {
+	if h.TestIdentities == nil {
+		return ""
+	}
+	return h.TestIdentities.AdminWebSessions
 }
 
 // TestIdentityWorkloadIssuers returns the hub's workload_issuers allowlist
