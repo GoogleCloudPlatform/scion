@@ -159,7 +159,7 @@ func TestSkillResolutionFailed_StatusMapping(t *testing.T) {
 			w := httptest.NewRecorder()
 			SkillResolutionFailed(w, &agent.SkillResolutionError{
 				URI: "gh://owner/repo/my-skill@main", Code: tt.code, Message: "could not resolve", RetryAfter: tt.retryAfter,
-			})
+			}, "run-1")
 
 			if w.Code != tt.wantStatus {
 				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())

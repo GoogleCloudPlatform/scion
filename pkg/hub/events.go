@@ -775,8 +775,14 @@ func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID 
 // artifactRefs are the references recorded for msg (recordMessageArtifacts);
 // they go only on the chat subjects (withChatArtifactRefs).
 func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef) {
-	evt := userMessageEvent(msg, attachments)
-	chatEvt := withChatArtifactRefs(evt, artifactRefs)
+	// Attachments stored as artifacts (ptone/scion#4595) go only on the chat
+	// subjects, which reach sessions only, the same audience their history
+	// lists them to. agent.<id>.message, user.<id>.message and
+	// project.<id>.user.message carry the AttachmentStore's attachments only:
+	// the hub's agent messages stream, which a user access token may open,
+	// reads agent.<id>.message (ptone/scion#4596).
+	evt := userMessageEvent(msg, legacyAttachmentRefs(attachments))
+	chatEvt := withChatArtifactRefs(userMessageEvent(msg, attachments), artifactRefs)
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
 	// RecipientID is the agent UUID, so publishing to user.<agentID>

@@ -63,14 +63,22 @@ func ValidateHubURL(endpoint string) error {
 	return nil
 }
 
-// userInfoRe matches the user info of a URL that url.Parse rejects, up to the last '@' before the host.
+// userInfoRe matches the user info of a URL that url.Parse rejects, up to
+// the last '@' before the host.
+// pkg/apiclient keeps a copy of these rules (redactURLUserInfo), since it
+// imports no scion package; change both together.
 var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
+
+// textURLRe matches the scheme and authority of each http(s) URL in a
+// text. The authority ends at the path, query or fragment, at white space,
+// or at a character that delimits a URL in a message and cannot appear in
+// user info.
+var textURLRe = regexp.MustCompile("(?i)\\bhttps?://(?:[^\\s/?#\"<>`\\\\]|\\\\.)*")
 
 // RedactURL returns raw for display with any credential in its user info
 // replaced: the password (see url.URL.Redacted), or a user name given
 // without a password, which may itself be a token. A URL that does not
-// parse has its whole user info replaced. Hub URLs come from flags and the
-// environment, where a user may have put credentials.
+// parse has its whole user info replaced.
 func RedactURL(raw string) string {
 	if u, err := url.Parse(raw); err == nil {
 		if u.User == nil {
@@ -83,6 +91,17 @@ func RedactURL(raw string) string {
 		return u.String()
 	}
 	return userInfoRe.ReplaceAllString(raw, "${1}xxxxx@")
+}
+
+// RedactURLsIn returns text (for example an error message) with the user
+// info of every http(s) URL in it replaced as RedactURL does.
+func RedactURLsIn(text string) string {
+	return textURLRe.ReplaceAllStringFunc(text, func(m string) string {
+		if !strings.Contains(m, "@") {
+			return m
+		}
+		return RedactURL(m)
+	})
 }
 
 // AddHub adds a hub entry named name for endpoint. The name and the URL

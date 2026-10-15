@@ -86,9 +86,13 @@ Traced end-to-end for the "re-import the same URL" case:
 2. **Sync layer** — the import loop calls `ResourceStore.Bootstrap(..., force=true)`
    (`pkg/hub/resource_import.go:390`). With `force=true`, Bootstrap **skips the
    unchanged-hash short-circuit** (`resource_store.go:179`), re-uploads all files,
-   and calls `reconcileResourceStorage` to **drop objects no longer in the manifest**
-   so files removed upstream don't linger. It recomputes the content hash and flips
-   the record back to `active`.
+   and commits the new manifest, so files removed upstream **drop out of the
+   manifest** and are no longer hydrated. (This originally ran a
+   `reconcileResourceStorage` prefix sweep; since the content-addressed blob layout,
+   ptone/scion#4221 for templates and ptone/scion#4219 for harness-configs, the
+   commit deletes nothing and the blob garbage collector removes unreferenced
+   blobs after a grace period.) It recomputes the content hash and flips the
+   record back to `active`.
 
 **Conclusion: re-importing from the same URL already pulls fresh content** — fresh
 bytes at the fetch layer, forced re-upload + stale-file pruning at the sync layer.
@@ -276,7 +280,7 @@ Per §2.3 this **already works**. Add regression tests rather than a fix:
   2. Mutate the source: change `a.txt` → `"v2"`, add `b.txt`, delete an existing file.
   3. Re-import the **same source**.
   4. Assert the stored manifest reflects `v2`, includes `b.txt`, and **no longer
-     includes** the deleted file (exercises `reconcileResourceStorage`), and that the
+     includes** the deleted file (the commit drops it from the manifest), and that the
      record's `ContentHash` changed and status is `active`.
 - **Remote-cache test** (`pkg/config`): assert `FetchRemoteTemplate` re-fetches for
   the same URL — the cache dir is wiped/rewritten on the second call (guards the

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -84,10 +85,7 @@ func TestHTTPHubClient_IAPTransport_UsedOnAllPaths(t *testing.T) {
 		case "/api/v1/projects/p1/agents":
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(hubCreateAgentResponse{
-				Agent: struct {
-					Slug string `json:"slug"`
-					Name string `json:"name"`
-				}{Slug: "agent-1", Name: "Agent 1"},
+				Agent: hubclient.Agent{Slug: "agent-1", Name: "Agent 1"},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)

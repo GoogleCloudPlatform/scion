@@ -63,6 +63,8 @@ func (vs *VersionedSettings) ForProfileResolution(mode ProfileResolutionMode) *V
 	view.activeProfileErr = nil
 	view.storedProfileNames = nil
 	view.activeProfileFallbackFrom = nil
+	view.retainedProfileNames = nil
+	view.retainedRuntimeNames = nil
 	return &view
 }
 

@@ -65,6 +65,7 @@ var windDownPhaseList = []string{
 	string(state.PhaseStopping),
 	string(state.PhaseStopped),
 	string(state.PhaseError),
+	string(state.PhaseHalted),
 }
 
 // launchReaperFailureHook, when non-nil, is called at each named tick-level
@@ -454,6 +455,7 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonTimedOut).
 			SetStateVersion(row.StateVersion + 1)
+		withStartFailureEnd(upd, row)
 		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonTimedOut, now).Save(ctx)
 		if err != nil {
 			return nil, err
@@ -473,6 +475,7 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 			SetLaunchState(store.LaunchStateEnded).
 			SetLaunchEndReason(store.LaunchEndReasonLost).
 			SetStateVersion(row.StateVersion + 1)
+		withStartFailureEnd(upd, row)
 		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonLost, now).Save(ctx)
 		if err != nil {
 			return nil, err
@@ -488,7 +491,7 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 		}
 		newErr := row.LaunchError
 		switch state.Phase(row.Phase) {
-		case state.PhaseSuspended, state.PhaseStopping, state.PhaseStopped:
+		case state.PhaseSuspended, state.PhaseStopping, state.PhaseStopped, state.PhaseHalted:
 			newErr = store.LaunchErrorLaunchStopped
 		case state.PhaseError:
 			if newErr == "" {
@@ -500,6 +503,17 @@ func reapRow(ctx context.Context, txClient *ent.Client, isPG bool, id uuid.UUID,
 			SetLaunchEndReason(store.LaunchEndReasonLost).
 			SetLaunchError(newErr).
 			SetStateVersion(row.StateVersion + 1)
+		if isStartKindLaunch(row) {
+			// A wind-down end writes no phase (ptone/scion#4669). A row
+			// another writer moved to error keeps the memory its prior
+			// earns, as a failure end would; every other wind-down phase
+			// clears it.
+			resume := ""
+			if state.Phase(row.Phase) == state.PhaseError {
+				_, resume = startLaunchFailureEnd(row)
+			}
+			upd.SetLaunchResumePhase(resume)
+		}
 		updated, err := withLaunchEndSettlement(upd, row, store.LaunchEndReasonLost, now).Save(ctx)
 		if err != nil {
 			return nil, err

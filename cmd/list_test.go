@@ -64,7 +64,9 @@ func TestFormatLastActivity(t *testing.T) {
 	}
 }
 
-func TestDisplayAgentsLocalMode(t *testing.T) {
+// TestDisplayAgents_RowsAndMissingValues checks the table header and rows,
+// including "-" for a missing harness config.
+func TestDisplayAgents_RowsAndMissingValues(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
 			Name:            tid("agent-1"),
@@ -93,7 +95,7 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -135,7 +137,9 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	}
 }
 
-func TestDisplayAgentsHubMode(t *testing.T) {
+// TestDisplayAgents_BrokerColumn checks that the BROKER column shows the
+// broker name.
+func TestDisplayAgents_BrokerColumn(t *testing.T) {
 	agents := []api.AgentInfo{
 		{
 			Name:              "hub-agent",
@@ -154,7 +158,7 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, true)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -172,10 +176,10 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 	}
 
 	header := lines[0]
-	// Hub mode should have BROKER column
+	// The header has a BROKER column
 	for _, col := range []string{"NAME", "TEMPLATE", "HARNESS-CFG", "RUNTIME", "PROJECT", "BROKER", "PHASE", "CONTAINER", "LAST ACTIVITY"} {
 		if !strings.Contains(header, col) {
-			t.Errorf("hub mode header missing column %q: %s", col, header)
+			t.Errorf("header missing column %q: %s", col, header)
 		}
 	}
 
@@ -229,7 +233,7 @@ func TestDisplayAgentsSortByTime(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -263,7 +267,7 @@ func TestDisplayAgentsEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, false, false)
+	err := displayAgents(nil, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -285,7 +289,7 @@ func TestDisplayAgentsEmptyAll(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(nil, true, false)
+	err := displayAgents(nil, true)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -326,7 +330,7 @@ func TestDisplayAgentsFriendlyTemplateName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -450,11 +454,49 @@ func TestHubAgentToAgentInfo_HarnessConfigFallbackToAppliedConfig(t *testing.T) 
 	}
 }
 
+func TestHaltedPhaseLabel(t *testing.T) {
+	assert.Equal(t, "halted (preempted)", haltedPhaseLabel("halted", "preempted"))
+	assert.Equal(t, "halted (out of memory)", haltedPhaseLabel("halted", "oom_killed"))
+	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", "evil\x1b[2J"), "only fixed labels are shown")
+	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", ""))
+	assert.Equal(t, "stopped", haltedPhaseLabel("stopped", "preempted"), "only halted shows its reason")
+}
+
+func TestDisplayAgents_HubHaltedShowsReason(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	code := 143
+	info := hubAgentToAgentInfo(hubclient.Agent{Slug: "halted-agent", Phase: "halted", ExitReason: "preempted", ExitCode: &code})
+	assert.Equal(t, "preempted", info.ExitReason)
+	require.NotNil(t, info.ExitCode)
+	assert.Equal(t, 143, *info.ExitCode)
+
+	var err error
+	out := captureStdout(t, func() { err = displayAgents([]api.AgentInfo{info}, false) })
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	assert.Contains(t, lines[1], "halted (preempted)")
+}
+
+func TestHaltedPhaseDecisions(t *testing.T) {
+	assert.True(t, hubStartImpliesResume("halted"))
+	assert.True(t, hubCreateReusesExistingAgent("halted", true, false))
+	assert.False(t, hubCreateReusesExistingAgent("halted", false, false))
+	assert.Equal(t, "Restarting", hubStartActionWord("halted", true, false))
+	done, err := launchOutcome("a", &hubclient.Agent{Phase: "halted"})
+	assert.True(t, done)
+	assert.Error(t, err, "a launch that ends halted failed")
+}
+
 func TestFilterRunningAgents(t *testing.T) {
 	agents := []api.AgentInfo{
 		{Name: "running-agent", Phase: "running"},
 		{Name: "stopped-agent", Phase: "stopped"},
 		{Name: "error-agent", Phase: "error"},
+		{Name: "halted-agent", Phase: "halted"},
 		{Name: "starting-agent", Phase: "starting"},
 		{Name: "created-agent", Phase: "created"},
 		{Name: "provisioning-agent", Phase: "provisioning"},
@@ -464,7 +506,7 @@ func TestFilterRunningAgents(t *testing.T) {
 
 	filtered := filterRunningAgents(agents)
 
-	// Should exclude stopped and error, keep everything else
+	// Should exclude stopped, error and halted, keep everything else
 	expected := map[string]bool{
 		"running-agent":      true,
 		"starting-agent":     true,
@@ -511,7 +553,7 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -532,18 +574,9 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 }
 
 // TestDisplayAgentsStartingPhase (ptone/scion#4756): an agent whose runtime
-// reports Phase and ContainerStatus "starting" is shown as starting in both
-// the local table and the hub table (via hubAgentToAgentInfo), and --running
-// keeps it.
+// reports Phase and ContainerStatus "starting" is shown as starting in the
+// table (via hubAgentToAgentInfo), and --running keeps it.
 func TestDisplayAgentsStartingPhase(t *testing.T) {
-	local := api.AgentInfo{
-		Name:            "starting-local",
-		Template:        "default",
-		Runtime:         "cloudrun-sandbox",
-		Project:         "my-project",
-		Phase:           "starting",
-		ContainerStatus: "starting",
-	}
 	hub := hubAgentToAgentInfo(hubclient.Agent{
 		ID:              "agent-starting-hub",
 		Name:            "starting-hub",
@@ -564,19 +597,17 @@ func TestDisplayAgentsStartingPhase(t *testing.T) {
 	defer func() { listRunning = false }()
 
 	for _, tc := range []struct {
-		name    string
-		agent   api.AgentInfo
-		hubMode bool
+		name  string
+		agent api.AgentInfo
 	}{
-		{name: "local", agent: local, hubMode: false},
-		{name: "hub", agent: hub, hubMode: true},
+		{name: "hub", agent: hub},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := os.Stdout
 			r, w, _ := os.Pipe()
 			os.Stdout = w
 
-			err := displayAgents([]api.AgentInfo{tc.agent}, false, tc.hubMode)
+			err := displayAgents([]api.AgentInfo{tc.agent}, false)
 			_ = w.Close()
 			os.Stdout = old
 			if err != nil {
@@ -645,7 +676,7 @@ func TestFilterAgentsByPhase(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -685,7 +716,7 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -721,7 +752,7 @@ func TestFilterAgentsByTemplate(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -758,7 +789,7 @@ func TestFilterAgentsCombined(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -793,7 +824,7 @@ func TestSortAgentsByName(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -835,7 +866,7 @@ func TestSortAgentsByCreated(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -879,7 +910,7 @@ func TestSortAgentsReverse(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -919,7 +950,7 @@ func TestDisplayAgentsFilteredEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 
@@ -1146,7 +1177,7 @@ func TestListJSONAlwaysBareArray(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := displayAgents(agents, false, false)
+	err := displayAgents(agents, false)
 
 	_ = w.Close()
 	os.Stdout = oldStdout

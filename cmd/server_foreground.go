@@ -52,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -157,6 +158,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	cfg, err := loadAndReconcileConfig(cmd)
 	if err != nil {
 		return err
+	}
+	if err := validateServerRole(serverRole); err != nil {
+		return err
+	}
+	if serverRole == serverRoleRelay {
+		// A separate conduit relay: no hub, Runtime Broker or web.
+		if err := validateRelayRoleFlags(cmd.Flags()); err != nil {
+			return err
+		}
+		applyServerLogLevelSetting(cfg.LogLevel)
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return runRelayRole(ctx, cfg)
 	}
 	// Server secrets are now in memory; remove them from the process env
 	// before anything below can start a child process. Two earlier
@@ -1483,6 +1499,12 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Relay.Validate(); err != nil {
+		return err
+	}
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
+		return err
+	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
@@ -2264,6 +2286,24 @@ func resolveSessionSecret() string {
 	return secret
 }
 
+// sessionSecretValue is the configured session secret, or "": the
+// --session-secret flag, else the value scrubServerSecretEnv read at
+// startup, else SCION_SERVER_SESSION_SECRET, then SESSION_SECRET. It only
+// reads: no deprecation or hosted-mode warning (resolveSessionSecret adds
+// the hosted-mode one).
+func sessionSecretValue() string {
+	if webSessionSecret != "" {
+		return webSessionSecret
+	}
+	if capturedSessionSecret != "" {
+		return capturedSessionSecret
+	}
+	if s := os.Getenv(sessionSecretEnv); s != "" {
+		return s
+	}
+	return os.Getenv(legacySessionSecretEnv)
+}
+
 // hubObservabilityExport decides at startup whether the hub's own metrics
 // and trace exporters run, and their export project (ptone/scion#4914).
 // See decideHubObservabilityExport for the inputs.
@@ -2595,6 +2635,10 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
+	}
+
+	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
+		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
 	}
 
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
@@ -3035,10 +3079,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
-	bootstrapKoanf := config.LoadBootstrapKoanfWithConfigPath(serverConfigPath)
 	// Seed material never carries the removed key, so the every-boot sync
 	// cannot write it back into a seeded profiles row.
-	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
+	bootstrapKoanf := config.LoadServerBootstrapKoanf(serverConfigPath, tzScan.ProfileTimezones)
 
 	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
 	// Layer-1 settings (these should use SCION_SEED_* instead).
@@ -3159,37 +3202,47 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 			return fmt.Errorf("checking section %q: %w", sec.Name, err)
 		}
 
+		// The decision is opsettings.SyncedSection, shared with the rebuild
+		// preflight. BackfillOrigin has already run, so the stored origin is
+		// the effective one and UpdatedBy is not passed.
+		var row *opsettings.SectionRow
+		if existing != nil {
+			row = &opsettings.SectionRow{Origin: existing.Origin, Value: existing.Value}
+		}
+		doc, present := opsettings.SyncedSection(sec.Name, row, bootstrapDoc)
+
 		if existing == nil {
 			// An empty catalog section is left absent: an empty stored
 			// runtimes, profiles or harness_configs map means "not managed
 			// in the hub", and absent says so without a row
 			// (ptone/scion#5007).
-			if isEmptyCatalogSeed(sec.Name, bootstrapDoc) {
+			if !present {
 				slog.Debug("Empty catalog section not seeded", "section", sec.Name)
 				continue
 			}
 			// No row — create with bootstrap material.
-			if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+			if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded"); err != nil {
 				return fmt.Errorf("seeding section %q: %w", sec.Name, err)
 			}
 			log.Printf("  Seeded section: %s (new)", sec.Name)
 			continue
 		}
 
-		if existing.Origin == "managed" {
-			slog.Debug("Skipping managed section", "section", sec.Name)
-			continue
-		}
-
-		// Origin is "seeded" — update only if content differs.
-		// Compare semantically (not byte-for-byte) because Postgres jsonb
+		// Write only when SyncedSection's document differs from the row, so
+		// the write set comes from the shared rule alone: a managed row's
+		// document is its own value and is never rewritten. Compare
+		// semantically (not byte-for-byte) because Postgres jsonb
 		// re-serializes values, changing whitespace and key ordering.
-		if jsonEqual(existing.Value, bootstrapDoc) {
-			slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+		if jsonEqual(existing.Value, doc) {
+			if existing.Origin == opsettings.OriginManaged {
+				slog.Debug("Skipping managed section", "section", sec.Name)
+			} else {
+				slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+			}
 			continue
 		}
 
-		if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+		if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded"); err != nil {
 			return fmt.Errorf("re-syncing section %q: %w", sec.Name, err)
 		}
 		log.Printf("  Re-synced section: %s (content changed)", sec.Name)
@@ -3206,22 +3259,6 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
-}
-
-// isEmptyCatalogSeed reports whether doc is an empty bootstrap document for
-// one of the map-of-objects catalog sections (runtimes, profiles,
-// harness_configs), which syncHubSettings does not create a row for.
-func isEmptyCatalogSeed(section string, doc json.RawMessage) bool {
-	switch section {
-	case "runtimes", "profiles", "harness_configs":
-	default:
-		return false
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(doc, &m); err != nil {
-		return false
-	}
-	return len(m) == 0
 }
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
@@ -3974,6 +4011,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			log.Printf("WARNING: %s", warning)
 		}
 	}
+	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
+	}
 
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
@@ -4027,7 +4067,12 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
 	// exists, so it comes from the settings file and startup never sees an
 	// overlay-only active_profile error.
-	installColocatedSettingsOverlay(cfg, hubSrv)
+	if installColocatedSettingsOverlay(cfg, hubSrv) {
+		// Built-in profile retention (ptone/scion#5113): enabled only for the
+		// legacy co-located broker, whose ID is known here (registered above).
+		// A failed registration leaves it disabled: the overlay is unchanged.
+		enableColocatedProfileReferences(ctx, hubSrv)
+	}
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)

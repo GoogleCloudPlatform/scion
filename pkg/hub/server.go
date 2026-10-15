@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -1659,6 +1660,26 @@ type Server struct {
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
 	conduit atomic.Pointer[conduitRuntime]
+	// conduitStartFailure is set when the in-process relay failed to start
+	// (SetConduitRelayStartFailure): the setting key that caused it, or ""
+	// when the cause was not one setting. nil: no failure recorded.
+	conduitStartFailure atomic.Pointer[string]
+	// conduitExternal is the hub's conduit runtime in external relay mode
+	// (conduit_external.go): routing to separate relays, no relay of its
+	// own. At most one of conduit and conduitExternal is set.
+	conduitExternal atomic.Pointer[conduitExternalRuntime]
+	// conduitEligibleRelays is the number of eligible separate relays at
+	// the last check (-1: not checked yet), read by the readiness gauge.
+	conduitEligibleRelays atomic.Int64
+	// conduitAdmissionAEADv is the admission token cipher
+	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
+	// it could not be.
+	conduitAdmissionKeyOnce sync.Once
+	conduitAdmissionAEADv   cipher.AEAD
+	conduitAdmissionKeyErr  error
+	// conduitRenewal verifies latest grants and mints renewal grants for
+	// relay stream re-checks (conduit_renewal.go); nil until set.
+	conduitRenewal atomic.Pointer[conduitRenewalGrants]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
@@ -1689,6 +1710,7 @@ type Server struct {
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
+	haltedDispatches       sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
 
 	// delegationAdoptionCommitHook, when set, runs after authorization and
 	// before the delegation-adoption commit transaction. Tests use it to
@@ -1712,6 +1734,9 @@ type Server struct {
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
 	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	// profileRefs counts built-in profile references for the co-located
+	// broker's settings overlay (ptone/scion#5113; profile_references.go).
+	profileRefs profileReferences
 	// embeddedBrokerPending is non-nil while a co-located broker is expected
 	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
 	// registration succeeds or fails. embeddedBrokerRegErr records a failed
@@ -1811,6 +1836,9 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
+	// artifactAttachmentRetirer keeps the attachment retirement's position
+	// between passes of the artifact maintenance loop (its only user).
+	artifactAttachmentRetirer artifacts.AttachmentRetirer
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -6206,7 +6234,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// process runs a relay (hub.conduit on at startup). One replica per tick
 	// under Postgres; the registry requires the three reaps to run together
 	// under one lock.
-	if s.conduit.Load() != nil {
+	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		s.scheduler.RegisterRecurringSingleton("conduit-registry-reap", conduitRegistryReapInterval, store.LockConduitRegistryReap, s.conduitRegistryReapHandler())
 	}
 
@@ -7063,6 +7091,7 @@ func (s *Server) registerRoutes() {
 	// unless the test admin gate is on; the gate runs before the guard.
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
@@ -7152,6 +7181,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Grant shaping (ptone/scion#4240, admin tier A3): records the
+	// request's grant actor and, for a test identity with an admin role,
+	// the shaping the store applies to every grant it writes.
+	h = s.grantShapingMiddleware(h)
 
 	// Test admin audit (ptone/scion#4240): runs right after authentication,
 	// so every request an admin-kind test identity makes is written to the

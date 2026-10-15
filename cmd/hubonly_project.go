@@ -180,5 +180,5 @@ func (p hubOnlyProject) unlinkedError() error {
 // notFoundError is the error for a project the hub at endpoint does not
 // know.
 func (p hubOnlyProject) notFoundError(endpoint string) error {
-	return tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "%s not found on hub %s", p.describe(), endpoint)
+	return tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "%s not found on hub %s", p.describe(), config.RedactURL(endpoint))
 }
