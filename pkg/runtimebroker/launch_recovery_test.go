@@ -271,8 +271,10 @@ func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 		if mgr.CleanupCallCount() != 0 {
 			t.Fatal("cleanup ran against a runtime that is not the launch's")
 		}
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("record not removed: %v", err)
+		// The runtime may come back (a later boot's auxiliary discovery),
+		// so the clean-up is kept for a bounded retry (ptone/scion#5177).
+		if got := readJournalFileT(t, path); got.State != "cleanup_pending" || got.CleanupAttempts != 1 {
+			t.Fatalf("a launch whose runtime is unavailable was not kept for a retry: %+v", got)
 		}
 	})
 }
