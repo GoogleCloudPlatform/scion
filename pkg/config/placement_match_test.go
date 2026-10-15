@@ -113,6 +113,9 @@ func TestMatchKubernetesEntry_U3b_NeitherEqualsC(t *testing.T) {
 	rec := RuntimeBuildRecord{Present: true, KubeconfigContext: "ctx-b"}
 	got, cause := MatchKubernetesEntry(entry, "ctx-a", "ns", true, KubeConnKubeconfig, rec, "ns", liveContext("ctx-c", nil, &calls))
 	requireMatch(t, got, cause, NoMatch)
+	if calls != 1 {
+		t.Fatalf("live reads = %d, want 1", calls)
+	}
 }
 
 // U3c: kubeconfig connection, empty-context entry, both R and L equal C is
@@ -238,4 +241,7 @@ func TestMatchKubernetesEntry_U14_ExplicitContextRuntimeEmptyContextEntry(t *tes
 	got, cause := MatchKubernetesEntry(V1RuntimeConfig{Type: "kubernetes", Namespace: "ns"}, "requested", "ns", true,
 		KubeConnKubeconfig, rec, "default", liveContext("raw-current", nil, &calls))
 	requireMatch(t, got, cause, NoMatch)
+	if calls != 1 {
+		t.Fatalf("live reads = %d, want 1", calls)
+	}
 }
