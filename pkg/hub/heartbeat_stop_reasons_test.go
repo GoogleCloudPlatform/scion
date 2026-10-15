@@ -67,7 +67,9 @@ func TestHeartbeatStopReason_OOMKilledAfterCrashReport(t *testing.T) {
 		{"crashed reason, generic message", "crashed", "", "oom_killed", oomMessage137},
 		{"crashed reason, specific message kept", "crashed", "harness: out of memory in tool X", "oom_killed", "harness: out of memory in tool X"},
 		{"preempted reason kept", "preempted", "Agent pod was preempted", "preempted", "Agent pod was preempted"},
-		{"limits_exceeded reason kept", "limits_exceeded", "Agent crashed with exit code 137", "limits_exceeded", "Agent crashed with exit code 137"},
+		// A limits reason can come from the agent's own report; the agent
+		// runtime's OOM kill is the platform's finding and replaces it.
+		{"limits_exceeded reason replaced", "limits_exceeded", "Agent crashed with exit code 137", "oom_killed", oomMessage137},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)

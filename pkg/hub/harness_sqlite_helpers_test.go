@@ -665,3 +665,15 @@ type finalizeEnvErrDispatcher struct {
 func (d *finalizeEnvErrDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
 	return nil, d.err
 }
+
+// setHarnessConfigContentForTest writes hc's content columns (Files,
+// ContentHash, Harness, Config, Status, Storage*) as a test fixture, against
+// the row's current content hash. UpdateHarnessConfig writes metadata only
+// (ptone/scion#4219), so fixtures that stage content state use this.
+func setHarnessConfigContentForTest(ctx context.Context, s store.Store, hc *store.HarnessConfig) error {
+	cur, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		return err
+	}
+	return s.UpdateHarnessConfigContent(ctx, hc, store.HarnessConfigContentPrecondition{ContentHash: cur.ContentHash})
+}

@@ -42,21 +42,22 @@ type ErrorResponse struct {
 
 // Error codes matching the Hub API specification.
 const (
-	ErrCodeInvalidRequest       = "invalid_request"
-	ErrCodeValidationError      = "validation_error"
-	ErrCodeUnauthorized         = "unauthorized"
-	ErrCodeForbidden            = "forbidden"
-	ErrCodeNotFound             = "not_found"
-	ErrCodeConflict             = "conflict"
-	ErrCodeVersionConflict      = "version_conflict"
-	ErrCodeTemplateConflict     = "template_conflict" // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
-	ErrCodeUnprocessable        = "unprocessable"
-	ErrCodeRateLimited          = "rate_limited"
-	ErrCodeInternalError        = "internal_error"
-	ErrCodeRuntimeError         = "runtime_error"
-	ErrCodeUnavailable          = "unavailable"
-	ErrCodeNoRuntimeBroker      = "no_runtime_broker"
-	ErrCodeRuntimeBrokerUnavail = "runtime_broker_unavailable"
+	ErrCodeInvalidRequest        = "invalid_request"
+	ErrCodeValidationError       = "validation_error"
+	ErrCodeUnauthorized          = "unauthorized"
+	ErrCodeForbidden             = "forbidden"
+	ErrCodeNotFound              = "not_found"
+	ErrCodeConflict              = "conflict"
+	ErrCodeVersionConflict       = "version_conflict"
+	ErrCodeTemplateConflict      = "template_conflict"       // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
+	ErrCodeHarnessConfigConflict = "harness_config_conflict" // 409: a harness-config commit lost its compare-and-swap (ptone/scion#4219)
+	ErrCodeUnprocessable         = "unprocessable"
+	ErrCodeRateLimited           = "rate_limited"
+	ErrCodeInternalError         = "internal_error"
+	ErrCodeRuntimeError          = "runtime_error"
+	ErrCodeUnavailable           = "unavailable"
+	ErrCodeNoRuntimeBroker       = "no_runtime_broker"
+	ErrCodeRuntimeBrokerUnavail  = "runtime_broker_unavailable"
 	// ErrCodeRuntimeBrokerNotFound reports an explicitly requested runtime
 	// broker (by ID, name or slug) that does not exist at all, as opposed to
 	// one that exists but is offline/unreachable (runtime_broker_unavailable).

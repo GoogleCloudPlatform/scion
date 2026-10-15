@@ -182,13 +182,11 @@ func TestBootstrapHarnessConfigsFromDir_PersistsModelAliases(t *testing.T) {
 	}
 }
 
-// TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilent
-// verifies extractModelConfig's "only overwrite when config.yaml declares
-// it" contract: a hub-side manual edit to Config.ModelAliases (e.g. made
-// through the harness-config API) must survive a re-sync of a config.yaml
-// that has no model_aliases key at all, mirroring the existing
-// TestSyncHarnessConfig_PreservesTypedConfig contract for Config.Model.
-func TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilent(t *testing.T) {
+// TestBootstrapHarnessConfigsFromDir_ClearsModelAliasesWhenConfigYAMLSilent
+// pins the clear-on-absent rule (ptone/scion#4219): config.yaml is the only
+// source of the derived fields, so a value staged directly in the row does
+// not survive a re-sync of a config.yaml without model_aliases.
+func TestBootstrapHarnessConfigsFromDir_ClearsModelAliasesWhenConfigYAMLSilent(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -204,7 +202,7 @@ func TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilen
 		t.Fatal(err)
 	}
 	hc.Config.ModelAliases = map[string]string{"large": "manually-set-model"}
-	if err := s.UpdateHarnessConfig(ctx, hc); err != nil {
+	if err := setHarnessConfigContentForTest(ctx, s, hc); err != nil {
 		t.Fatal(err)
 	}
 
@@ -220,8 +218,11 @@ func TestBootstrapHarnessConfigsFromDir_PreservesModelAliasesWhenConfigYAMLSilen
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Config == nil || got.Config.ModelAliases["large"] != "manually-set-model" {
-		t.Errorf("expected manually-set ModelAliases to survive a config.yaml silent on model_aliases, got %+v", got.Config)
+	if got.Config == nil || got.Config.Image != "scion-custom:v2" {
+		t.Fatalf("expected Config.Image from config.yaml, got %+v", got.Config)
+	}
+	if len(got.Config.ModelAliases) != 0 {
+		t.Errorf("expected ModelAliases cleared by a config.yaml without model_aliases, got %+v", got.Config.ModelAliases)
 	}
 }
 
@@ -329,10 +330,11 @@ func TestBootstrapHarnessConfigsFromDir_SkipsUnchanged(t *testing.T) {
 	}
 }
 
-// TestSyncHarnessConfig_PreservesTypedConfig guards the ResourceStore
-// record↔model round-trip for harness-configs: a content-changing sync must
-// leave the typed HarnessConfigData payload intact.
-func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
+// TestSyncHarnessConfig_DerivesTypedConfig guards the harness-config
+// record round-trip (ptone/scion#4219): a content-changing sync replaces the
+// typed HarnessConfigData with what config.yaml gives (a value only the row
+// held is cleared), and leaves the metadata alone.
+func TestSyncHarnessConfig_DerivesTypedConfig(t *testing.T) {
 	srv, s, _ := testTemplateBootstrapServer(t)
 	ctx := context.Background()
 
@@ -349,6 +351,9 @@ func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	hc.Config = &store.HarnessConfigData{Image: "scion-claude:latest", Model: "opus"}
+	if err := setHarnessConfigContentForTest(ctx, s, hc); err != nil {
+		t.Fatal(err)
+	}
 	hc.DisplayName = "Claude Config"
 	if err := s.UpdateHarnessConfig(ctx, hc); err != nil {
 		t.Fatal(err)
@@ -367,11 +372,9 @@ func TestSyncHarnessConfig_PreservesTypedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Config == nil {
-		t.Fatal("expected typed Config to survive sync, got nil")
-	}
-	if got.Config.Model != "opus" {
-		t.Errorf("typed Config not preserved: got %+v", got.Config)
+	want := &store.HarnessConfigData{Harness: "claude", Image: "scion-claude:v2", User: "scion"}
+	if !reflect.DeepEqual(got.Config, want) {
+		t.Errorf("Config = %+v, want %+v (derived from config.yaml only)", got.Config, want)
 	}
 	if got.DisplayName != "Claude Config" {
 		t.Errorf("expected DisplayName preserved, got %q", got.DisplayName)
