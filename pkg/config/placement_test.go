@@ -262,6 +262,7 @@ func TestPlacementValidators_V1(t *testing.T) {
 			{"bad key char", map[string]string{"bad key": "v"}, `key "bad key"`},
 			{"bad prefix", map[string]string{"Bad_Prefix/name": "v"}, `key "Bad_Prefix/name"`},
 			{"key too long", map[string]string{strings.Repeat("k", 64): "v"}, "key"},
+			{"key prefix too long", map[string]string{overLongPrefix() + "/pool": "v"}, "key"},
 			{"bad value char", map[string]string{"pool": "a b"}, `value for key "pool"`},
 			{"value too long", map[string]string{"pool": strings.Repeat("v", 64)}, `value for key "pool"`},
 			{"value leading dash", map[string]string{"pool": "-agents"}, `value for key "pool"`},
@@ -301,6 +302,9 @@ func TestPlacementValidators_V1(t *testing.T) {
 			{"Exists with value", api.K8sToleration{Key: "k", Operator: "Exists", Value: "v"}, "must be empty when the operator is Exists"},
 			{"bad key", api.K8sToleration{Key: "bad key", Operator: "Exists"}, `key "bad key"`},
 			{"bad Equal value", api.K8sToleration{Key: "k", Operator: "Equal", Value: "a b"}, `value "a b"`},
+			{"key name too long", api.K8sToleration{Key: strings.Repeat("k", 64), Operator: "Exists"}, `].key "`},
+			{"key prefix too long", api.K8sToleration{Key: overLongPrefix() + "/k", Operator: "Exists"}, `].key "`},
+			{"Equal value too long", api.K8sToleration{Key: "k", Operator: "Equal", Value: strings.Repeat("v", 64)}, `].value "`},
 		} {
 			err := ValidateTolerations([]api.K8sToleration{{Key: "ok", Operator: "Exists"}, tc.tol})
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "tolerations[1]") {
@@ -321,4 +325,15 @@ func TestPlacementValidators_V1(t *testing.T) {
 			}
 		}
 	})
+}
+
+// overLongPrefix returns a 254-character DNS subdomain, one over the
+// 253-character limit for a label key prefix.
+func overLongPrefix() string {
+	p := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." +
+		strings.Repeat("c", 63) + "." + strings.Repeat("d", 62)
+	if len(p) != 254 {
+		panic("overLongPrefix length")
+	}
+	return p
 }
