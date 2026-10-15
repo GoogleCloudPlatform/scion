@@ -38,7 +38,9 @@ type purgeGuardFixture struct {
 
 func newPurgeGuardFixture(t *testing.T) purgeGuardFixture {
 	t.Helper()
-	home := t.TempDir()
+	// HOME is nested, so its parent is not also a parent of the scion home.
+	home := filepath.Join(t.TempDir(), "u", "home")
+	require.NoError(t, os.MkdirAll(home, 0o755))
 	t.Setenv("HOME", home)
 	scionHome := filepath.Join(t.TempDir(), ".scion")
 	stateRoot := filepath.Join(scionHome, "runtime-broker-state")
@@ -94,24 +96,24 @@ func TestPurgeBrokerLocalState_RefusesUnexpectedEntries(t *testing.T) {
 			return e, 0
 		}, "not the broker daemon log"},
 		"state root is the filesystem root": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: "/", Path: "/b-1", BrokerID: "b-1"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: "/", Path: "/b-1", BrokerID: "b-1", ScionHome: f.scionHome}, 1
 		}, "state root is the filesystem root"},
 		"state root is the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.home, Path: filepath.Join(f.home, "b-1"), BrokerID: "b-1"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.home, Path: filepath.Join(f.home, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
 		}, "state root is the home directory"},
 		"state root resolves to the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
 			link := filepath.Join(t.TempDir(), "state-link")
 			require.NoError(t, os.Symlink(f.home, link))
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: link, Path: filepath.Join(link, "b-1"), BrokerID: "b-1"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: link, Path: filepath.Join(link, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
 		}, "state root is the home directory"},
 		"state directory name is not a broker ID": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.stateRoot, Path: filepath.Join(f.stateRoot, "a..b"), BrokerID: "a..b"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.stateRoot, Path: filepath.Join(f.stateRoot, "a..b"), BrokerID: "a..b", ScionHome: f.scionHome}, 1
 		}, "not a single path element"},
 		"state directory is not root-broker-id": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.stateRoot, Path: filepath.Join(f.stateRoot, "other"), BrokerID: "b-1"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.stateRoot, Path: filepath.Join(f.stateRoot, "other"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
 		}, "not <state root>/<broker-id>"},
 		"state directory path is relative": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
-			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: "rel", Path: filepath.Join("rel", "b-1"), BrokerID: "b-1"}, 1
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: "rel", Path: filepath.Join("rel", "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
 		}, "not an absolute, clean path"},
 		"template cache root is the filesystem root": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
 			return brokerLocalStateEntry{Kind: stateEntryTemplateCache, Root: "/", Path: "/cache/templates"}, 2
@@ -119,6 +121,45 @@ func TestPurgeBrokerLocalState_RefusesUnexpectedEntries(t *testing.T) {
 		"template cache root is the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
 			return brokerLocalStateEntry{Kind: stateEntryTemplateCache, Root: f.home, Path: filepath.Join(f.home, "cache", "templates")}, 2
 		}, "scion home is the home directory"},
+		"state root is the scion home": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: f.scionHome, Path: filepath.Join(f.scionHome, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
+		}, "is the scion home"},
+		"state root is a parent of the scion home": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			root := filepath.Dir(f.scionHome)
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: root, Path: filepath.Join(root, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
+		}, "is the scion home or one of its parents"},
+		"state root is a parent of the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			root := filepath.Dir(f.home)
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: root, Path: filepath.Join(root, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
+		}, "is the home directory or one of its parents"},
+		"state root resolves to a parent of the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			link := filepath.Join(t.TempDir(), "state-link")
+			require.NoError(t, os.Symlink(filepath.Dir(f.home), link))
+			return brokerLocalStateEntry{Kind: stateEntryStateDir, Root: link, Path: filepath.Join(link, "b-1"), BrokerID: "b-1", ScionHome: f.scionHome}, 1
+		}, "is the home directory or one of its parents"},
+		"template cache root resolves to the home directory": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			link := filepath.Join(t.TempDir(), "home-link")
+			require.NoError(t, os.Symlink(f.home, link))
+			return brokerLocalStateEntry{Kind: stateEntryTemplateCache, Root: link, Path: filepath.Join(link, "cache", "templates")}, 2
+		}, "scion home is the home directory"},
+		"template cache directory resolves elsewhere": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			e := f.entries[2]
+			cacheDir := filepath.Dir(e.Path)
+			require.NoError(t, os.RemoveAll(cacheDir))
+			other := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(other, "templates"), 0o755))
+			require.NoError(t, os.Symlink(other, cacheDir))
+			return e, 2
+		}, "outside"},
+		"template cache symlinked leaf in a directory outside the root": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
+			e := f.entries[2]
+			cacheDir := filepath.Dir(e.Path)
+			require.NoError(t, os.RemoveAll(cacheDir))
+			other := t.TempDir()
+			require.NoError(t, os.Symlink(t.TempDir(), filepath.Join(other, "templates")))
+			require.NoError(t, os.Symlink(other, cacheDir))
+			return e, 2
+		}, "outside"},
 		"template cache is not cache-templates": {func(t *testing.T, f purgeGuardFixture) (brokerLocalStateEntry, int) {
 			e := f.entries[2]
 			e.Path = filepath.Join(f.scionHome, "cache", "other")
@@ -139,5 +180,31 @@ func TestPurgeBrokerLocalState_RefusesUnexpectedEntries(t *testing.T) {
 			assert.Contains(t, out.String(), tc.reason, "refusal reason not given")
 			f.assertAllPresent(t)
 		})
+	}
+}
+
+// TestPurgeBrokerLocalState_SymlinkedLeafUnlinked: an entry whose leaf is a
+// symlink (its directory is where it is expected) is not refused; the
+// purge removes the link only, and the link's target stays.
+func TestPurgeBrokerLocalState_SymlinkedLeafUnlinked(t *testing.T) {
+	f := newPurgeGuardFixture(t)
+	elsewhere := t.TempDir()
+	for i, e := range f.entries {
+		target := filepath.Join(elsewhere, filepath.Base(e.Path)+"-target")
+		if i == 0 {
+			require.NoError(t, os.WriteFile(target, []byte("kept"), 0o644))
+		} else {
+			require.NoError(t, os.MkdirAll(filepath.Join(target, "kept"), 0o755))
+		}
+		require.NoError(t, os.RemoveAll(e.Path))
+		require.NoError(t, os.Symlink(target, e.Path))
+	}
+	var out bytes.Buffer
+	require.NoError(t, purgeBrokerLocalState(f.entries, &out), "a symlinked leaf refused the purge")
+	for _, e := range f.entries {
+		_, err := os.Lstat(e.Path)
+		assert.True(t, os.IsNotExist(err), "link %s not removed", e.Path)
+		_, err = os.Stat(filepath.Join(elsewhere, filepath.Base(e.Path)+"-target"))
+		assert.NoError(t, err, "the target of %s was removed", e.Path)
 	}
 }

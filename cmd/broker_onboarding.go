@@ -224,7 +224,7 @@ func recoverEmbeddedBrokerID(globalDir, embeddedID string, logf func(string, ...
 func brokerLocalStatePaths(globalDir, scionHome, stateRoot, brokerID string) []brokerLocalStateEntry {
 	entries := []brokerLocalStateEntry{{Kind: stateEntryDaemonLog, Path: daemon.GetLogPath(globalDir), Root: globalDir}}
 	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
-		entries = append(entries, brokerLocalStateEntry{Kind: stateEntryStateDir, Path: filepath.Join(stateRoot, brokerID), Root: stateRoot, BrokerID: brokerID})
+		entries = append(entries, brokerLocalStateEntry{Kind: stateEntryStateDir, Path: filepath.Join(stateRoot, brokerID), Root: stateRoot, BrokerID: brokerID, ScionHome: scionHome})
 	}
 	return append(entries, brokerLocalStateEntry{Kind: stateEntryTemplateCache, Path: filepath.Join(scionHome, "cache", "templates"), Root: scionHome})
 }

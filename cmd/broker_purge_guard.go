@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
@@ -56,12 +57,13 @@ func (k brokerStateEntryKind) String() string {
 
 // brokerLocalStateEntry is one broker-local state entry: its kind, its
 // path, the root it is expected under, and (state directory only) the
-// broker ID that names it.
+// broker ID that names it and the scion home it must not cover.
 type brokerLocalStateEntry struct {
-	Kind     brokerStateEntryKind
-	Path     string
-	Root     string
-	BrokerID string
+	Kind      brokerStateEntryKind
+	Path      string
+	Root      string
+	BrokerID  string
+	ScionHome string
 }
 
 // entryPaths returns the paths of entries, in order.
@@ -107,7 +109,7 @@ func checkPurgeEntry(e brokerLocalStateEntry) error {
 		if fi, err := os.Lstat(e.Path); err == nil && fi.IsDir() {
 			return errors.New("the broker daemon log path is a directory")
 		}
-		return nil
+		return checkResolvesUnderRoot(e.Path, e.Root)
 	case stateEntryStateDir:
 		if err := brokercredentials.ValidateBrokerIDPathElement(e.BrokerID); err != nil {
 			return err
@@ -115,14 +117,90 @@ func checkPurgeEntry(e brokerLocalStateEntry) error {
 		if e.Path != filepath.Join(e.Root, e.BrokerID) {
 			return fmt.Errorf("not <state root>/<broker-id> under %s", e.Root)
 		}
-		return checkPurgeRoot(e.Root, "state root")
+		if err := checkPurgeRoot(e.Root, "state root"); err != nil {
+			return err
+		}
+		if err := checkStateRootScope(e.Root, e.ScionHome); err != nil {
+			return err
+		}
+		return checkResolvesUnderRoot(e.Path, e.Root)
 	case stateEntryTemplateCache:
 		if e.Path != filepath.Join(e.Root, "cache", "templates") {
 			return fmt.Errorf("not <scion home>/cache/templates under %s", e.Root)
 		}
-		return checkPurgeRoot(e.Root, "scion home")
+		if err := checkPurgeRoot(e.Root, "scion home"); err != nil {
+			return err
+		}
+		return checkResolvesUnderRoot(e.Path, e.Root)
 	}
 	return fmt.Errorf("unknown entry kind %d", e.Kind)
+}
+
+// checkStateRootScope refuses a state root that, raw or resolved, is the
+// scion home, or is the home directory, the scion home or one of their
+// parents: a state root holds only broker state directories.
+func checkStateRootScope(root, scionHome string) error {
+	if scionHome == "" {
+		return errors.New("no scion home recorded for the state root")
+	}
+	roots := resolvedForms(root)
+	homes := []string{}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		homes = resolvedForms(filepath.Clean(home))
+	}
+	scionHomes := resolvedForms(filepath.Clean(scionHome))
+	for _, r := range roots {
+		for _, s := range scionHomes {
+			if r == s {
+				return fmt.Errorf("the state root %s is the scion home", root)
+			}
+			if isSameOrAncestor(r, s) {
+				return fmt.Errorf("the state root %s is the scion home or one of its parents", root)
+			}
+		}
+		for _, h := range homes {
+			if isSameOrAncestor(r, h) {
+				return fmt.Errorf("the state root %s is the home directory or one of its parents", root)
+			}
+		}
+	}
+	return nil
+}
+
+// checkResolvesUnderRoot refuses a path whose parent directory, resolved
+// (symlinks of its deepest existing ancestor resolved), is not the
+// resolved root or under it, so a symlinked intermediate directory cannot
+// redirect the removal elsewhere. The leaf itself is not resolved: when it
+// is a symlink, RemoveAll removes only the link. The caller has already
+// checked the leaf's name (the exact expected path).
+func checkResolvesUnderRoot(path, root string) error {
+	rd, err := resolveExistingPrefix(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", filepath.Dir(path), err)
+	}
+	rr, err := resolveExistingPrefix(root)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %s: %v", root, err)
+	}
+	if !isSameOrAncestor(rr, rd) {
+		return fmt.Errorf("its directory resolves to %s, outside %s", rd, rr)
+	}
+	return nil
+}
+
+// resolvedForms returns path and, when it differs, its resolved form.
+func resolvedForms(path string) []string {
+	forms := []string{path}
+	if r, err := resolveExistingPrefix(path); err == nil && r != path {
+		forms = append(forms, r)
+	}
+	return forms
+}
+
+// isSameOrAncestor reports whether dir is p or one of p's parents.
+func isSameOrAncestor(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // checkPurgeRoot refuses a root that is not absolute or that is, or
