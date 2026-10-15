@@ -557,8 +557,9 @@ type reincarnateTestDispatcher struct {
 	// resolved container image on a successful start response.
 	startImage string
 
-	// imageRegistry is the registry the fake reports through ImageRegistry(),
-	// as the HTTP dispatcher reports the registry it rewrites images to.
+	// imageRegistry is the registry the fake reports through
+	// ImageRegistryFor, as the HTTP dispatcher reports the registry it
+	// rewrites images to.
 	imageRegistry string
 
 	// reprovisionEcho and startEcho, when set, run on a successful dispatch
@@ -5167,7 +5168,7 @@ func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentApp
 	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
 }
 
-func (d *reincarnateTestDispatcher) ImageRegistry() string {
+func (d *reincarnateTestDispatcher) ImageRegistryFor(string, string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.imageRegistry

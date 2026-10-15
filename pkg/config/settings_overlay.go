@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 )
@@ -40,8 +39,10 @@ type SettingsOverlay struct {
 	runtimes       map[string]V1RuntimeConfig
 	profiles       map[string]V1ProfileConfig
 	harnessConfigs map[string]HarnessConfigEntry
-	imageRegistry  string
-	active         bool // true when any field has been set
+	// imageRegistry holds the hub's image_registry layers
+	// (UpdateImageRegistryInputs); nil until fed.
+	imageRegistry *ImageRegistryHubInputs
+	active        bool // true when any field has been set
 
 	// fallbackLogMu guards fallbackLogged, the (active_profile, chosen
 	// profile) pairs logSingleProfileFallback has logged since the last
@@ -93,12 +94,11 @@ func NewSettingsOverlay() *SettingsOverlay {
 // An empty (non-nil) map clears the section: a stored catalog with no
 // entries means the section is not managed in the hub, the same as unset,
 // so Apply keeps the settings file's map for it (ptone/scion#5007).
-// imageRegistry is always applied (empty string clears it).
+// image_registry is fed separately (UpdateImageRegistryInputs).
 func (o *SettingsOverlay) Update(
 	runtimes map[string]V1RuntimeConfig,
 	profiles map[string]V1ProfileConfig,
 	harnessConfigs map[string]HarnessConfigEntry,
-	imageRegistry string,
 ) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -112,7 +112,22 @@ func (o *SettingsOverlay) Update(
 	if harnessConfigs != nil {
 		o.harnessConfigs = nonEmptyOrNil(cloneHarnessConfigs(harnessConfigs))
 	}
-	o.imageRegistry = imageRegistry
+	o.active = true
+}
+
+// UpdateImageRegistryInputs sets the hub's image_registry layers, which
+// Apply hands to the loaded settings (VersionedSettings.ImageRegistryLayers),
+// and activates the overlay. The hub computes them with the accessor it
+// resolves dispatches with (ptone/scion#3916), and calls this whether or not
+// any catalog section is stored, so a managed endpoints value applies with
+// no stored catalog. ActiveProfile is not kept: the broker resolves an
+// empty profile through its own live settings.
+func (o *SettingsOverlay) UpdateImageRegistryInputs(in ImageRegistryHubInputs) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	c := in.Clone()
+	c.ActiveProfile = ""
+	o.imageRegistry = &c
 	o.active = true
 }
 
@@ -169,8 +184,9 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	if len(o.harnessConfigs) > 0 {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
 	}
-	if o.imageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
-		vs.ImageRegistry = o.imageRegistry
+	if o.imageRegistry != nil {
+		c := o.imageRegistry.Clone()
+		vs.imageRegistryHub = &c
 	}
 }
 
@@ -264,11 +280,13 @@ func resolveOverlaidActiveProfile(vs *VersionedSettings, stored, retained []stri
 	if containsString(stored, vs.ActiveProfile) {
 		return "", ""
 	}
-	if len(stored) == 1 {
+	// EffectiveDefaultProfile is this step, shared with the hub's
+	// image_registry resolution for agents with no profile.
+	if effective := EffectiveDefaultProfile(vs.ActiveProfile, stored); effective != vs.ActiveProfile {
 		configured = vs.ActiveProfile
 		vs.activeProfileFallbackFrom = &configured
-		vs.ActiveProfile = stored[0]
-		return configured, stored[0]
+		vs.ActiveProfile = effective
+		return configured, effective
 	}
 	if containsString(retained, vs.ActiveProfile) {
 		return "", ""

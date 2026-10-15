@@ -239,7 +239,7 @@ func TestImageRegistryYAMLRoundTrip(t *testing.T) {
 	assert.Empty(t, roundTripped.Profiles["local"].ImageRegistry)
 }
 
-func TestIsImageRegistryConfigured(t *testing.T) {
+func TestResolveImageRegistry_Configured(t *testing.T) {
 	tests := []struct {
 		name     string
 		settings *VersionedSettings
@@ -285,7 +285,7 @@ func TestIsImageRegistryConfigured(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tt.settings.IsImageRegistryConfigured(tt.profile)
+			got := tt.settings.ResolveImageRegistry(tt.profile) != ""
 			assert.Equal(t, tt.want, got)
 		})
 	}

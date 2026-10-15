@@ -544,6 +544,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				// value stays in effect.
 				continue
 			}
+			if sec.Name == "profiles" && exists {
+				// A managed profile without image_registry inherits the
+				// file value, so the profile is compared without it unless
+				// the row holds one (ptone/scion#3916).
+				bootstrapVal = withoutInheritedImageRegistry(bootstrapVal, dbVal)
+			}
 			if !exists || !reflect.DeepEqual(dbVal, bootstrapVal) {
 				koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key)
 				if koanfPath == "" {
@@ -571,6 +577,31 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 	return result
 }
 
+// withoutInheritedImageRegistry returns the bootstrap profile bootstrapVal
+// without image_registry when the stored profile dbVal has none: the stored
+// profile then inherits the file value rather than superseding it.
+func withoutInheritedImageRegistry(bootstrapVal, dbVal interface{}) interface{} {
+	boot, ok := bootstrapVal.(map[string]interface{})
+	if !ok {
+		return bootstrapVal
+	}
+	if db, ok := dbVal.(map[string]interface{}); ok {
+		if v, has := db[endpointsImageRegistryKey]; has && v != "" {
+			return bootstrapVal
+		}
+	}
+	if _, has := boot[endpointsImageRegistryKey]; !has {
+		return bootstrapVal
+	}
+	out := make(map[string]interface{}, len(boot))
+	for k, v := range boot {
+		if k != endpointsImageRegistryKey {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // unseededSectionMap returns a section's keys from the bootstrap merge
 // without the SCION_SEED_* layer, or nil when that merge is not set or does
 // not have the section.
@@ -596,20 +627,21 @@ func unseededSectionMap(unseededK *koanf.Koanf, sectionName string) map[string]i
 // value (for public_url, so does the hub's endpoint resolution at startup,
 // ptone/scion#3905).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
-	return section == "endpoints" && (key == "hub_name" || key == "public_url")
+	return section == "endpoints" && (key == "hub_name" || key == "public_url" || key == endpointsImageRegistryKey)
 }
 
 // applyRunningValuesForUnsetKeys sets, in a GET response, the running value
 // of each key that ApplySnapshot returns to the startup value when the
-// snapshot leaves it unset: soft_delete_retention, soft_delete_retain_files
-// and image_registry. A stored value is shown as stored. Without this, GET
-// would show the key empty (or false) while the hub runs with the startup
-// value, and a client echoing the body back would change the running value.
+// snapshot leaves it unset: soft_delete_retention and
+// soft_delete_retain_files. A stored value is shown as stored. Without
+// this, GET would show the key empty (or false) while the hub runs with the
+// startup value, and a client echoing the body back would change the
+// running value. It also sets image_registry and the profiles'
+// image_registry to the values a save compares with (shownImageRegistry).
 func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	s.mu.RLock()
 	retention := s.config.SoftDeleteRetention
 	retainFiles := s.config.SoftDeleteRetainFiles
-	registry := s.config.MaintenanceConfig.ImageRegistry
 	s.mu.RUnlock()
 
 	if snap.SoftDeleteRetention == "" && retention > 0 {
@@ -618,8 +650,13 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 	if snap.SoftDeleteRetainFiles == nil {
 		resp.Server.Hub.SoftDeleteRetainFiles = &retainFiles
 	}
-	if snap.ImageRegistry == "" {
-		resp.ImageRegistry = registry
+	// image_registry: the managed value, else this replica's file tier,
+	// never a node env; profiles show managed values only. A save compares
+	// with exactly these values (ptone/scion#3916).
+	if ops := s.GetOperationalSettings(); ops != nil {
+		resp.ImageRegistry = shownImageRegistry(ops)
+		_, managed := ops.managedImageRegistries()
+		resp.Profiles = showManagedProfileImageRegistries(resp.Profiles, managed)
 	}
 }
 
@@ -627,11 +664,10 @@ func (s *Server) applyRunningValuesForUnsetKeys(resp *ServerConfigResponse, snap
 const (
 	softDeleteRetentionKey   = "server.hub.soft_delete_retention"
 	softDeleteRetainFilesKey = "server.hub.soft_delete_retain_files"
-	imageRegistryKey         = "image_registry"
 )
 
-// echoedRunningValueKeys returns the keys of soft_delete_retention,
-// soft_delete_retain_files and image_registry that the request sends back
+// echoedRunningValueKeys returns the keys of soft_delete_retention and
+// soft_delete_retain_files that the request sends back
 // as the running value GET showed for them while no value is stored
 // (applyRunningValuesForUnsetKeys). Such a value is an echo, not a change:
 // writing it would pin this replica's startup value (which may come from
@@ -650,7 +686,6 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 	s.mu.RLock()
 	retention := s.config.SoftDeleteRetention
 	retainFiles := s.config.SoftDeleteRetainFiles
-	registry := s.config.MaintenanceConfig.ImageRegistry
 	s.mu.RUnlock()
 
 	echoed := map[string]bool{}
@@ -666,10 +701,6 @@ func (s *Server) echoedRunningValueKeys(ctx context.Context, ops *OperationalSet
 			storedKeyUnset(ctx, ops, softDeleteRetainFilesKey) {
 			echoed[softDeleteRetainFilesKey] = true
 		}
-	}
-	if registry != "" && req.ImageRegistry != nil && *req.ImageRegistry == registry &&
-		storedKeyUnset(ctx, ops, imageRegistryKey) {
-		echoed[imageRegistryKey] = true
 	}
 	return echoed
 }
@@ -800,16 +831,15 @@ func accessNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 }
 
 // endpointsNoRowBase is the endpoints base when no endpoints row exists:
-// the effective image_registry and monitoring_dashboard_url. hub_name is left
-// out: the bootstrap value applies without being written
-// (bootstrapAppliesWhenAbsent). public_url is left out too: a public URL is
-// stored only when an admin sets it, so a bootstrap value never becomes a
-// saved value that would override a later settings.yaml change
-// (ptone/scion#3905).
+// the effective monitoring_dashboard_url. hub_name is left out: the
+// bootstrap value applies without being written
+// (bootstrapAppliesWhenAbsent). public_url and image_registry are left out
+// too: each is stored only when an admin sets it, so a bootstrap value
+// never becomes a saved value that would override a later settings.yaml
+// change (ptone/scion#3905, ptone/scion#3916).
 func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 	snap := ops.Snapshot()
 	return structToRawMap(opsettings.EndpointsSettings{
-		ImageRegistry:          snap.ImageRegistry,
 		MonitoringDashboardURL: snap.MonitoringDashboardURL,
 	})
 }
@@ -820,9 +850,12 @@ func endpointsNoRowBase(ops *OperationalSettings) map[string]json.RawMessage {
 // schema pattern, so it is not carried into the managed row. Its public_url
 // is bootstrap material as well; carrying it would turn it into a saved
 // value that overrides a later settings.yaml change (ptone/scion#3905).
+// Its image_registry is this or another replica's file tier, which is
+// stored only when an admin changes it (ptone/scion#3916).
 func endpointsSeededBase(base map[string]json.RawMessage) {
 	delete(base, "hub_name")
 	delete(base, "public_url")
+	delete(base, endpointsImageRegistryKey)
 }
 
 // bodyMergeOptions returns the base rules of a section in
@@ -1160,6 +1193,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// keys the body sends change, and the row revision read is the CAS base
 	// (ptone/scion#3718, ptone/scion#3720).
 	mergedBaseRevs := map[string]int64{}
+	// noopRevs holds the base revision of each section whose filtered
+	// document equals the filtered base from the same read: such a save
+	// writes nothing (image_registry persistence, ptone/scion#3916).
+	noopRevs := map[string]int64{}
 	for _, sec := range bodyMergedSections {
 		doc, ok := sectionDocs[sec]
 		if !ok {
@@ -1177,7 +1214,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				delete(fp.raw, opsettings.SectionKeyFromKoanfPath(kp))
 			}
 		}
-		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, bodyMergeOptions(sec))
+		opts := bodyMergeOptions(sec)
+		var filteredBase json.RawMessage
+		if sec == "endpoints" {
+			opts = endpointsMergeOptions(ops, &filteredBase)
+		}
+		merged, rev, err := mergeSectionOnCurrentWith(r.Context(), ops, sec, doc, fp, opts)
 		if err != nil {
 			slog.Error("PUT server-config: failed to build section document", "section", sec, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
@@ -1185,6 +1227,40 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		sectionDocs[sec] = merged
 		mergedBaseRevs[sec] = rev
+		if sec == "endpoints" && sameAsFilteredBase(merged, filteredBase) {
+			noopRevs[sec] = rev
+		}
+	}
+
+	// profiles replaces the section wholesale: a profile the body leaves
+	// out is deleted with its values, and a profile's omitted or ""
+	// image_registry stores none. GET shows managed profile registries
+	// only, so an echo carries no file copies. A save equal to the
+	// filtered base from one row read (that row's revision is the CAS
+	// base) writes nothing (ptone/scion#3916).
+	if doc, ok := sectionDocs["profiles"]; ok {
+		var row *store.HubSetting
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "profiles")
+		switch {
+		case err == nil:
+			row, rev = got, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read profiles section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		base, err := profilesFilteredBase(ops, row)
+		if err != nil {
+			slog.Error("PUT server-config: failed to decode profiles section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		mergedBaseRevs["profiles"] = rev
+		if sameAsFilteredBase(doc, base) {
+			noopRevs["profiles"] = rev
+		}
 	}
 
 	// The start-claim keys are checked on the merged lifecycle document,
@@ -1550,6 +1626,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			expectedRev = gcpIAMBaseRev
 		} else if rev, ok := mergedBaseRevs[secName]; ok {
 			expectedRev = rev
+		}
+
+		// A save equal to the filtered base it was built from writes
+		// nothing, whatever the row's origin; a stale expected revision is
+		// not such a save and goes to the write's revision check.
+		if rev, ok := noopRevs[secName]; ok && expectedRev == rev {
+			applied[secName] = rev
+			unchanged = append(unchanged, secName)
+			continue
 		}
 
 		// A write that would leave a managed row as it is is skipped, so a

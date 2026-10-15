@@ -525,7 +525,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// store (templates, harness configs, pre-start hooks, skills settings),
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
-	imageRegistry := dispatchImageRegistry(dispatcher)
+	imageRegistry := dispatchImageRegistry(dispatcher, agent)
 	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
@@ -792,7 +792,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	// buildFreshAppliedConfig only reads; the plan and the profile the
 	// agent would run under come from the same call the real path uses.
-	imageRegistry := dispatchImageRegistry(dispatcher)
+	imageRegistry := dispatchImageRegistry(dispatcher, agent)
 	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {

@@ -396,14 +396,27 @@ func settingsProfileOverrideImage(vs *config.VersionedSettings, harnessConfigNam
 // imageRegistryProvider is implemented by dispatchers that rewrite image
 // names to a registry before sending them to a broker.
 type imageRegistryProvider interface {
-	ImageRegistry() string
+	ImageRegistryFor(brokerID, profile string) string
 }
 
-// dispatchImageRegistry returns the registry the dispatcher rewrites images
-// to, or "" when it does not rewrite them.
-func dispatchImageRegistry(dispatcher AgentDispatcher) string {
+// agentImageRegistryTarget returns the broker and profile an agent's image
+// registry is resolved for: its runtime broker and its saved profile.
+func agentImageRegistryTarget(agent *store.Agent) (brokerID, profile string) {
+	if agent == nil {
+		return "", ""
+	}
+	if agent.AppliedConfig != nil {
+		profile = agent.AppliedConfig.Profile
+	}
+	return agent.RuntimeBrokerID, profile
+}
+
+// dispatchImageRegistry returns the registry the dispatcher rewrites the
+// agent's images to (for its broker and profile), or "" when it does not
+// rewrite them.
+func dispatchImageRegistry(dispatcher AgentDispatcher, agent *store.Agent) string {
 	if p, ok := dispatcher.(imageRegistryProvider); ok {
-		return p.ImageRegistry()
+		return p.ImageRegistryFor(agentImageRegistryTarget(agent))
 	}
 	return ""
 }

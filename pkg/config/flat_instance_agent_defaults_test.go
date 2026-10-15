@@ -263,8 +263,8 @@ func TestFlatAgentDefaults_ImageRegistryRung(t *testing.T) {
 	if got := view.ResolveImageRegistry(""); got != "registry.example/instance" {
 		t.Fatalf("got %q, want the instance registry over the top-level one", got)
 	}
-	if !view.IsImageRegistryConfigured("") {
-		t.Fatal("an instance registry counts as configured")
+	if got := ResolveImageRegistryLayers(view.ImageRegistryLayers("", "")); got.Source != ImageRegistrySourceFileProfile {
+		t.Fatalf("source %q, want the instance (file profile/instance) layer", got.Source)
 	}
 }
 
