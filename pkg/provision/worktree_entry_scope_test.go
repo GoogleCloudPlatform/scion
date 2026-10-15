@@ -287,6 +287,9 @@ func TestClearOwnStaleWorktreeEntry_EmptyDirNotRegisteredLeftAlone(t *testing.T)
 	fi, err := dir.Stat()
 	require.NoError(t, err)
 	assert.NotZero(t, fi.Sys().(*syscall.Stat_t).Nlink, "the directory should not be replaced")
+	now, err := os.Stat(worktreePath)
+	require.NoError(t, err, "the directory should still be at its path")
+	assert.True(t, os.SameFile(fi, now), "the directory at the path should be the original one")
 }
 
 // Outside MountedWorktree the error shows the path as is and does not
