@@ -86,20 +86,26 @@ func TestReincarnateMove_DryRun_TargetWithoutHubRewriteKeepsBareImage(t *testing
 }
 
 // In place, the registry is resolved on the agent's own broker for the new
-// generation's profile, and the stored image uses that answer.
+// generation's profile, and the stored image uses that answer. The old
+// generation ran with "old-profile"; the new one's profile comes from its
+// create inputs ("new-profile"), and the two profiles have different
+// registries, so using the old profile would store the wrong image.
 func TestBuildPatchedAppliedConfig_ImageRegistryForNewProfile(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	ctx := context.Background()
 	f.agent.AppliedConfig.Profile = "old-profile"
+	f.agent.AppliedConfig.Image = "old.example/user-image:v1"
+	f.agent.AppliedConfig.CreateInputs.Profile = "new-profile"
 	f.agent.AppliedConfig.CreateInputs.InlineConfig = &api.ScionConfig{Image: "user-image:v1"}
 	f.agent.AppliedConfig.InlineConfig = &api.ScionConfig{Image: "user-image:v1"}
+	registries := map[string]string{"old-profile": "old.example", "new-profile": "new.example"}
 	var asked []string
 	fresh, _, err := f.srv.buildPatchedAppliedConfig(ctx, f.agent, f.project, func(profile string) string {
 		asked = append(asked, profile)
-		return "new.example"
+		return registries[profile]
 	}, nil)
 	require.NoError(t, err)
-	require.Len(t, asked, 1)
-	assert.Equal(t, fresh.Profile, asked[0], "resolved for the new generation's profile")
+	require.Equal(t, "new-profile", fresh.Profile, "precondition: the new generation's profile")
+	assert.Equal(t, []string{"new-profile"}, asked, "resolved for the new profile, never the old one")
 	assert.Equal(t, "new.example/user-image:v1", fresh.Image)
 }
