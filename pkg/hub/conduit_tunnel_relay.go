@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
@@ -46,7 +48,7 @@ import (
 // sessionID and returns the success answer (its stream id left for the
 // relay to set) with the instruction to open the tunnel. Refusals are
 // returned as errors, as open returns them.
-func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExternalRuntime, sessionID string, body []byte, exclude []string, openTunnels int) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
+func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExternalRuntime, sessionID string, body []byte, in relay.HubRPCRequest) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
 	log := slog.Default().With("subsystem", "hub.conduit", "user_id", ts.identity.ID(), "session_id", sessionID, "relay_held", true)
 	if !ts.credExpiry.IsZero() && !ts.now().Before(ts.credExpiry) {
 		log.Info("Conduit tunnel refused", "cause", "credential_expired")
@@ -65,7 +67,7 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	}
 	// The session's tunnel cap, at the point open applies it: the relay
 	// holding the session counts its open and opening tunnels.
-	if int64(openTunnels) >= conduitTunnelStreamCap.Load() {
+	if int64(in.OpenTunnels) >= conduitTunnelStreamCap.Load() {
 		return nil, nil, tunnelRefusal(tunnelRateLimited, "too many tunnels on this session")
 	}
 	agent, _, log, err := ts.checkTunnelTarget(ctx, log, req.Agent, kind, params)
@@ -76,17 +78,15 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 		return nil, nil, tunnelRefusal(tunnelConduitNotServing, "conduit is not serving on this hub node")
 	}
 
-	skip := make(map[string]bool, len(exclude))
-	for _, id := range exclude {
-		skip[id] = true
-	}
-	res, err := rt.router.Resolve(ctx, router.Request{
+	// Targets an earlier attempt found stale, and every session held by a
+	// relay it could not reach, are ruled out (as router.Do does).
+	res, err := rt.router.ResolveExcluding(ctx, router.Request{
 		Op:    router.OpStream,
 		Kind:  registry.PrincipalAgent,
 		ID:    agent.ID,
 		Want:  registry.Want{ProjectID: agent.ProjectID, Capability: kind},
 		Agent: agentIncarnationFacts(agent),
-	}, skip)
+	}, stringSet(in.ExcludeTargets), stringSet(in.ExcludeRelays))
 	if err != nil {
 		return nil, nil, conduitTunnelOpenError(err)
 	}
@@ -120,6 +120,10 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	if err != nil {
 		return nil, nil, fmt.Errorf("encoding the unavailable answer: %w", err)
 	}
+	refusals, err := relayTunnelTargetRefusals()
+	if err != nil {
+		return nil, nil, err
+	}
 	open := &relay.HubTunnelOpen{
 		TargetSessionID: res.Record.SessionID,
 		OwnerInstanceID: res.Record.RelayInstanceID,
@@ -132,6 +136,7 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 		Params:          params,
 		Grant:           tok,
 		Unavailable:     unavailable,
+		TargetRefusals:  refusals,
 	}
 	if claims != nil {
 		open.OpenJTI = claims.JTI
@@ -145,15 +150,25 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	}, open, nil
 }
 
+// conduitRelayTunnelsMessage refuses POST /v1/tunnels forwarded by a relay
+// that does not open the tunnels the hub authorizes (one without
+// relay.HubFeatureTunnels: an older relay).
+const conduitRelayTunnelsMessage = "Tunnels on this session need a newer separate relay"
+
 // relayTunnelRPC answers a POST /v1/tunnels forwarded from the relay-held
 // user session sessionID, for identity: a refusal (no instruction), or the
-// success answer with the instruction to open the tunnel.
-func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime, identity UserIdentity, credExpiry time.Time, sessionID string, rpc *conduitv1.RpcRequest, exclude []string, openTunnels int) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+// success answer with the instruction to open the tunnel. A relay that does
+// not list relay.HubFeatureTunnels gets 503 unavailable (conduit_not_serving)
+// and no instruction, as before relays opened tunnels.
+func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime, identity UserIdentity, credExpiry time.Time, sessionID string, rpc *conduitv1.RpcRequest, in relay.HubRPCRequest) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+	if !slices.Contains(in.Features, relay.HubFeatureTunnels) {
+		return tunnelRefusal(tunnelConduitNotServing, conduitRelayTunnelsMessage).response(), nil
+	}
 	if rpc.GetMethod() != http.MethodPost {
 		return withRPCHeader(conduitRPCError(http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "method not allowed"), "Allow", http.MethodPost), nil
 	}
 	ts := newConduitTunnelSession(s, identity, credExpiry)
-	resp, open, err := ts.openForRelay(ctx, rt, sessionID, rpc.GetBody(), exclude, openTunnels)
+	resp, open, err := ts.openForRelay(ctx, rt, sessionID, rpc.GetBody(), in)
 	if err != nil {
 		var te *conduitTunnelError
 		if errors.As(err, &te) {
@@ -163,4 +178,35 @@ func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime,
 		return tunnelRefusal(tunnelInternal, "tunnel request failed").response(), nil
 	}
 	return conduitRPCJSON(http.StatusOK, resp), open
+}
+
+// relayTunnelTargetRefusals are the answers a relay gives when the target
+// refuses the tunnel's stream, by close code: the same mapping a tunnel on a
+// hub-held session applies (conduitTunnelOpenError): target not found is 404
+// agent_not_found and forbidden is 403 forbidden.
+func relayTunnelTargetRefusals() (map[uint32][]byte, error) {
+	out := map[uint32][]byte{}
+	for code, refusal := range map[uint32]*conduitTunnelError{
+		relay.CloseTargetNotFound: tunnelRefusal(tunnelAgentNotFound, "agent not found"),
+		conduit.CloseForbidden:    tunnelRefusal(tunnelForbidden, "not permitted"),
+	} {
+		b, err := proto.Marshal(refusal.response())
+		if err != nil {
+			return nil, fmt.Errorf("encoding the target refusal for %d: %w", code, err)
+		}
+		out[code] = b
+	}
+	return out, nil
+}
+
+// stringSet returns the set of ids (nil when there are none).
+func stringSet(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
 }

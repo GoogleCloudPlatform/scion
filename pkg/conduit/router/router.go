@@ -209,6 +209,14 @@ func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bo
 	return r.resolve(ctx, req, exclusions{sessions: exclude})
 }
 
+// ResolveExcluding is Resolve with relay instances ruled out as well: no
+// session held by a relay in excludeRelays is picked, as Do rules out an
+// unreachable owner within one resolution. It serves a caller that opens
+// the stream elsewhere and retries the resolution itself.
+func (r *Router) ResolveExcluding(ctx context.Context, req Request, excludeSessions, excludeRelays map[string]bool) (Resolved, error) {
+	return r.resolve(ctx, req, exclusions{sessions: excludeSessions, relays: excludeRelays})
+}
+
 // exclusions are the candidates a resolution has ruled out: session ids
 // (stale routes) and relay instance ids (an unreachable owner, which
 // rules out every session it holds).

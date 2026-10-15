@@ -30,9 +30,6 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// TunnelsRPCPath is the RPC path of a tunnel request (POST).
-const TunnelsRPCPath = "/v1/tunnels"
-
 // MaxTunnelReResolves bounds how many times one tunnel request goes back to
 // the hub after the target session it named turned out stale (the same
 // budget the router gives one resolution).
@@ -54,7 +51,8 @@ type Tunnel struct {
 	OpenGrant []byte
 	// Bridge is the one internal stream to the owner relay when the
 	// target session is held by another relay (nil when it is held here).
-	// Renewals for the target go on it.
+	// It is the one stream renewals for the target will use; nothing sends
+	// renewals on it yet.
 	Bridge relay.Bridge
 }
 
@@ -135,24 +133,26 @@ func (ro *Role) Tunnels() []Tunnel {
 	return out
 }
 
-// relayLocal is the relay's Local, false before the role is bound.
-func (ro *Role) relayLocal(ctx context.Context, sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
-	if ro.relay == nil {
-		return nil, registry.SessionRecord{}, false
-	}
-	return ro.relay.Local(ctx, sessionID)
+// tunnelStaleError reports a target session the owner no longer holds or
+// no longer admits (the hub resolves again without that session), or an
+// owner relay that could not be reached (relayUnreachable: the hub resolves
+// again without any session that relay holds, as router.Do does).
+type tunnelStaleError struct {
+	relayUnreachable bool
+	err              error
 }
 
-// errTunnelStale reports a target session the owner no longer holds or no
-// longer admits, or an owner relay that cannot be reached: the hub
-// resolves the tunnel's target again without it.
-var errTunnelStale = errors.New("conduit relay: the tunnel's target session is stale")
+func (e *tunnelStaleError) Error() string {
+	return "conduit relay: the tunnel's target is stale: " + e.err.Error()
+}
+
+func (e *tunnelStaleError) Unwrap() error { return e.err }
 
 // openTunnel opens the tunnel the hub authorized for the user session
 // userSessionID: the target stream (on a session this relay holds, or
 // through one bridge to its owner relay), then the user stream, spliced
 // together. accepted is the hub's success answer; the user stream's id is
-// set in its body. It returns errTunnelStale when the target is stale.
+// set in its body. It returns a *tunnelStaleError when the target is stale.
 func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *conduitv1.RpcResponse, in *relay.HubTunnelOpen) (*conduitv1.RpcResponse, error) {
 	unavailable := tunnelUnavailable(in)
 	if ro.relay == nil {
@@ -170,7 +170,7 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 	if owner.InstanceID == ro.relay.InstanceID() {
 		// Same relay: the target stream is opened here, with no bridge.
 		if owner.Generation != ro.relay.Generation() {
-			return nil, errTunnelStale
+			return nil, &tunnelStaleError{err: &relay.StaleRouteError{Reason: "relay_target_mismatch"}}
 		}
 		target, ids, err = ro.relay.OpenLocal(ctx, in.TargetSessionID, in.Want(), open)
 	} else {
@@ -185,10 +185,19 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 			target, ids = bridge, bridge.Target()
 		}
 	}
+	var ce *conduit.CloseError
 	switch {
-	case errors.Is(err, relay.ErrStaleRoute), errors.Is(err, relay.ErrOwnerUnreachable):
+	case errors.Is(err, relay.ErrOwnerUnreachable):
+		ro.log.Debug("Conduit tunnel owner relay unreachable", "session_id", userSessionID, "owner_relay", owner.InstanceID, "error", err)
+		return nil, &tunnelStaleError{relayUnreachable: true, err: err}
+	case errors.Is(err, relay.ErrStaleRoute):
 		ro.log.Debug("Conduit tunnel target stale", "session_id", userSessionID, "target_session_id", in.TargetSessionID, "error", err)
-		return nil, errTunnelStale
+		return nil, &tunnelStaleError{err: err}
+	case errors.As(err, &ce) && in.TargetRefusals[ce.Code] != nil:
+		// The target refused the stream (target not found, forbidden): the
+		// hub's answer for that close code, as on a hub-held session.
+		ro.log.Info("Conduit tunnel target refused the stream", "session_id", userSessionID, "target_session_id", in.TargetSessionID, "close_code", ce.Code)
+		return targetRefusal(in, ce.Code, unavailable), nil
 	case err != nil:
 		ro.log.Info("Conduit tunnel target could not be opened", "session_id", userSessionID, "target_session_id", in.TargetSessionID, "error", err)
 		return unavailable, nil
@@ -243,6 +252,16 @@ func tunnelUnavailable(in *relay.HubTunnelOpen) *conduitv1.RpcResponse {
 	if len(in.Unavailable) == 0 || proto.Unmarshal(in.Unavailable, resp) != nil || resp.GetStatus() == 0 {
 		body, _ := json.Marshal(map[string]any{"error": map[string]string{"code": "agent_session_unavailable", "message": "agent session unavailable"}})
 		return &conduitv1.RpcResponse{Status: http.StatusServiceUnavailable, Body: body}
+	}
+	return resp
+}
+
+// targetRefusal decodes the hub's answer for a target refusal with code,
+// falling back to fallback.
+func targetRefusal(in *relay.HubTunnelOpen, code uint32, fallback *conduitv1.RpcResponse) *conduitv1.RpcResponse {
+	resp := &conduitv1.RpcResponse{}
+	if proto.Unmarshal(in.TargetRefusals[code], resp) != nil || resp.GetStatus() == 0 {
+		return fallback
 	}
 	return resp
 }

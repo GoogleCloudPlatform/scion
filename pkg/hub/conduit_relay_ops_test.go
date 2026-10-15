@@ -290,8 +290,8 @@ func TestRelayAdmit_BindsRelayAndHost(t *testing.T) {
 
 // TestRelayRPC_ReachesHandlerWithAdmittedPrincipal: a forwarded RPC runs in
 // the unchanged in-process handler as the principal Admit admitted; POST
-// /v1/tunnels runs the hub's tunnel checks instead (a request without a
-// body is refused 400 with no instruction to open anything).
+// /v1/tunnels from a relay that does not open tunnels (no
+// relay.HubFeatureTunnels: an older relay) gets the typed refusal.
 func TestRelayRPC_ReachesHandlerWithAdmittedPrincipal(t *testing.T) {
 	f, cf := newUserRelayOps(t)
 	captured := captureRelayRPCs(t)
@@ -304,8 +304,9 @@ func TestRelayRPC_ReachesHandlerWithAdmittedPrincipal(t *testing.T) {
 
 	resp, err = rpcCall(t, f.hub, "s1", adm.AdmissionToken, conduitTunnelsPath)
 	require.NoError(t, err)
-	assert.Equal(t, int32(http.StatusBadRequest), resp.GetStatus())
-	assert.Contains(t, string(resp.GetBody()), ErrCodeInvalidRequest)
+	assert.Equal(t, int32(http.StatusServiceUnavailable), resp.GetStatus())
+	assert.Contains(t, string(resp.GetBody()), ptyReasonConduitNotServing)
+	assert.Contains(t, string(resp.GetBody()), conduitRelayTunnelsMessage)
 	assert.Equal(t, []string{cf.owner.ID()}, captured.ids, "tunnel requests do not reach the in-process handler")
 }
 
@@ -595,7 +596,7 @@ func TestRelayRPC_TunnelCapAppliesToRelayCount(t *testing.T) {
 	call := func(open int) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
 		var out relay.HubRPCResponse
 		require.NoError(t, f.hub.Call(context.Background(), relay.HubSessionPath("s1", "rpc"),
-			relay.HubRPCRequest{AdmissionToken: adm.AdmissionToken, RPC: b, OpenTunnels: open}, &out))
+			relay.HubRPCRequest{AdmissionToken: adm.AdmissionToken, RPC: b, OpenTunnels: open, Features: []string{relay.HubFeatureTunnels}}, &out))
 		resp := &conduitv1.RpcResponse{}
 		require.NoError(t, proto.Unmarshal(out.RPC, resp))
 		return resp, out.Tunnel
@@ -611,4 +612,64 @@ func TestRelayRPC_TunnelCapAppliesToRelayCount(t *testing.T) {
 	assert.Equal(t, int32(http.StatusNotFound), resp.GetStatus(), "below the cap the agent is looked up: %s", resp.GetBody())
 	assert.Contains(t, string(resp.GetBody()), ErrCodeAgentNotFound)
 	assert.Nil(t, tunnel)
+}
+
+// TestRelayRPC_TunnelNeedsRelayFeature (mixed versions): a tunnel request
+// forwarded by a relay that lists relay.HubFeatureTunnels runs the hub's
+// tunnel checks; the same request from a relay without it (an older relay,
+// which would ignore an instruction to open the tunnel) gets 503
+// unavailable with reason conduit_not_serving and no instruction, never a
+// 200 that opens nothing.
+func TestRelayRPC_TunnelNeedsRelayFeature(t *testing.T) {
+	f, cf := newUserRelayOps(t)
+	adm := f.mustAdmit(t, bearer(ownerJWT(t, cf)), "s1")
+	body, err := json.Marshal(conduitTunnelRequest{Agent: "no-such-agent", Kind: "tcp", Params: map[string]string{"port": "3000"}})
+	require.NoError(t, err)
+	b, err := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1", Method: http.MethodPost, Path: conduitTunnelsPath, Body: body})
+	require.NoError(t, err)
+	call := func(features []string) (*conduitv1.RpcResponse, *relay.HubTunnelOpen) {
+		var out relay.HubRPCResponse
+		require.NoError(t, f.hub.Call(context.Background(), relay.HubSessionPath("s1", "rpc"),
+			relay.HubRPCRequest{AdmissionToken: adm.AdmissionToken, RPC: b, Features: features}, &out))
+		resp := &conduitv1.RpcResponse{}
+		require.NoError(t, proto.Unmarshal(out.RPC, resp))
+		return resp, out.Tunnel
+	}
+
+	for name, features := range map[string][]string{"no features": nil, "other features": {"something-else"}} {
+		resp, tunnel := call(features)
+		assert.Equal(t, int32(http.StatusServiceUnavailable), resp.GetStatus(), name)
+		assert.Contains(t, string(resp.GetBody()), ptyReasonConduitNotServing, name)
+		assert.Nil(t, tunnel, name)
+	}
+
+	resp, tunnel := call([]string{relay.HubFeatureTunnels})
+	assert.Equal(t, int32(http.StatusNotFound), resp.GetStatus(), "the tunnel checks ran: %s", resp.GetBody())
+	assert.Contains(t, string(resp.GetBody()), ErrCodeAgentNotFound)
+	assert.Nil(t, tunnel)
+}
+
+// TestRelayTunnelTargetRefusals: the answers the hub gives a relay for a
+// target that refuses the tunnel's stream follow the in-process mapping:
+// target not found is 404 agent_not_found, forbidden is 403 forbidden.
+func TestRelayTunnelTargetRefusals(t *testing.T) {
+	refusals, err := relayTunnelTargetRefusals()
+	require.NoError(t, err)
+	require.Len(t, refusals, 2)
+	for code, want := range map[uint32]struct {
+		status int32
+		code   string
+	}{
+		relay.CloseTargetNotFound: {http.StatusNotFound, ErrCodeAgentNotFound},
+		conduit.CloseForbidden:    {http.StatusForbidden, ErrCodeForbidden},
+	} {
+		resp := &conduitv1.RpcResponse{}
+		require.NoError(t, proto.Unmarshal(refusals[code], resp), "close code %d", code)
+		assert.Equal(t, want.status, resp.GetStatus(), "close code %d", code)
+		assert.Contains(t, string(resp.GetBody()), want.code, "close code %d", code)
+		// The same mapping as a tunnel on a hub-held session.
+		var te *conduitTunnelError
+		require.ErrorAs(t, conduitTunnelOpenError(&conduit.CloseError{Code: code}), &te)
+		assert.Equal(t, want.status, int32(conduitTunnelFailures[te.failure].status), "in-process mapping for %d", code)
+	}
 }

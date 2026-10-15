@@ -39,8 +39,9 @@ type Owner struct {
 //
 // Its holder (a relay splicing a user stream, or the hub node holding a
 // port proxy or PTY leaf) keeps exactly this one internal stream for the
-// stream's life: renewals for the target go on it (Renew), and no second
-// stream is opened for them.
+// stream's life. It is the one stream renewals for the target will use
+// (Renew), so none will need a second stream. No holder sends renewals on
+// it yet.
 type Bridge interface {
 	conduit.Stream
 	// Renew sends AuthRefresh{stream_id, credential} on this hop; the

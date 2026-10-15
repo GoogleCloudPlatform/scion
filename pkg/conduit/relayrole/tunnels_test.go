@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -36,14 +37,16 @@ import (
 // echoTarget is an agent session config that accepts every stream, records
 // its StreamOpen and id, and echoes the stream's bytes.
 type echoTarget struct {
-	mu     sync.Mutex
-	opens  []*conduitv1.StreamOpen
-	ids    chan uint32
+	mu    sync.Mutex
+	opens []*conduitv1.StreamOpen
+	ids   chan uint32
+	// ends receives once per stream, when its echo ends (the stream closed).
+	ends   chan struct{}
 	config conduit.Config
 }
 
 func newEchoTarget() *echoTarget {
-	e := &echoTarget{ids: make(chan uint32, 8)}
+	e := &echoTarget{ids: make(chan uint32, 8), ends: make(chan struct{}, 8)}
 	e.config = conduit.Config{StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, open *conduitv1.StreamOpen, ps conduit.PendingStream) error {
 		st, err := ps.Accept()
 		if err != nil {
@@ -56,6 +59,7 @@ func newEchoTarget() *echoTarget {
 		go func() {
 			_, _ = io.Copy(st, st)
 			_ = st.Close()
+			e.ends <- struct{}{}
 		}()
 		return nil
 	})}
@@ -382,5 +386,168 @@ func TestRoleTunnel_ReportsOpenTunnelsForCap(t *testing.T) {
 	defer mu.Unlock()
 	if len(counts) != 2 || counts[0] != 0 || counts[1] != 1 {
 		t.Fatalf("open tunnel counts sent to the hub %v, want [0 1]", counts)
+	}
+	var last relay.HubRPCRequest
+	f.hub.last("rpc", &last)
+	if len(last.Features) != 1 || last.Features[0] != relay.HubFeatureTunnels {
+		t.Fatalf("forwarded features %v, want [%s]", last.Features, relay.HubFeatureTunnels)
+	}
+}
+
+// refusingTarget is an agent session config that refuses every stream
+// with code, as a target refusing a grant does.
+func refusingTarget(code uint32, opened chan<- struct{}) conduit.Config {
+	return conduit.Config{StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+		opened <- struct{}{}
+		return ps.Reject(code, "grant_invalid")
+	})}
+}
+
+// TestRoleTunnel_TargetRefusalMapped: a target that refuses the tunnel's
+// stream with 4403 gets the user the hub's answer for that close code (403
+// forbidden, the in-process mapping), and no tunnel is recorded. A close
+// code the hub gave no answer for gets the unavailable answer.
+func TestRoleTunnel_TargetRefusalMapped(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   uint32
+		status int32
+		want   string
+	}{
+		{name: "forbidden", code: conduit.CloseForbidden, status: http.StatusForbidden, want: "forbidden"},
+		{name: "unmapped", code: conduit.CloseRelayRestart, status: http.StatusServiceUnavailable, want: "agent_session_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			opened := make(chan struct{}, 4)
+			rec := dialTarget(t, f.w, f.node, refusingTarget(tc.code, opened))
+			ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+				in := tunnelInstruction(t, rec, f.node.Internal.URL)
+				in.Tunnel.TargetRefusals = map[uint32][]byte{
+					conduit.CloseForbidden: mustMarshalRPC(t, &conduitv1.RpcResponse{Status: http.StatusForbidden, Body: []byte(`{"error":{"code":"forbidden"}}`)}),
+				}
+				return hubAnswer{status: http.StatusOK, body: in}
+			})
+			resp := requestTunnel(t, ls)
+			if resp.GetStatus() != tc.status || !bytes.Contains(resp.GetBody(), []byte(tc.want)) {
+				t.Fatalf("answer %v, want %d %s", resp, tc.status, tc.want)
+			}
+			relaytest.Wait(t, opened, "the target's StreamOpen")
+			if tns := f.role.Tunnels(); len(tns) != 0 {
+				t.Fatalf("tunnels %+v, want none", tns)
+			}
+			if n := f.hub.count("rpc"); n != 1 {
+				t.Fatalf("%d hub calls, want 1 (a refusal is not a stale route)", n)
+			}
+		})
+	}
+}
+
+// TestRoleTunnel_UserSessionDrainingAfterHubAnswer: when the user session
+// starts draining after the hub answered, the user stream cannot be
+// opened: the target stream already opened is closed, the user gets the
+// session layer's bare 503 with Retry-After 0, and no tunnel is recorded.
+func TestRoleTunnel_UserSessionDrainingAfterHubAnswer(t *testing.T) {
+	f := newRoleFixture(t)
+	target := newEchoTarget()
+	rec := dialTarget(t, f.w, f.node, target.config)
+	var (
+		mu          sync.Mutex
+		userSession string
+	)
+	ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+		// The tunnel request is still in flight, so the drained session
+		// stays open until it is answered.
+		mu.Lock()
+		id := userSession
+		mu.Unlock()
+		if rls, _, ok := f.node.Relay.Local(context.Background(), id); ok {
+			_ = rls.GoAway(conduit.GoAwayOptions{})
+		}
+		return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, f.node.Internal.URL)}
+	})
+	mu.Lock()
+	userSession = ls.Info().SessionID
+	mu.Unlock()
+	resp := requestTunnel(t, ls)
+	if resp.GetStatus() != http.StatusServiceUnavailable || resp.GetHeaders()[conduit.RetryAfterHeader] != "0" || len(resp.GetBody()) != 0 {
+		t.Fatalf("answer %v, want a bare 503 with Retry-After 0", resp)
+	}
+	relaytest.Wait(t, target.ids, "the target stream")
+	relaytest.Wait(t, target.ends, "the target stream's end")
+	if tns := f.role.Tunnels(); len(tns) != 0 {
+		t.Fatalf("tunnels %+v, want none", tns)
+	}
+}
+
+// TestRoleTunnel_InstructionOnlyForTunnelRequests: an instruction to open
+// a tunnel in the hub's answer to any other RPC is a malformed answer, and
+// nothing is opened.
+func TestRoleTunnel_InstructionOnlyForTunnelRequests(t *testing.T) {
+	f := newRoleFixture(t)
+	target := newEchoTarget()
+	rec := dialTarget(t, f.w, f.node, target.config)
+	ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+		return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, f.node.Internal.URL)}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, req := range []*conduitv1.RpcRequest{
+		{RequestId: "g1", Method: http.MethodGet, Path: relay.TunnelsRPCPath},
+		{RequestId: "p1", Method: http.MethodPost, Path: "/v1/other"},
+	} {
+		resp, err := ls.Call(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.GetStatus() != http.StatusBadGateway {
+			t.Fatalf("%s %s: answer %v, want 502 (malformed hub answer)", req.GetMethod(), req.GetPath(), resp)
+		}
+	}
+	if tns := f.role.Tunnels(); len(tns) != 0 {
+		t.Fatalf("tunnels %+v, want none", tns)
+	}
+	select {
+	case id := <-target.ids:
+		t.Fatalf("the target accepted stream %d, want none", id)
+	default:
+	}
+}
+
+// TestRoleTunnel_UnreachableOwnerExcludesRelay: when the owner relay the
+// hub named cannot be reached, the request goes back to the hub with that
+// relay excluded (not just the one session), as the router excludes an
+// unreachable owner, and the tunnel opens on the target named next.
+func TestRoleTunnel_UnreachableOwnerExcludesRelay(t *testing.T) {
+	f := newRoleFixture(t)
+	owner := f.w.StartNode("relay-1", nil)
+	target := newEchoTarget()
+	rec := dialTarget(t, f.w, owner, target.config)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+	gone := registry.SessionRecord{SessionID: "session-on-dead-relay", RelayInstanceID: "relay-dead", RelayGeneration: 1}
+	var (
+		mu   sync.Mutex
+		reqs []relay.HubRPCRequest
+	)
+	ls, _ := userSessionFor(t, f, func(n int, req relay.HubRPCRequest) hubAnswer {
+		mu.Lock()
+		reqs = append(reqs, req)
+		mu.Unlock()
+		if n == 1 {
+			return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, gone, deadURL)}
+		}
+		return hubAnswer{status: http.StatusOK, body: tunnelInstruction(t, rec, owner.Internal.URL)}
+	})
+	resp := requestTunnel(t, ls)
+	if resp.GetStatus() != http.StatusOK {
+		t.Fatalf("answer %v, want 200 after re-resolution", resp)
+	}
+	_ = relaytest.Wait(t, target.ids, "the target stream")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reqs) != 2 || len(reqs[1].ExcludeRelays) != 1 || reqs[1].ExcludeRelays[0] != "relay-dead" || len(reqs[1].ExcludeTargets) != 0 {
+		t.Fatalf("hub requests %+v, want the second to exclude relay-dead only", reqs)
 	}
 }

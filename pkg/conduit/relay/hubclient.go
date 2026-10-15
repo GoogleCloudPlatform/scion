@@ -307,6 +307,15 @@ type HubRPCRequest struct {
 	// open or is opening on the session, this request excluded. The hub
 	// applies its per-session tunnel cap to it.
 	OpenTunnels int `json:"open_tunnels,omitempty"`
+	// ExcludeRelays names relay instances an earlier attempt of the same
+	// tunnel request could not reach. The hub resolves the target without
+	// any session they hold, as the router does within one resolution.
+	ExcludeRelays []string `json:"exclude_relays,omitempty"`
+	// Features lists what the forwarding relay supports. A relay that opens
+	// the tunnels the hub authorizes lists HubFeatureTunnels; a relay that
+	// does not (an older one) gets the tunnel request refused, never an
+	// instruction it would ignore.
+	Features []string `json:"features,omitempty"`
 }
 
 // HubRPCResponse is the RPC's answer (the encoded RpcResponse).
@@ -319,6 +328,14 @@ type HubRPCResponse struct {
 	// set under TunnelResponseStreamIDKey in its JSON body.
 	Tunnel *HubTunnelOpen `json:"tunnel,omitempty"`
 }
+
+// HubFeatureTunnels is the HubRPCRequest feature of a relay that opens
+// the tunnels the hub authorizes (HubRPCResponse.Tunnel).
+const HubFeatureTunnels = "tunnels"
+
+// TunnelsRPCPath is the RPC path of a tunnel request (POST), on the hub
+// and on a relay-held session alike.
+const TunnelsRPCPath = "/v1/tunnels"
 
 // TunnelResponseStreamIDKey is the key of the user-side stream id in the
 // JSON body of an accepted tunnel request's answer.
@@ -347,6 +364,11 @@ type HubTunnelOpen struct {
 	// Unavailable is the encoded RpcResponse to answer with when the
 	// tunnel cannot be opened (no target stream, or no user stream).
 	Unavailable []byte `json:"unavailable"`
+	// TargetRefusals are the encoded RpcResponses to answer with when the
+	// target refuses the stream with one of these close codes (the same
+	// mapping as a tunnel on a hub-held session: target not found, and
+	// forbidden). Any other failure answers with Unavailable.
+	TargetRefusals map[uint32][]byte `json:"target_refusals,omitempty"`
 }
 
 // Owner returns the relay holding the target session.

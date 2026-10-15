@@ -277,19 +277,15 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 	}
 	// A tunnel the hub authorized is opened here (openTunnel). When its
 	// target turns out stale, the request goes back to the hub with that
-	// target excluded, and the hub re-checks and mints for the session it
-	// resolves next.
+	// target excluded (or, for an owner relay that could not be reached,
+	// every session that relay holds), and the hub re-checks and mints for
+	// the session it resolves next.
+	isTunnel := req.GetMethod() == http.MethodPost && req.GetPath() == relay.TunnelsRPCPath
 	var (
-		exclude     []string
-		openTunnels int
+		exclude, excludeRelays []string
+		openTunnels            int
 	)
-	if req.GetPath() == TunnelsRPCPath {
-		// A draining session takes no new tunnel: the same answer the
-		// session layer gives an RPC on a draining session, before the
-		// hub is asked to mint anything.
-		if ls, _, ok := f.ro.relayLocal(ctx, f.sessionID); ok && ls.Info().Draining {
-			return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: http.StatusServiceUnavailable, Headers: map[string]string{conduit.RetryAfterHeader: "0"}}
-		}
+	if isTunnel {
 		// The hub applies the session's tunnel cap to this count.
 		var release func()
 		openTunnels, release = f.ro.tunnels.reserve(f.sessionID)
@@ -297,7 +293,14 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 	}
 	for attempt := 0; ; attempt++ {
 		var out relay.HubRPCResponse
-		err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{AdmissionToken: f.ro.token(f.sessionID), RPC: b, ExcludeTargets: exclude, OpenTunnels: openTunnels}, &out)
+		err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{
+			AdmissionToken: f.ro.token(f.sessionID),
+			RPC:            b,
+			ExcludeTargets: exclude,
+			ExcludeRelays:  excludeRelays,
+			OpenTunnels:    openTunnels,
+			Features:       []string{relay.HubFeatureTunnels},
+		}, &out)
 		var refusal *relay.HubRefusal
 		switch {
 		case err == nil:
@@ -308,12 +311,22 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 			if out.Tunnel == nil {
 				return resp
 			}
+			if !isTunnel {
+				// An instruction to open a tunnel answers only a tunnel
+				// request.
+				return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+			}
 			opened, err := f.ro.openTunnel(ctx, f.sessionID, resp, out.Tunnel)
-			if errors.Is(err, errTunnelStale) {
+			var stale *tunnelStaleError
+			if errors.As(err, &stale) {
 				if attempt >= MaxTunnelReResolves {
 					opened = tunnelUnavailable(out.Tunnel)
 				} else {
-					exclude = append(exclude, out.Tunnel.TargetSessionID)
+					if stale.relayUnreachable {
+						excludeRelays = append(excludeRelays, out.Tunnel.OwnerInstanceID)
+					} else {
+						exclude = append(exclude, out.Tunnel.TargetSessionID)
+					}
 					continue
 				}
 			}

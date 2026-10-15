@@ -66,9 +66,3 @@ func conduitLeafTarget(res router.Resolved, st conduit.Stream, b relay.Bridge) r
 	}
 	return conduitTargetOf(res, st)
 }
-
-// conduitBridgeOf returns st as a bridge when it is one (nil otherwise).
-func conduitBridgeOf(st conduit.Stream) relay.Bridge {
-	b, _ := st.(relay.Bridge)
-	return b
-}

@@ -66,7 +66,7 @@ import (
 // Only the session's close or loss ends every tunnel on it.
 
 // conduitTunnelsPath is the RPC path of a tunnel request.
-const conduitTunnelsPath = "/v1/tunnels"
+const conduitTunnelsPath = relay.TunnelsRPCPath
 
 // conduitTunnelStreamCap is the most tunnels (open or opening) one user
 // session may hold. It matches the dialer's default limit on the streams
@@ -386,7 +386,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		return nil, errors.New("stream re-check is not running")
 	}
 
-	target, renew, err := ts.openTarget(ctx, rt.router, agent, kind, params)
+	target, bridge, renew, err := ts.openTarget(ctx, rt.router, agent, kind, params)
 	if err != nil {
 		if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
 			log.Info("Conduit tunnel refused", "cause", te.message, "error", err)
@@ -416,7 +416,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		StreamID:  user.ID(),
 		Close:     t.closeBoth,
 		Renew:     renew,
-		Bridge:    conduitBridgeOf(target),
+		Bridge:    bridge,
 	}
 	t.untrack = s.trackConduitUserStream(tracked)
 	t.tracked.Store(tracked)
@@ -625,10 +625,11 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 // params, as the agent PTY path does. It also returns the stream's
 // renewal notice sender (conduitStreamRenewal: nil when this node does not
 // hold the target's session).
-func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, func() error, error) {
+func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, relay.Bridge, func() error, error) {
 	var (
-		st    conduit.Stream
-		renew func() error
+		st     conduit.Stream
+		bridge relay.Bridge
+		renew  func() error
 	)
 	req := router.Request{
 		Op:    router.OpStream,
@@ -658,7 +659,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 			// Authorization passed; the signing key set failed.
 			return fmt.Errorf("%w: %w", errConduitTunnelGrantKeys, err)
 		}
-		st, _, err = ts.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
+		st, bridge, err = ts.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduit.StreamKind(kind).Proto(),
 			Params: params,
 			Grant:  tok,
@@ -670,9 +671,9 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		return nil
 	})
 	if err != nil {
-		return nil, nil, conduitTunnelOpenError(err)
+		return nil, nil, nil, conduitTunnelOpenError(err)
 	}
-	return st, renew, nil
+	return st, bridge, renew, nil
 }
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
