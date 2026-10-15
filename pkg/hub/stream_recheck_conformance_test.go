@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"testing"
 
@@ -77,7 +79,7 @@ func streamRecheckViolations(specs []authzop.OperationSpec, modes map[authzop.Op
 				break
 			}
 		}
-		if !streaming || spec.Bearer.Kind != authzop.BearerAdmit {
+		if !streaming || !spec.Bearer.Kind.AdmitsToken() {
 			continue
 		}
 		mode, ok := modes[spec.ID]
@@ -118,8 +120,15 @@ func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
 	for id := range streamRecheckOperations {
 		spec, ok := byID[id]
 		require.True(t, ok, "%s is a catalog operation", id)
-		assert.Equal(t, authzop.BearerAdmit, spec.Bearer.Kind, "%s admits a token", id)
+		assert.True(t, spec.Bearer.Kind.AdmitsToken(), "%s admits a token", id)
 		assert.Contains(t, spec.Credentials, authzop.CredentialScopedUAT, "%s lists the user access token credential", id)
+		streaming := false
+		for _, ep := range spec.EntryPoints {
+			if ep.Kind == authzop.EntryPointSSE || ep.Kind == authzop.EntryPointWebSocket {
+				streaming = true
+			}
+		}
+		assert.True(t, streaming, "%s has a stream entry point", id)
 	}
 	for ck, reason := range streamRecheckExemptCredentials {
 		assert.NotEqual(t, authzop.CredentialScopedUAT, ck, "the token kind is re-checked, never exempt")
@@ -138,7 +147,10 @@ func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
 	assert.NotNil(t, ch, "a token stream is re-checked")
 	stop()
 	assert.NotNil(t, srv.ptyTokenCredentialCheck(token, agent), "a token PTY session is re-checked")
-	for _, kind := range []CredentialKind{CredentialKindInteractive} {
+	for _, kind := range []CredentialKind{
+		CredentialKindInteractive, CredentialKindAgentJWT, CredentialKindFederation, CredentialKindBroker,
+		CredentialKindDev, CredentialKindDelegatedAgent, CredentialKindHubDelivery,
+	} {
 		ctx := with(kind)
 		ch, stop := streamTokenRecheck(ctx)
 		assert.Nil(t, ch, "%s: no token re-check", kind)
@@ -159,4 +171,35 @@ func TestStreamRecheck_CoversEveryAdmittedCredentialKind(t *testing.T) {
 	uncovered.ID = "agent.logs.read"
 	uncovered.Credentials = []authzop.CredentialKind{authzop.CredentialScopedUAT, authzop.CredentialDelegatedAgent}
 	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{uncovered}, streamRecheckOperations, streamRecheckExemptCredentials), 1)
+	selfAdmitted := unclassified
+	selfAdmitted.ID = "proof.stream.self"
+	selfAdmitted.Bearer = authzop.BearerDisposition{Kind: authzop.BearerAdmitSelf}
+	assert.Len(t, streamRecheckViolations([]authzop.OperationSpec{selfAdmitted}, streamRecheckOperations, streamRecheckExemptCredentials), 1,
+		"an admit_self stream operation also names its re-check")
+}
+
+// TestAgentMessageLogParticipant_NonUserWithoutFullHistoryRefused requires
+// the message-log participant filter to refuse, with 403, a caller that is
+// not a user and has no full history, so such a caller never gets an
+// unfiltered query; with the full history no filter applies, and a user
+// without it is filtered to its own ID.
+func TestAgentMessageLogParticipant_NonUserWithoutFullHistoryRefused(t *testing.T) {
+	agentCtx := contextWithIdentity(context.Background(), agentIdentityFor(tid("mlp-agent"), tid("mlp-project"), ScopeProjectRead))
+
+	rec := httptest.NewRecorder()
+	id, ok := agentMessageLogParticipant(agentCtx, rec, false)
+	assert.False(t, ok)
+	assert.Equal(t, "", id)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	rec = httptest.NewRecorder()
+	id, ok = agentMessageLogParticipant(agentCtx, rec, true)
+	assert.True(t, ok)
+	assert.Equal(t, "", id, "the full history has no participant filter")
+
+	user := NewAuthenticatedUser(tid("mlp-user"), "mlp@test.com", "MLP", store.UserRoleMember, "web")
+	rec = httptest.NewRecorder()
+	id, ok = agentMessageLogParticipant(contextWithIdentity(context.Background(), user), rec, false)
+	assert.True(t, ok)
+	assert.Equal(t, user.ID(), id)
 }

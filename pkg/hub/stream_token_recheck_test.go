@@ -447,8 +447,8 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 				listStatus, listParticipant := list(t, path, tc.setAuth)
 				require.Equal(t, tc.wantStatus, listStatus, "list")
 				require.Equal(t, tc.participant, listParticipant, "list participant filter")
-				streamStatus, streamParticipant := stream(t, path, tc.setAuth)
-				assert.Equal(t, tc.wantStatus, streamStatus, "stream")
+				streamCode, streamParticipant := stream(t, path, tc.setAuth)
+				assert.Equal(t, tc.wantStatus, streamCode, "stream")
 				assert.Equal(t, tc.participant, streamParticipant, "stream participant filter")
 			})
 		}
@@ -468,8 +468,8 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 			listStatus, listParticipant := list(t, path, setAuth)
 			require.Equal(t, http.StatusOK, listStatus, "list")
 			require.Equal(t, "", listParticipant, "list: full history")
-			streamStatus, streamParticipant := stream(t, path, setAuth)
-			assert.Equal(t, http.StatusOK, streamStatus, "stream")
+			streamCode, streamParticipant := stream(t, path, setAuth)
+			assert.Equal(t, http.StatusOK, streamCode, "stream")
 			assert.Equal(t, "", streamParticipant, "stream: full history")
 		})
 		t.Run(path+" read-only agent caller: refused on list and stream", func(t *testing.T) {
@@ -477,8 +477,8 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 			listStatus, listParticipant := list(t, path, setAuth)
 			require.Equal(t, http.StatusForbidden, listStatus, "list")
 			require.Equal(t, "<none>", listParticipant, "list: no query")
-			streamStatus, streamParticipant := stream(t, path, setAuth)
-			assert.Equal(t, http.StatusForbidden, streamStatus, "stream")
+			streamCode, streamParticipant := stream(t, path, setAuth)
+			assert.Equal(t, http.StatusForbidden, streamCode, "stream")
 			assert.Equal(t, "<none>", streamParticipant, "stream: no tail")
 		})
 	}
@@ -616,8 +616,7 @@ func TestMessagesStreamToken_AdmissionByBoundary(t *testing.T) {
 		"hub token with agent:read")
 	assert.Equal(t, http.StatusForbidden, streamStatus(t, f.srv, path, mint(projectBoundary(f.agent.ProjectID), "project:read")),
 		"token without agent:read")
-	other403or404 := streamStatus(t, f.srv, path, mint(projectBoundary(other.ID), "agent:read"))
-	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, other403or404,
+	assert.Equal(t, http.StatusForbidden, streamStatus(t, f.srv, path, mint(projectBoundary(other.ID), "agent:read")),
 		"token bounded to another project")
 	assert.Equal(t, http.StatusOK, streamStatus(t, f.srv, path, "Bearer "+session), "session")
 }

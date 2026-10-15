@@ -463,8 +463,8 @@ func TestAgentFullHistory_MessagesStream(t *testing.T) {
 // TestAgentFullHistory_MessageLogs pins the rule on the message-log path for
 // agent callers, which have no user identity to filter by: an agent holding
 // agent.attach on the target (which for an agent needs the lifecycle scope)
-// passes to the log query, and an agent with read alone is denied, on the
-// message-log list and on its stream.
+// passes to the log query, and an agent without agent.attach is denied, on
+// the message-log list and on its stream.
 func TestAgentFullHistory_MessageLogs(t *testing.T) {
 	f := bypassAgentsSetup(t)
 	f.srv.logQueryService = nil
@@ -474,12 +474,12 @@ func TestAgentFullHistory_MessageLogs(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, rec.Code, "attach holder reaches the log query: %s", rec.Body.String())
 
 	rec = f.asAgent(t, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "read without attach: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "without agent.attach: %s", rec.Body.String())
 
 	// The message-log stream applies the same rule.
 	rec = f.asAgent(t, http.MethodGet, path+"/stream", nil, ScopeAgentLifecycle)
 	assert.Equal(t, http.StatusNotImplemented, rec.Code, "stream: attach holder reaches the log query: %s", rec.Body.String())
 
 	rec = f.asAgent(t, http.MethodGet, path+"/stream", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "stream: read without attach: %s", rec.Body.String())
+	assert.Equal(t, http.StatusForbidden, rec.Code, "stream: without agent.attach: %s", rec.Body.String())
 }
