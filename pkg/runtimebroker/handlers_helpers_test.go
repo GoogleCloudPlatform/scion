@@ -443,7 +443,9 @@ func endAsyncLaunchesAtCleanup(t *testing.T, srv *Server) {
 		if n > 0 {
 			t.Errorf("%d async launch(es) still running %v after the test; its temp dirs may not be removable", n, asyncLaunchCleanupWait)
 		}
-		srv.launchJournal.Close()
+		if srv.launchJournal != nil {
+			srv.launchJournal.Close()
+		}
 	})
 }
 
