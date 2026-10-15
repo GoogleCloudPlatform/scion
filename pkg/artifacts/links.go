@@ -167,24 +167,20 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 	return min(def, maxTTL), maxTTL
 }
 
-// canAdminister reports whether the caller may administer a, an artifact
-// it can read (so a is live and unexpired: readableArtifact checked it):
-// manage its share links and grants, and change its expiry or home. It
-// must be a user (sharing is user-only, design D15) whose credential
-// permits artifact.manage in the home scope, and it must own the artifact
-// or hold an unexpired admin grant (a principal grant for it, or a scope
-// grant for a scope the host authorizes it to manage in).
+// canAdministerWith reports whether the caller has full administration of
+// a, an artifact it can read (so a is live and unexpired: readableArtifact
+// checked it): manage its share links and grants, and change its expiry or
+// home. It must be a user (sharing is user-only, design D15) whose
+// credential permits artifact.manage in the home scope, and it must own
+// the artifact or hold an unexpired admin grant (a principal grant for it,
+// or a scope grant for a scope the host authorizes it to manage in).
 //
 // A failed grant read is an error, never a refusal, so the caller answers
-// 500 rather than a 403 that a working read would not give.
-func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bool, error) {
-	return s.canAdministerWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
-}
-
-// canAdministerWith is canAdminister with a's grants read through grants,
-// which is called only when the decision needs them. Stewards do not
-// count: canAdminister is full administration (CanManage), which a
-// steward does not have (no admin grant, no move).
+// 500 rather than a 403 that a working read would not give. a's grants are
+// read through grants, which is called only when the decision needs them.
+// Stewards do not count: this is full administration (CanManage), which a
+// steward does not have (no admin grant, no move); adminAuthorityWith
+// admits them.
 func (s *Service) canAdministerWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (bool, error) {
 	authority, err := s.managerAuthorityWith(ctx, a, grants)
 	return authority != "", err
@@ -304,7 +300,7 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 // grant (CodeReviewReplacesAccess); see putReviewGrant.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
 	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of its home project may grant review access"
+	"and an admin of the artifact's home project may grant review access"
 
 // agentAdminForbiddenMessage is the same 403's text for an agent, which may
 // never administer an artifact, its own included (sharing is user-only), so
@@ -313,7 +309,7 @@ const adminForbiddenMessage = "only the artifact's owner or a user with an admin
 const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
 	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
 	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
-	"and an admin of its home project may grant review access"
+	"and an admin of the artifact's home project may grant review access"
 
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
 // but not administer it: the agent text for an agent, the user text

@@ -246,6 +246,71 @@ func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, home
 	return ""
 }
 
+var _ artifacts.Stewardship = (*artifactHost)(nil)
+
+// StewardClause implements artifacts.Stewardship (design D25,
+// ptone/scion#5144): which steward clause, if any, the calling user holds
+// on an artifact owned by agent ownerAgentID and homed in project
+// homeScope. In order:
+//   - artifacts.StewardClauseProjectOwner: Authorize(homeScope,
+//     artifact.steward), which the project-owner role and super-admins hold
+//     (and any custom role an operator gives it). Authorize starts with
+//     Permits, so a scoped token must reach homeScope and carry
+//     artifact:steward in its ceiling;
+//   - artifacts.StewardClauseDelegator: the caller reads in homeScope
+//     through a role (Authorize(homeScope, artifact.read), decided from role
+//     bindings only, never from the artifact's own grants), and is the user
+//     at the root of the agent's live, recorded delegation chain
+//     (ResolveProvenanceRoot with no legacy allowance, as for the review
+//     clause). The role-read check binds the authority to the artifact's
+//     current home, which a move can change.
+//
+// A home project that no longer exists has no stewards. sponsorRef and
+// orphaned (the recorded sponsor of an agent that is gone) are not
+// consulted yet. Only users are answered; every other identity, a
+// missing authz service and every lookup failure answer "".
+func (h *artifactHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, _ string, _ bool) string {
+	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
+		return ""
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return ""
+	}
+	var userID string
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		userID = id.ID()
+	default:
+		return ""
+	}
+	if userID == "" {
+		return ""
+	}
+	// A deleted home project has no stewards (design 4.1): a super-admin's
+	// system role would otherwise still pass the project-owner clause for
+	// a project id that no longer exists. Custodians retire such artifacts.
+	if exists, err := h.ScopesExist(ctx, []string{homeScope}); err != nil || !exists[homeScope] {
+		return ""
+	}
+	if h.Authorize(ctx, homeScope, artifacts.PermissionSteward) {
+		return artifacts.StewardClauseProjectOwner
+	}
+	if !h.Authorize(ctx, homeScope, artifacts.PermissionRead) {
+		return ""
+	}
+	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	if err != nil {
+		slog.DebugContext(ctx, "artifacts: steward: delegating user not resolved",
+			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
+		return ""
+	}
+	if root.RootUser != nil && root.RootUser.ID == userID {
+		return artifacts.StewardClauseDelegator
+	}
+	return ""
+}
+
 // MemberScopes returns the projects the caller belongs to: for a user (a
 // session, a scoped user access token or the dev user), every project it
 // holds an active project-scoped binding of a role that confers membership

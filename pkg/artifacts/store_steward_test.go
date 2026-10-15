@@ -170,6 +170,9 @@ func TestStoreStewardExpect(t *testing.T) {
 					t.Fatalf("write with a matching Expect: %v", err)
 				}
 				evs := eventsOf(t, st, a.ID)
+				if len(evs) == 0 {
+					t.Fatal("the write recorded no event")
+				}
 				if last := evs[len(evs)-1]; last.Authority != AuthorityStewardProjectOwner || last.ActorRef != "user-s" {
 					t.Errorf("event = %+v", last)
 				}
@@ -374,9 +377,9 @@ func TestStoreCreationEvents(t *testing.T) {
 		if _, err := st.PutReviewGrant(ctx, rg, 10, "project-1", reviewActor); err != nil {
 			t.Fatal(err)
 		}
-		if evs := eventsOf(t, st, a.ID); evs[len(evs)-1].Action != EventGrantCreated || evs[len(evs)-1].ActorRef != "user-pa" ||
+		if evs := eventsOf(t, st, a.ID); len(evs) == 0 || evs[len(evs)-1].Action != EventGrantCreated || evs[len(evs)-1].ActorRef != "user-pa" ||
 			evs[len(evs)-1].Detail["permission"] != GrantReview {
-			t.Errorf("review grant event = %+v", evs[len(evs)-1])
+			t.Errorf("review grant events = %+v", evs)
 		}
 
 		token := "the-token-is-never-recorded"

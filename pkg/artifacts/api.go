@@ -69,7 +69,7 @@ type ArtifactResponse struct {
 	// Warnings are notes about the write that did not fail it.
 	Warnings []string `json:"warnings,omitempty"`
 	// CanManage, on a GET of the artifact or of one of its versions, is
-	// true when the caller may share and change it (see canAdminister).
+	// true when the caller may share and change it (see canAdministerWith).
 	CanManage bool `json:"canManage,omitempty"`
 	// CanShare, on a GET of the artifact or of one of its versions, is true
 	// when the caller may share it: CanManage, or a steward of an artifact

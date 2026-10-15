@@ -551,8 +551,8 @@ func TestStewardReviewGrantTakesManagerPath(t *testing.T) {
 		}
 	}
 	f.host.mu.Unlock()
-	if e := eventsOf(t, f.store, f.id); e[len(e)-1].Authority != AuthorityStewardDelegator {
-		t.Errorf("event authority %q", e[len(e)-1].Authority)
+	if e := eventsOf(t, f.store, f.id); len(e) == 0 || e[len(e)-1].Action != EventGrantCreated || e[len(e)-1].Authority != AuthorityStewardDelegator {
+		t.Errorf("last event = %+v; want grant_created by steward_delegator", e)
 	}
 	if rec := f.jsonDo(delegSteward, http.MethodPost, grantsPath(f.id), reviewBody(SubjectPrincipal, "user:outsider", GrantRead)); rec.Code != http.StatusCreated {
 		t.Fatal(rec.Body.String())
@@ -605,9 +605,54 @@ func TestReviewGrantEventAuthority(t *testing.T) {
 			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
 		}
 		evs := eventsOf(t, f.store, id)
+		if len(evs) == 0 {
+			t.Fatalf("review grant by %s recorded no event", tc.caller.ref)
+		}
 		e := evs[len(evs)-1]
 		if e.Action != EventGrantCreated || e.ActorRef != tc.caller.ref || e.Authority != tc.authority || e.Detail["subjectRef"] != tc.subject {
 			t.Errorf("review grant by %s: event %+v, want authority %s", tc.caller.ref, e, tc.authority)
 		}
+	}
+}
+
+// laxStore stands for a store without the steward bounds: it records a
+// steward's admin grant or move as if an owner made it. With it, only the
+// routes' own gates stand between a steward and those actions.
+type laxStore struct{ Store }
+
+func laxActor(actor *Actor) *Actor {
+	if actor == nil || !isSteward(actor.Authority) {
+		return actor
+	}
+	return &Actor{Kind: actor.Kind, Ref: actor.Ref, Authority: AuthorityAdminGrant}
+}
+
+func (s laxStore) PutGrant(ctx context.Context, g *Grant, max int, cross bool, actor *Actor) (bool, error) {
+	return s.Store.PutGrant(ctx, g, max, cross, laxActor(actor))
+}
+
+func (s laxStore) UpdateArtifact(ctx context.Context, id string, u ArtifactUpdate) (*Artifact, error) {
+	u.Actor = laxActor(u.Actor)
+	return s.Store.UpdateArtifact(ctx, id, u)
+}
+
+// TestStewardHandlerGates: the routes refuse a steward's admin grant and
+// move themselves, before the store is asked (the store's own refusal is
+// TestStewardStoreRefusesBoundedActions).
+func TestStewardHandlerGates(t *testing.T) {
+	for _, act := range stewardActions() {
+		switch act.name {
+		case "grant user admin", "grant agent admin", "grant project admin", "raise to admin", "move", "move with expiry":
+		default:
+			continue
+		}
+		t.Run(act.name, func(t *testing.T) {
+			f := newStewardFixture(t)
+			f.svc.SetStore(laxStore{f.store})
+			rec := act.do(f, ownerSteward)
+			if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeStewardActionNotAllowed {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

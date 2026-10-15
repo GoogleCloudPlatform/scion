@@ -614,7 +614,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 // links cut short and the grants that will be removed (design A1, A2).
 //
 // scopeRef moves the artifact to another home project (D16). It needs, on
-// top of canAdminister, exactly the gate publishing into that project has
+// top of adminAuthorityWith (and not for a steward), exactly the gate publishing into that project has
 // (Permits and Authorize for artifact.create there, for every caller), and
 // because it gives that project's members access, the host's switch for
 // sharing across projects. The old home project's grant is removed (a

@@ -143,6 +143,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"artifact.update":       testAdminPolicyAllow,
 	"artifact.delete":       testAdminPolicyAllow,
 	"artifact.manage":       testAdminPolicyAllow,
+	"artifact.steward":      testAdminPolicyAllow,
 	"skill.create":          testAdminPolicyAllow,
 	"skill.create_global":   testAdminPolicyAllow,
 	"skill.read":            testAdminPolicyAllow,
