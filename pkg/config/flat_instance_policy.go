@@ -28,6 +28,9 @@ type FlatInstancePolicy struct {
 	// Target is a deep copy of the instance's runtime_target (the zero
 	// value when the entry has none).
 	Target V1RuntimeTargetConfig
+	// Defaults is a deep copy of the instance's agent_defaults (the zero
+	// value when the entry has none).
+	Defaults V1InstanceAgentDefaults
 }
 
 // NewFlatInstancePolicy returns the policy of inst, deep-copied so that no
@@ -40,6 +43,11 @@ func NewFlatInstancePolicy(inst V1RuntimeBrokerInstanceConfig) *FlatInstancePoli
 		// (TestNewFlatInstancePolicy_CopiesEveryReferenceField enforces it).
 		p.Target = *inst.RuntimeTarget
 		p.Target.KubernetesServiceAccountMappings = copyStringMap(inst.RuntimeTarget.KubernetesServiceAccountMappings)
+		p.Target.SharedDirStorageBackends = copyStringMap(inst.RuntimeTarget.SharedDirStorageBackends)
+		p.Target.SafeToEvict = copyBoolPtr(inst.RuntimeTarget.SafeToEvict)
+	}
+	if d := copyInstanceAgentDefaults(inst.AgentDefaults); d != nil {
+		p.Defaults = *d
 	}
 	return p
 }
@@ -82,6 +90,11 @@ func (vs *VersionedSettings) ForFlatInstance(p *FlatInstancePolicy) *VersionedSe
 	view := *vs
 	view.ActiveProfile = ""
 	view.Profiles = nil
+	// The hub settings overlay's record of the stored profiles and of an
+	// unresolvable active_profile belongs to the profile tier too.
+	view.activeProfileErr = nil
+	view.storedProfileNames = nil
+	view.activeProfileFallbackFrom = nil
 	view.flat = p
 	return &view
 }

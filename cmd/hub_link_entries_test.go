@@ -102,17 +102,67 @@ func TestResolveInvocationTarget_LinkEntry(t *testing.T) {
 	}
 }
 
-// TestResolveInvocationTarget_NoLinkEntryKeepsSettings: without a link
-// entry, a directory project that pins an endpoint in its settings keeps
-// resolving through its settings, not the context hub.
-func TestResolveInvocationTarget_NoLinkEntryKeepsSettings(t *testing.T) {
-	setupContextTest(t)
-	saveTestContext(t, ctxTestHub, ctxTestProjectID)
-	makeLinkedDirProject(t, linkEntryTestPinnedHub)
+// TestResolveInvocationTarget_LinkedProjectImport: a project linked before
+// link entries existed (its hub only in its own hub.endpoint) resolves to
+// that hub on the first run, through a link entry imported once; later
+// changes to its settings are not followed, the current hub (another hub)
+// does not apply in the directory, and no settings file changes. Without
+// the import, the settings endpoint is not read and the current hub
+// applies.
+func TestResolveInvocationTarget_LinkedProjectImport(t *testing.T) {
+	t.Run("imported", func(t *testing.T) {
+		setupContextTest(t)
+		enableGlobalHubImport(t)
+		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
+		settingsFile := filepath.Join(dotScion, "settings.yaml")
+		before, err := os.ReadFile(settingsFile)
+		require.NoError(t, err)
 
-	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
-	assert.Empty(t, hubEndpoint, "the settings endpoint applies (read later by GetHubEndpoint)")
-	assert.Empty(t, hubSource)
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+		assert.Equal(t, linkEntryTestPinnedHub, hubEndpoint)
+		assert.Equal(t, targetSourceDirectory, hubSource)
+		assert.Empty(t, projectPath, "no context project is injected in a directory project")
+		c, err := config.LoadCLIContext()
+		require.NoError(t, err)
+		p, h := c.LinkEntryFor(config.LinkPathForProject(dotScion))
+		require.NotNil(t, h, "no link entry was imported")
+		assert.Equal(t, linkEntryTestHubID, p.ID)
+		assert.Equal(t, ctxTestHub, c.CurrentHubEntry().Endpoint, "the import does not change the current hub")
+		after, err := os.ReadFile(settingsFile)
+		require.NoError(t, err)
+		assert.Equal(t, string(before), string(after), "the settings file changed")
+
+		// Once: a later change to the settings endpoint is not followed.
+		require.NoError(t, os.WriteFile(settingsFile, []byte("project_id: dir-project-id\nhub:\n  linked: true\n  projectId: "+linkEntryTestHubID+"\n  endpoint: https://changed.example.com\n"), 0o644))
+		resetContextTargets()
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+		assert.Equal(t, linkEntryTestPinnedHub, hubEndpoint)
+	})
+	t.Run("the environment chooses the hub: no import", func(t *testing.T) {
+		setupContextTest(t)
+		enableGlobalHubImport(t)
+		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		dotScion := makeLinkedDirProject(t, linkEntryTestPinnedHub)
+		t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.com")
+		before := readFileT(t, contextFilePath())
+
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+		assert.Empty(t, hubEndpoint, "the environment's hub applies (invocationHub)")
+		assert.Equal(t, "https://env.example.com", invocationHubEndpoint())
+		assert.Equal(t, before, readFileT(t, contextFilePath()), "nothing is imported or saved")
+		c := readTestContext(t)
+		assert.False(t, c.ProjectImported(config.LinkPathForProject(dotScion)))
+	})
+	t.Run("not imported", func(t *testing.T) {
+		setupContextTest(t)
+		saveTestContext(t, ctxTestHub, ctxTestProjectID)
+		makeLinkedDirProject(t, linkEntryTestPinnedHub)
+
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+		assert.Equal(t, ctxTestHub, hubEndpoint, "the settings endpoint was read")
+		assert.Equal(t, targetSourceContext, hubSource)
+	})
 }
 
 // TestUseShow_DirectoryLink: bare 'scion use' in a linked directory reports
@@ -149,6 +199,7 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 	tests := []struct {
 		name      string
 		linkEntry bool
+		imports   bool
 		pinned    string
 		flag      string
 		cmd       []string
@@ -168,9 +219,10 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 			want: "Warning: this directory is linked to hub 'linked' (" + linkEntryTestHub + "), but --hub selects 'prod' (" + ctxTestHub + ")" + tail,
 		},
 		{
-			name: "endpoint pinned in settings, no link entry", pinned: linkEntryTestPinnedHub, flag: "https://other.example.com", cmd: []string{"list"},
-			want: "Warning: this directory is linked to hub " + linkEntryTestPinnedHub + ", but --hub selects https://other.example.com" + tail,
+			name: "endpoint pinned in settings, imported into a link entry", imports: true, pinned: linkEntryTestPinnedHub, flag: "https://other.example.com", cmd: []string{"list"},
+			want: "Warning: this directory is linked to hub 'pinned' (" + linkEntryTestPinnedHub + "), but --hub selects https://other.example.com" + tail,
 		},
+		{name: "endpoint pinned in settings, not imported: no warning", pinned: linkEntryTestPinnedHub, flag: "https://other.example.com", cmd: []string{"list"}},
 		{name: "the same hub: no warning", linkEntry: true, flag: linkEntryTestHub + "/", cmd: []string{"list"}},
 		{name: "not a project command: no warning", linkEntry: true, flag: "https://other.example.com", cmd: []string{"config", "list"}},
 		{name: "--project given: no warning", linkEntry: true, flag: "https://other.example.com", cmd: []string{"list"}, project: "some-slug"},
@@ -178,6 +230,9 @@ func TestHubFlagMismatchWarning(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			setupContextTest(t)
+			if tc.imports {
+				enableGlobalHubImport(t)
+			}
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			dotScion := makeLinkedDirProject(t, tc.pinned)
 			if tc.linkEntry {
@@ -263,8 +318,8 @@ func TestHubUnlink_NotLinkedRemovesLeftoverEntry(t *testing.T) {
 
 // TestRegisterLocalHub covers what 'scion server start' does to the hub
 // list: it registers the local hub once, and makes it current only when
-// no hub is current and the global hub.endpoint is unset or names the
-// local hub.
+// no hub is current after the one-time import of the global hub.endpoint
+// (which makes a remote global hub current first).
 func TestRegisterLocalHub(t *testing.T) {
 	const local = "http://127.0.0.1:8080"
 	const registered = "Registered hub 'local' (" + local + "); rename with 'scion hub rename'.\n"
@@ -297,16 +352,26 @@ func TestRegisterLocalHub(t *testing.T) {
 		assert.Equal(t, "local", readTestContext(t).CurrentHub)
 	})
 
-	t.Run("global hub.endpoint names a remote hub: registered, not current", func(t *testing.T) {
+	t.Run("global hub.endpoint names a remote hub: imported and current, local registered, not current", func(t *testing.T) {
 		setupContextTest(t)
+		enableGlobalHubImport(t)
 		writeHomeGlobalSettings(t, "hub:\n  endpoint: https://remote.example.com\n")
 		var out, errOut bytes.Buffer
 		registerLocalHub(&out, &errOut, local)
 		assert.Equal(t, registered, out.String(), "the local hub is still registered")
 		c := readTestContext(t)
 		require.NotNil(t, c.Hubs["local"])
-		assert.Empty(t, c.CurrentHub, "the remote hub of the global settings keeps applying outside projects")
+		require.NotNil(t, c.Hubs["remote"], "the global hub.endpoint is imported")
+		assert.Equal(t, "remote", c.CurrentHub, "the remote hub of the global settings stays the current hub")
 		assert.Equal(t, "https://remote.example.com", settingsEndpoint(t, filepath.Join(os.Getenv("HOME"), ".scion")), "global settings unchanged")
+	})
+
+	t.Run("without the import a remote global hub.endpoint is not read: local current", func(t *testing.T) {
+		setupContextTest(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: https://remote.example.com\n")
+		var out, errOut bytes.Buffer
+		registerLocalHub(&out, &errOut, local)
+		assert.Equal(t, "local", readTestContext(t).CurrentHub)
 	})
 
 	t.Run("another hub is current: registered, not current", func(t *testing.T) {
@@ -353,7 +418,7 @@ func TestPrintWorkstationQuickstart_RegistersLocalHub(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", string(ModeHuman))
 
 	out := captureStdout(t, func() {
-		printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false, true, true)
+		printWorkstationQuickstart(false, dir, nil, "0.0.0.0", 9090, true, false, true, true)
 	})
 
 	assert.Contains(t, out, "Registered hub 'local' (http://127.0.0.1:9090); rename with 'scion hub rename'.")

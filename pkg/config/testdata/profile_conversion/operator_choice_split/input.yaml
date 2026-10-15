@@ -1,0 +1,15 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  fast:
+    runtime: cluster
+    image_registry: reg.example/fast
+  slow:
+    runtime: cluster
+    image_registry: reg.example/slow
+  other:
+    runtime: cluster
+    image_registry: reg.example/slow

@@ -18,12 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -83,7 +85,7 @@ var harnessConfigListCmd = &cobra.Command{
 
 		// Include Hub results if requested or when running in hub context (agent containers)
 		if includeHub {
-			hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+			hubCtx, err := requireHub(gp)
 			if err == nil && hubCtx != nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
 					Status: "active",
@@ -325,14 +327,10 @@ the local directory: files deleted locally are removed from the Hub.`,
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		hubName, _ := cmd.Flags().GetString("name")
@@ -368,14 +366,10 @@ var harnessConfigPullCmd = &cobra.Command{
 			gp = projectDir
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		// Find the harness-config on the Hub
@@ -445,7 +439,7 @@ var harnessConfigShowCmd = &cobra.Command{
 		}
 
 		// Try Hub
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found locally and Hub unavailable: %w", name, err)
 		}
@@ -502,14 +496,10 @@ var harnessConfigDeleteCmd = &cobra.Command{
 			gp = projectDir
 		}
 
-		hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+		hubCtx, err := requireHub(gp)
 		if err != nil {
 			return err
 		}
-		if hubCtx == nil {
-			return fmt.Errorf("hub integration is not enabled, configure via 'scion config set hub.enabled true' and 'scion config set hub.endpoint <url>'")
-		}
-
 		PrintUsingHub(hubCtx.Endpoint)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -785,6 +775,14 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 	// Finalize
 	fmt.Println("Finalizing harness-config...")
 	hc, err := hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+	if isHarnessConfigConflictError(err) {
+		// Another commit changed the harness-config between the Hub's read
+		// and its write (409 harness_config_conflict). The local directory
+		// is the source of truth for a sync, so finalize once more against
+		// the Hub's fresh row (ptone/scion#4219).
+		fmt.Println("Harness-config was changed by another commit during finalize; retrying once...")
+		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL)
+	}
 	if err != nil {
 		if !isHarnessConfigMissingFileError(err) {
 			return fmt.Errorf("failed to finalize: %w", err)
@@ -843,6 +841,17 @@ func isHarnessConfigNoFilesError(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "harness config has no files")
+}
+
+// harnessConfigConflictErrorCode is the error code of a harness-config
+// finalize that lost the Hub's compare-and-swap (ptone/scion#4219).
+const harnessConfigConflictErrorCode = "harness_config_conflict"
+
+// isHarnessConfigConflictError reports whether err is the Hub refusing a
+// harness-config finalize with 409 harness_config_conflict.
+func isHarnessConfigConflictError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == harnessConfigConflictErrorCode
 }
 
 func isHarnessConfigMissingFileError(err error) bool {

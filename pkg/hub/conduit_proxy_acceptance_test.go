@@ -20,9 +20,14 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,24 +235,86 @@ func TestConduitSciontoolSupersededLaunchRefused(t *testing.T) {
 }
 
 // TestConduitSciontoolKeyRotationWithoutReconnect: after the hub rotates
-// its grant signing key, a sciontool that refreshed its keys from the
-// hub's grant-key route accepts grants signed with the new key on the
-// same session; before the refresh it refuses them.
+// its grant signing key, a grant signed with the new key reaches a
+// sciontool that has not refreshed its keys yet. The agent makes exactly
+// one grant-key fetch from the hub, authenticated as itself, for the
+// unknown kid, and the session is kept. The new kid was never in the session's Welcome
+// (design v2.21.24 §3.5, Target-side deadlines). That further unknown
+// kids within 10s share that fetch is covered by the sciontool tests
+// (TestAgentUnknownKidsShareOneFetchPerInterval): here the hub signs
+// only with keys it has activated, so a second unknown kid cannot be
+// produced within the interval.
 func TestConduitSciontoolKeyRotationWithoutReconnect(t *testing.T) {
 	f := newConduitProxyFixture(t, nil)
-	f.startAgent(t)
+	// The agent reaches the hub through a front that records its
+	// grant-key fetches: the agent the credential belongs to, when each
+	// arrived and when each completed.
+	var (
+		mu        sync.Mutex
+		subjects  []string
+		arrived   atomic.Int64
+		completed atomic.Int64
+	)
+	pub, err := url.Parse(f.public.URL)
+	require.NoError(t, err)
+	rp := httputil.NewSingleHostReverseProxy(pub)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/conduit/grant-keys" {
+			rp.ServeHTTP(w, r)
+			return
+		}
+		sub := ""
+		if claims, err := f.srv.agentTokenService.ValidateAgentToken(r.Header.Get("X-Scion-Agent-Token")); err == nil {
+			sub = claims.Subject
+		}
+		mu.Lock()
+		subjects = append(subjects, sub)
+		mu.Unlock()
+		arrived.Add(1)
+		rp.ServeHTTP(w, r)
+		completed.Add(1)
+	}))
+	t.Cleanup(front.Close)
+	f.base = front.URL
+
+	admitted := make(chan *conduitv1.Welcome, 4)
+	f.runAgent(t, f.launched.RunID, admitted)
+	var welcome *conduitv1.Welcome
+	select {
+	case welcome = <-admitted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("conduit session not admitted")
+	}
 	require.Equal(t, http.StatusOK, f.get(t, "/before", nil).StatusCode)
 
 	activation := f.srv.conduitGrantKeyActivation()
-	_, err := f.srv.conduitGrants.rotate(context.Background(), activation, time.Hour)
+	rot, err := f.srv.conduitGrants.rotate(context.Background(), activation, time.Hour)
 	require.NoError(t, err)
 	f.clock.Advance(activation + time.Second) // the new key now signs
+	_, known := f.sciontool.Keys().Lookup(rot.KeyID)
+	require.False(t, known, "the agent already held the new key")
+	base := completed.Load()
+	require.Equal(t, base, arrived.Load(), "a grant-key fetch was in flight before the request")
+	mu.Lock()
+	first := len(subjects)
+	mu.Unlock()
 
-	assert.NotEqual(t, http.StatusOK, f.get(t, "/stale", nil).StatusCode,
-		"grant signed with a key the agent has not fetched was accepted")
-	require.NoError(t, f.sciontool.RefreshKeys(context.Background()))
-	resp := f.get(t, "/after", nil)
+	resp := f.get(t, "/rotated", nil)
 	body, _ := io.ReadAll(resp.Body)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+	// Exactly one fetch.
+	assert.Equal(t, base+1, arrived.Load(), "grant-key fetches started for the unknown kid")
+	require.Eventually(t, func() bool { return completed.Load() == base+1 }, 2*time.Second, 10*time.Millisecond,
+		"the grant-key fetch did not complete")
+	assert.Equal(t, base+1, completed.Load(), "grant-key fetches completed for the unknown kid")
+	mu.Lock()
+	got := append([]string(nil), subjects[first:]...)
+	mu.Unlock()
+	assert.Equal(t, []string{f.launched.ID}, got, "the fetch carried the agent's own credential")
+	_, known = f.sciontool.Keys().Lookup(rot.KeyID)
+	assert.True(t, known, "the agent did not install the new key")
+	for _, k := range welcome.GetGrantKeys() {
+		assert.NotEqual(t, rot.KeyID, k.GetKid(), "the new kid was offered in the Welcome")
+	}
 	assert.Equal(t, int64(1), f.sessions.Load(), "the session was replaced")
 }

@@ -177,7 +177,7 @@ scion tunnel my-agent --port 5173 --local-port 8080
 scion tunnel status
 ```
 
-The local listener binds to `127.0.0.1` only. The tunnel stays open until you stop the command (Ctrl-C) or the session to the Hub is lost (exit code 6).
+The local listener binds to `127.0.0.1` only. Each accepted connection gets its own tunnel. The listener runs until you stop the command (Ctrl-C, exit code 130) or the session to the Hub is lost (exit code 6). It also stops when the Hub refuses a new tunnel in a way no later connection can fix: an expired or refused credential (3), an agent that was deleted (4), access that was withdrawn (5), or a Hub without tunnels (11). After such a refusal the listener closes its port, so new connections are refused. Connections that are already open continue until they end, and the command then exits with that code. If the agent is stopped, the listener keeps listening. Each new connection is closed, with the line `tunnel request failed: the agent is not running (agent_not_running)` on stderr, and connections are served again once the agent is started.
 
 **How it works.** The CLI opens one Conduit session to the Hub (`GET /api/v1/conduit`, with your usual Hub credential) and asks for each tunnel over it. The Hub checks each tunnel on its own and connects it to the agent's own Conduit session, so the agent's ports are never opened to the network. A `scion tunnel` process targets one agent; its session carries one tunnel per accepted local connection, up to the session's limit. Closing a tunnel closes only that tunnel.
 
@@ -187,7 +187,15 @@ The local listener binds to `127.0.0.1` only. The tunnel stays open until you st
 
 `sciontool` in the agent runs an embedded SSH server that is reachable only through a Conduit tunnel; it never listens on a network port. It offers a shell, `exec`, `sftp` and forwarding to the agent's loopback addresses (except [the reserved ports](#2-infrastructure-reserved-ports-denylist)) and Unix sockets. Unlike a TCP tunnel, SSH forwarding does not require the port to be exposed or allow-listed. Remote forwarding, agent forwarding and X11 are refused. Every session runs as the container user, whatever user name you give. The Hub authorizes the tunnel, so the SSH connection itself needs no key.
 
-Use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand`:
+The simplest way in is `scion ssh`, which runs your system `ssh` through the tunnel with the agent's host key taken from the Hub:
+
+```bash
+scion ssh my-agent
+```
+
+To use plain `ssh`, `scp` or an editor's Remote-SSH, install Host blocks for your agents with `scion ssh-config --write`; each agent is then reachable as `scion.<hub-label>.<project>.<agent>`, where `<hub-label>` is derived from the Hub's host name (not its hub-list nickname). See [`scion ssh`](/scion/reference/cli/#scion-ssh) and [`scion ssh-config`](/scion/reference/cli/#scion-ssh-config).
+
+You can also use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand` directly:
 
 ```bash
 ssh -o ProxyCommand="scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my-agent" scion@my-agent
@@ -206,10 +214,10 @@ Administrators can control whether port forwarding and auto-expose are permitted
 
 1. **The agent itself**: the agent-create request's `config.env`, or the auto-expose control on the agent's configure page. This is recorded as the agent's explicit choice and survives reincarnate.
 2. **The project annotation** `scion.io/auto-expose-ports-enabled` (see below).
-3. **Template or harness-config env.**
+3. **Harness-config env.** A template cannot set `SCION_*` keys.
 4. **The Hub default** `auto_expose_ports.enabled` (see below).
 
-A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks template and harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
+A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a Runtime Broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
 
 ### Global Server Configuration
 The Hub-wide default, the lowest tier above, is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
@@ -232,13 +240,13 @@ Project owners and admins can control the auto-expose feature for all agents wit
 scion.io/auto-expose-ports-enabled: "true"
 ```
 
-When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides template, harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
+When set, the Hub gives every agent in that Project `SCION_AUTO_EXPOSE_PORTS` with the annotation's value. It overrides harness-config and Hub-default values, but not a value set on the agent itself. The value is applied when the agent is created and re-read when it is reincarnated.
 
 ### Precedence
 
-The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project or template value, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
+The `SCION_AUTO_EXPOSE_*` variables resolve the same way when an agent is created and when its configuration is changed later (`PATCH`): a value set explicitly on the agent wins, then the project value, then harness-config env, then the Hub default. A configuration change that does not mention the auto-expose keys leaves the explicit value alone and re-derives the inherited one.
 
-In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project or template, or Hub default), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project, template, and Hub default values.
+In the web UI, the agent **Configure** page shows the effective auto-expose value and where it comes from (set on the agent, project, or Hub default; the page's source labels still mention a template, which can no longer set this key), and saves the auto-expose keys only when you change the control. On the create page, the control starts at the Hub default; if you leave it untouched, the agent inherits the project and Hub default values.
 
 ---
 
@@ -263,8 +271,11 @@ Certain infrastructure and internal control-plane ports are reserved for system 
 ### 3. Authentication & Authorization
 Access to the proxy and port registration APIs requires authentication, verified under the unified permission policy:
 
-* **Managing Ports (Register/Delete)**:
-  * Only the agent container itself (authenticating with its token containing `ScopeAgentPortForward`) or a global **Hub Admin** user is authorized to register or delete exposed ports.
+* **Managing Ports (Register/Delete/Clear)**:
+  * The agent container itself (authenticating with its token containing `ScopeAgentPortForward`) may register or delete its own exposed ports.
+  * A user may register, delete or clear an agent's exposed ports when they hold `agent.port_access` on that agent (the same check as accessing its proxied ports) and `agent.port_access` at hub level (the super-admin role, or a custom system-scope role that grants it). The `agent.port_access` that the project owner and admin roles carry within a project opens ports but does not manage them.
+  * A [user access token](/scion/hosted/user/personal-access-tokens/) needs the `agent:port_access` scope and a boundary that contains the agent's project, and its holder needs `agent.port_access` at hub level. All three are required.
+  * Only the agent itself opens its port tunnel (`/api/v1/agents/{id}/ports/tunnel`); every user is refused.
 * **Accessing Proxied Ports**:
   * An agent can only access its own port registrations.
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.

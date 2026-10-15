@@ -1107,7 +1107,7 @@ func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, 
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
 		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", NotificationStatusHalted},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
 	}
@@ -1135,7 +1135,7 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	if force && phase == string(state.PhaseError) {
 		return true, true
 	}
-	return phase == string(state.PhaseStopped), false
+	return phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted), false
 }
 
 // existingAgentBranch is the branch handleExistingAgent takes for a request,
@@ -1157,7 +1157,7 @@ func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgent
 	switch {
 	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
 		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
@@ -1464,8 +1464,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):
@@ -1494,12 +1492,13 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Branch 2: Agent is running/stopped/error.
-	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
+	// Branch 2: Agent is running/stopped/error/halted.
+	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
 			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError)) {
+			existingAgent.Phase == string(state.PhaseError) ||
+			existingAgent.Phase == string(state.PhaseHalted)) {
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
 		if resumeInPlace {
@@ -1606,8 +1605,6 @@ func (s *Server) handleExistingAgent(
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
-				case isContainerNameConflict(err):
-					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
 				case relayBrokerRefusal(w, err):
@@ -1641,6 +1638,14 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		// Flat placement pre-check on the agent being replaced, before its
+		// stop intent: the recreate deletes it on its Runtime Broker.
+		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return existingAgentErrored
+		}
 		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
@@ -1648,6 +1653,18 @@ func (s *Server) handleExistingAgent(
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
+				// The agent's saved placement is inconsistent, and the
+				// dispatcher's placement backstop sent nothing
+				// (requirePinnedPlacement): as for a run mismatch,
+				// removing the row could leave a running workload with no
+				// row, so the recreate is refused with the placement 409,
+				// and cleanupMode=force does not override it.
+				if refusal, ok := placementRefusalOf(err); ok {
+					s.agentLifecycleLog.Warn("Env-gather recreate: agent placement is inconsistent; not removing the agent",
+						"agent_id", existingAgent.ID, "code", refusal.Code, "cleanup_mode", cleanupMode)
+					writeError(w, refusal.Status, refusal.Code, refusal.Message, refusal.Details)
+					return existingAgentErrored
+				}
 				// The broker holds a different run of the agent than the
 				// row records and deleted nothing (ptone/scion#3080):
 				// removing the row would leave that run with no row.
@@ -1822,8 +1839,6 @@ func (s *Server) handleExistingAgent(
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
-			case isContainerNameConflict(err):
-				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
 			case relayBrokerRefusal(w, err):

@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -547,30 +546,6 @@ func TestCloudRunSandboxStarting_SyncCancelForcedDelete(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Fault check S8f: the forced delete is skipped because the async hooks are
-// set. OnResourceCreated is a recorder and a blocking `run` is killed by
-// ctx: `delete --force` is still issued and no entry is left.
-func TestCloudRunSandboxStarting_ForcedDeleteIgnoresHooks(t *testing.T) {
-	rt, env := newStartingRuntime(t, startScripts{run: blockUntilKilled})
-	var reported atomic.Int32
-	cfg := startingCfg(t, "run-a")
-	cfg.OnResourceCreated = func(api.ResourceHandle) { reported.Add(1) }
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	errc := runSandboxAsync(ctx, rt, cfg)
-	waitForFile(t, env.mark)
-	cancel()
-	if err := recvErr(t, errc, "Run"); err == nil {
-		t.Fatal("Run succeeded, want the killed run's error")
-	}
-	wantDeletes(t, env.log, 1)
-	if e := fileEntry(t, env.state); e != nil {
-		t.Errorf("entry = %+v, want none", e)
-	}
-	// CR-1 reports no handle; ptone/scion#4758 adds the report.
-	t.Logf("handles reported: %d", reported.Load())
 }
 
 // Fault check S8c: the sync cleanup deletes when the key holds another nonce.

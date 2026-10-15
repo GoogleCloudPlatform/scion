@@ -245,6 +245,16 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			wantError: `invalid memory request "bad"`,
 		},
 		{
+			name:      "overflowing memory limit",
+			resources: &api.ResourceSpec{Limits: api.ResourceList{Memory: "8192Pi"}},
+			wantError: `invalid memory limit "8192Pi"`,
+		},
+		{
+			name:      "non-finite memory request",
+			resources: &api.ResourceSpec{Requests: api.ResourceList{Memory: "NaNGi"}},
+			wantError: `invalid memory request "NaNGi"`,
+		},
+		{
 			name:      "invalid cpu limit",
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "bad"}},
 			wantError: `invalid cpu limit "bad"`,
@@ -256,7 +266,7 @@ func TestAppendContainerResourceArgs(t *testing.T) {
 			got, err := appendContainerResourceArgs([]string{"run", "-t"}, test.resources)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
-					t.Fatalf("appendContainerResourceArgs() error = %v, want %q", err, test.wantError)
+					t.Fatalf("appendContainerResourceArgs() error = %v, want %q; args = %v", err, test.wantError, got)
 				}
 				return
 			}

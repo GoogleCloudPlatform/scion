@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This file covers the three async-launch settings
-// (async_agent_launch, launch_timeout, launch_keepalive_seconds) round-trip
+// This file covers the two async-launch settings
+// (launch_timeout, launch_keepalive_seconds) round-trip
 // through V1<->Global config conversion, and that their documented
 // SCION_SERVER_HUB_* environment variables actually reach GlobalConfig via
 // the server-startup path (LoadGlobalConfig -> applyEnvOverrides ->
@@ -21,7 +21,8 @@
 // present. The env var names are read from the schema itself (not
 // hard-coded) so a future rename that isn't also reflected in the loader
 // path fails this test, rather than silently reintroducing the mismatch
-// this file was added to catch.
+// this file was added to catch. Async create itself is the
+// hub.async_agent_launch experiment, not a setting (ptone/scion#4991).
 package config
 
 import (
@@ -51,19 +52,16 @@ func schemaEnvVar(t *testing.T, field string) string {
 }
 
 func TestLoadGlobalConfig_AsyncLaunchEnvVars(t *testing.T) {
-	asyncEnvVar := schemaEnvVar(t, "async_agent_launch")
 	timeoutEnvVar := schemaEnvVar(t, "launch_timeout")
 	keepaliveEnvVar := schemaEnvVar(t, "launch_keepalive_seconds")
 
 	setEnv := func(t *testing.T) {
 		t.Helper()
-		t.Setenv(asyncEnvVar, "true")
 		t.Setenv(timeoutEnvVar, "10m")
 		t.Setenv(keepaliveEnvVar, "20")
 	}
 	assertApplied := func(t *testing.T, cfg *GlobalConfig) {
 		t.Helper()
-		assert.True(t, cfg.Hub.AsyncAgentLaunch, "%s should set Hub.AsyncAgentLaunch", asyncEnvVar)
 		assert.Equal(t, 10*time.Minute, cfg.Hub.LaunchTimeout, "%s should set Hub.LaunchTimeout", timeoutEnvVar)
 		assert.Equal(t, 20, cfg.Hub.LaunchKeepaliveSeconds, "%s should set Hub.LaunchKeepaliveSeconds", keepaliveEnvVar)
 	}
@@ -100,17 +98,14 @@ server:
 }
 
 func TestConvertV1ServerToGlobalConfig_AsyncLaunchSettings(t *testing.T) {
-	asyncLaunch := true
 	keepalive := 20
 	v1 := &V1ServerConfig{
 		Hub: &V1ServerHubConfig{
-			AsyncAgentLaunch:       &asyncLaunch,
 			LaunchTimeout:          "10m",
 			LaunchKeepaliveSeconds: &keepalive,
 		},
 	}
 	gc := ConvertV1ServerToGlobalConfig(v1)
-	assert.True(t, gc.Hub.AsyncAgentLaunch)
 	assert.Equal(t, 10*time.Minute, gc.Hub.LaunchTimeout)
 	assert.Equal(t, 20, gc.Hub.LaunchKeepaliveSeconds)
 }
@@ -132,29 +127,24 @@ func TestConvertV1ServerToGlobalConfig_LaunchTimeoutInvalidIgnored(t *testing.T)
 func TestConvertV1ServerToGlobalConfig_AsyncLaunchSettingsAbsent(t *testing.T) {
 	v1 := &V1ServerConfig{Hub: &V1ServerHubConfig{}}
 	gc := ConvertV1ServerToGlobalConfig(v1)
-	assert.False(t, gc.Hub.AsyncAgentLaunch)
 	assert.Equal(t, time.Duration(0), gc.Hub.LaunchTimeout)
 	assert.Equal(t, 0, gc.Hub.LaunchKeepaliveSeconds)
 }
 
 func TestConvertGlobalToV1ServerConfig_AsyncLaunchSettingsRoundTrip(t *testing.T) {
 	gc := &GlobalConfig{}
-	gc.Hub.AsyncAgentLaunch = true
 	gc.Hub.LaunchTimeout = 7 * time.Minute
 	gc.Hub.LaunchKeepaliveSeconds = 25
 
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require := assert.New(t)
 	require.NotNil(v1.Hub)
-	require.NotNil(v1.Hub.AsyncAgentLaunch)
-	require.True(*v1.Hub.AsyncAgentLaunch)
 	require.Equal("7m0s", v1.Hub.LaunchTimeout)
 	require.NotNil(v1.Hub.LaunchKeepaliveSeconds)
 	require.Equal(25, *v1.Hub.LaunchKeepaliveSeconds)
 
 	// Round trip back.
 	gc2 := ConvertV1ServerToGlobalConfig(v1)
-	require.Equal(gc.Hub.AsyncAgentLaunch, gc2.Hub.AsyncAgentLaunch)
 	require.Equal(gc.Hub.LaunchTimeout, gc2.Hub.LaunchTimeout)
 	require.Equal(gc.Hub.LaunchKeepaliveSeconds, gc2.Hub.LaunchKeepaliveSeconds)
 }
@@ -164,7 +154,6 @@ func TestConvertGlobalToV1ServerConfig_AsyncLaunchSettingsZeroOmitted(t *testing
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require := assert.New(t)
 	require.NotNil(v1.Hub)
-	require.Nil(v1.Hub.AsyncAgentLaunch, "false must not round-trip as an explicit *bool")
 	require.Empty(v1.Hub.LaunchTimeout)
 	require.Nil(v1.Hub.LaunchKeepaliveSeconds)
 }

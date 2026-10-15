@@ -59,6 +59,7 @@ type policyInstance struct {
 	projectID   string
 	mu          sync.Mutex
 	pvcs        []*corev1.PersistentVolumeClaim
+	pods        []*corev1.Pod
 }
 
 // writePolicyHome points HOME at a temp dir holding settings (the global
@@ -97,10 +98,22 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 		p.mu.Unlock()
 		return false, nil, nil
 	})
-	clientset.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+	clientset.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		p.mu.Lock()
+		p.pods = append(p.pods, a.(k8stesting.CreateAction).GetObject().(*corev1.Pod).DeepCopy())
+		p.mu.Unlock()
 		return true, nil, errPodCaptured
 	})
-	rt := scionrt.NewKubernetesRuntime(k8s.NewTestClient(dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()), clientset))
+	client := k8s.NewTestClient(dynamicfake.NewSimpleDynamicClient(k8sruntime.NewScheme()), clientset)
+	rt := scionrt.NewKubernetesRuntime(client)
+	if inst != nil && inst.RuntimeTarget != nil {
+		// A flat instance's runtime is built from its own target, with
+		// the constructor and configuration the host uses.
+		var err error
+		if rt, err = scionrt.NewKubernetesRuntimeFromClient(client, inst.RuntimeTarget.KubernetesRuntimeConfig()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	rt.DefaultNamespace = "agents"
 	p.mgr = agent.NewManager(rt).(*agent.AgentManager)
 
@@ -128,6 +141,12 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 // carries the project ID and a per-agent ID, as a Hub dispatch does, so a
 // flat instance can record its ownership.
 func (p *policyInstance) start(name string) error {
+	return p.startWith(name, nil)
+}
+
+// startWith is start with the agent's start options adjusted by edit (nil
+// for none), for example to give the agent its own inline configuration.
+func (p *policyInstance) startWith(name string, edit func(*api.StartOptions)) error {
 	var startErr error
 	handler := p.srv.profileResolutionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sc, sce := p.srv.buildStartContext(r.Context(), startContextInputs{
@@ -142,6 +161,9 @@ func (p *policyInstance) start(name string) error {
 		opts := sc.Opts
 		opts.BrokerMode, opts.NoAuth = true, true
 		opts.SharedDirs = []api.SharedDir{{Name: "scratch"}}
+		if edit != nil {
+			edit(&opts)
+		}
 		if _, err := p.mgr.Start(r.Context(), opts); !errors.Is(err, errPodCaptured) {
 			startErr = fmt.Errorf("start %s: want the captured pod create, got %v", name, err)
 		}

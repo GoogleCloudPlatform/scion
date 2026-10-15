@@ -185,7 +185,7 @@ func markReimportRowStale(t *testing.T, s store.Store, kind storage.ResourceKind
 	require.NoError(t, err)
 	require.NotNil(t, hc, "GetHarnessConfig(%q) returned no harness config and no error", id)
 	hc.ContentHash = "stale"
-	require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
+	require.NoError(t, setHarnessConfigContentForTest(ctx, s, hc))
 }
 
 // reimportFromURL runs the global import path for one built-in from url.

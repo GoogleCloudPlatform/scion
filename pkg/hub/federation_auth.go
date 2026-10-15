@@ -70,7 +70,7 @@ type federationClaims struct {
 	Ancestry      []string `json:"ancestry,omitempty"`
 	RootUser      string   `json:"root_user,omitempty"`
 	Email         string   `json:"email,omitempty"`
-	EmailVerified bool     `json:"email_verified,omitempty"`
+	EmailVerified *bool    `json:"email_verified,omitempty"` // nil when the token has no email_verified claim
 	Name          string   `json:"name,omitempty"`
 }
 
@@ -416,9 +416,11 @@ func extractUserClaims(claims *federationClaims,
 	if role == "" || role == "admin" {
 		role = "viewer"
 	}
-	return NewFederatedUserIdentity(
+	identity := NewFederatedUserIdentity(
 		claims.Issuer, claims.Subject, claims.Email, claims.Name, role, scopes,
-	), nil
+	)
+	identity.emailVerified = claims.EmailVerified
+	return identity, nil
 }
 
 // matchesAllowedEmails checks if an email matches any pattern in the allowed list.

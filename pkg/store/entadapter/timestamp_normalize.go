@@ -25,6 +25,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -197,7 +198,7 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, dbDialect string, l
 			if err != nil {
 				return n.report, err
 			}
-			if !containsString(cols, jt.column) {
+			if !slices.Contains(cols, jt.column) {
 				continue
 			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
@@ -206,7 +207,7 @@ func NormalizeUTCTimestamps(ctx context.Context, db *sql.DB, dbDialect string, l
 		}
 	} else {
 		for _, jt := range jsonTimeTargets {
-			if len(opts.Tables) > 0 && !containsString(opts.Tables, jt.table) {
+			if len(opts.Tables) > 0 && !slices.Contains(opts.Tables, jt.table) {
 				continue
 			}
 			if err := n.jsonColumn(ctx, jt); err != nil {
@@ -743,7 +744,7 @@ func entTimeTargets(ctx context.Context, db *sql.DB, tables map[string]bool) ([]
 		}
 		var cols []string
 		for _, c := range t.Columns {
-			if c.Type == field.TypeTime && containsString(present, c.Name) {
+			if c.Type == field.TypeTime && slices.Contains(present, c.Name) {
 				cols = append(cols, c.Name)
 			}
 		}
@@ -761,19 +762,10 @@ func restrictTables(tables map[string]bool, only []string) {
 		return
 	}
 	for name := range tables {
-		if !containsString(only, name) {
+		if !slices.Contains(only, name) {
 			delete(tables, name)
 		}
 	}
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // ErrSnapshotInProgress is returned by SnapshotSQLite when the temporary

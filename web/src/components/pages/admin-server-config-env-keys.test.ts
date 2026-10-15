@@ -115,6 +115,7 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
         stalled_threshold: '10m',
         gcp_iam_check_mode: 'enforce',
         gcp_iam_deny_unknown_policy: 'fail-closed',
+        observability: { metrics_enabled: true, tracing_enabled: false },
       },
       broker: {
         enabled: true,

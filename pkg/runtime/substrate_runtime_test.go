@@ -1209,6 +1209,60 @@ func TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities(t *
 	}
 }
 
+// TestBuildActorTemplate_WakeupProbeTargetsServeHealthz confirms the agent
+// container carries a wakeup probe on substrate-serve's healthz: path
+// /scion/v1/healthz (substrateHealthzPath) on port 80 (substrate-serve's
+// --addr default; the template's Command passes no --addr). Without it,
+// Substrate takes the golden snapshot even when the entrypoint has already
+// exited, and every later restore of that golden fails. The literals are
+// spelled out rather than read back from the constants, so a change to
+// either side has to be made here on purpose.
+func TestBuildActorTemplate_WakeupProbeTargetsServeHealthz(t *testing.T) {
+	image := "repo/image@sha256:" + strings.Repeat("b", 64)
+	for _, sc := range []config.V1SubstrateConfig{
+		{},
+		{SandboxClass: "microvm", EgressTrustBundle: "egress-mitm.ate.dev"},
+	} {
+		tmpl := buildActorTemplate("scion-test", "scion-abc123", image, sc, nil)
+		if len(tmpl.GetContainers()) != 1 {
+			t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
+		}
+		probe := tmpl.GetContainers()[0].GetWakeupProbe()
+		if probe == nil {
+			t.Fatalf("Container.WakeupProbe is nil (config %+v), want an HTTP GET on /scion/v1/healthz port 80", sc)
+		}
+		if got := probe.GetHttpGet().GetPath(); got != "/scion/v1/healthz" {
+			t.Errorf("WakeupProbe.HttpGet.Path = %q, want %q", got, "/scion/v1/healthz")
+		}
+		if got := probe.GetHttpGet().GetPort(); got != 80 {
+			t.Errorf("WakeupProbe.HttpGet.Port = %d, want 80", got)
+		}
+		if got := probe.GetTimeoutSeconds(); got < 30 || got > 3600 {
+			t.Errorf("WakeupProbe.TimeoutSeconds = %d, want within [30, 3600] (Substrate's default and maximum)", got)
+		}
+	}
+}
+
+// TestBuildActorTemplate_WakeupProbeIsFreshPerCall confirms each template
+// gets its own probe value, so mutating one built template cannot change
+// the next one, or what substrateTemplateName hashes for it.
+func TestBuildActorTemplate_WakeupProbeIsFreshPerCall(t *testing.T) {
+	image := "repo/image@sha256:" + strings.Repeat("b", 64)
+	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	before := substrateTemplateName(image, cfg, nil)
+
+	first := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	first.GetContainers()[0].GetWakeupProbe().GetHttpGet().Path = "/mutated"
+
+	second := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	if got := second.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPath(); got != substrateHealthzPath {
+		t.Errorf("second template's WakeupProbe path = %q after mutating the first, want %q", got, substrateHealthzPath)
+	}
+	if after := substrateTemplateName(image, cfg, nil); after != before {
+		t.Errorf("substrateTemplateName() changed after mutating a built template's probe: %q -> %q", before, after)
+	}
+}
+
 // TestSubstrateTemplateName_ChangesWithImageDigest confirms the image is
 // part of the template's content-address: ensureActorTemplate's reuse
 // decision (same templateName -> assume the existing golden template is

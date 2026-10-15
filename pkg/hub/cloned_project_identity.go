@@ -296,7 +296,7 @@ func (s *Server) projectConfigInUse(ctx context.Context, projectID string) (bool
 		}
 		for _, a := range result.Items {
 			switch state.Phase(a.Phase) {
-			case state.PhaseStopped, state.PhaseError:
+			case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 			default:
 				return true, nil
 			}

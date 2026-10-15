@@ -56,10 +56,9 @@ Detaching:
   move to Ctrl-\ then Ctrl-^: a lone Ctrl-\ is delayed until the next key,
   and the full sequence ends the attach (the agent keeps running).
 
-Local vs Hub mode:
-  With a local project, scion attach runs the container runtime's exec on this
-  machine. When the project is linked to a Hub, the session goes through the
-  Hub to the runtime broker running the agent, over a WebSocket. Anyone with
+Sessions:
+  The session goes through the Hub to the runtime broker running the agent,
+  over a WebSocket. Anyone with
   attach permission on the agent can attach. Several people can be attached at
   once and see the same session.
 
@@ -94,7 +93,7 @@ Disconnects:
 		}
 
 		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
@@ -296,7 +295,7 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 // with scion resume (scion start would create a new agent run instead).
 func notRunningAttachHint(phase, agentName string) string {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseSuspended:
 		return fmt.Sprintf("Resume it and attach with: scion resume %s --attach", agentName)
 	case state.PhaseStopping:
 		return fmt.Sprintf("Wait for it to stop, then resume it with: scion resume %s --attach", agentName)
@@ -622,19 +621,8 @@ func attachErrorWithUATHint(err error, token string) error {
 }
 
 // resolveAttachTransport resolves transport auth for the attach WebSocket path.
-// It checks env vars first, then the hub list entry of the hub in use, then
-// settings.yaml. Returns (nil, _, nil) when
-// transport auth is not configured.
+// It checks env vars first, then the hub list entry of the hub in use.
+// Returns (nil, _, nil) when transport auth is not configured.
 func resolveAttachTransport() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-	// Load settings for transport config.
-	resolvedPath, _, _ := config.ResolveProjectPath(projectPath)
-	settings, _ := config.LoadSettings(resolvedPath)
-
-	var endpoint string
-	if settings != nil {
-		endpoint = GetHubEndpoint(settings)
-	} else {
-		endpoint = GetHubEndpoint(nil)
-	}
-	return transportauth.FromSettings(hubTransportSettings(settings, endpoint), adcsource.New)
+	return transportauth.FromSettings(hubTransportSettings(invocationHubEndpoint()), adcsource.New)
 }

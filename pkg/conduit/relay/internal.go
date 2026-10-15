@@ -359,7 +359,11 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		return
 	}
-	if err := hop.grant(conduit.DefaultStreamWindow); err != nil {
+	// Renewals the caller sends for this stream go to the target stream.
+	if r, ok := st.(conduit.StreamRenewer); ok {
+		hop.setRenewalHandler(func(credential []byte) { _ = r.Renew(credential) })
+	}
+	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: sessionID, StreamID: st.ID()}); err != nil {
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return

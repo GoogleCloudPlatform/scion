@@ -177,7 +177,7 @@ func TestFlatRunFence_NoDeleteOrCleanupPathActsOnNewerRun(t *testing.T) {
 		{"aborted launch file cleanup of the old launch", false, func(t *testing.T, f *partitionFixture) {
 			// The agent's files are the newer run's; the old launch's marker
 			// still matches it, so only the run-owner check protects them.
-			projectDir := t.TempDir()
+			projectDir := filepath.Join(t.TempDir(), ".scion")
 			agentDir := filepath.Join(projectDir, "agents", "worker")
 			if err := os.MkdirAll(agentDir, 0o755); err != nil {
 				t.Fatal(err)

@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -60,8 +61,8 @@ var errConduitNoRoute = errors.New("conduit: no router on this node")
 // exactly the resolved session. Errors wrap router.ErrNoSession when the
 // agent has no eligible session.
 func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *store.Agent, port int) (net.Conn, error) {
-	rt := s.conduit.Load()
-	if rt == nil || rt.router == nil {
+	rtr := s.conduitRouter()
+	if rtr == nil {
 		return nil, errConduitNoRoute
 	}
 	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
@@ -78,7 +79,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		Agent: agentIncarnationFacts(agent),
 	}
 	var conn net.Conn
-	err := rt.router.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		tok, _, err := s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: identity,
 			Agent:    agent,
@@ -103,14 +104,15 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
+		target := conduitTargetOf(res, st)
 		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindTCP,
 			Identity:  identity,
 			AgentID:   agent.ID,
 			ProjectID: agent.ProjectID,
 			Port:      port,
-			SessionID: res.Record.SessionID,
-			StreamID:  st.ID(),
+			SessionID: target.SessionID,
+			StreamID:  target.StreamID,
 			Close:     sc.closeWithCode,
 			Renew:     conduitStreamRenewal(res, st.ID()),
 		})
@@ -133,6 +135,18 @@ func conduitStreamRenewal(res router.Resolved, streamID uint32) func() error {
 		return nil
 	}
 	return func() error { return ls.RefreshAuth(nil, streamID) }
+}
+
+// conduitTargetOf returns the stream's ids on the target's own session: on
+// a session this node holds, the session and stream ids; through another
+// relay, the ids the owner relay reported when it accepted the hop
+// (relay.TargetOf). When they are not known it falls back to the resolved
+// session id and st's id.
+func conduitTargetOf(res router.Resolved, st conduit.Stream) relay.TargetStream {
+	if t, ok := relay.TargetOf(res.Session, st); ok {
+		return t
+	}
+	return relay.TargetStream{SessionID: res.Record.SessionID, StreamID: st.ID()}
 }
 
 // conduitProxyTransport returns a transport whose only connection is
@@ -439,7 +453,13 @@ func (t *wsFrameTracker) atBoundary() bool { return t.hdrLen == 0 && t.remaining
 // session") to a response.
 func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID string, err error) {
 	var ce *conduit.CloseError
+	var placement *PlacementConflictError
 	switch {
+	case errors.As(err, &placement):
+		// The grant was refused for the agent's saved placement
+		// (mintConduitGrant): its own 409 and code, not an authorization
+		// result.
+		writeError(w, placement.Refusal.Status, placement.Refusal.Code, placement.Refusal.Message, placement.Refusal.Details)
 	case errors.Is(err, errConduitForbidden):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):

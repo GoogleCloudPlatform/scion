@@ -26,7 +26,8 @@
 //   - the connection goes to the first vetted address only (no other
 //     address is tried and the name is not resolved again), and TLS is
 //     verified against the hop's own host name;
-//   - no proxy, cookies, credentials or authorization headers;
+//   - no proxy, cookies, credentials or authorization headers (except the
+//     caller-supplied Authorization of FetchBytesAuthorized, see below);
 //   - connect, per-fetch and caller-supplied (total) deadlines;
 //   - the body is capped while streaming and must sniff as PNG, JPEG, GIF or
 //     WebP; SVG and everything else are refused. The returned content type
@@ -35,7 +36,9 @@
 // FetchBytes applies the same request rules but returns the capped body
 // without sniffing its type, for callers that fetch non-image content. A
 // Config.AllowedHosts list, when set, further limits every hop (including
-// redirects) to the named hosts.
+// redirects) to the named hosts. FetchBytesAuthorized is FetchBytes plus one
+// caller-supplied Authorization header, sent only to the first request's
+// host: a redirect to any other host is followed without it.
 //
 // Errors carry a Reason for server-side logs. Callers must not show the
 // reason to the publisher or to readers: a refused address and a missing
@@ -88,6 +91,7 @@ const (
 	ReasonTooLarge       Reason = "too_large"
 	ReasonType           Reason = "type_not_allowed"
 	ReasonHostNotAllowed Reason = "host_not_allowed"
+	ReasonAuthorization  Reason = "authorization_not_allowed"
 )
 
 // Error is a failed fetch.
@@ -186,27 +190,42 @@ const (
 // Fetch downloads one image. The per-fetch timeout applies on top of any
 // deadline ctx already carries (the caller's total budget).
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
-	return f.run(ctx, rawURL, modeImage)
+	return f.run(ctx, rawURL, modeImage, "")
 }
 
 // FetchBytes downloads one body of any content type under the same request
 // rules as Fetch (https, port, address vetting, redirect checks, AllowedHosts,
 // size cap and timeouts). The body is not sniffed.
 func (f *Fetcher) FetchBytes(ctx context.Context, rawURL string) (*Result, error) {
-	return f.run(ctx, rawURL, modeBytes)
+	return f.run(ctx, rawURL, modeBytes, "")
 }
 
-func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode) (*Result, error) {
+// FetchBytesAuthorized is FetchBytes with authorization sent as the
+// Authorization header. The header goes only to the host of rawURL (on the
+// first request and on any redirect hop back to that same host); a hop to
+// any other host, such as a download host that carries its own short-lived
+// access in the redirect URL, is sent without it. The value is never logged.
+// An empty authorization makes it identical to FetchBytes. A non-empty one
+// is refused (ReasonAuthorization, before any request) unless the Fetcher
+// has AllowedHosts.
+func (f *Fetcher) FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*Result, error) {
+	if authorization != "" && len(f.cfg.AllowedHosts) == 0 {
+		return nil, fail(ReasonAuthorization, "authorization requires AllowedHosts")
+	}
+	return f.run(ctx, rawURL, modeBytes, authorization)
+}
+
+func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode, authorization string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.cfg.Timeout)
 	defer cancel()
-	res, err := f.fetch(ctx, rawURL, mode)
+	res, err := f.fetch(ctx, rawURL, mode, authorization)
 	if err != nil {
 		var fe *Error
 		if !errors.As(err, &fe) {
-			fe = fail(ReasonConnect, "%v", err)
+			fe = fail(ReasonConnect, "%v", innerError(err))
 		}
 		if ctx.Err() != nil && fe.Reason != ReasonDeniedAddress {
-			fe = fail(ReasonTimeout, "%v", err)
+			fe = fail(ReasonTimeout, "%s", fe.Detail)
 		}
 		msg := "artifacts: remote image not fetched"
 		if mode == modeBytes {
@@ -219,18 +238,28 @@ func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode) (*Resu
 	return res, nil
 }
 
-func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode) (*Result, error) {
+// fetch follows redirects under the per-hop rules. authorization, when set, is
+// sent on each hop whose host is the first request's host, and on no other.
+func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, authorization string) (*Result, error) {
 	current := rawURL
+	authHost := ""
 	for hop := 0; ; hop++ {
 		u, err := f.checkURL(current)
 		if err != nil {
 			return nil, err
 		}
+		if hop == 0 {
+			authHost = u.Hostname()
+		}
 		addr, err := f.vet(ctx, u.Hostname())
 		if err != nil {
 			return nil, err
 		}
-		resp, err := f.get(ctx, u, addr, mode)
+		hopAuth := ""
+		if strings.EqualFold(u.Hostname(), authHost) {
+			hopAuth = authorization
+		}
+		resp, err := f.get(ctx, u, addr, mode, hopAuth)
 		if err != nil {
 			return nil, err
 		}
@@ -360,7 +389,8 @@ func (f *Fetcher) vet(ctx context.Context, host string) (netip.Addr, error) {
 
 // get sends one request to addr, the vetted address of u's host. The
 // transport dials that address only and verifies TLS against u's host.
-func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fetchMode) (*http.Response, error) {
+// authorization, when non-empty, is sent as the Authorization header.
+func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fetchMode, authorization string) (*http.Response, error) {
 	target := net.JoinHostPort(addr.String(), f.port)
 	dialer := &net.Dialer{Timeout: f.cfg.ConnectTimeout}
 	transport := &http.Transport{
@@ -391,7 +421,7 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fail(ReasonBadURL, "build request: %v", err)
+		return nil, fail(ReasonBadURL, "build request for %s: %v", redactURL(u.String()), innerError(err))
 	}
 	req.Header.Set("User-Agent", "scion-artifacts/1")
 	if mode == modeBytes {
@@ -399,9 +429,12 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 	} else {
 		req.Header.Set("Accept", "image/png, image/jpeg, image/gif, image/webp")
 	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fail(ReasonConnect, "%s via %s: %v", u.Hostname(), target, err)
+		return nil, fail(ReasonConnect, "%s via %s: %v", redactURL(u.String()), target, innerError(err))
 	}
 	return resp, nil
 }
@@ -440,7 +473,7 @@ func (f *Fetcher) readBytes(resp *http.Response) (*Result, error) {
 	var buf bytes.Buffer
 	n, err := io.Copy(&buf, io.LimitReader(resp.Body, f.cfg.MaxBytes+1))
 	if err != nil {
-		return nil, fail(ReasonConnect, "read body: %v", err)
+		return nil, fail(ReasonConnect, "read body: %v", innerError(err))
 	}
 	if n > f.cfg.MaxBytes {
 		return nil, fail(ReasonTooLarge, "body over %d bytes", f.cfg.MaxBytes)
@@ -474,4 +507,15 @@ func redactURL(raw string) string {
 	}
 	u.RawQuery, u.Fragment, u.User = "", "", nil
 	return u.String()
+}
+
+// innerError strips every *url.Error from err, whose message repeats the
+// full request URL (query string included), and returns the error it wraps.
+// Error details pair it with redactURL instead.
+func innerError(err error) error {
+	var ue *url.Error
+	for errors.As(err, &ue) {
+		err = ue.Err
+	}
+	return err
 }

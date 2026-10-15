@@ -104,7 +104,7 @@ func TestExperimentsSectionSkippedBySeeding(t *testing.T) {
 
 	k := koanf.New(".")
 	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"web.terminal_workspace": false,
+		"web.sample_flag": false,
 	}, "."), nil)
 
 	raw, err := opsettings.ExtractSectionFromKoanf(k, "experiments")

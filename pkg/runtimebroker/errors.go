@@ -122,6 +122,11 @@ const (
 	// request, is the reason.
 	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
 
+	// ErrCodeStatsNotImplemented marks an agent stats request: this broker
+	// does not collect per-agent resource usage, so the stats action answers
+	// 501 with this code instead of placeholder values.
+	ErrCodeStatsNotImplemented = "stats_not_implemented"
+
 	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
 	// before the WebSocket upgrade because the target runtime declines
 	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
@@ -299,6 +304,16 @@ func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
+// RetainedFilesRefused writes a 409 Conflict response with the stable
+// api.BrokerErrCodeRetainedFilesRefused code, for a purge of retained files
+// that removed nothing (ptone/scion#4744). reason, which names no host path,
+// is also in the details under api.BrokerErrDetailReason.
+func RetainedFilesRefused(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, api.BrokerErrCodeRetainedFilesRefused,
+		"Retained files not removed: "+reason,
+		map[string]interface{}{api.BrokerErrDetailReason: reason})
+}
+
 // StaleDispatch writes a 409 Conflict response with the stable
 // ErrCodeStaleDispatch code.
 func StaleDispatch(w http.ResponseWriter, message string) {
@@ -323,6 +338,12 @@ func AgentIdentityUnknown(w http.ResponseWriter, message string) {
 // meant to carry.
 func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// StatsNotImplemented writes a 501 Not Implemented response with the stable
+// ErrCodeStatsNotImplemented code for the agent stats action.
+func StatsNotImplemented(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeStatsNotImplemented, message, nil)
 }
 
 // RuntimeAttachUnsupported writes a 501 Not Implemented response with the
@@ -661,14 +682,18 @@ func skillResolutionHTTPStatus(code string) int {
 // cause instead of folding the failure into a generic 500/502 (#2546). Every
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
-func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
-	skillResolutionFailedWithDetails(w, err, nil)
+//
+// The message is fixed text (see skillResolutionPublicText) carrying ref,
+// the correlation id of the server-side log record; the caller logs the
+// full error with logSkillResolutionFailure.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError, ref string) {
+	skillResolutionFailedWithDetails(w, err, ref, nil)
 }
 
 // skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
 // details (for example the start markers from startFailureDetails) merged
 // alongside the skill and cause.
-func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, ref string, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
@@ -676,10 +701,10 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 	for k, v := range extra {
 		details[k] = v
 	}
-	details["skill"] = err.URI
+	details["skill"] = publicSkillRef(err.URI)
 	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(), details)
+		"Failed to provision agent: "+skillResolutionPublicText(err, ref), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by
@@ -697,10 +722,13 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior. The one exception is errSavedProfileUnresolved (a saved profile
-// that no longer resolves), which is checked ahead of every other case and
-// written as the retryable 503 from writeSavedProfileUnresolved; its text is
-// client-safe by construction.
+// behavior. The exceptions are errSavedProfileUnresolved (a saved profile
+// that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
+// a default profile the Hub's stored profiles lack) and
+// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// which are checked ahead of every other case and written as the retryable
+// 503 from writeProfileUnresolved; their text is client-safe by
+// construction.
 //
 // Within that Hub branch, a missing local file (OriginalErr matches
 // fs.ErrNotExist) is checked first and written as a 422 template_error by
@@ -728,9 +756,11 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	// errSavedProfileUnresolved's text names only the agent, the profile
-	// and a fixed or ResolveRuntime cause, and is client-safe as is.
-	if errors.Is(err, errSavedProfileUnresolved) {
-		writeSavedProfileUnresolved(w, err)
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
+	// the stored profile names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
 	sce, ok := err.(*startContextError)

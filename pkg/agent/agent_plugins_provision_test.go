@@ -231,7 +231,7 @@ func TestStart_AgentPluginsHarnessSwitchWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	want := `agent_plugins: harness-config "hc-scripted" predates Agent Plugins support; plugins staged but not installed (reinstall it with scion harness-config install --force)`
+	want := `agent_plugins: harness-config "hc-scripted" predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset hc-scripted for the bundled defaults, or scion harness-config upgrade hc-scripted to keep local edits)`
 	if n := countWarning(info.Warnings, want); n != 1 {
 		t.Errorf("start warnings = %v, want %q once", info.Warnings, want)
 	}
