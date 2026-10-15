@@ -415,6 +415,7 @@ func TestRoleTunnel_TargetRefusalMapped(t *testing.T) {
 		want   string
 	}{
 		{name: "forbidden", code: conduit.CloseForbidden, status: http.StatusForbidden, want: "forbidden"},
+		{name: "target not found", code: relay.CloseTargetNotFound, status: http.StatusNotFound, want: "agent_not_found"},
 		{name: "unmapped", code: conduit.CloseRelayRestart, status: http.StatusServiceUnavailable, want: "agent_session_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -423,9 +424,7 @@ func TestRoleTunnel_TargetRefusalMapped(t *testing.T) {
 			rec := dialTarget(t, f.w, f.node, refusingTarget(tc.code, opened))
 			ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
 				in := tunnelInstruction(t, rec, f.node.Internal.URL)
-				in.Tunnel.TargetRefusals = map[uint32][]byte{
-					conduit.CloseForbidden: mustMarshalRPC(t, &conduitv1.RpcResponse{Status: http.StatusForbidden, Body: []byte(`{"error":{"code":"forbidden"}}`)}),
-				}
+				in.Tunnel.TargetRefusals = testTargetRefusals(t)
 				return hubAnswer{status: http.StatusOK, body: in}
 			})
 			resp := requestTunnel(t, ls)
@@ -549,5 +548,56 @@ func TestRoleTunnel_UnreachableOwnerExcludesRelay(t *testing.T) {
 	defer mu.Unlock()
 	if len(reqs) != 2 || len(reqs[1].ExcludeRelays) != 1 || reqs[1].ExcludeRelays[0] != "relay-dead" || len(reqs[1].ExcludeTargets) != 0 {
 		t.Fatalf("hub requests %+v, want the second to exclude relay-dead only", reqs)
+	}
+}
+
+// testTargetRefusals are the answers by target close code, as the hub
+// sends them (pkg/hub relayTunnelTargetRefusals).
+func testTargetRefusals(t *testing.T) map[uint32][]byte {
+	t.Helper()
+	return map[uint32][]byte{
+		relay.CloseTargetNotFound: mustMarshalRPC(t, &conduitv1.RpcResponse{Status: http.StatusNotFound, Body: []byte(`{"error":{"code":"agent_not_found"}}`)}),
+		conduit.CloseForbidden:    mustMarshalRPC(t, &conduitv1.RpcResponse{Status: http.StatusForbidden, Body: []byte(`{"error":{"code":"forbidden"}}`)}),
+	}
+}
+
+// TestRoleTunnel_TargetRefusalOverBridge: the bridge path. The owner relay
+// admits the bridge and opens the target stream, the target refuses it
+// (4403 grant_invalid when the stale-route race slips past the owner's
+// admission, or 4404), and the refusal reaches the user as the hub's
+// answer for that close code. No tunnel is recorded, and the hub is asked
+// once (a refusal is not a stale route).
+func TestRoleTunnel_TargetRefusalOverBridge(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   uint32
+		status int32
+		want   string
+	}{
+		{name: "forbidden", code: conduit.CloseForbidden, status: http.StatusForbidden, want: "forbidden"},
+		{name: "target not found", code: relay.CloseTargetNotFound, status: http.StatusNotFound, want: "agent_not_found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRoleFixture(t)
+			owner := f.w.StartNode("relay-1", nil)
+			opened := make(chan struct{}, 4)
+			rec := dialTarget(t, f.w, owner, refusingTarget(tc.code, opened))
+			ls, _ := userSessionFor(t, f, func(int, relay.HubRPCRequest) hubAnswer {
+				in := tunnelInstruction(t, rec, owner.Internal.URL)
+				in.Tunnel.TargetRefusals = testTargetRefusals(t)
+				return hubAnswer{status: http.StatusOK, body: in}
+			})
+			resp := requestTunnel(t, ls)
+			if resp.GetStatus() != tc.status || !bytes.Contains(resp.GetBody(), []byte(tc.want)) {
+				t.Fatalf("answer %v, want %d %s", resp, tc.status, tc.want)
+			}
+			relaytest.Wait(t, opened, "the target's StreamOpen, through the owner relay")
+			if tns := f.role.Tunnels(); len(tns) != 0 {
+				t.Fatalf("tunnels %+v, want none", tns)
+			}
+			if n := f.hub.count("rpc"); n != 1 {
+				t.Fatalf("%d hub calls, want 1 (a refusal is not a stale route)", n)
+			}
+		})
 	}
 }
