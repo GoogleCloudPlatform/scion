@@ -195,9 +195,9 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 			// The broker is shutting down: the next boot tries again.
 			return
 		}
-		s.agentLifecycleLog.Warn("Launch recovery: no definitive answer within the TTL; record removed with no cleanup",
-			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "instance_id", jr.InstanceID, "error", err)
-		_ = os.Remove(path)
+		// No definitive answer: keep the record for the next boot to
+		// resend, up to the bound (ptone/scion#5186).
+		s.keepRecoveredReport(path, jr, t)
 		return
 	}
 	// The existing predicates decide cleanup, unchanged.
