@@ -634,16 +634,32 @@ func TestFixtureProvenance_Route(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, map[string]any{"resource": "agent:" + realAgent.ID, "proven": false, "reason": "no fixture stamp"}, raw(rec))
 	assert.NotContains(t, rec.Body.String(), e.human.ID, "no owner or creator data")
-	// A missing agent and a missing project: the same answer.
+	// A real user's project, schedule and group (O5): the same exact
+	// unproven shape, with no owner or creator data.
+	ctx := context.Background()
+	realProject := &store.Project{ID: generateID(), Name: "fc-prov-real-p", Slug: "fc-prov-real-p", CreatedBy: e.human.ID, OwnerID: e.human.ID}
+	require.NoError(t, e.store.CreateProject(ctx, realProject))
+	realSchedule := &store.Schedule{ID: generateID(), ProjectID: realProject.ID, Name: "fc-prov-real-s", CronExpr: "0 * * * *", EventType: "message", CreatedBy: e.human.ID}
+	require.NoError(t, e.store.CreateSchedule(ctx, realSchedule))
+	realGroup := &store.Group{ID: generateID(), Name: "fc-prov-real-g", Slug: "fc-prov-real-g", CreatedBy: e.human.ID}
+	require.NoError(t, e.store.CreateGroup(ctx, realGroup))
+	for _, res := range []string{"project:" + realProject.ID, "schedule:" + realSchedule.ID, "group:" + realGroup.ID} {
+		rec = get(e.issuerTok, "?resource="+res)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, map[string]any{"resource": res, "proven": false, "reason": "no fixture stamp"}, raw(rec), res)
+		assert.NotContains(t, rec.Body.String(), e.human.ID, "%s: no owner or creator data", res)
+	}
+	// A missing agent, project, schedule and group: the same answer.
 	missing := generateID()
 	for _, typ := range []string{"agent", "project", "schedule", "group"} {
 		rec = get(e.issuerTok, "?resource="+typ+":"+missing)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		assert.Equal(t, map[string]any{"resource": typ + ":" + missing, "proven": false, "reason": "no fixture stamp"}, raw(rec))
 	}
+	// An ID that is not a UUID (O6): the same exact shape.
 	rec = get(e.issuerTok, "?resource=agent:not-a-uuid")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, false, raw(rec)["proven"])
+	assert.Equal(t, map[string]any{"resource": "agent:not-a-uuid", "proven": false, "reason": "no fixture stamp"}, raw(rec))
 
 	// Stamped resources: proven, with the stamp and the identity's state.
 	for _, res := range []string{"agent:" + stamped, "project:" + e.project, "group:" + groupID, "schedule:" + scheduleID} {
