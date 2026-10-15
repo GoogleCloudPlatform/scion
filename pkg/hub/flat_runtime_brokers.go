@@ -298,7 +298,7 @@ func (s *Server) registerFlatRuntimeBroker(ctx context.Context, reg flatRegistra
 		}
 		// A row created (or re-created after a deregistration) here gets its
 		// agents' reservations back before the registration returns.
-		s.backfillBrokerOnJoin(ctx, reg.BrokerID)
+		s.BackfillBrokerOnRegistration(ctx, reg.BrokerID)
 		return stored, true, nil
 	}
 

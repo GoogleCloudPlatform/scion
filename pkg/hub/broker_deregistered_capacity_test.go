@@ -466,7 +466,7 @@ func TestJoinBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
 	hook.agentID = a.ID
 	fault.Arm()
 
-	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	f.srv.BackfillBrokerOnRegistration(context.Background(), f.brokerID)
 	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the read failed: not backfilled")
 	require.True(t, backfillPending(f.srv, f.brokerID), "the broker stays pending")
 
@@ -504,7 +504,7 @@ func TestJoinBackfill_WriteError_RetriedNextHeartbeat(t *testing.T) {
 	hook.agentID = a.ID
 	fault.Arm()
 
-	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	f.srv.BackfillBrokerOnRegistration(context.Background(), f.brokerID)
 	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the write failed: not backfilled")
 	first := activeReservation(t, f.s, brokerLimitDefID(t, f.s), ok.ID)
 	require.NotNil(t, first, "the other agent was backfilled at the join")
@@ -543,7 +543,7 @@ func TestJoinBackfill_DeleteClearsPending(t *testing.T) {
 	a := f.addAgent("bf-delete", "running", "working")
 	hook.agentID = a.ID
 	fault.Arm()
-	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	f.srv.BackfillBrokerOnRegistration(context.Background(), f.brokerID)
 	require.True(t, backfillPending(f.srv, f.brokerID))
 
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/runtime-brokers/"+f.brokerID, nil)
@@ -563,7 +563,7 @@ func TestJoinBackfill_PendingLost_SweepRestores(t *testing.T) {
 	a := f.addAgent("bf-lost", "running", "working")
 	hook.agentID = a.ID
 	fault.Arm()
-	f.srv.backfillBrokerOnJoin(context.Background(), f.brokerID)
+	f.srv.BackfillBrokerOnRegistration(context.Background(), f.brokerID)
 	require.True(t, backfillPending(f.srv, f.brokerID))
 	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID))
 
@@ -609,6 +609,7 @@ func TestReRegistered_JoinOnOneReplica_HeartbeatOnAnother(t *testing.T) {
 // registration path).
 func TestReRegistered_EmbeddedFlat_RestoresRunningAgents(t *testing.T) {
 	srv, s := testServer(t)
+	setFlatExperiment(t, srv, true)
 	ctx := context.Background()
 	id := uuid.NewString()
 	target := &api.RuntimeTargetDescriptor{ID: tid("rt-flat-rereg"), Type: "docker", DisplayName: "Docker"}

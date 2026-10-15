@@ -1626,8 +1626,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
 
-	// Retry a join-time reservation backfill that skipped an agent on this
-	// replica (backfillBrokerOnJoin). Without a pending one this reads
+	// Retry a registration reservation backfill that skipped an agent on this
+	// replica (BackfillBrokerOnRegistration). Without a pending one this reads
 	// nothing: a heartbeat that needs nothing does not read the broker row.
 	s.retryBrokerBackfill(ctx, id)
 

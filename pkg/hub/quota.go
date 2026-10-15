@@ -61,8 +61,8 @@ type QuotaService struct {
 	capacityMetrics atomic.Pointer[OTelQuotaCapacityMetrics]
 
 	// brokerBackfillPending holds, per Runtime Broker ID, a
-	// *brokerBackfillRetry for a broker whose join-time backfill skipped an
-	// agent on this replica (Server.backfillBrokerOnJoin); its heartbeats
+	// *brokerBackfillRetry for a broker whose registration backfill skipped an
+	// agent on this replica (Server.BackfillBrokerOnRegistration); its heartbeats
 	// retry it (Server.retryBrokerBackfill).
 	brokerBackfillPending sync.Map
 }

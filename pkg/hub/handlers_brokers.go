@@ -639,8 +639,8 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	s.conduitBrokerCredentialChanged(req.BrokerID)
 	// Record the reservations of the agents the broker still runs (a broker
 	// registered again under the same ID), now that its row is written and
-	// before the join answers (backfillBrokerOnJoin).
-	s.backfillBrokerOnJoin(r.Context(), req.BrokerID)
+	// before the join answers (BackfillBrokerOnRegistration).
+	s.BackfillBrokerOnRegistration(r.Context(), req.BrokerID)
 
 	writeJSON(w, http.StatusOK, resp)
 }
