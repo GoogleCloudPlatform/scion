@@ -244,14 +244,14 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // error is returned as is.
 //
 // Only the edges where the agent is the delegate are deactivated. Edges where
-// it is the delegator are left as they are: the standing check of each
-// delegate (resolveChainRoot with checkChain, which loads each delegator
-// agent through standingChainAgent) refuses an agent whose project-scoped
-// edge chain reaches a missing or soft-deleted agent, and a restore
-// reactivates an edge only when its delegator is live
-// (checkRestoreDelegatorsLive). A project delete, which removes every agent
-// of the project in one transaction, deactivates both sides
-// (deactivateProjectAgentEdges).
+// it is the delegator are left as they are: authorization re-loads each
+// agent delegator in a chain. The delegation ceiling walk
+// (walkDelegationChainHops, through checkAgentHoldsPermission) and the
+// standing check (resolveChainRoot with checkChain) refuse a chain that
+// reaches a missing or soft-deleted agent, and a restore reactivates an edge
+// only when its delegator is live (checkRestoreDelegatorsLive). A project
+// delete, which removes every agent of the project in one transaction,
+// deactivates both sides (deactivateProjectAgentEdges).
 func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {
