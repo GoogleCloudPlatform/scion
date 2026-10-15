@@ -690,6 +690,28 @@ func conduitTunnelMintErrPassesThrough(err error) bool {
 // errConduitTunnelGrantKeys marks a grant that could not be signed.
 var errConduitTunnelGrantKeys = errors.New("grant keys unavailable")
 
+// conduitTunnelTargetCloses is the one mapping from the close code a target
+// refuses a tunnel's stream with to the tunnel's refusal (design §3.8 rule
+// 7), for tunnels on hub-held sessions (conduitTunnelOpenError) and on
+// relay-held sessions (relayTunnelTargetRefusals) alike.
+var conduitTunnelTargetCloses = map[uint32]struct {
+	failure conduitTunnelFailure
+	message string
+}{
+	relay.CloseTargetNotFound: {tunnelAgentNotFound, "agent not found"},
+	conduit.CloseForbidden:    {tunnelForbidden, "not permitted"},
+}
+
+// conduitTunnelTargetRefusal returns the refusal for a target close code
+// (nil when the code has none).
+func conduitTunnelTargetRefusal(code uint32) *conduitTunnelError {
+	m, ok := conduitTunnelTargetCloses[code]
+	if !ok {
+		return nil
+	}
+	return tunnelRefusal(m.failure, "%s", m.message)
+}
+
 // conduitTunnelOpenError maps a failed target open to its refusal.
 func conduitTunnelOpenError(err error) error {
 	var ce *conduit.CloseError
@@ -712,10 +734,8 @@ func conduitTunnelOpenError(err error) error {
 		return tunnelRefusal(tunnelRegistryUnavailable, "conduit routing is temporarily unavailable")
 	case errors.Is(err, errConduitTunnelGrantKeys):
 		return tunnelRefusal(tunnelGrantKeysUnavailable, "stream grants are temporarily unavailable")
-	case errors.As(err, &ce) && ce.Code == relay.CloseTargetNotFound:
-		return tunnelRefusal(tunnelAgentNotFound, "agent not found")
-	case errors.As(err, &ce) && ce.Code == conduit.CloseForbidden:
-		return tunnelRefusal(tunnelForbidden, "not permitted")
+	case errors.As(err, &ce) && conduitTunnelTargetRefusal(ce.Code) != nil:
+		return conduitTunnelTargetRefusal(ce.Code)
 	case errors.Is(err, context.Canceled):
 		return err
 	default:

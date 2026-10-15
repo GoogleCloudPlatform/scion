@@ -25,7 +25,6 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
@@ -181,16 +180,13 @@ func (s *Server) relayTunnelRPC(ctx context.Context, rt *conduitExternalRuntime,
 }
 
 // relayTunnelTargetRefusals are the answers a relay gives when the target
-// refuses the tunnel's stream, by close code: the same mapping a tunnel on a
-// hub-held session applies (conduitTunnelOpenError): target not found is 404
-// agent_not_found and forbidden is 403 forbidden.
+// refuses the tunnel's stream, by close code, from the one mapping a tunnel
+// on a hub-held session uses too (conduitTunnelTargetCloses): target not
+// found is 404 agent_not_found and forbidden is 403 forbidden.
 func relayTunnelTargetRefusals() (map[uint32][]byte, error) {
-	out := map[uint32][]byte{}
-	for code, refusal := range map[uint32]*conduitTunnelError{
-		relay.CloseTargetNotFound: tunnelRefusal(tunnelAgentNotFound, "agent not found"),
-		conduit.CloseForbidden:    tunnelRefusal(tunnelForbidden, "not permitted"),
-	} {
-		b, err := proto.Marshal(refusal.response())
+	out := make(map[uint32][]byte, len(conduitTunnelTargetCloses))
+	for code := range conduitTunnelTargetCloses {
+		b, err := proto.Marshal(conduitTunnelTargetRefusal(code).response())
 		if err != nil {
 			return nil, fmt.Errorf("encoding the target refusal for %d: %w", code, err)
 		}
