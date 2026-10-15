@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -53,6 +54,28 @@ func TestBrokerStateDir(t *testing.T) {
 		_, err := brokerStateDir(bad, "b-1")
 		require.Error(t, err, "relative state_dir %q accepted by brokerStateDir", bad)
 		assert.Contains(t, err.Error(), "server.broker.state_dir", bad)
+	}
+}
+
+// TestBrokerStateDir_BrokerIDPathElement: under a configured state_dir, a
+// broker ID that is not a single path element is an error, not a path;
+// with no state_dir the broker's own default (which checks the ID too) is
+// left in place.
+func TestBrokerStateDir_BrokerIDPathElement(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for name, id := range brokerIDsNotPathElement {
+		if id == "" {
+			continue // "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			got, err := brokerStateDir("/srv/broker-state", id)
+			require.Error(t, err, "configured state dir accepted broker ID %q: %q", id, got)
+			assert.True(t, errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement))
+			assert.Empty(t, got)
+			got, err = brokerStateDir("", id)
+			require.NoError(t, err)
+			assert.Empty(t, got, "no state_dir leaves the broker default")
+		})
 	}
 }
 
