@@ -25,7 +25,9 @@ type BrokerJoinToken struct {
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Issuance ID of the admin-kind test identity that created this row (grant shaping)
+	IssuanceID   *string `json:"issuance_id,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -34,7 +36,7 @@ func (*BrokerJoinToken) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case brokerjointoken.FieldTokenHash, brokerjointoken.FieldCreatedBy:
+		case brokerjointoken.FieldTokenHash, brokerjointoken.FieldCreatedBy, brokerjointoken.FieldIssuanceID:
 			values[i] = new(sql.NullString)
 		case brokerjointoken.FieldExpiresAt, brokerjointoken.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -85,6 +87,13 @@ func (_m *BrokerJoinToken) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Created = value.Time
 			}
+		case brokerjointoken.FieldIssuanceID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuance_id", values[i])
+			} else if value.Valid {
+				_m.IssuanceID = new(string)
+				*_m.IssuanceID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -132,6 +141,11 @@ func (_m *BrokerJoinToken) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.IssuanceID; v != nil {
+		builder.WriteString("issuance_id=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

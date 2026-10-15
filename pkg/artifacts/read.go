@@ -109,6 +109,11 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
 		return false
 	}
+	// An attachment's scope is not a project: it has its own rule, and no
+	// project permission or grant ever applies to it.
+	if IsAttachmentScope(a.ScopeKind) {
+		return canReadAttachmentScope(ctx, host, a, kind, ref)
+	}
 	// 1. Credential.
 	if !host.Permits(ctx, a.ScopeRef, PermissionRead) {
 		return false
@@ -132,6 +137,41 @@ func canReadWith(ctx context.Context, host Host, a *Artifact, grants func() ([]G
 		return false
 	}
 	return grantAllows(ctx, host, a, gs, now, kind, ref, grantsForRead, PermissionRead, true)
+}
+
+// canReadAttachmentScope is canReadWith for a row of an attachment scope
+// (ptone/scion#4595), whose caller is (kind, ref). The checks run in a fixed
+// order, and the first that fails refuses:
+//
+//  1. The host implements MessageScopeHost; a host without it makes every
+//     attachment unreadable.
+//  2. MessageScopeHost.PermitsMessageRead: the caller's credential allows
+//     reading messages at all. Nothing below reaches past it.
+//  3. The attachment has a ready version.
+//  4. An upload: the caller is its uploader (owner and scope ref). A
+//     message attachment: MessageScopeHost.MayReadMessage for its message,
+//     asked now, so a reader who loses the message loses the attachment on
+//     the next request.
+//
+// Grants never count: an attachment is exactly as readable as its message.
+func canReadAttachmentScope(ctx context.Context, host Host, a *Artifact, kind, ref string) bool {
+	mh, ok := host.(MessageScopeHost)
+	if !ok {
+		return false
+	}
+	if !mh.PermitsMessageRead(ctx) {
+		return false
+	}
+	if a.CurrentSeq == 0 {
+		return false
+	}
+	switch a.ScopeKind {
+	case ScopeKindUpload:
+		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref)
+	case ScopeKindMessage:
+		return a.ScopeRef != "" && mh.MayReadMessage(ctx, a.ScopeRef)
+	}
+	return false
 }
 
 // Permission sets a grant must carry for each kind of access. A review

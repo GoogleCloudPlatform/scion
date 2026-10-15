@@ -50,7 +50,7 @@ instructions_file: .claude/CLAUDE.md
 system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native
 model_aliases:
-  small: haiku
+  small: claude-haiku-5-5
   medium: claude-sonnet-5-5
   large: claude-opus-5-5
   extra-large: claude-fable-5-1
@@ -104,6 +104,7 @@ capabilities:
     sse: { support: "yes" }
     streamable_http: { support: "yes" }
   resume: { support: "yes" }
+  agent_plugins: { support: "partial", reason: "Installed as a skills-dir plugin with a generated .claude-plugin manifest; stdio servers run through an sh cwd wrapper; servers with placeholder-like text Claude would expand are skipped" }
 no_auth:
   behavior: drop-to-shell
   command: claude setup-token

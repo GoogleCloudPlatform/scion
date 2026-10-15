@@ -75,7 +75,9 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 		return report, fmt.Errorf("storage backend is not configured")
 	}
 
-	if rec.Kind == storage.ResourceKindTemplate && rec.Layout == store.TemplateLayoutBlobs {
+	// Templates and harness-configs share the blob layout
+	// (ptone/scion#4221, ptone/scion#4219).
+	if (rec.Kind == storage.ResourceKindTemplate || rec.Kind == storage.ResourceKindHarnessConfig) && rec.Layout == store.TemplateLayoutBlobs {
 		return rs.validateTemplateBlobs(ctx, stor, rec, report)
 	}
 
@@ -168,10 +170,11 @@ func (rs *ResourceStore) ValidateStorage(ctx context.Context, rec *ResourceRecor
 	return report, nil
 }
 
-// validateTemplateBlobs checks a blob-layout template: every manifest entry
-// must have its blob at <StoragePath>.blobs/<hex>. A blob's name is its
-// content hash and blobs are never overwritten, so content is not re-hashed
-// and no manifest.json is expected (ptone/scion#4221).
+// validateTemplateBlobs checks a blob-layout template or harness-config:
+// every manifest entry must have its blob at <StoragePath>.blobs/<hex>. A
+// blob's name is its content hash and blobs are never overwritten, so content
+// is not re-hashed and no manifest.json is expected (ptone/scion#4221,
+// ptone/scion#4219).
 func (rs *ResourceStore) validateTemplateBlobs(ctx context.Context, stor storage.Storage, rec *ResourceRecord, report *ValidationReport) (*ValidationReport, error) {
 	for _, file := range rec.Files {
 		hex, ok := templateBlobHex(file.Hash)

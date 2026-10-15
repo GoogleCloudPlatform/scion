@@ -379,6 +379,28 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_cause").
 			Optional().
 			Default(""),
+		// launch_prior_phase is the effective resting phase a start or
+		// restart launch began from (ptone/scion#4669): written by
+		// BeginStartLaunch, reset to "" by a create BeginLaunch. A failed
+		// start-kind launch reads it to choose the phase it ends in.
+		field.String("launch_prior_phase").
+			Optional().
+			Default(""),
+		// launch_revoke_on_fail records the Hub's decision, taken when a
+		// start launch began, whether a failed end revokes the start's
+		// credential (ptone/scion#4669). Written with launch_prior_phase.
+		field.Bool("launch_revoke_on_fail").
+			Default(false),
+		// launch_resume_phase is the resume memory of a failed start
+		// (ptone/scion#4669): the resting phase (suspended, created,
+		// provisioning or halted) a start-kind launch began from when its
+		// failure left the row in phase error, or "". Every launch-ending
+		// write of a start-kind launch writes it, and the
+		// ClearLaunchResumePhaseHook clears it on any write of a phase other
+		// than starting or error. UpdateAgent never writes it.
+		field.String("launch_resume_phase").
+			Optional().
+			Default(""),
 
 		// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
 		// A leased, sticky delete marker. Every write goes through

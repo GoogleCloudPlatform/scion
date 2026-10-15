@@ -2255,7 +2255,7 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 			Status:     autoBroker.Status,
 			LinkedBy:   autoProvideLinkedBy,
 		}
-		if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+		if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 			s.envSecretLog.Warn("Failed to auto-link broker to project",
 				"broker", autoBroker.Name, "project_id", project.ID, "error", addErr)
 			continue
@@ -2569,7 +2569,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		LinkedBy:   linkedBy,
 	}
 
-	if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+	if err := s.linkProjectProvider(ctx, provider); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}

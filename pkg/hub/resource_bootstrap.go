@@ -190,7 +190,7 @@ func (s *Server) ArchiveObsoleteBundledHarnessConfigs(ctx context.Context) error
 		// concurrent commit is never reverted; a lost race is logged and
 		// skipped (the next startup retries).
 		hc.Status = store.HarnessConfigStatusArchived
-		if err := s.store.UpdateHarnessConfigContent(ctx, &hc, store.HarnessConfigContentPrecondition{ContentHash: hc.ContentHash}); err != nil {
+		if err := s.store.UpdateHarnessConfigContent(ctx, &hc, harnessConfigCommitPrecondition(&hc)); err != nil {
 			s.resourceLog.Warn("failed to archive obsolete bundled harness-config",
 				"name", hc.Name, "id", hc.ID, "error", err)
 			continue

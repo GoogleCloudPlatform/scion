@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -88,9 +89,14 @@ func (d txOnlyDriver) Tx(context.Context) (dialect.Tx, error) {
 // newTxClient builds the *ent.Client every launch writer uses: ent builders
 // issued through it run on tx's connection and participate in tx, including
 // through UpdateOneID/DeleteOneID's internal nested-Tx call (see txOnlyDriver).
+// It registers entc.ClearLaunchResumePhaseHook, so the launch writers' phase
+// writes follow the same resume-memory rule as every other agent write
+// (ptone/scion#4669).
 func newTxClient(dialectName string, tx *sql.Tx) *ent.Client {
 	drv := entsql.NewDriver(dialectName, entsql.Conn{ExecQuerier: tx})
-	return ent.NewClient(ent.Driver(txOnlyDriver{drv}))
+	client := ent.NewClient(ent.Driver(txOnlyDriver{drv}))
+	client.Use(entc.ClearLaunchResumePhaseHook)
+	return client
 }
 
 // beginLaunchTx opens a fresh connection and transaction and wraps it in an
@@ -151,13 +157,42 @@ func storeNow(ctx context.Context, tx *sql.Tx, isPostgres bool) (time.Time, erro
 
 // BeginLaunch implements store.AgentStore.BeginLaunch.
 func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
-	// P1a only implements the create path (store.LaunchKindCreate); start and
-	// restart (store.LaunchKindStart / LaunchKindRestart) are P6 (design
-	// §3.13) and are rejected here rather than silently accepted and stored.
+	// Start and restart launches go through BeginStartLaunch, which carries
+	// their options (ptone/scion#4669).
 	if kind != store.LaunchKindCreate {
-		return "", fmt.Errorf("%w: BeginLaunch kind must be %q in P1a, got %q", store.ErrInvalidInput, store.LaunchKindCreate, kind)
+		return "", fmt.Errorf("%w: BeginLaunch kind must be %q, got %q", store.ErrInvalidInput, store.LaunchKindCreate, kind)
 	}
+	return s.beginLaunch(ctx, agentID, kind, timeout, store.BeginLaunchOptions{})
+}
 
+// BeginStartLaunch implements store.AgentStore.BeginStartLaunch.
+func (s *AgentStore) BeginStartLaunch(ctx context.Context, agentID, kind string, timeout time.Duration, opts store.BeginLaunchOptions) (string, error) {
+	if kind != store.LaunchKindStart && kind != store.LaunchKindRestart {
+		return "", fmt.Errorf("%w: BeginStartLaunch kind must be %q or %q, got %q", store.ErrInvalidInput, store.LaunchKindStart, store.LaunchKindRestart, kind)
+	}
+	return s.beginLaunch(ctx, agentID, kind, timeout, opts)
+}
+
+// beginLaunchPhaseAllowed reports whether a launch of kind may begin on a
+// row in phase: a create on created or provisioning; a start only on
+// starting, the phase the start dispatch wrote for an uncounted prior
+// phase; a restart on starting, running or stopped, which its synchronous
+// stop leg can leave (ptone/scion#4669).
+func beginLaunchPhaseAllowed(kind string, phase state.Phase) bool {
+	switch kind {
+	case store.LaunchKindCreate:
+		return phase == state.PhaseCreated || phase == state.PhaseProvisioning
+	case store.LaunchKindStart:
+		return phase == state.PhaseStarting
+	case store.LaunchKindRestart:
+		return phase == state.PhaseStarting || phase == state.PhaseRunning || phase == state.PhaseStopped
+	}
+	return false
+}
+
+// beginLaunch is BeginLaunch and BeginStartLaunch: kind has been checked by
+// the caller.
+func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration, opts store.BeginLaunchOptions) (string, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return "", err
@@ -185,12 +220,7 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 		return "", mapError(err)
 	}
 
-	// P1a: BeginLaunch is restricted to phase in {created, provisioning} —
-	// every P1 caller is a create path (design §3.3). Start/restart (P6)
-	// extend this for stopped/suspended rows.
-	switch state.Phase(current.Phase) {
-	case state.PhaseCreated, state.PhaseProvisioning:
-	default:
+	if !beginLaunchPhaseAllowed(kind, state.Phase(current.Phase)) {
 		return "", store.ErrInvalidPhase
 	}
 
@@ -204,7 +234,9 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 
 	// A previous active launch on this row becomes implicitly superseded:
 	// its ID no longer matches the new launch_id (design §3.3). No explicit
-	// write of its end state is needed or made here.
+	// write of its end state is needed or made here. The resume memory
+	// (launch_resume_phase) is left alone: EffectiveRestingPhase ignores it
+	// while this launch is active, and this launch's end rewrites it.
 	upd := ltx.client.Agent.UpdateOneID(uid).
 		SetLaunchID(newID).
 		SetLaunchState(store.LaunchStateActive).
@@ -215,10 +247,18 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchSeq(0).
 		SetLaunchStep("").
 		SetLaunchError("").
-		SetLaunchCause("")
-	// Link a create start claim to this launch, so only this launch's end
-	// settles it.
-	if _, err := linkLaunchClaim(upd, current, newID, now).Save(ctx); err != nil {
+		SetLaunchCause("").
+		SetLaunchPriorPhase(opts.PriorPhase).
+		SetLaunchRevokeOnFail(opts.RevokeOnFail)
+	if kind == store.LaunchKindRestart && current.Phase != string(state.PhaseStarting) {
+		// A restart's start leg moves the row to starting, as a phase
+		// change, so it bumps state_version (v11 §3.13).
+		upd.SetPhase(string(state.PhaseStarting)).
+			SetStateVersion(current.StateVersion + 1)
+	}
+	// Link the start claim of the matching kind to this launch, so only
+	// this launch's end settles it.
+	if _, err := linkLaunchClaim(upd, current, kind, newID, now).Save(ctx); err != nil {
 		return "", mapError(err)
 	}
 

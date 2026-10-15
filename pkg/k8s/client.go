@@ -75,13 +75,41 @@ func NewClientWithContext(kubeconfigPath, contextName string) (*Client, error) {
 		contextName,
 		loadClientConfig,
 		rest.InClusterConfig,
-		func(config *rest.Config) (dynamic.Interface, error) {
-			return dynamic.NewForConfig(config)
-		},
-		func(config *rest.Config) (kubernetes.Interface, error) {
-			return kubernetes.NewForConfig(config)
-		},
+		newDynamicForConfig,
+		newClientsetForConfig,
 	)
+}
+
+// errInClusterDisabled is the in-cluster leg's error for
+// NewClientWithContextNoInCluster.
+var errInClusterDisabled = errors.New("in-cluster config disabled for this client")
+
+// NewClientWithContextNoInCluster is NewClientWithContext without any
+// in-cluster fallback: only the default loading rules (KUBECONFIG, including
+// a path list, and ~/.kube/config) or kubeconfigPath. It is for callers, such
+// as tests, that must never use the service account of the pod they run in.
+// When no kubeconfig yields a configuration, the error wraps
+// errInClusterDisabled.
+func NewClientWithContextNoInCluster(kubeconfigPath, contextName string) (*Client, error) {
+	return newClientWithContext(
+		kubeconfigPath,
+		contextName,
+		loadClientConfigNoInCluster,
+		func() (*rest.Config, error) { return nil, errInClusterDisabled },
+		newDynamicForConfig,
+		newClientsetForConfig,
+	)
+}
+
+// newDynamicForConfig and newClientsetForConfig are the API client
+// constructors NewClientWithContext and NewClientWithContextNoInCluster
+// share.
+func newDynamicForConfig(config *rest.Config) (dynamic.Interface, error) {
+	return dynamic.NewForConfig(config)
+}
+
+func newClientsetForConfig(config *rest.Config) (kubernetes.Interface, error) {
+	return kubernetes.NewForConfig(config)
 }
 
 // NewClientFromKubeconfigFile creates a client from exactly one kubeconfig
@@ -228,6 +256,40 @@ func loadClientConfig(kubeconfigPath, contextName string) (*rest.Config, string,
 		}
 	}
 
+	return config, currentContext, nil
+}
+
+// loadClientConfigNoInCluster is loadClientConfig with no in-cluster leg;
+// the two differ only there. loadClientConfig uses client-go's deferred
+// loader, whose ClientConfig (clientcmd.DeferredLoadingClientConfig) returns
+// the in-cluster configuration itself when the kubeconfig sources yield an
+// empty or default configuration and an in-cluster config is possible (the
+// service variables and token file of a pod). This loads the same sources,
+// with the same loading rules and overrides, and builds a direct client
+// configuration from them, which has no in-cluster leg by construction. An
+// empty configuration, or a context the merged configuration does not
+// define, is an error.
+func loadClientConfigNoInCluster(kubeconfigPath, contextName string) (*rest.Config, string, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
+	raw, err := loadingRules.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	overrides := &clientcmd.ConfigOverrides{}
+	if contextName != "" {
+		overrides.CurrentContext = contextName
+	}
+	config, err := clientcmd.NewNonInteractiveClientConfig(*raw, contextName, overrides, loadingRules).ClientConfig()
+	if err != nil {
+		return nil, "", err
+	}
+	currentContext := contextName
+	if currentContext == "" {
+		currentContext = raw.CurrentContext
+	}
 	return config, currentContext, nil
 }
 
