@@ -1533,8 +1533,17 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 // directory and then only that worktree's entry. It never runs a
 // repository-wide prune, which would also drop the entries of other
 // agents' worktrees that this process cannot see (ptone/scion#5071).
-// Callers gate worktreePath with shouldCleanupPartialWorktree.
+// Callers gate worktreePath with shouldCleanupPartialWorktree; the path check
+// is repeated here.
 func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agentID string) {
+	// Repeat the caller's gate here, so this function can only ever remove a
+	// path strictly inside <projectRoot>/worktrees, never that directory
+	// itself, the checkout, or anything outside it.
+	if !isStrictWorktreeChild(projectRoot, worktreePath) {
+		slog.Warn("worktree-per-agent: refusing to clean up a path that is not inside the shared checkout's worktrees directory",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
 	rm, rmCmdErr := provision.SafeGitCommand(ctx, projectRoot, "worktree", "remove", "--force", worktreePath)
 	var out []byte
 	var rmErr error
@@ -1552,7 +1561,9 @@ func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agen
 		"agent_id", agentID, "path", worktreePath,
 		"error", rmErr, "output", strings.TrimSpace(string(out)))
 	if cleanErr := os.RemoveAll(worktreePath); cleanErr != nil {
-		slog.Warn("worktree-per-agent: failed to clean up partial worktree",
+		// The directory is (partly) still there, so its entry is not
+		// stale and is left in place; nothing else is touched.
+		slog.Warn("worktree-per-agent: failed to remove the partial worktree's directory; its git entry is left in place",
 			"agent_id", agentID, "path", worktreePath, "error", cleanErr)
 		return
 	}

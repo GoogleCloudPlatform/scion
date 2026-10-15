@@ -14,11 +14,6 @@
 
 package runtimebroker
 
-// cleanupPartialWorktree removes only the failed agent's own worktree and
-// its git entry, never every entry whose directory is missing: another
-// worktree that this process cannot see keeps its registration
-// (ptone/scion#5071).
-
 import (
 	"bytes"
 	"context"
@@ -29,6 +24,11 @@ import (
 	"strings"
 	"testing"
 )
+
+// The tests below check that cleanupPartialWorktree removes only the failed
+// agent's own worktree and its git entry, never every entry whose directory
+// is missing: another worktree that this process cannot see keeps its
+// registration (ptone/scion#5071).
 
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -163,11 +163,81 @@ func TestCleanupPartialWorktree_UsesSafeGitCommand(t *testing.T) {
 	if err := os.Remove(commondir); err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(logs.String(), "git worktree remove failed, removing the directory and its git entry") {
+		t.Errorf("expected the refused worktree remove to be logged; log:\n%s", logs.String())
+	}
 	if !strings.Contains(logs.String(), "could not remove the partial worktree's git entry") {
 		t.Errorf("expected the refused entry removal to be logged; log:\n%s", logs.String())
 	}
 	if _, err := os.Lstat(ownAdminDir(base)); err != nil {
 		t.Errorf("expected the entry to be kept when git is refused (lstat err=%v)", err)
+	}
+	requireSiblingEntryIntact(t, base, sibling, restore)
+}
+
+// cleanupPartialWorktree acts only on a path strictly inside the shared
+// checkout's worktrees directory, whatever its caller checked: the
+// worktrees directory itself, the checkout, or a path outside it is
+// refused and left in place.
+func TestCleanupPartialWorktree_RefusesPathOutsideWorktreesDir(t *testing.T) {
+	base, own, sibling, restore := partialWorktreeBase(t)
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+
+	for _, p := range []string{filepath.Join(base, "worktrees"), base, outside, filepath.Join(base, "worktrees", "..", "worktrees")} {
+		cleanupPartialWorktree(context.Background(), base, p, "agent-1")
+	}
+
+	for _, p := range []string{own, filepath.Join(base, ".git"), outside} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("expected %s to be left in place: %v", p, err)
+		}
+	}
+	if !strings.Contains(logs.String(), "refusing to clean up a path that is not inside the shared checkout's worktrees directory") {
+		t.Errorf("expected the refusal to be logged; log:\n%s", logs.String())
+	}
+	requireSiblingEntryIntact(t, base, sibling, restore)
+}
+
+// When the partial worktree's directory cannot be removed (here: it holds
+// a read-only directory with a file in it, and remove --force fails because
+// the entry is locked), the entry is left in place, that is logged, and no
+// other entry is touched.
+func TestCleanupPartialWorktree_RemoveAllFails_EntryLeftInPlace(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	base, own, sibling, restore := partialWorktreeBase(t)
+	gitT(t, base, "worktree", "lock", own)
+	stuck := filepath.Join(own, "stuck")
+	if err := os.MkdirAll(stuck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "f"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0o755) })
+	logs := captureLog(t)
+
+	cleanupPartialWorktree(context.Background(), base, own, "agent-1")
+
+	if err := os.Chmod(stuck, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "failed to remove the partial worktree's directory; its git entry is left in place") {
+		t.Errorf("expected the failed directory removal to be logged; log:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "could not remove the partial worktree's git entry") {
+		t.Errorf("no entry removal should be attempted while the directory is still there; log:\n%s", logs.String())
+	}
+	if _, err := os.Lstat(ownAdminDir(base)); err != nil {
+		t.Errorf("expected the entry to be left in place (lstat err=%v)", err)
 	}
 	requireSiblingEntryIntact(t, base, sibling, restore)
 }
