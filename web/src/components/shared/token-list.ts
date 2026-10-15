@@ -254,7 +254,8 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'artifact:steward',
     label: 'artifact:steward',
-    description: 'Share and delete artifacts owned by agents in the project (no admin grants, no moves)',
+    description:
+      'Share and delete artifacts owned by agents in the project (no admin grants, no moves)',
     resource: 'artifact',
     isAlias: false,
   },
