@@ -84,3 +84,12 @@
 ## Merge forward
 
 - 2026-10-15: merged upstream main forward; the visitor grant code now comes from upstream, and this item's changes are unchanged.
+
+## Startup refusal tests
+
+- 2026-10-15: `startNewWithRouteTable` (used by `TestNewRefusesInvalidVisitorRoute`
+  and `TestNewRefusesVisitorMethodNotServedByPattern`) now requires New to
+  refuse with exactly the `validateVisitorRoutes` error for the table, and
+  turns a panic in New into a test failure. Without this, removing the
+  visitor route check from New let New run on and panic on the nil store,
+  which no assertion reported. Test-only change.
