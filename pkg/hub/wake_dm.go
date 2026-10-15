@@ -307,11 +307,21 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		if err != nil {
 			var quotaErr *startQuotaError
 			if errors.As(err, &quotaErr) {
+				var conflict *ReservationScopeConflictError
+				if errors.As(err, &conflict) {
+					return nil, &AgentDMError{
+						Code: ErrCodeBrokerReservationScopeConflict,
+						Message: fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+							conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID),
+						HTTPStatus: http.StatusConflict,
+					}
+				}
 				if errors.Is(err, store.ErrQuotaExceeded) {
 					return nil, &AgentDMError{
 						Code:       ErrCodeQuotaExceeded,
 						Message:    quotaExceededMessage(store.LimitMaxAgentsPerBroker),
 						HTTPStatus: http.StatusTooManyRequests,
+						Details:    quotaExceededDetails(err),
 					}
 				}
 				return nil, &AgentDMError{
