@@ -304,7 +304,7 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 		return nil, st.drained()
 	case errors.Is(err, conduit.ErrRequestNotSent):
 		return nil, &relay.StaleRouteError{Reason: "not_sent"}
-	case errors.Is(err, relay.ErrStaleRoute), errors.Is(err, relay.ErrOwnerUnreachable):
+	case errors.As(err, &stale) && ownerStaleReason(stale.Reason), errors.Is(err, relay.ErrOwnerUnreachable):
 		// Refused before the target saw it: the router re-resolves.
 		return nil, err
 	case errors.Is(err, conduit.ErrRPCEncode):
@@ -317,6 +317,11 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 	// session closed or was lost, the owner relay lost it, or the attempt
 	// timed out.
 	st.written = true
+	if errors.Is(err, relay.ErrStaleRoute) {
+		// A stale route outside the owner's closed set: keep only its
+		// text, so the router does not re-resolve on it.
+		err = errors.New("owner relay refused with an unrecognised stale reason: " + err.Error())
+	}
 	if callCtx.Err() != nil {
 		err = &brokerTransportError{msg: fmt.Sprintf("request timeout after %v", t.attemptTimeout()), sentinel: errBrokerResponseTimeout}
 	}
@@ -331,6 +336,36 @@ func (t *routedBrokerTunnel) attempt(ctx context.Context, res router.Resolved, r
 		"broker_id", res.Record.PrincipalID, "session_id", res.Record.SessionID, "operation", spec.op, "error", err)
 	return nil, &relay.StaleRouteError{Reason: "session_lost"}
 }
+
+// ownerStaleReasons is the closed set of X-Conduit-Stale-Reason values an
+// owner relay sends with the 404 or 409 that refuses a route before the
+// target saw the request: not_local, the registry admission reasons,
+// relay_target_mismatch, relay_not_serving, draining and not_sent. On the
+// routed broker path only a stale route with one of them is re-resolved;
+// one without the header, or with any other value, is handled under the
+// operation class like any other failure (the request may have reached
+// the broker).
+var ownerStaleReasons = map[string]bool{
+	"not_local":                                true,
+	"relay_target_mismatch":                    true,
+	"relay_not_serving":                        true,
+	"not_sent":                                 true,
+	string(registry.ReasonNotFound):            true,
+	string(registry.ReasonNotRoutable):         true,
+	string(registry.ReasonRelayMissing):        true,
+	string(registry.ReasonRelaySuperseded):     true,
+	string(registry.ReasonRelayStale):          true,
+	string(registry.ReasonSessionStale):        true,
+	string(registry.ReasonDraining):            true,
+	string(registry.ReasonProjectMismatch):     true,
+	string(registry.ReasonExecScopeMismatch):   true,
+	string(registry.ReasonIncarnationMismatch): true,
+	string(registry.ReasonCapabilityMissing):   true,
+	string(registry.ReasonEpochObsolete):       true,
+}
+
+// ownerStaleReason reports whether reason is in ownerStaleReasons.
+func ownerStaleReason(reason string) bool { return ownerStaleReasons[reason] }
 
 // drained handles a draining session's refusal: the first is retried on a
 // replacement session (the router excludes this one), a second falls back.
