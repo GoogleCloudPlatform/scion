@@ -26,6 +26,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +56,15 @@ type ws4Env struct {
 // captures these once, in New.
 func newWS4Env(t *testing.T, superAdmin, adminWeb bool) *ws4Env {
 	t.Helper()
-	e := newTIWebEnv(t)
+	srv, st := newTestIdentityServer(t, true)
+	return newWS4EnvOn(t, srv, st, superAdmin, adminWeb)
+}
+
+// newWS4EnvOn is newWS4Env on a server the caller built (for example with
+// a store fault wrapper installed before any setup).
+func newWS4EnvOn(t *testing.T, srv *Server, st store.Store, superAdmin, adminWeb bool) *ws4Env {
+	t.Helper()
+	e := newTIWebEnvOn(t, srv, st, tiWebKey(t))
 	e.srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: superAdmin, hubID: taHubID, hubClass: config.HubClassTest}
 	e.srv.testAdminWeb = testAdminWebState{on: adminWeb}
 	sink := &taSinkBuffer{}
@@ -820,11 +829,21 @@ func ws4GateStartLine(t *testing.T, out string) map[string]any {
 	return found[0]
 }
 
-// ws4BumpFailStore fails every session generation bump.
-type ws4BumpFailStore struct{ store.Store }
+// ws4BumpFailStore fails session generation bumps while its fault switch
+// is armed, up to remaining times; otherwise it delegates. It is installed
+// with installStoreFault before any setup, so srv.store is never
+// reassigned mid-test.
+type ws4BumpFailStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	remaining atomic.Int32
+}
 
-func (ws4BumpFailStore) IncrementSessionGeneration(context.Context, string) error {
-	return errors.New("session generation bump unavailable")
+func (w *ws4BumpFailStore) IncrementSessionGeneration(ctx context.Context, id string) error {
+	if w.fault.Active() && w.remaining.Add(-1) >= 0 {
+		return errors.New("session generation bump unavailable")
+	}
+	return w.Store.IncrementSessionGeneration(ctx, id)
 }
 
 // revoke-all fails closed on the session generation bump: when a bump
@@ -832,17 +851,22 @@ func (ws4BumpFailStore) IncrementSessionGeneration(context.Context, string) erro
 // reports a revocation that may have left a live session behind. Once the
 // bump works again, revoke-all ends the session and deletes the row.
 func TestAdminWebSessions_RevokeAllFailsClosedOnBumpError(t *testing.T) {
-	e := newWS4Env(t, false, true)
+	srv, st := newTestIdentityServer(t, true)
+	bump, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *ws4BumpFailStore {
+		return &ws4BumpFailStore{Store: inner, fault: f}
+	})
+	e := newWS4EnvOn(t, srv, st, false, true)
 	iss := e.issuer("ws4-b4b-iss")
 	adm := e.issueAdmin(iss, testAdminRoleHubAdmin)
 	jar := e.adminLogin(iss, adm.Identity.ID)
 	require.Equal(t, http.StatusOK, e.apiMe(jar).Code)
 	before := e.row(adm.Identity.ID)
 
-	orig := e.srv.store
-	e.srv.store = ws4BumpFailStore{orig}
+	// One bump fails (there is one admin-kind identity), then bumps work.
+	bump.remaining.Store(1)
+	fault.Arm()
 	rec := doRequestAsUser(t, e.srv, iss, http.MethodPost, taRevokeAllPath, nil)
-	e.srv.store = orig
+	assert.Equal(t, int32(0), bump.remaining.Load(), "the bump was attempted and failed")
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	after := e.row(adm.Identity.ID)
 	assert.Equal(t, store.UserStatusActive, after.Status, "nothing was suspended")
