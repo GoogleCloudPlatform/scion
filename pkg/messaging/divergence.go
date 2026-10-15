@@ -472,11 +472,13 @@ func CheckConversationConsistency(
 
 	var messages []store.Message
 
+	// Every lookup below reads only Items, so each one passes SkipTotalCount:
+	// otherwise the store runs a COUNT of the matching messages per call.
 	if threadID != "" {
 		// Look up prior messages with the same ThreadID.
 		result, err := msgStore.ListMessages(ctx, store.MessageFilter{
 			ThreadID: threadID,
-		}, store.ListOptions{Limit: 50})
+		}, store.ListOptions{Limit: 50, SkipTotalCount: true})
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query by thread_id",
 				"thread_id", threadID, "error", err)
@@ -488,10 +490,11 @@ func CheckConversationConsistency(
 	} else if senderID != "" && recipientID != "" {
 		// Look up prior DM messages between the same two principals.
 		// Query both directions: sender→recipient and recipient→sender.
+		dmOpts := store.ListOptions{Limit: 25, SkipTotalCount: true}
 		result1, err := msgStore.ListMessages(ctx, store.MessageFilter{
 			SenderID:    senderID,
 			RecipientID: recipientID,
-		}, store.ListOptions{Limit: 25})
+		}, dmOpts)
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query by sender/recipient",
 				"sender_id", senderID, "recipient_id", recipientID, "error", err)
@@ -500,7 +503,7 @@ func CheckConversationConsistency(
 		result2, err := msgStore.ListMessages(ctx, store.MessageFilter{
 			SenderID:    recipientID,
 			RecipientID: senderID,
-		}, store.ListOptions{Limit: 25})
+		}, dmOpts)
 		if err != nil {
 			log.Warn("conversation consistency check: failed to query reverse direction",
 				"sender_id", recipientID, "recipient_id", senderID, "error", err)

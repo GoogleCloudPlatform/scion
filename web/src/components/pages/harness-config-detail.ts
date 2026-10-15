@@ -41,6 +41,14 @@ import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
 import { describeSourceUrl } from '../../shared/source-url.js';
 
+/**
+ * The image to show and check for a harness-config: the image the hub last
+ * built for it when set, otherwise config.yaml's image (ptone/scion#4219).
+ */
+export function harnessConfigImage(hc: HarnessConfig): string | undefined {
+  return hc.builtImage || hc.config?.image;
+}
+
 /** Image availability from GET /api/v1/harness-configs/{id}/image-status. */
 interface HarnessConfigImageStatus {
   image?: string;
@@ -549,7 +557,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       this.fileBrowserDataSource = new HarnessConfigFileBrowserDataSource(this.harnessConfigId);
       this.fileEditorDataSource = new HarnessConfigFileEditorDataSource(this.harnessConfigId);
 
-      if (this.harnessConfig.config?.image) {
+      if (harnessConfigImage(this.harnessConfig)) {
         void this.recheckImage();
       }
     } catch (err) {
@@ -738,7 +746,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   }
   private renderImageSection() {
     const hc = this.harnessConfig!;
-    const image = hc.config?.image;
+    const image = harnessConfigImage(hc);
     const showSection = image || this.hasDockerfile;
     if (!showSection) return nothing;
 
@@ -802,7 +810,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     st: typeof this.imageStatus
   ) {
     const hc = this.harnessConfig!;
-    const image = hc.config?.image;
+    const image = harnessConfigImage(hc);
 
     if (!broker.reachable) {
       return html`

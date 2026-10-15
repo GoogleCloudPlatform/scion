@@ -450,11 +450,49 @@ func TestHubAgentToAgentInfo_HarnessConfigFallbackToAppliedConfig(t *testing.T) 
 	}
 }
 
+func TestHaltedPhaseLabel(t *testing.T) {
+	assert.Equal(t, "halted (preempted)", haltedPhaseLabel("halted", "preempted"))
+	assert.Equal(t, "halted (out of memory)", haltedPhaseLabel("halted", "oom_killed"))
+	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", "evil\x1b[2J"), "only fixed labels are shown")
+	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", ""))
+	assert.Equal(t, "stopped", haltedPhaseLabel("stopped", "preempted"), "only halted shows its reason")
+}
+
+func TestDisplayAgents_HubHaltedShowsReason(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	code := 143
+	info := hubAgentToAgentInfo(hubclient.Agent{Slug: "halted-agent", Phase: "halted", ExitReason: "preempted", ExitCode: &code})
+	assert.Equal(t, "preempted", info.ExitReason)
+	require.NotNil(t, info.ExitCode)
+	assert.Equal(t, 143, *info.ExitCode)
+
+	var err error
+	out := captureStdout(t, func() { err = displayAgents([]api.AgentInfo{info}, false, true) })
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	assert.Contains(t, lines[1], "halted (preempted)")
+}
+
+func TestHaltedPhaseDecisions(t *testing.T) {
+	assert.True(t, hubStartImpliesResume("halted"))
+	assert.True(t, hubCreateReusesExistingAgent("halted", true, false))
+	assert.False(t, hubCreateReusesExistingAgent("halted", false, false))
+	assert.Equal(t, "Restarting", hubStartActionWord("halted", true, false))
+	done, err := launchOutcome("a", &hubclient.Agent{Phase: "halted"})
+	assert.True(t, done)
+	assert.Error(t, err, "a launch that ends halted failed")
+}
+
 func TestFilterRunningAgents(t *testing.T) {
 	agents := []api.AgentInfo{
 		{Name: "running-agent", Phase: "running"},
 		{Name: "stopped-agent", Phase: "stopped"},
 		{Name: "error-agent", Phase: "error"},
+		{Name: "halted-agent", Phase: "halted"},
 		{Name: "starting-agent", Phase: "starting"},
 		{Name: "created-agent", Phase: "created"},
 		{Name: "provisioning-agent", Phase: "provisioning"},
@@ -464,7 +502,7 @@ func TestFilterRunningAgents(t *testing.T) {
 
 	filtered := filterRunningAgents(agents)
 
-	// Should exclude stopped and error, keep everything else
+	// Should exclude stopped, error and halted, keep everything else
 	expected := map[string]bool{
 		"running-agent":      true,
 		"starting-agent":     true,

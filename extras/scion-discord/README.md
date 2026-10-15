@@ -104,6 +104,7 @@ server:
           # send_queue_size: 100     # max queued messages per channel
           # send_min_delay: 50ms     # minimum delay between sends (rate limiting)
           # agent_cache_ttl: 30s     # how long to cache agent lists from hub
+          # async_create: true       # opt /scion thread in to async agent create
 ```
 
 ### 5. Start the Hub
@@ -300,6 +301,7 @@ These keys go in `plugins.broker.discord.config` in `settings.yaml`:
 | `send_queue_size` | No | `100` | Max queued outbound messages per channel |
 | `send_min_delay` | No | `50ms` | Minimum delay between sends (rate-limit protection) |
 | `agent_cache_ttl` | No | `5m` | TTL for cached agent lists from the hub |
+| `async_create` | No | `true` | `/scion thread` asks the hub for an asynchronous create. When the hub's `hub.async_agent_launch` experiment is on, the hub answers as soon as the broker accepts the create; the bot then edits the thread's status message with each launch step (shown as its code, for example `image_pull`). It ends with "✅ Ready — agent `<slug>`" once the agent is running, "❌ Agent `<slug>` failed to start (`<code>`): <message>" when the launch fails, or "⚠️ Couldn't confirm that agent `<slug>` started: <reason>." when the wait ends first (the launch budget ran out, the agent was deleted, the hub refused the status read, or it gave up 13 minutes after the command, the limit of the Discord interaction; the agent may still start). The thread is bound and the kickoff is sent only once the agent is running; after a failure or an unconfirmed start the thread stays unbound (bind it later with `/scion default <agent>`). A hub without async launch answers synchronously, as before. `false` always uses the synchronous create. |
 | `register_url` | No | `hub_url` | Public URL for user-facing registration links. Used instead of internal `hub_url` to fix broken links behind auth proxies. |
 | `send_search_root` | No | `/scion-volumes/` | Configurable base directory for file searches when executing `/scion send` commands. |
 

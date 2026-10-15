@@ -1440,6 +1440,7 @@ var unreachablePhases = map[string]bool{
 	string(state.PhaseStopping):  true,
 	string(state.PhaseStopped):   true,
 	string(state.PhaseError):     true,
+	string(state.PhaseHalted):    true,
 }
 
 // agentGoneReason is the failure reason recorded when the primary agent no

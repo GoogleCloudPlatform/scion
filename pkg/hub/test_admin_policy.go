@@ -550,6 +550,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.ChatThreadGroups:             testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
+	experiments.AgentPlugins:                 testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

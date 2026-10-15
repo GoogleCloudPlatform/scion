@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 	"github.com/knadh/koanf/parsers/yaml"
@@ -1474,6 +1475,12 @@ type VersionedSettings struct {
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
+	// LocalExperiments enables experiments for solo/local (non-broker)
+	// provisioning, where no hub decides. Only experiments the local
+	// provisioning path consults take effect (hub.agent_plugins); a broker
+	// never reads it. Unknown names are logged once and ignored.
+	LocalExperiments []string `json:"local_experiments,omitempty" yaml:"local_experiments,omitempty" koanf:"local_experiments"`
+
 	// activeProfileErr is set by the hub settings overlay when it replaced
 	// Profiles, ActiveProfile is not one of them, and there is not exactly
 	// one stored profile to use instead (see resolveOverlaidActiveProfile).
@@ -1608,6 +1615,7 @@ type V1ServerConfig struct {
 	Mode             string                    `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
 	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Relay            *V1ServerRelayConfig      `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
 	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
 	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
 	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
@@ -2004,6 +2012,31 @@ type V1ServerHubConduitConfig struct {
 	// re-checks the principal and renews or closes the stream (defaults
 	// "8h" for user, "24h" for broker and agent; each 1m-168h).
 	StreamAuthzMax *V1ServerHubConduitStreamAuthzMax `json:"stream_authz_max,omitempty" yaml:"stream_authz_max,omitempty" koanf:"stream_authz_max"`
+	// RelayMode is "in_process" (default: every hub process runs a relay)
+	// or "external" (the hub runs no relay; separate relay processes,
+	// scion server --role relay, hold the conduit sessions). Read at
+	// startup.
+	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
+	// PeerSecret is the dedicated relay-peer secret: raw octets (one
+	// trailing newline removed), at least 32 of them, 16 distinct:
+	// the HMAC key of every relay-peer call is derived from it wherever a
+	// separate relay runs. Required in external mode and on --role relay;
+	// it must differ from the session secret. Never stored in the
+	// database, returned by the server-config API or logged. Read at
+	// startup.
+	PeerSecret string `json:"peer_secret,omitempty" yaml:"peer_secret,omitempty" koanf:"peer_secret"`
+}
+
+// V1ServerRelayConfig holds the settings of a separate relay process,
+// scion server --role relay (server.relay; design §3.9 "Separate relay").
+// Settings it shares with the hub's relay stay under server.hub.conduit.
+type V1ServerRelayConfig struct {
+	// HubInternalURL is the base URL of the hub internal API the relay
+	// calls for admission, RPCs and re-checks (any hub replica serves it).
+	HubInternalURL string `json:"hub_internal_url,omitempty" yaml:"hub_internal_url,omitempty" koanf:"hub_internal_url"`
+	// PublicURL is the relay's own public URL, recorded as its
+	// relay_instances.public_endpoint.
+	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -3620,11 +3653,42 @@ func resolveEffectiveProjectPath(projectPath string) string {
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix)
 func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
+	k, err := loadVersionedSettingsKoanf(projectPath, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal into VersionedSettings struct
+	settings := &VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
+		return nil, err
+	}
+	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
+		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
+		}
+	}
+
+	return settings, nil
+}
+
+// loadVersionedSettingsKoanf merges LoadVersionedSettings' layers into one
+// koanf instance. withDefaults false leaves out layer 1 (the embedded
+// defaults), so ProfileOrigins can tell settings that come from the files
+// and environment from the built-in defaults with the same layer list.
+func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.Koanf, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML)
-	if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
-		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+	if withDefaults {
+		if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
+			_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+		}
 	}
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
@@ -3714,23 +3778,20 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// Unmarshal into VersionedSettings struct
-	settings := &VersionedSettings{
-		Runtimes:       make(map[string]V1RuntimeConfig),
-		HarnessConfigs: make(map[string]HarnessConfigEntry),
-		Profiles:       make(map[string]V1ProfileConfig),
-	}
+	return k, nil
+}
 
-	if err := unmarshalVersionedSettings(k, settings); err != nil {
-		return nil, err
-	}
-	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
-			return nil, err
+// warnUnknownLocalExperiments logs, once per name and process, each
+// local_experiments entry that is not a registered experiment. Unknown names
+// are never an error.
+func warnUnknownLocalExperiments(names []string) {
+	reg := experiments.Default()
+	for _, n := range names {
+		if _, ok := reg.Lookup(n); ok {
+			continue
 		}
+		warnUnparseableSettingOnce("local_experiments."+n, "settings: local_experiments names an unknown experiment; ignoring it")
 	}
-
-	return settings, nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3760,10 +3821,14 @@ func unmarshalVersionedSettings(k *koanf.Koanf, settings *VersionedSettings) err
 			return err
 		}
 	}
-	if err := k.Unmarshal("", settings); err == nil {
-		return nil
+	err := k.Unmarshal("", settings)
+	if err != nil {
+		err = unmarshalSkippingBadSettings(k, settings)
 	}
-	return unmarshalSkippingBadSettings(k, settings)
+	if err == nil {
+		warnUnknownLocalExperiments(settings.LocalExperiments)
+	}
+	return err
 }
 
 // unmarshalSkippingBadSettings handles a decode failure in
@@ -3953,6 +4018,9 @@ func versionedEnvKeyMapper(s string) string {
 	// Handle nested server keys — deep nesting requires mapping compound field names
 	if strings.HasPrefix(key, "server_") {
 		rest := strings.TrimPrefix(key, "server_")
+		if a, ok := lookupServerEnvPathAlias(rest); ok {
+			return a.Path
+		}
 		return "server." + mapServerEnvKey(rest)
 	}
 	// Handle nested telemetry keys — deep nesting with compound field names
@@ -3973,6 +4041,55 @@ func versionedEnvKeyMapper(s string) string {
 var conduitV1EnvListKeys = []string{
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
+}
+
+// serverEnvPathAliases is the seed of the single env mapping table
+// (ptone/scion#3911): each entry names one server setting by its exact
+// settings path and the same setting's GlobalConfig koanf path. Both env
+// spellings of the setting, the canonical one (underscores inside a field
+// removed: SCION_SERVER_HUB_CONDUIT_PEERSECRET) and the underscored one
+// (SCION_SERVER_HUB_CONDUIT_PEER_SECRET), map to it in every env consumer:
+// versionedEnvKeyMapper, serverEnvToOpsettingsKey and envKeyToConfigKey
+// consult this table before their generic splitting. Entries match by the
+// whole path, never by a bare field name. The other server settings still
+// go through knownCompoundFields and the per-segment tables until #3911
+// moves them here.
+var serverEnvPathAliases = []serverEnvPathAlias{
+	{Path: "server.hub.conduit.peer_secret", GlobalConfig: "hub.conduit.peerSecret"},
+	{Path: "server.hub.conduit.relay_mode", GlobalConfig: "hub.conduit.relayMode"},
+	{Path: "server.relay.hub_internal_url", GlobalConfig: "relay.hubInternalUrl"},
+	{Path: "server.relay.public_url", GlobalConfig: "relay.publicUrl"},
+}
+
+// serverEnvPathAlias is one serverEnvPathAliases entry.
+type serverEnvPathAlias struct {
+	// Path is the settings (VersionedSettings, opsettings) key.
+	Path string
+	// GlobalConfig is the GlobalConfig koanf path of the same setting.
+	GlobalConfig string
+}
+
+// envSpellings returns the two env spellings of a.Path after SCION_SERVER_,
+// lower-cased: the canonical one and the underscored one.
+func (a serverEnvPathAlias) envSpellings() (canonical, underscored string) {
+	segs := strings.Split(strings.TrimPrefix(a.Path, "server."), ".")
+	underscored = strings.Join(segs, "_")
+	for i, s := range segs {
+		segs[i] = strings.ReplaceAll(s, "_", "")
+	}
+	return strings.Join(segs, "_"), underscored
+}
+
+// lookupServerEnvPathAlias returns the serverEnvPathAliases entry that rest,
+// an env name after SCION_SERVER_ (any case), spells.
+func lookupServerEnvPathAlias(rest string) (serverEnvPathAlias, bool) {
+	r := strings.ToLower(rest)
+	for _, a := range serverEnvPathAliases {
+		if c, u := a.envSpellings(); r == c || r == u {
+			return a, true
+		}
+	}
+	return serverEnvPathAlias{}, false
 }
 
 // knownCompoundFields lists multi-word snake_case field names used in server config.
@@ -4122,7 +4239,10 @@ func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
 		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
-		"transport", "scheduler":
+		"transport", "scheduler",
+		// relay: server.relay keys that serverEnvPathAliases does not list
+		// (future ones) map generically, like the other sections.
+		"relay":
 		return true
 	}
 	return false
@@ -4383,6 +4503,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				LifetimeCap:          c.LifetimeCap,
 				ShutdownGrace:        c.ShutdownGrace,
 				ProxySessionMaxAge:   c.ProxySessionMaxAge,
+				RelayMode:            c.RelayMode,
+				PeerSecret:           c.PeerSecret,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4397,6 +4519,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				TracingEnabled: copyBoolPtr(o.TracingEnabled),
 			}
 		}
+	}
+
+	if r := v1.Relay; r != nil {
+		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
 	}
 
 	// Broker config
@@ -4748,6 +4874,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			LifetimeCap:          c.LifetimeCap,
 			ShutdownGrace:        c.ShutdownGrace,
 			ProxySessionMaxAge:   c.ProxySessionMaxAge,
+			RelayMode:            c.RelayMode,
+			PeerSecret:           c.PeerSecret,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4798,6 +4926,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
+	if r := gc.Relay; !r.IsZero() {
+		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+	}
 
 	// Broker config
 	v1.Broker = &V1BrokerConfig{
@@ -5315,6 +5446,13 @@ func settingsCandidateDirs(projectPath string) []string {
 // - If all user files are legacy or absent → uses LoadSettingsKoanf + AdaptLegacySettings
 // Returns (settings, deprecation_warnings, error).
 func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, error) {
+	return loadEffectiveSettings(projectPath, true)
+}
+
+// loadEffectiveSettings is LoadEffectiveSettings; withGlobalOverlay false
+// skips the installed global settings overlay, for a caller that applies a
+// stored set of its own (ProfileCatalogView).
+func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectHierarchyFormat(projectPath)
 	if hasVersioned {
 		vs, err := LoadVersionedSettings(projectPath)
@@ -5327,7 +5465,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
-		if o := globalOverlay; o != nil {
+		if o := globalOverlay; o != nil && withGlobalOverlay {
 			o.Apply(vs)
 		}
 		return vs, warnings, nil
@@ -5370,7 +5508,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	vs, legacyWarnings := AdaptLegacySettings(legacy)
 	warnings = append(warnings, legacyWarnings...)
 	// Apply DB-backed settings overlay (co-located hub+broker mode).
-	if o := globalOverlay; o != nil {
+	if o := globalOverlay; o != nil && withGlobalOverlay {
 		o.Apply(vs)
 	}
 	return vs, warnings, nil

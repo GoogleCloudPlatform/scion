@@ -167,7 +167,8 @@
     "server.hub.membership_sweep_report_only",
     "server.hub.missing_agent_grace",
     "server.hub.conduit",
-    "server.hub.port_proxy"
+    "server.hub.port_proxy",
+    "server.relay"
   ],
   "file_keys": [
     "active_profile",
