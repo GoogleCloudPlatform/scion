@@ -177,6 +177,11 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 	if !ok {
 		return nil, nil
 	}
+	// A transport identity is never linked or created as a user
+	// (TestTIWebIAP_TransportIdentityInvariant).
+	if s.isTransportIdentity(email) {
+		return nil, nil
+	}
 	pending, err := s.store.GetFederatedUserByEmail(ctx, issuer, email)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -284,6 +289,11 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 func (s *Server) applyVisitorRules(ctx context.Context, fu *FederatedUserIdentity, u *store.User) {
 	issuer, email, ok := s.visitorTokenEmail(fu)
 	if !ok || u.HomeIssuer == nil || *u.HomeIssuer != issuer {
+		return
+	}
+	// A rule never binds a transport identity, including an account linked
+	// before its email became one.
+	if s.isTransportIdentity(email) {
 		return
 	}
 	rules, err := s.activeVisitorRulesForEmail(ctx, issuer, email)

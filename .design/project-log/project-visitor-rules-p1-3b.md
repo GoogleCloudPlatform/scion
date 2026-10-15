@@ -145,3 +145,5 @@ after review.
 2026-10-14: merged upstream main (with item 3A as one commit) in. Item 3A's files now carry upstream's text with only this item's changes on top; the operation catalog report counts upstream's operations plus this item's four visitor rule operations (297).
 
 2026-10-15: merged upstream main in again. The visitor binding source-rule check in createRoleBinding now sits before upstream's test admin system binding check, which takes the role name; the API reference keeps upstream's grant route text and this item's rule route text.
+
+2026-10-15: first contact through a visitor rule now checks the transport identity predicate (Server.isTransportIdentity) after visitorTokenEmail and before any lookup or account creation, so the platform service account and a proxy driver principal are never linked or created by a rule; the request keeps the verified federated identity, as for any email with nothing to link. applyVisitorRules checks it too, so an account linked before its email became a transport identity is not bound by a rule. linkPendingVisitor is listed in the transport identity census creators set.

@@ -1177,3 +1177,99 @@ func TestProjectVisitorRules_ConduitAuthzChangedAfterCommit(t *testing.T) {
 		assert.Nil(t, bindings[0].ExpiresAt, "the binding's window is unchanged")
 	})
 }
+
+// A visitor rule does not link or create an account for a transport
+// identity: the platform service account and a proxy driver principal
+// (also given in mixed case), each in a domain that has a rule, are not
+// served as visitors, and get no federated account, no rule binding and no
+// visitor_linked audit. Another email in each of those domains is still
+// linked and bound by the rule.
+func TestFederatedVisitor_RuleSkipsTransportIdentities(t *testing.T) {
+	const (
+		driver   = "web-driver@partner.example"
+		platform = "platform-sa@visitor-proj.iam.gserviceaccount.com"
+	)
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		srv.proxyDrivers = newDriverPrincipalSet([]string{driver})
+		srv.platformAuthSA = platform
+	})
+	ctx := context.Background()
+	issuer := store.NormalizeFederatedIssuer(grantTestOtherIssuer)
+	driverRule := f.addRuleOK(t, grantTestOtherIssuer, "partner.example")
+	platformRule := f.addRuleOK(t, grantTestOtherIssuer, "visitor-proj.iam.gserviceaccount.com")
+
+	for name, tc := range map[string]struct{ subject, email string }{
+		"driver principal":                {"sub-driver", driver},
+		"driver principal, mixed case":    {"sub-driver-mixed", "Web-Driver@Partner.EXAMPLE"},
+		"platform service account":        {"sub-platform", platform},
+		"platform service account, mixed": {"sub-platform-mixed", "Platform-SA@visitor-proj.IAM.gserviceaccount.com"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok := f.token(t, grantTestOtherIssuer, tc.subject, tc.email, boolPtr(true))
+			assert.Nil(t, f.visitorThrough(t, tok), "not served as a visitor")
+			_, err := f.st.GetFederatedUserByEmail(ctx, issuer, store.NormalizeFederatedEmail(tc.email))
+			assert.ErrorIs(t, err, store.ErrNotFound, "no federated account for %s", tc.email)
+			_, err = f.st.GetFederatedUserBySubject(ctx, grantTestOtherIssuer, tc.subject)
+			assert.ErrorIs(t, err, store.ErrNotFound, "no account linked to %s", tc.subject)
+		})
+	}
+	assert.Empty(t, f.ruleBindings(t, f.projectID, driverRule.ID), "no binding in the driver's domain")
+	assert.Empty(t, f.ruleBindings(t, f.projectID, platformRule.ID), "no binding in the platform account's domain")
+	assert.Empty(t, f.audits(t, mutationTypeVisitorLinked), "no visitor_linked audit")
+
+	// Control: other emails in the same domains are linked and bound.
+	for _, tc := range []struct {
+		subject, email string
+		rule           ProjectVisitorRuleView
+	}{
+		{"sub-ann", "ann@partner.example", driverRule},
+		{"sub-bo", "bo@visitor-proj.iam.gserviceaccount.com", platformRule},
+	} {
+		v := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, tc.subject, tc.email, boolPtr(true)))
+		require.NotNil(t, v, "%s is a visitor through the rule", tc.email)
+		bindings := f.ruleBindings(t, f.projectID, tc.rule.ID)
+		require.Len(t, bindings, 1, "%s is bound", tc.email)
+		assert.Equal(t, v.ID(), bindings[0].PrincipalID)
+	}
+}
+
+// A rule does not bind an account linked before its email became a
+// transport identity: after the email is configured as a proxy driver
+// principal or as the platform service account, a matching rule added
+// later writes no binding and no visitor_linked audit on the next request.
+func TestFederatedVisitor_RuleDoesNotBindLaterTransportIdentity(t *testing.T) {
+	const (
+		driver   = "later-driver@any.example"
+		platform = "later-platform@any.example"
+	)
+	f := newVisitorGrantFixture(t)
+	ctx := context.Background()
+	tokens := map[string]string{}
+	for sub, email := range map[string]string{"sub-later-driver": driver, "sub-later-platform": platform} {
+		f.grantOK(t, grantTestOtherIssuer, email)
+		tokens[sub] = f.token(t, grantTestOtherIssuer, sub, email, boolPtr(true))
+		require.NotNil(t, f.visitorThrough(t, tokens[sub]), "%s links through its grant", email)
+	}
+	linkedBefore := len(f.audits(t, mutationTypeVisitorLinked))
+
+	f.srv.proxyDrivers = newDriverPrincipalSet([]string{driver})
+	f.srv.platformAuthSA = platform
+	otherProject := tid(t.Name() + "-other")
+	createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
+	rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
+	require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
+
+	for _, tok := range tokens {
+		_, _, code := f.identityThroughMiddleware(t, tok)
+		require.Equal(t, http.StatusOK, code)
+	}
+	assert.Empty(t, f.ruleBindings(t, otherProject, rule.ID), "the rule binds neither account")
+	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), linkedBefore, "no new visitor_linked audit")
+
+	// Control: another account in the domain is bound by the rule.
+	v := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-cal", "cal@any.example", boolPtr(true)))
+	require.NotNil(t, v)
+	bindings := f.ruleBindings(t, otherProject, rule.ID)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, v.ID(), bindings[0].PrincipalID)
+}
