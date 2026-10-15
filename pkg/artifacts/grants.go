@@ -383,21 +383,22 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // cannot read the artifact, and code CodeReviewReplacesAccess when the
 // user holds a principal read, write or admin grant. A refusal by the
 // store's re-check of the home and owner under the artifact's lock keeps
-// the uniform 403. Every 403 here is logged once (logReviewGrantRefusal).
+// the uniform 403. Every 403 here writes one decision log entry
+// (logReviewGrantRefusal).
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
 	var clause string // the review clause that allowed the grant, for the decision log
 	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
 	ctx := r.Context()
 	subject, refusal := s.reviewGrantSubject(r, a)
 	if refusal != "" {
-		s.logReviewGrantRefusal(ctx, a, refusal, subject)
+		s.logReviewGrantRefusal(r, a, refusal, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	}
 	if _, ok := s.host.(ReviewSubjectAuthority); !ok {
 		// Without the subject check nobody passes it (fail closed), but
 		// saying the user cannot read would not be true: the uniform 403.
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	}
@@ -421,7 +422,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 			s.refuseReviewReplacesAccess(w, r, a, subject)
 			return
 		}
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
 		writeError(w, http.StatusForbidden, CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
 		return
 	}
@@ -438,7 +439,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	case errors.Is(err, ErrReviewGrantRefused):
 		// The home or owner changed since the caller's authority was
 		// checked: the uniform 403.
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalStoreRefused, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalStoreRefused, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	case errors.Is(err, ErrAttachmentNotShareable):
@@ -467,7 +468,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 // refuseReviewReplacesAccess logs and answers putReviewGrant's refusal of
 // a user who holds a principal read, write or admin grant on a.
 func (s *Service) refuseReviewReplacesAccess(w http.ResponseWriter, r *http.Request, a *Artifact, subject string) {
-	s.logReviewGrantRefusal(r.Context(), a, reviewRefusalExistingAccess, subject)
+	s.logReviewGrantRefusal(r, a, reviewRefusalExistingAccess, subject)
 	writeError(w, http.StatusForbidden, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 }
 
