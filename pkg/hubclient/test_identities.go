@@ -62,6 +62,23 @@ type TestIdentityService interface {
 	// any earlier unredeemed one. The hub answers 404 when web sessions are
 	// not available on it.
 	WebLoginCode(ctx context.Context, id string) (*TestIdentityWebLoginCode, error)
+
+	// IssueAdmin creates a test identity with an admin role (POST
+	// /api/v1/test-identities/admin) and returns its one access token.
+	// The hub answers 404 unless it started with --test-mode=admin (or
+	// super-admin for the super-admin role). See test_admin_identities.go.
+	IssueAdmin(ctx context.Context, req *IssueTestAdminIdentityRequest) (*TestAdminIdentityTokenResponse, error)
+
+	// RevokeAllAdmin revokes every test identity with an admin role (POST
+	// /api/v1/test-identities/admin/revoke-all). Human super-admin on an
+	// interactive session only.
+	RevokeAllAdmin(ctx context.Context) (*RevokeAllTestAdminIdentitiesResponse, error)
+
+	// AdminResidue returns the residue report of one test identity with an
+	// admin role, live or purged (GET
+	// /api/v1/test-identities/admin/{id}/residue). Human super-admin on an
+	// interactive session only.
+	AdminResidue(ctx context.Context, id string) (*TestAdminResidueReport, error)
 }
 
 // TestIdentityPurgeCounts counts what a purge removed.
