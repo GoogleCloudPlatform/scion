@@ -301,7 +301,8 @@ func TestCatalogWideList_UsesListSelectorThroughEvidence(t *testing.T) {
 }
 
 // TestListFilters_CannotEnlargeTokenResults pins that caller-supplied list
-// filters (projectId, a project slug, scopeId, ancestorId) only narrow a
+// filters (projectId, a project slug, git remote or name, scopeId,
+// ancestorId, lineageRootId, ids) only narrow a
 // token's results: a project token asking for another project's rows gets
 // none, while a hub token of the same holder gets them through the same
 // filter.
@@ -311,12 +312,16 @@ func TestListFilters_CannotEnlargeTokenResults(t *testing.T) {
 	now := time.Now().UTC()
 	tmplB := uuid.NewString()
 	require.NoError(t, f.s.CreateTemplate(ctx, &store.Template{ID: tmplB, Name: "filter-tmpl-b", Slug: "filter-tmpl-b-" + tmplB[:8], Scope: store.TemplateScopeProject, ScopeID: f.projB, Harness: "claude", Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	cfgB := uuid.NewString()
+	require.NoError(t, f.s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: cfgB, Name: "filter-cfg-b", Slug: "filter-cfg-b-" + cfgB[:8], Scope: store.HarnessConfigScopeProject, ScopeID: f.projB, Harness: "claude", Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
 	child := &store.Agent{ID: uuid.NewString(), Slug: "filter-child-b", Name: "Filter Child B", ProjectID: f.projB, Phase: "running", Ancestry: []string{f.agentB.ID}}
 	require.NoError(t, f.s.CreateAgent(ctx, child))
 	projB, err := f.s.GetProject(ctx, f.projB)
 	require.NoError(t, err)
+	projB.GitRemote = "github.com/example/list-filter-b"
+	require.NoError(t, f.s.UpdateProject(ctx, projB))
 
-	scopes := []string{"agent:list", "project:list", "skill:list", "skill:read", "template:read"}
+	scopes := []string{"agent:list", "agent:read", "project:list", "project:read", "skill:list", "skill:read", "template:read", "harness_config:read"}
 	keyA := f.mint(t, f.admin, projectBoundary(f.projA), scopes...)
 	hub := f.mint(t, f.admin, hubBoundary(), scopes...)
 
@@ -326,7 +331,13 @@ func TestListFilters_CannotEnlargeTokenResults(t *testing.T) {
 		{"agents by projectId", "/api/v1/agents?projectId=" + f.projB, "agents", f.agentB.ID},
 		{"agents by project slug", "/api/v1/agents?projectId=" + url.QueryEscape(projB.Slug), "agents", f.agentB.ID},
 		{"agents by ancestorId", "/api/v1/agents?ancestorId=" + f.agentB.ID, "agents", child.ID},
+		{"agents by lineageRootId", "/api/v1/agents?lineageRootId=" + f.agentB.ID, "agents", child.ID},
+		{"agents by ids", "/api/v1/agents?sort=updated&ids=" + f.agentB.ID, "agents", f.agentB.ID},
 		{"projects by slug", "/api/v1/projects?slug=" + url.QueryEscape(projB.Slug), "projects", f.projB},
+		{"projects by gitRemote", "/api/v1/projects?gitRemote=" + url.QueryEscape(projB.GitRemote), "projects", f.projB},
+		{"projects by name", "/api/v1/projects?name=" + url.QueryEscape(projB.Name), "projects", f.projB},
+		{"harness configs by projectId", "/api/v1/harness-configs?projectId=" + f.projB, "harnessConfigs", cfgB},
+		{"harness configs by scopeId", "/api/v1/harness-configs?scope=project&scopeId=" + f.projB, "harnessConfigs", cfgB},
 		{"skills by scopeId", "/api/v1/skills?scope=project&scopeId=" + f.projB, "skills", f.b},
 		{"templates by projectId", "/api/v1/templates?projectId=" + f.projB, "templates", tmplB},
 		{"templates by scopeId", "/api/v1/templates?scope=project&scopeId=" + f.projB, "templates", tmplB},
@@ -338,4 +349,60 @@ func TestListFilters_CannotEnlargeTokenResults(t *testing.T) {
 			assert.Contains(t, decodeListPage(t, f.call(t, hub, http.MethodGet, tc.path, nil), tc.itemsKey).IDs, tc.rowB, "fixture: the filter matches the row for a hub token")
 		})
 	}
+}
+
+// TestAgentListSidePaths_ProjectTokenNeedsAgentList pins the agent.list
+// rule on the two views that reuse it: the agent rows of a chat space's
+// member list and the agents section of a GCP service account status. A
+// project token without agent:list gets no agent rows from either; with
+// agent:list it gets its project's agents.
+func TestAgentListSidePaths_ProjectTokenNeedsAgentList(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	membersPath := "/api/v1/chat/spaces/" + f.projA + "/members"
+	agentIDs := func(rec *httptest.ResponseRecorder) []string {
+		ids := []string{}
+		for _, a := range decodeSpaceMembers(t, rec.Code, rec.Body.Bytes()).Agents {
+			ids = append(ids, a.ID)
+		}
+		return ids
+	}
+
+	sa := mappingTestSA(t, f.s, f.projA, mappedGSA)
+	saAgent := createSAStatusAgent(t, f.s, f.projA, "list-side-sa-agent", sa.ID)
+	admin, err := f.s.GetUser(ctx, f.admin)
+	require.NoError(t, err)
+	adminUser := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "api")
+	saAgents := func(boundary TokenBoundary, selectors ...string) GCPServiceAccountAgents {
+		token := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, boundary, selectors, "side-"+uuid.NewString()[:8], bearerCeiling(t, selectors...), nil)
+		return f.srv.gcpServiceAccountAgents(contextWithIdentity(ctx, token), f.projA, sa.ID)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		boundary  TokenBoundary
+		selectors []string
+		listed    bool
+	}{
+		{"project token without agent:list", projectBoundary(f.projA), []string{"project:read"}, false},
+		{"project token with agent:list", projectBoundary(f.projA), []string{"project:read", "agent:list"}, true},
+		{"hub token without agent:list", hubBoundary(), []string{"project:read"}, false},
+		{"hub token with agent:list", hubBoundary(), []string{"project:read", "agent:list"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			members := agentIDs(f.call(t, f.mint(t, f.admin, tc.boundary, tc.selectors...), http.MethodGet, membersPath, nil))
+			got := saAgents(tc.boundary, tc.selectors...)
+			if tc.listed {
+				assert.Contains(t, members, f.agentA.ID)
+				assert.Contains(t, got.Names, saAgent.Name)
+				return
+			}
+			assert.Empty(t, members, "no agent rows without agent:list")
+			assert.Empty(t, got.Names, "no agents section without agent:list")
+		})
+	}
+
+	// A project token for another project gets no agent rows of A from
+	// the status view either.
+	assert.Empty(t, saAgents(projectBoundary(f.projB), "project:read", "agent:list").Names)
 }
