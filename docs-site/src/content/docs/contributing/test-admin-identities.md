@@ -11,6 +11,8 @@ This runbook is for operators of **test-designated hubs** who run admin-level au
 
 The routes behind them are described under "Test admin identities" in the [API reference](/scion/reference/api/). The commands are listed under `scion hub test-identity` in the [CLI reference](/scion/reference/cli/). Member and viewer test identities are covered in [Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/).
 
+A test identity with an admin role can also hold a browser session, on systemd test hubs that turn it on at startup with `server.hub.test_identities.admin_web_sessions` set to the hub id. Such a session never lasts longer than the kind's maximum identity lifetime (60 minutes for a test hub-admin, 30 for a test super-admin), and `revoke-all` ends it before revoking the identity. See [Admin test identities](/scion/contributing/test-identity-browser-sessions/#admin-test-identities-systemd-test-hubs-only) in the browser sessions guide.
+
 All three commands are for human operators only:
 
 - They are not available in agent mode.
@@ -91,6 +93,7 @@ Only a human super-admin signed in interactively (`scion hub auth login`) may re
 `revoke-all` revokes **every** test identity with an admin role on the hub:
 
 - Each identity is deleted. If it owns agents or is a project's last owner, it is suspended and its role bindings are removed instead.
+- Before any identity is deleted or suspended, the hub advances the session generation of every one of them, so their browser sessions end on their next request.
 - Its tokens stop working at once.
 
 Only a human super-admin signed in interactively may run it. Other callers get the same named error as for `residue`.
@@ -116,7 +119,7 @@ Follow these steps:
    scion hub test-identity revoke-all --reason "INC-123 stop test admins"
    ```
 
-   `--reason` is required. It is printed with the result as **your own record only**: the hub does not receive or store the reason. The hub's audit records who revoked each identity and when. Keep the reason in your incident or runbook log. The output lists every identity and its outcome (`deleted` or `suspended`). `--json` prints the same facts. If the command fails partway (for example `503` when the hub cannot write its test admin audit), some identities may already be revoked: check with `--dry-run` and run it again. It is safe to repeat.
+   `--reason` is required. It is printed with the result as **your own record only**: the hub does not receive or store the reason. The hub's audit records who revoked each identity and when. Keep the reason in your incident or runbook log. The output lists every identity and its outcome (`deleted` or `suspended`). `--json` prints the same facts. If the command fails partway (for example `503` when the hub cannot write its test admin audit), some identities may already be revoked: check with `--dry-run` and run it again. If it answers `503` because the hub could not advance an identity's session generation, nothing was deleted or suspended; run it again. It is safe to repeat.
 
 3. **Clean up what is left.** For each suspended identity, check `scion hub test-identity residue <id>`, then run `scion hub test-identity delete <id> --purge`.
 
