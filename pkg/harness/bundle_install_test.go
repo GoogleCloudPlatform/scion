@@ -62,7 +62,7 @@ func TestBundleInstall_OpenCode(t *testing.T) {
 	}
 
 	// 2. Simulate install: CopyDir from bundle source to a temp target
-	// (mirrors cmd/harness_config_install.go installLocally).
+	// (as the former local harness-config install did).
 	installDir := filepath.Join(t.TempDir(), "opencode-test")
 	if err := util.CopyDir(src, installDir); err != nil {
 		t.Fatalf("CopyDir (install): %v", err)

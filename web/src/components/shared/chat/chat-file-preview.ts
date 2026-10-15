@@ -217,6 +217,15 @@ function downloadUrlFor(target: PreviewTarget): string {
   return buildFileApiUrl(target.projectId, target.location);
 }
 
+/**
+ * The query that asks the hub to serve an attachment's bytes itself. On a hub
+ * whose attachments live in object storage, the attachment route otherwise
+ * answers with a redirect to a signed object-store URL, which `fetch()`
+ * cannot follow because it is cross-origin. The legacy attachment route
+ * ignores it. Plain links (download, `<img src>`) keep the redirect.
+ */
+const ATTACHMENT_STREAM_QUERY = 'stream=1';
+
 /** Classify a non-OK response into a short, actionable message. */
 async function describeHttpError(res: Response): Promise<string> {
   if (res.status === 403) return "You don't have permission to view this file.";
@@ -465,7 +474,11 @@ export class ScionChatFilePreview extends LitElement {
 
     try {
       if (isImage) {
-        const res = await apiFetch(`${baseUrl}?view=true`, {
+        const imageUrl =
+          target.kind === 'attachment'
+            ? `${baseUrl}?view=true&${ATTACHMENT_STREAM_QUERY}`
+            : `${baseUrl}?view=true`;
+        const res = await apiFetch(imageUrl, {
           signal: controller.signal,
         });
         if (gen !== this.generation) return; // superseded — discard silently
@@ -497,7 +510,11 @@ export class ScionChatFilePreview extends LitElement {
       // the gcs endpoint serves raw bytes directly, classified from its own
       // response headers (see the dedicated gcs branch just below).
       const url =
-        target.kind === 'attachment' || target.kind === 'gcs' ? baseUrl : `${baseUrl}?format=json`;
+        target.kind === 'attachment'
+          ? `${baseUrl}?${ATTACHMENT_STREAM_QUERY}`
+          : target.kind === 'gcs'
+            ? baseUrl
+            : `${baseUrl}?format=json`;
       const res = await apiFetch(url, { signal: controller.signal });
       if (gen !== this.generation) return;
       if (!res.ok) {

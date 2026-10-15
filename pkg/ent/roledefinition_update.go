@@ -267,6 +267,9 @@ func (_u *RoleDefinitionUpdate) sqlSave(ctx context.Context) (_node int, err err
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(roledefinition.FieldUpdated, field.TypeTime, value)
 	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(roledefinition.FieldIssuanceID, field.TypeString)
+	}
 	if _u.mutation.RoleBindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -597,6 +600,9 @@ func (_u *RoleDefinitionUpdateOne) sqlSave(ctx context.Context) (_node *RoleDefi
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(roledefinition.FieldUpdated, field.TypeTime, value)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(roledefinition.FieldIssuanceID, field.TypeString)
 	}
 	if _u.mutation.RoleBindingsCleared() {
 		edge := &sqlgraph.EdgeSpec{
