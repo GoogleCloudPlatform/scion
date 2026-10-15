@@ -721,6 +721,8 @@ server:
 
 `launch_timeout` is read only at Hub startup, so restart the Hub after changing it. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
 
+A broker pod that stops during a launch reports it failed with `broker_restarted`. Give broker and combined Hub and broker pods `terminationGracePeriodSeconds: 45` so that report fits in the shutdown. To also recover launches after a crash or a pod replacement, point `server.broker.state_dir` at a persistent local volume. See [Broker restarts during a launch](/scion/reference/server-config/#asynchronous-agent-create).
+
 ## Architecture & Security
 
 ### Native Client & In-Cluster Authentication

@@ -218,11 +218,13 @@ func recoverEmbeddedBrokerID(globalDir, embeddedID string, logf func(string, ...
 // template cache (ptone/scion#3538). It never lists settings files, other
 // hubs' credentials, another broker ID's state directory, or the hub-id file
 // (that belongs to a local hub, not to the broker). scionHome is the
-// directory the broker keeps its state under (~/.scion).
-func brokerLocalStatePaths(globalDir, scionHome, brokerID string) []string {
+// directory the broker keeps its template cache under (~/.scion); stateRoot
+// is the base of its state directories (configuredBrokerStateRoot:
+// server.broker.state_dir, default ~/.scion/runtime-broker-state).
+func brokerLocalStatePaths(globalDir, scionHome, stateRoot, brokerID string) []string {
 	paths := []string{daemon.GetLogPath(globalDir)}
 	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
-		paths = append(paths, filepath.Join(scionHome, "runtime-broker-state", brokerID))
+		paths = append(paths, filepath.Join(stateRoot, brokerID))
 	}
 	return append(paths, filepath.Join(scionHome, "cache", "templates"))
 }
