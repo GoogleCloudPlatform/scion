@@ -99,8 +99,6 @@
       "telemetry.cloud.protocol",
       "telemetry.cloud.headers",
       "telemetry.cloud.provider",
-      "telemetry.cloud.gcp_project_id",
-      "telemetry.cloud.cloud_logging",
       "telemetry.cloud.tls",
       "telemetry.cloud.tls.enabled",
       "telemetry.cloud.tls.insecure_skip_verify",

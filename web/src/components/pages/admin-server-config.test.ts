@@ -961,7 +961,7 @@ describe('scion-page-admin-server-config', () => {
             ],
           },
           telemetry: {
-            koanf_paths: [...sections.telemetry.koanf_paths],
+            koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.gcp_project_id'],
           },
           auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
           quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
