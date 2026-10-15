@@ -5968,18 +5968,23 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 // Passthrough-to-assign translation for cloudrun-sandbox runtimes
 // ---------------------------------------------------------------------------
 
-// passthroughProfileIsCloudRunSandbox reports whether the runtime profile an
-// agent resolves to on broker has the "cloudrun-sandbox" type: such a profile
-// runs gVisor sandboxes that cannot reach the real GCE metadata server.
+// resolvePassthroughProfile resolves the one runtime profile an agent runs
+// under on broker and reports whether it has the "cloudrun-sandbox" type:
+// such a profile runs gVisor sandboxes that cannot reach the real GCE
+// metadata server. resolvedProfile is that profile's name, or "" when none
+// resolves.
 // profileName is the agent's effective profile (see
 // effectiveRuntimeProfileName); resolveAgentRuntimeProfileType falls back to
 // the broker's default profile, then to a sole profile. A profile that cannot
 // be resolved (including any flat Runtime Broker, which stores no profiles)
 // is reported as not cloudrun-sandbox, so no host service account is
 // assigned on a guess.
-func passthroughProfileIsCloudRunSandbox(broker *store.RuntimeBroker, profileName string) bool {
-	_, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
-	return ok && runtimeType == "cloudrun-sandbox"
+func resolvePassthroughProfile(broker *store.RuntimeBroker, profileName string) (resolvedProfile string, isSandbox bool) {
+	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
+	if !ok {
+		return "", false
+	}
+	return resolvedProfile, runtimeType == "cloudrun-sandbox"
 }
 
 // translatePassthroughForSandbox translates a passthrough GCP identity config
@@ -5991,6 +5996,14 @@ func passthroughProfileIsCloudRunSandbox(broker *store.RuntimeBroker, profileNam
 // (effectiveRuntimeProfileName); it may be nil only where the project has no
 // active profile to contribute.
 //
+// Whenever the profile resolves, it is recorded on the agent
+// (pinResolvedProfile: AppliedConfig.Profile and CreateInputs.Profile, when
+// empty) in the same change as the mode, whichever way the mode goes.
+// Later starts and reincarnations then run under the profile the mode was
+// decided on, rather than one resolved afresh from the project's active
+// profile or the broker's default at that time. A profile that cannot be
+// resolved is not recorded.
+//
 // Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
 // unreachable, so passthrough mode produces no credentials. The translation
 // uses the broker's registered host service account — semantically equivalent
@@ -5998,12 +6011,14 @@ func passthroughProfileIsCloudRunSandbox(broker *store.RuntimeBroker, profileNam
 // emulator → hub gcp-token endpoint → IAM impersonation) works inside the
 // sandbox.
 //
-// The method is a no-op when:
+// The GCP setting is left unchanged when:
 //   - the agent's config is not passthrough,
-//   - the agent's resolved profile is not a cloudrun-sandbox profile, or
-//     cannot be resolved (passthrough is kept), or
+//   - the agent's profile cannot be resolved (passthrough is kept and no
+//     profile is recorded),
+//   - the agent's resolved profile is not a cloudrun-sandbox profile
+//     (passthrough is kept and the profile is recorded), or
 //   - the broker has no host SA registered (leaves passthrough as-is with a
-//     warning — identical to pre-fix behavior).
+//     warning; the profile is recorded).
 //
 // On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
 // assign mode with the broker's host SA, and a GCPServiceAccount record is
@@ -6030,7 +6045,9 @@ func (s *Server) translatePassthroughForSandbox(
 		return fmt.Errorf("load broker %s: %w", brokerID, err)
 	}
 	profileName := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
-	if !passthroughProfileIsCloudRunSandbox(broker, profileName) {
+	resolvedProfile, isSandbox := resolvePassthroughProfile(broker, profileName)
+	pinResolvedProfile(agent.AppliedConfig, resolvedProfile)
+	if !isSandbox {
 		return nil // not a sandbox profile — passthrough works as-is
 	}
 
