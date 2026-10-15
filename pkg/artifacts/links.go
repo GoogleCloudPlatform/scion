@@ -371,6 +371,9 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		Permission: GrantRead, ExpiresAt: &exp, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
 	}
 	switch err := b.store.CreateLink(r.Context(), g, MaxLinksPerArtifact, now); {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyLinks):
 		writeError(w, http.StatusConflict, "too_many_links",
 			"the artifact already has "+strconv.Itoa(MaxLinksPerArtifact)+" active share links; revoke one first")
