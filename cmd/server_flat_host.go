@@ -747,6 +747,31 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	return true
 }
 
+// enableColocatedProfileReferences enables built-in profile retention on the
+// installed settings overlay for the legacy co-located broker
+// (ptone/scion#5113): it counts the references the broker's agents and
+// projects hold (or, if that fails, retains conservatively), and loads the
+// settings once so the retention WARN appears at startup. A no-op when no
+// overlay is installed or no legacy co-located broker is registered (a flat
+// host, or a failed registration): the overlay then behaves as before.
+func enableColocatedProfileReferences(ctx context.Context, hubSrv *hub.Server) {
+	overlay := config.GetGlobalSettingsOverlay()
+	if overlay == nil || hubSrv == nil {
+		return
+	}
+	brokerID := hubSrv.LegacyColocatedBrokerID()
+	if brokerID == "" {
+		return
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		log.Printf("Built-in profile retention not enabled: the global settings directory cannot be resolved: %v", err)
+		return
+	}
+	hubSrv.EnableProfileReferences(ctx, overlay, brokerID, globalDir)
+	_, _, _ = config.LoadEffectiveSettings("")
+}
+
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
 // active instance: every 30s it writes the instance's status from its own
 // control channel state.
