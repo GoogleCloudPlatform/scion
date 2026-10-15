@@ -152,10 +152,14 @@ func hubIDPinned(cfg *config.GlobalConfig) bool {
 // cannot see the hub id); resolveTestMode and hub.New check the same
 // condition again.
 func validateTestModeHubIDPinned(cfg *config.GlobalConfig) error {
-	if testModeRequested() && !hubIDPinned(cfg) {
-		return fmt.Errorf("--test-mode=%s: %w (this hub's current resolved hub id is %q)", testModeLevel, hub.ErrTestModeHubIDNotPinned, cfg.Hub.ResolveHubID())
+	if !testModeRequested() || hubIDPinned(cfg) {
+		return nil
 	}
-	return nil
+	if cfg == nil {
+		// No config: refuse without a current id to print.
+		return fmt.Errorf("--test-mode=%s: %w", testModeLevel, hub.ErrTestModeHubIDNotPinned)
+	}
+	return fmt.Errorf("--test-mode=%s: %w (this hub's current resolved hub id is %q)", testModeLevel, hub.ErrTestModeHubIDNotPinned, cfg.Hub.ResolveHubID())
 }
 
 // testModeInputs are the inputs of resolveTestMode.

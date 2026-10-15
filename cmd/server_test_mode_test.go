@@ -340,6 +340,7 @@ func TestTestMode_UnpinnedHubIDRefusedAtEveryNonOffLevel(t *testing.T) {
 			assert.Contains(t, err.Error(), "current resolved hub id is", "the error prints the id to pin")
 			assert.Contains(t, err.Error(), "never a new value")
 			assert.NoError(t, validateTestModeHubIDPinned(pinned))
+			assert.ErrorIs(t, validateTestModeHubIDPinned(nil), hub.ErrTestModeHubIDNotPinned, "nil config refuses cleanly, no panic")
 
 			// resolveTestMode.
 			in := tiaValidInputs()
