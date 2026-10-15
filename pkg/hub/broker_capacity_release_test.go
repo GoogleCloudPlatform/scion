@@ -885,7 +885,7 @@ func (w *reservationSwapStore) GetActiveReservation(ctx context.Context, limitDe
 		return got, err
 	}
 	w.swapped = true
-	require.NoError(w.t, w.Store.ReleaseReservationByID(ctx, got.ID))
+	require.NoError(w.t, w.ReleaseReservationByID(ctx, got.ID))
 	seedBrokerRow(w.t, w.Store, limitDefID, w.swapTo, resourceID, time.Time{})
 	return got, nil
 }

@@ -66,7 +66,7 @@ func (b *brokerHookStore) GetRuntimeBroker(ctx context.Context, id string) (*sto
 	got, err := b.Store.GetRuntimeBroker(ctx, id)
 	if b.fault.Active() && id == b.recreateID && !b.recreated && errors.Is(err, store.ErrNotFound) {
 		b.recreated = true
-		if cerr := b.Store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		if cerr := b.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 			ID: id, Name: "re-registered", Slug: "re-registered-" + id[:8], Status: store.BrokerStatusOnline,
 		}); cerr != nil {
 			return nil, cerr
