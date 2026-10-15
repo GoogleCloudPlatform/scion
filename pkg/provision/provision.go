@@ -748,8 +748,9 @@ const (
 // name must be an agent slug, and base/worktrees must be a plain
 // directory. Only base/worktrees/<name> is touched, and only when it is a
 // worktree of this checkout (or one git no longer has an entry for): it
-// is renamed to a .removing- name inside worktrees/, git worktree prune
-// drops its entry, and the agent is dropped from the sharer registry. The
+// is renamed to a .removing- name inside worktrees/, git's entry for that
+// one worktree is removed (no repository-wide prune), and the agent is
+// dropped from the sharer registry. The
 // rename is a single step, so a removal that stops partway never leaves a
 // half-deleted worktree at the agent's path. PurgeRemovedWorktrees deletes
 // the renamed directory afterwards. The agent's branch is kept. An empty
@@ -822,10 +823,14 @@ func RemoveMountedWorktree(ctx context.Context, base, stateDir, name string, loc
 	if _, err := moveWorktreeAside(base, name, removedWorktreePrefix); err != nil {
 		return fmt.Errorf("remove worktree %s: %w", path, err)
 	}
-	pruneCtx, cancel := context.WithTimeout(ctx, removalPruneTimeout)
+	// Remove only this worktree's entry from git, now that its directory
+	// has moved aside. A repository-wide prune would also drop the entries
+	// of other agents' worktrees that this process cannot see
+	// (ptone/scion#5071).
+	entryCtx, cancel := context.WithTimeout(ctx, removalEntryTimeout)
 	defer cancel()
-	if out, err := gitInSharedCheckout(pruneCtx, base, path, "worktree", "prune"); err != nil {
-		slog.Warn("remove worktree: git worktree prune failed", "path", base, "error", err, "output", out)
+	if err := util.RemoveWorktreeEntry(entryCtx, path, sharedCheckoutGitCmd(base, path)); err != nil {
+		slog.Warn("remove worktree: could not remove the worktree's git entry", "path", path, "error", err)
 	}
 	if _, err := UnregisterSharerElsewhere(base, name, ""); err != nil {
 		slog.Warn("remove worktree: could not update the sharer registry", "path", base, "error", err)
@@ -833,9 +838,9 @@ func RemoveMountedWorktree(ctx context.Context, base, stateDir, name string, loc
 	return nil
 }
 
-// removalPruneTimeout bounds the git worktree prune RemoveMountedWorktree
-// runs under the lock.
-const removalPruneTimeout = 2 * time.Minute
+// removalEntryTimeout bounds the git worktree entry removal
+// RemoveMountedWorktree runs under the lock.
+const removalEntryTimeout = 2 * time.Minute
 
 // PurgeRemovedWorktrees deletes the directories RemoveMountedWorktree
 // moved aside under base/worktrees, including any left by an earlier
@@ -873,9 +878,19 @@ func moveWorktreeAside(base, name, prefix string) (string, error) {
 // checkout and the agent's worktree belong to the agents' user rather than
 // the caller, so both are listed in safe.directory for this command only.
 func gitInSharedCheckout(ctx context.Context, base, worktree string, args ...string) (string, error) {
-	full := append([]string{"-c", "safe.directory=" + base, "-c", "safe.directory=" + worktree, "-C", base}, args...)
-	out, err := exec.CommandContext(ctx, "git", full...).CombinedOutput()
+	cmd, _ := sharedCheckoutGitCmd(base, worktree)(ctx, args...)
+	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
+}
+
+// sharedCheckoutGitCmd returns a builder of the git commands
+// gitInSharedCheckout runs, for callers that run the command themselves
+// (util.RemoveWorktreeEntry).
+func sharedCheckoutGitCmd(base, worktree string) func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+	return func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		full := append([]string{"-c", "safe.directory=" + base, "-c", "safe.directory=" + worktree, "-C", base}, args...)
+		return exec.CommandContext(ctx, "git", full...), nil
+	}
 }
 
 // fileLockWait is how long ProvisionShared waits for the file lock:
@@ -3396,7 +3411,7 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 	}
 
 	// 2. Check git worktree list for a prior-run worktree without a registry entry.
-	if existingPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
+	if existingPath, _, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && existingPath != "" {
 		if validateJoinCandidate(base, existingPath, in.AgentID, branchName, "git-worktree-list") {
 			if in.MountedWorktree {
 				return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, existingPath)
@@ -3439,6 +3454,10 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 		return o, err
 	}
 
+	if err := clearOwnStaleWorktreeEntry(ctx, in, base, worktreePath); err != nil {
+		return worktreeOutcome{}, err
+	}
+
 	slog.Info("ProvisionShared: creating worktree",
 		"agent_id", in.AgentID, "branch", branchName, "path", worktreePath)
 
@@ -3459,7 +3478,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 		// proactive JOIN checks above — it is not guaranteed safe just because
 		// git reported it.
 		if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
-			if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+			attachPath, holder, findErr := findWorktreeForBranch(ctx, base, branchName)
+			if findErr == nil && attachPath != "" &&
 				validateJoinCandidate(base, attachPath, in.AgentID, branchName, "git-fallback") {
 				if in.MountedWorktree {
 					return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
@@ -3467,6 +3487,9 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 				slog.Info("ProvisionShared: attaching to existing worktree (git fallback)",
 					"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 				return registered(attachPath)
+			}
+			if holder != "" {
+				return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", util.WorktreeBranchHeldError(branchName, holder))
 			}
 			return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out but cannot find existing worktree: %s",
 				branchName, outputStr)
@@ -3482,7 +3505,8 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 			if err != nil {
 				reuse := strings.TrimSpace(string(output))
 				if strings.Contains(reuse, "already checked out") || strings.Contains(reuse, "already used by worktree") {
-					if attachPath, findErr := findWorktreeForBranch(ctx, base, branchName); findErr == nil && attachPath != "" &&
+					attachPath, holder, findErr := findWorktreeForBranch(ctx, base, branchName)
+					if findErr == nil && attachPath != "" &&
 						validateJoinCandidate(base, attachPath, in.AgentID, branchName, "reuse-fallback") {
 						if in.MountedWorktree {
 							return worktreeOutcome{}, branchInOtherWorktreeError(in, branchName, attachPath)
@@ -3490,6 +3514,9 @@ func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, er
 						slog.Info("ProvisionShared: attaching to existing worktree (reuse fallback)",
 							"agent_id", in.AgentID, "branch", branchName, "path", attachPath)
 						return registered(attachPath)
+					}
+					if holder != "" {
+						return worktreeOutcome{}, fmt.Errorf("ProvisionShared: %w", util.WorktreeBranchHeldError(branchName, holder))
 					}
 					return worktreeOutcome{}, fmt.Errorf("git worktree add: branch %q already checked out: %s", branchName, reuse)
 				}
@@ -3698,8 +3725,8 @@ func reuseMountedWorktree(ctx context.Context, in ProvisionInput, path, branch s
 }
 
 // startBranchFile is the file in a worktree's admin directory that records
-// the branch the agent's worktree was started with. git worktree prune
-// deletes it together with the admin directory.
+// the branch the agent's worktree was started with. Removing the
+// worktree's git entry deletes it together with the admin directory.
 const startBranchFile = "scion-start-branch"
 
 // startBranch returns the branch recorded for the worktree at path, or ""
@@ -3785,36 +3812,154 @@ var gitSupportsRelativeWorktrees = func() bool {
 	return util.CompareGitVersion(version, 2, 48) == nil
 }
 
-// findWorktreeForBranch parses 'git worktree list --porcelain' output to find
-// the worktree path for a given branch. Returns "" if no worktree has that
-// branch checked out.
-func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (string, error) {
-	// Prune first so a worktree dir removed on disk (but not unregistered in git)
-	// isn't returned as a stale join target pointing at a non-existent path.
-	if pruneCmd, err := SafeGitCommand(ctx, repoDir, "worktree", "prune"); err == nil {
-		_ = pruneCmd.Run()
-	}
+// worktreeEntry is one entry of 'git worktree list --porcelain'.
+type worktreeEntry struct {
+	path   string
+	branch string // short branch name; "" when detached or bare
+}
+
+// listWorktreeEntries returns the worktree entries git has for repoDir.
+// A quoted path (git quotes paths with unusual characters) is unquoted.
+func listWorktreeEntries(ctx context.Context, repoDir string) ([]worktreeEntry, error) {
 	cmd, err := SafeGitCommand(ctx, repoDir, "worktree", "list", "--porcelain")
 	if err != nil {
-		return "", fmt.Errorf("git worktree list: %w", err)
+		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git worktree list: %w", err)
+		return nil, fmt.Errorf("git worktree list: %w", err)
 	}
-	var currentPath string
+	var entries []worktreeEntry
 	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "worktree ") {
-			currentPath = strings.TrimPrefix(line, "worktree ")
-		}
-		if strings.HasPrefix(line, "branch refs/heads/") {
-			b := strings.TrimPrefix(line, "branch refs/heads/")
-			if b == branch {
-				return currentPath, nil
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path := strings.TrimPrefix(line, "worktree ")
+			if strings.HasPrefix(path, "\"") {
+				if unquoted, err := strconv.Unquote(path); err == nil {
+					path = unquoted
+				}
 			}
+			entries = append(entries, worktreeEntry{path: path})
+		case strings.HasPrefix(line, "branch refs/heads/") && len(entries) > 0:
+			entries[len(entries)-1].branch = strings.TrimPrefix(line, "branch refs/heads/")
 		}
 	}
-	return "", nil
+	return entries, nil
+}
+
+// findWorktreeForBranch returns the path of the worktree that has branch
+// checked out, or "" if there is none. An entry whose path is missing, or
+// cannot be checked (any Lstat error), is skipped instead of being pruned:
+// it may be another agent's worktree that this process cannot see
+// (ptone/scion#5071). The path of a skipped entry holding the branch is
+// returned as holder, for error messages only; it is never removed.
+func findWorktreeForBranch(ctx context.Context, repoDir, branch string) (path, holder string, err error) {
+	entries, err := listWorktreeEntries(ctx, repoDir)
+	if err != nil {
+		return "", "", err
+	}
+	for _, e := range entries {
+		if e.branch != branch {
+			continue
+		}
+		if _, statErr := os.Lstat(e.path); statErr != nil {
+			if holder == "" {
+				holder = e.path
+			}
+			continue
+		}
+		return e.path, holder, nil
+	}
+	return "", holder, nil
+}
+
+// worktreeRegisteredAt reports whether git has a worktree entry at path,
+// comparing symlink-resolved paths. path must exist.
+func worktreeRegisteredAt(ctx context.Context, repoDir, path string) (bool, error) {
+	want, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false, err
+	}
+	entries, err := listWorktreeEntries(ctx, repoDir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if got, err := filepath.EvalSymlinks(e.path); err == nil && got == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// clearOwnStaleWorktreeEntry removes a stale git entry at the agent's own
+// worktreePath before a worktree is added there, and no other entry
+// (ptone/scion#5071). Without it, "git worktree add" refuses the path as a
+// registered worktree.
+//
+//   - worktreePath missing: its entry, if any, is removed.
+//   - worktreePath an empty directory (made for the pod mount) that git
+//     still has an entry for: git refuses to remove the entry of a
+//     directory that exists, so the empty directory is removed, the entry
+//     removed, and the directory created again with the same mode and
+//     owner.
+//   - Anything else (a non-empty directory, a file, a link) is left alone;
+//     the add reports it.
+//
+// Any failing step returns an error that names the path and how to clear
+// the entry by hand.
+func clearOwnStaleWorktreeEntry(ctx context.Context, in ProvisionInput, base, worktreePath string) error {
+	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return SafeGitCommand(ctx, base, args...)
+	}
+	stale := func(err error) error {
+		return fmt.Errorf("ProvisionShared: git still has an entry for this agent's worktree at %s that could not be removed: %w. "+
+			"Remove it with git worktree remove %q in the shared checkout, and start the agent again",
+			mountedDisplayPath(in, worktreePath), err, worktreePath)
+	}
+	fi, err := os.Lstat(worktreePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
+			return stale(err)
+		}
+		return nil
+	}
+	if err != nil || mountedDirState(worktreePath) != mountedDirEmpty {
+		return nil
+	}
+	registered, err := worktreeRegisteredAt(ctx, base, worktreePath)
+	if err != nil || !registered {
+		return nil
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return stale(fmt.Errorf("cannot read the owner of %s", worktreePath))
+	}
+	if err := os.Remove(worktreePath); err != nil {
+		return stale(err)
+	}
+	entryErr := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd)
+	if err := recreateEmptyDir(worktreePath, fi.Mode().Perm(), int(st.Uid), int(st.Gid)); err != nil {
+		return stale(errors.Join(entryErr, err))
+	}
+	if entryErr != nil {
+		return stale(entryErr)
+	}
+	slog.Info("ProvisionShared: removed a stale git entry for the agent's empty worktree directory",
+		"agent_id", in.AgentID, "path", worktreePath)
+	return nil
+}
+
+// recreateEmptyDir creates dir with mode and owner. A variable so tests can
+// make it fail.
+var recreateEmptyDir = func(dir string, mode os.FileMode, uid, gid int) error {
+	if err := os.Mkdir(dir, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, mode); err != nil {
+		return err
+	}
+	return os.Lchown(dir, uid, gid)
 }
 
 // prepareBaseForWorktrees configures a freshly cloned base checkout for

@@ -15,6 +15,8 @@
 package util
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -192,4 +194,38 @@ func TestRemoveWorktreeEntryIn(t *testing.T) {
 			t.Errorf("entry should be kept inside an agent container; worktree list:\n%s", list)
 		}
 	})
+}
+
+// RemoveWorktreeEntry runs git only through the caller's command builder,
+// with just "worktree remove <path>" (no -C of its own), and returns a
+// builder error without falling back.
+func TestRemoveWorktreeEntry_UsesCommandBuilder(t *testing.T) {
+	repo, own, sibling, restore := hiddenSiblingRepo(t)
+	if err := os.RemoveAll(own); err != nil {
+		t.Fatal(err)
+	}
+
+	var calls [][]string
+	builder := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		calls = append(calls, args)
+		return exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...), nil
+	}
+	if err := RemoveWorktreeEntry(t.Context(), own, builder); err != nil {
+		t.Fatalf("RemoveWorktreeEntry: %v", err)
+	}
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "worktree remove "+own {
+		t.Errorf("builder calls = %q, want one call with worktree remove %s", calls, own)
+	}
+	if list := worktreeEntries(t, repo); strings.Contains(list, "branch refs/heads/own") {
+		t.Errorf("own entry should be removed; worktree list:\n%s", list)
+	}
+
+	refused := errors.New("refused by the builder")
+	err := RemoveWorktreeEntry(t.Context(), filepath.Join(repo, "agents", "gone", "workspace"), func(context.Context, ...string) (*exec.Cmd, error) {
+		return nil, refused
+	})
+	if !errors.Is(err, refused) {
+		t.Errorf("RemoveWorktreeEntry with a refusing builder = %v, want the builder's error", err)
+	}
+	assertSiblingIntact(t, repo, sibling, restore)
 }
