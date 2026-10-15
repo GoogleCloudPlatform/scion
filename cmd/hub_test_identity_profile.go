@@ -82,9 +82,9 @@ at most 30), a test super-admin at most 30 minutes (token at most 15). The
 token of a cached admin identity is re-issued through the same delegation
 ('token --as <alias>'), never past the identity's lifetime. A web-login code
 ('web-code <id> --admin-role <role>') needs the target's admin web session
-setting. The
-delegation cannot list or delete admin identities: they end at their expiry
-(teardown drops them from the cache), or a human super-admin revokes them.
+setting. The delegation cannot list or delete admin identities: they end at
+their expiry (teardown drops them from the cache), or a human super-admin
+revokes them.
 
 Examples:
   scion --hub-profile t9 hub test-identity issue-admin --admin-role hub-admin --purpose "admin journey" --as admin1 --run r1
