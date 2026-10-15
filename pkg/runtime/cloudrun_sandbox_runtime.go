@@ -733,6 +733,83 @@ func runSandboxProbe(ctx context.Context, bin, name string) (string, error) {
 	return out, nil
 }
 
+// sandboxExecStdinWaitDelay bounds how long runSandboxExec waits, after
+// the CLI has exited or been killed, for the copy of a caller's stdin
+// into the CLI to finish (exec.Cmd.WaitDelay).
+const sandboxExecStdinWaitDelay = 2 * time.Second
+
+// runSandboxExec runs `sandbox <args>` for the log retrieval and exec
+// paths (GetLogs, Attach's window-size step, Exec, ExecWithStdin) and
+// returns what runSimpleCommandWithStdin would: the same log lines
+// (argument count only, output omitted under WithSensitiveExec), the
+// error wrapped as "<bin> failed: %w", the raw output on error and the
+// trimmed output on success. stdin may be nil.
+//
+// The output is captured in an unlinked temporary file
+// (newSandboxCommandOutput), never a pipe (ptone/scion#5040), as the
+// probe, launch and delete paths do: a process left behind by the
+// command may inherit and hold its stdout and stderr, and with a pipe
+// Wait would block until every holder exits, past ctx's deadline. The
+// output read back is everything written up to Wait's return, with no
+// cap, as CombinedOutput returns. If the file cannot be created, the
+// output is discarded (stdio is /dev/null).
+//
+// A stdin that is not an *os.File is copied into the CLI through a pipe
+// by os/exec, and Wait waits for that copy; a holder that inherited the
+// pipe's read end and never reads it would block the copy. WaitDelay
+// bounds that wait. With stdout and stderr in a file, the only pipe it
+// can close is stdin's write end, which the holder sees as end of input,
+// not as SIGPIPE.
+//
+// Nothing here streams output: these paths return it as a string. The
+// interactive attach (runInteractiveCommand) streams by handing the
+// caller's own stdio files to the CLI, with no pipe or copy, and does
+// not use this helper. The shared runSimpleCommand helpers are left as
+// they are, for the other runtimes.
+func runSandboxExec(ctx context.Context, bin string, stdin io.Reader, args ...string) (string, error) {
+	// Log the command name and argument count only, never the argument
+	// values or the stdin payload (see runSimpleCommand).
+	if stdin != nil {
+		runtimeLog().Debug("Executing command with stdin", "cmd", bin, "argc", len(args))
+	} else {
+		runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
+	}
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	if stdin != nil {
+		cmd.Stdin = stdin
+		cmd.WaitDelay = sandboxExecStdinWaitDelay
+	}
+	outFile := newSandboxCommandOutput("exec")
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	elapsed := time.Since(begin)
+	out := readSandboxExecOutput(outFile)
+	if err != nil {
+		logCommandFailure(ctx, bin, len(args), elapsed, []byte(out))
+		return out, fmt.Errorf("%s failed: %w", bin, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(out), nil
+}
+
+// readSandboxExecOutput returns everything written to f up to now. The
+// size is taken once, so a holder still writing cannot extend the read.
+func readSandboxExecOutput(f *os.File) string {
+	if f == nil {
+		return ""
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	return readSandboxCommandOutputRaw(f, fi.Size())
+}
+
 // maxSandboxLaunchOutputRead bounds how much `sandbox run` output is read
 // back: 4 MiB, above Linux's whole-argv limit (ARG_MAX, 2 MiB by default),
 // so an echo of the CLI's argv, which carries every --env KEY=VALUE, is
@@ -1435,6 +1512,20 @@ func NewCloudRunSandboxRuntime(cfg *config.V1CloudRunSandboxConfig) *CloudRunSan
 		bin:          bin,
 		state:        ss,
 		rootDir:      defaultScionRoot,
+		watchCancels: make(map[string]context.CancelFunc),
+	}
+}
+
+// NewCloudRunSandboxRuntimeForTest builds a CloudRunSandboxRuntime that runs
+// bin as the sandbox CLI, keeps its state in statePath and lays agents out
+// under rootDir, without the start-up reconcile. Exported so tests in other
+// packages (e.g. pkg/agent, pkg/runtimebroker) can drive the real runtime
+// through a fake CLI, as NewSubstrateRuntimeForTest does for substrate.
+func NewCloudRunSandboxRuntimeForTest(bin, statePath, rootDir string) *CloudRunSandboxRuntime {
+	return &CloudRunSandboxRuntime{
+		bin:          bin,
+		state:        newSandboxStateStore(statePath),
+		rootDir:      rootDir,
 		watchCancels: make(map[string]context.CancelFunc),
 	}
 }
@@ -2614,7 +2705,7 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 		agents = append(agents, api.AgentInfo{
 			ContainerID:     entry.SandboxName,
 			RunID:           entry.Labels[api.LabelRunID],
-			Name:            entry.AgentID,
+			Name:            sandboxAgentName(entry),
 			ContainerStatus: statusStr,
 			Phase:           phase,
 			Image:           entry.Image,
@@ -2628,6 +2719,20 @@ func (r *CloudRunSandboxRuntime) List(ctx context.Context, labelFilter map[strin
 	}
 
 	return agents, nil
+}
+
+// sandboxAgentName is the agent name List reports for entry: the agent slug
+// (the scion.name label), as DockerRuntime.List and SubstrateRuntime.List
+// report it, not AgentID, which Run records as the project-prefixed
+// container name ("<project>--<agent>"). The broker's delete and stop
+// resolution and AgentManager match the hub-side agent name against Name,
+// so a project-prefixed Name never matches and the sandbox is left behind
+// (ptone/scion#5156). An entry without the label falls back to AgentID.
+func sandboxAgentName(entry *sandboxStateEntry) string {
+	if name := entry.Labels["scion.name"]; name != "" {
+		return name
+	}
+	return entry.AgentID
 }
 
 // listEntries returns this instance's cached entries, with every Starting
@@ -2666,7 +2771,7 @@ func (r *CloudRunSandboxRuntime) listEntries() []*sandboxStateEntry {
 func (r *CloudRunSandboxRuntime) GetLogs(ctx context.Context, id string) (string, error) {
 	// Try tmux capture-pane first (live sandbox path).
 	// Absolute paths required -- PATH is empty inside a sandbox.
-	logs, err := runSimpleCommand(ctx, r.bin, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
+	logs, err := runSandboxExec(ctx, r.bin, nil, "exec", id, "--", "/usr/bin/tmux", "capture-pane", "-p", "-t", "scion", "-S", "-1000")
 	if err == nil && strings.TrimSpace(logs) != "" {
 		return logs, nil
 	}
@@ -2750,7 +2855,7 @@ func (r *CloudRunSandboxRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("cloudrun-sandbox: sandbox %q not found", id)
 	}
 	// Set tmux window-size to latest for proper resize behavior.
-	_, _ = runSimpleCommand(ctx, r.bin, "exec", id, "--",
+	_, _ = runSandboxExec(ctx, r.bin, nil, "exec", id, "--",
 		"/usr/bin/tmux", "set-option", "-g", "window-size", "latest")
 	// Interactive attach via sandbox exec.
 	// TERM=xterm-256color is load-bearing: without it tmux sees TERM=dumb
@@ -2795,7 +2900,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 	// Absolute paths: PATH is empty inside a sandbox, so callers must provide
 	// absolute paths or the command must be on a bind-mounted path.
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommand(ctx, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, nil, args...)
 }
 
 // ExecWithStdin runs cmd inside the sandbox with stdin piped from the given
@@ -2805,7 +2910,7 @@ func (r *CloudRunSandboxRuntime) Exec(ctx context.Context, id string, cmd []stri
 // #1355.
 func (r *CloudRunSandboxRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	args := append([]string{"exec", id, "--"}, cmd...)
-	return runSimpleCommandWithStdin(ctx, stdin, r.bin, args...)
+	return runSandboxExec(ctx, r.bin, stdin, args...)
 }
 
 // GetWorkspacePath returns the HOST-side workspace path from the state

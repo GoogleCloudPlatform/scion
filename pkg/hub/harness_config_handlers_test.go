@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -406,8 +407,10 @@ func TestHarnessConfigUpdate_PreservesContentHashAndFiles(t *testing.T) {
 	assertHarnessConfigContentEqual(t, "stored", hc, stored)
 }
 
-// TestHarnessConfigUpdate_AppliesUpdatableFields verifies that descriptive
-// fields and config still update through the update handler.
+// TestHarnessConfigUpdate_AppliesUpdatableFields verifies that the metadata
+// fields update through the update handler while config and harness, which
+// are derived from config.yaml, keep their stored values: a PUT is
+// metadata-only and silently pins everything else (ptone/scion#4219).
 func TestHarnessConfigUpdate_AppliesUpdatableFields(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -418,7 +421,7 @@ func TestHarnessConfigUpdate_AppliesUpdatableFields(t *testing.T) {
 		Slug:        hc.Slug,
 		DisplayName: "Renamed Display",
 		Description: "updated description",
-		Harness:     hc.Harness,
+		Harness:     "gemini",
 		Config:      &store.HarnessConfigData{Harness: "claude", Image: "updated-image:2"},
 		Status:      hc.Status,
 	}
@@ -440,8 +443,11 @@ func TestHarnessConfigUpdate_AppliesUpdatableFields(t *testing.T) {
 	if stored.Description != "updated description" {
 		t.Errorf("description = %q, want %q", stored.Description, "updated description")
 	}
-	if stored.Config == nil || stored.Config.Image != "updated-image:2" {
-		t.Errorf("config = %+v, want image %q", stored.Config, "updated-image:2")
+	if !reflect.DeepEqual(stored.Config, hc.Config) {
+		t.Errorf("config = %+v, want the stored %+v (pinned)", stored.Config, hc.Config)
+	}
+	if stored.Harness != hc.Harness {
+		t.Errorf("harness = %q, want the stored %q (pinned)", stored.Harness, hc.Harness)
 	}
 	assertHarnessConfigContentEqual(t, "stored", hc, stored)
 }

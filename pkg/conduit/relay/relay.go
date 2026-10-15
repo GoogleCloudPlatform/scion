@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -106,6 +108,15 @@ type Principal struct {
 	// RPCHandler, when set, serves the session's inbound RPCs in place of
 	// Config.Session.RPCHandler (the hub sets it for user sessions only).
 	RPCHandler conduit.RPCHandler
+	// SessionID, when set, is the id the session is admitted under in place
+	// of a new one (Config.NewSessionID). A separate relay chooses it before
+	// asking the hub to admit the dialer, so the hub binds its admission to
+	// exactly this session.
+	SessionID string
+	// GrantKeys, when set, are this session's Welcome.grant_keys in place
+	// of Config.GrantKeys (a separate relay gets them from the hub with the
+	// admission).
+	GrantKeys []*conduitv1.GrantKey
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for
@@ -225,8 +236,19 @@ type Relay struct {
 	log *slog.Logger
 	clk clock.Clock
 
-	mu       sync.Mutex
-	state    relayState
+	// admitMu serializes SetAdmitting so the relay row's draining flag is
+	// written in the order the admission changes were made.
+	admitMu sync.Mutex
+
+	mu    sync.Mutex
+	state relayState
+	// paused refuses new admissions while the relay keeps running
+	// (SetAdmitting).
+	paused bool
+	// drainingStale is set while the relay row's draining flag may not
+	// match paused (its last write failed); SetAdmitting rewrites it.
+	drainingStale bool
+
 	gen      int64
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
@@ -1209,14 +1231,76 @@ func (r *Relay) serving() bool {
 }
 
 // admissionState returns the generation and the state admission sees (a
-// killed relay reports stateStopped).
+// killed relay reports stateStopped; a paused one stateDraining).
 func (r *Relay) admissionState() (int64, relayState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.killed {
 		return r.gen, stateStopped
 	}
+	if r.paused && r.state == stateServing {
+		return r.gen, stateDraining
+	}
 	return r.gen, r.state
+}
+
+// Admitting reports whether the relay admits new sessions.
+func (r *Relay) Admitting() bool {
+	_, st := r.admissionState()
+	return st == stateServing
+}
+
+// SetAdmitting stops or resumes admission while the relay keeps running
+// (design §3.9: the conduit experiment turned off at run time). Stopping
+// refuses new sessions (4503 draining), marks the relay row draining so no
+// hub picks this relay, and drains every open session with GoAway; the
+// sessions end by their drain deadline. Resuming admits again and clears
+// the row's draining flag. It is a no-op when nothing changes, unless the
+// last draining flag write failed: then the flag is written again.
+func (r *Relay) SetAdmitting(admitting bool) {
+	r.admitMu.Lock()
+	r.mu.Lock()
+	if r.state != stateServing || r.killed {
+		r.mu.Unlock()
+		r.admitMu.Unlock()
+		return
+	}
+	changed := r.paused != !admitting
+	if !changed && !r.drainingStale {
+		r.mu.Unlock()
+		r.admitMu.Unlock()
+		return
+	}
+	r.paused = !admitting
+	gen := r.gen
+	var entries []*entry
+	if changed && !admitting {
+		entries = r.snapshotLocked()
+	}
+	r.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
+	err := r.cfg.Registry.SetRelayDraining(ctx, r.cfg.InstanceID, gen, !admitting)
+	cancel()
+	r.mu.Lock()
+	// A failed write is retried by the next call, changed or not.
+	r.drainingStale = err != nil
+	r.mu.Unlock()
+	if err != nil {
+		r.log.Warn("Conduit: updating the relay row's draining flag failed; retried on the next admission update", "admitting", admitting, "error", err)
+	}
+	r.admitMu.Unlock()
+	if !changed {
+		return
+	}
+	if admitting {
+		r.log.Info("Conduit relay admission resumed")
+		return
+	}
+	r.log.Info("Conduit relay admission stopped; draining open sessions", "sessions", len(entries))
+	for _, e := range entries {
+		r.goAway(e, r.drainOptions(e))
+	}
 }
 
 // evictObsoleteLaunchRows deletes the agent's non-draining launch_id rows
@@ -1246,4 +1330,23 @@ func (r *Relay) evictObsoleteLaunchRows(ctx context.Context, p Principal) {
 		r.log.Info("Conduit: evicted a launch session made epoch-obsolete by a refused fallback admission; it will reconnect",
 			"session_id", s.SessionID, "principal_id", p.ID, "relay_instance_id", s.RelayInstanceID)
 	}
+}
+
+// InstanceID returns this process's relay instance id: the configured id,
+// else POD_NAME, else the host name plus a random per-process suffix (a
+// random id when there is no host name). Two live processes must never
+// share an id: a relay start supersedes any relay registered under the
+// same id.
+func InstanceID(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	if pod := os.Getenv("POD_NAME"); pod != "" {
+		return pod
+	}
+	suffix := strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h + "-" + suffix
+	}
+	return uuid.NewString()
 }

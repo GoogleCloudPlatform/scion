@@ -1107,7 +1107,7 @@ func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, 
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
 		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", NotificationStatusHalted},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
 	}
@@ -1135,7 +1135,7 @@ func resumeInPlaceDecision(phase string, resume, force bool) (resumeInPlace, for
 	if force && phase == string(state.PhaseError) {
 		return true, true
 	}
-	return phase == string(state.PhaseStopped), false
+	return phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted), false
 }
 
 // existingAgentBranch is the branch handleExistingAgent takes for a request,
@@ -1157,7 +1157,7 @@ func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgent
 	switch {
 	case !req.ProvisionOnly && a.Phase == string(state.PhaseSuspended):
 		return existingBranchStart
-	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError)):
+	case !req.ProvisionOnly && (a.Phase == string(state.PhaseRunning) || a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted)):
 		if inPlace, _ := resumeInPlaceDecision(a.Phase, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
 		}
@@ -1492,12 +1492,13 @@ func (s *Server) handleExistingAgent(
 		return existingAgentStarted
 	}
 
-	// Branch 2: Agent is running/stopped/error.
-	// Resume=true for stopped agents restarts in-place; otherwise reject as duplicate.
+	// Branch 2: Agent is running/stopped/error/halted.
+	// Resume=true for stopped or halted agents restarts in-place; otherwise reject as duplicate.
 	if !req.ProvisionOnly &&
 		(existingAgent.Phase == string(state.PhaseRunning) ||
 			existingAgent.Phase == string(state.PhaseStopped) ||
-			existingAgent.Phase == string(state.PhaseError)) {
+			existingAgent.Phase == string(state.PhaseError) ||
+			existingAgent.Phase == string(state.PhaseHalted)) {
 
 		resumeInPlace, forcedRecovery := resumeInPlaceDecision(existingAgent.Phase, req.Resume, req.ForceResume)
 		if resumeInPlace {
@@ -2071,7 +2072,9 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				Status:     broker.Status,
 				LinkedBy:   linkedByForProvider(GetUserIdentityFromContext(ctx)),
 			}
-			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+			// linkProjectProvider also retains the project's activeProfile
+			// built-in before this request dispatches (ptone/scion#5113).
+			if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
 				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers())

@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -146,6 +145,30 @@ func (rs *ResourceStore) reconcileStorage(ctx context.Context, stor storage.Stor
 	reconcileResourceStorage(ctx, stor, storagePath, name, keep, rs.srv.resourceLog, rs.pers.Label())
 }
 
+// commitUploaded commits rec (its uploaded manifest) through the
+// persistence's Update and reconciles storage under storagePath to the
+// objects the upload wrote. Every path that uploads and then commits an
+// existing resource (Bootstrap, BootstrapSource's update and storage
+// repair) goes through it, so the reconcile order cannot drift between them.
+//
+// For a store with reconcileAfterCommit (harness-configs, ptone/scion#4219)
+// the reconcile runs only after Update succeeded and not at all when it
+// fails: a commit that loses the compare-and-swap (or is refused) must not
+// reconcile storage to its own directory while the row keeps another
+// commit's manifest. Other kinds reconcile before Update, as before.
+func (rs *ResourceStore) commitUploaded(ctx context.Context, stor storage.Storage, storagePath, name string, written map[string]struct{}, rec *ResourceRecord, dir string) error {
+	if !rs.reconcileAfterCommit {
+		rs.reconcileStorage(ctx, stor, storagePath, name, written)
+	}
+	if err := rs.pers.Update(ctx, rec, dir); err != nil {
+		return err
+	}
+	if rs.reconcileAfterCommit {
+		rs.reconcileStorage(ctx, stor, storagePath, name, written)
+	}
+	return nil
+}
+
 // checkDir runs the persistence's optional pre-upload check.
 func (rs *ResourceStore) checkDir(ctx context.Context, dir string, files []transfer.FileInfo) error {
 	if c, ok := rs.pers.(preUploadChecker); ok {
@@ -165,6 +188,9 @@ type ResourceStore struct {
 	// excludePatterns are extra transfer.CollectFiles exclude patterns for
 	// this kind (e.g. harness-config backups and temp files).
 	excludePatterns []string
+	// reconcileAfterCommit makes commitUploaded reconcile storage only
+	// after a successful commit (harness-configs).
+	reconcileAfterCommit bool
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -176,10 +202,11 @@ func (s *Server) templateStore() *ResourceStore {
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 	return &ResourceStore{
-		srv:             s,
-		pers:            &harnessConfigPersistence{s: s, harness: harness},
-		hubID:           s.HubID(),
-		excludePatterns: config.HarnessConfigTransientPatterns,
+		srv:                  s,
+		pers:                 &harnessConfigPersistence{s: s, harness: harness},
+		hubID:                s.HubID(),
+		excludePatterns:      config.HarnessConfigTransientPatterns,
+		reconcileAfterCommit: true,
 	}
 }
 
@@ -276,12 +303,6 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, err
 	}
 
-	// Reconcile storage: drop objects no longer in the manifest so removed files
-	// don't linger. (Harness-configs gain it by routing through the shared
-	// path — a removed-file cleanup fix. Templates store blobs, which the
-	// blob garbage collector removes instead.)
-	rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
-
 	newHash := computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
 	if changed {
@@ -298,7 +319,11 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// record left in "pending" by a prior bootstrap that failed mid-upload: the
 	// retry re-syncs and flips it to active rather than leaving it stuck.
 	existing.Status = resourceStatusActive
-	if err := p.Update(ctx, existing, dir); err != nil {
+	// Commit, and reconcile storage: drop objects no longer in the manifest
+	// so removed files don't linger (commitUploaded orders the two per kind;
+	// templates store blobs, which the blob garbage collector removes
+	// instead).
+	if err := rs.commitUploaded(ctx, stor, storagePath, existing.Name, written, existing, dir); err != nil {
 		return false, err
 	}
 
@@ -609,6 +634,10 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 
 // --- Harness-config persistence -------------------------------------------
 
+// harnessConfigPersistence persists harness-configs for the shared
+// ResourceStore. Every write of files or derived fields goes through
+// commitHarnessConfigFiles (ptone/scion#4219); harness is only the fallback
+// Harness of the pending row Create writes before the first commit.
 type harnessConfigPersistence struct {
 	s       *Server
 	harness string
@@ -632,12 +661,20 @@ func (p *harnessConfigPersistence) GetBySlug(ctx context.Context, slug, scope, s
 	return harnessConfigToRecord(hc), nil
 }
 
+// Create writes the pending row. It carries no files and no derived Config:
+// the Update that follows the upload commits both through
+// commitHarnessConfigFiles. Harness is set because the column is non-empty;
+// the commit replaces it with the derived value.
 func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceRecord, dir string) error {
+	harnessType := p.harness
+	if idx := deriveHarnessConfigIndexFromDir(dir, rec.Name); idx.Harness != "" {
+		harnessType = idx.Harness
+	}
 	hc := &store.HarnessConfig{
 		ID:            rec.ID,
 		Name:          rec.Name,
 		Slug:          rec.Slug,
-		Harness:       p.harness,
+		Harness:       harnessType,
 		Scope:         rec.Scope,
 		ScopeID:       rec.ScopeID,
 		Status:        rec.Status,
@@ -646,163 +683,168 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
 	}
-	extractNoAuthBehavior(hc, dir)
-	extractAuthMeta(hc, dir)
-	extractModelConfig(hc, dir)
-	rec.Harness = p.harness
+	rec.Harness = harnessType
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
 }
 
+// Update commits the uploaded manifest through commitHarnessConfigFiles,
+// reading config.yaml from dir. A commit that loses the compare-and-swap is
+// retried once against the re-read row; a second conflict, or a refused
+// commit (an unusable provisioner), returns an error and leaves the row
+// unchanged, and the bootstrap and import callers log it and skip the
+// resource.
 func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceRecord, dir string) error {
 	hc := p.model
-	hc.Files = rec.Files
-	hc.ContentHash = rec.ContentHash
-	hc.Status = rec.Status
-	hc.Harness = p.harness
-	rec.Harness = p.harness
-	if rec.SourceURL != "" {
-		hc.SourceURL = rec.SourceURL
+	apply := func(hc *store.HarnessConfig) {
+		hc.Status = rec.Status
+		if rec.SourceURL != "" {
+			hc.SourceURL = rec.SourceURL
+		}
+		p.ensureStoragePath(hc)
 	}
-	extractNoAuthBehavior(hc, dir)
-	extractAuthMeta(hc, dir)
-	extractModelConfig(hc, dir)
-	return p.s.store.UpdateHarnessConfig(ctx, hc)
+	written := make(map[string]bool, len(rec.Files))
+	for _, f := range rec.Files {
+		written[f.Path] = true
+	}
+	opts := harnessConfigCommitOpts{dir: dir, written: written}
+
+	work := *hc
+	apply(&work)
+	err := p.s.commitHarnessConfigFiles(ctx, &work, rec.Files, opts)
+	if errors.Is(err, store.ErrHarnessConfigConflict) {
+		var fresh *store.HarnessConfig
+		fresh, err = p.rereadAfterConflict(ctx, hc)
+		if err == nil {
+			work = *fresh
+			apply(&work)
+			err = p.s.commitHarnessConfigFiles(ctx, &work, rec.Files, opts)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("%s: harness config %q not updated: %w", p.Label(), hc.Name, err)
+	}
+	*hc = work
+	rec.Harness = hc.Harness
+	return nil
 }
 
+// rereadAfterConflict reloads hc after a commit lost its compare-and-swap,
+// logging the retry.
+func (p *harnessConfigPersistence) rereadAfterConflict(ctx context.Context, hc *store.HarnessConfig) (*store.HarnessConfig, error) {
+	p.s.resourceLog.Warn(p.Label()+": harness config changed during commit; re-reading and retrying once",
+		"harness_config", hc.Name, "id", hc.ID)
+	return p.s.store.GetHarnessConfig(ctx, hc.ID)
+}
+
+// OnHashMatch re-derives the index from dir when the content is unchanged
+// but the stored derived fields differ from what config.yaml gives (a row
+// written before the clear-on-absent rule, or before a field was derived).
+// The re-derivation goes through commitHarnessConfigFiles. A conflict is
+// retried once while the re-read row still has the directory's content
+// hash; otherwise another writer replaced the content and the resource is
+// skipped.
 func (p *harnessConfigPersistence) OnHashMatch(ctx context.Context, rec *ResourceRecord, dir string) (bool, error) {
+	hc := p.model
+	if harnessConfigIndexMatches(hc, deriveHarnessConfigIndexFromDir(dir, hc.Name)) {
+		return false, nil
+	}
+	opts := harnessConfigCommitOpts{dir: dir}
+	work := *hc
+	p.ensureStoragePath(&work)
+	err := p.s.commitHarnessConfigFiles(ctx, &work, work.Files, opts)
+	if errors.Is(err, store.ErrHarnessConfigConflict) {
+		var fresh *store.HarnessConfig
+		fresh, err = p.rereadAfterConflict(ctx, hc)
+		if err == nil {
+			if fresh.ContentHash != rec.ContentHash {
+				p.s.resourceLog.Warn(p.Label()+": harness config content replaced by another commit; skipping re-derive",
+					"harness_config", hc.Name, "id", hc.ID)
+				return false, nil
+			}
+			work = *fresh
+			p.ensureStoragePath(&work)
+			err = p.s.commitHarnessConfigFiles(ctx, &work, work.Files, opts)
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("%s: failed to re-derive harness config %q: %w", p.Label(), hc.Name, err)
+	}
+	*hc = work
+	p.s.resourceLog.Info(p.Label()+": re-derived harness config index",
+		"harness_config", hc.Name, "harness", hc.Harness)
 	return false, nil
 }
 
+// PostFinalize starts an image status check for the committed image. It
+// writes nothing to the row: the commit derived Config.Image.
 func (p *harnessConfigPersistence) PostFinalize(ctx context.Context, rec *ResourceRecord, dir string) {
-	image := p.extractImage(dir)
+	image := effectiveHarnessConfigImage(p.model)
 	if image == "" {
 		return
 	}
-
-	if p.model != nil && (p.model.Config == nil || p.model.Config.Image != image) {
-		if p.model.Config == nil {
-			p.model.Config = &store.HarnessConfigData{}
-		}
-		p.model.Config.Image = image
-		if err := p.s.store.UpdateHarnessConfig(ctx, p.model); err != nil {
-			slog.Error("failed to persist image in harness config", "id", rec.ID, "error", err)
-		}
-	}
-
 	go p.s.checkAndUpdateImageStatus(context.WithoutCancel(ctx), rec.ID, image)
 }
 
-func (p *harnessConfigPersistence) extractImage(dir string) string {
-	configPath := filepath.Join(dir, "config.yaml")
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		entry, err := config.ParseHarnessConfigYAML(data)
-		if err == nil && entry.Image != "" {
-			return entry.Image
-		}
+// CheckDir refuses a harness-config directory whose config.yaml declares a
+// provisioner that could never provision an agent, before the shared store
+// uploads anything (no row, no storage change). It applies the one content
+// check, unusableProvisionerInYAML; the commit runs it again.
+func (p *harnessConfigPersistence) CheckDir(_ context.Context, dir string, _ []transfer.FileInfo) error {
+	data, present, err := readHarnessConfigYAMLFromDir(dir)
+	if err != nil || !present {
+		return nil
 	}
-	if p.model != nil && p.model.Config != nil {
-		return p.model.Config.Image
+	if perr := unusableProvisionerInYAML(filepath.Base(dir), data); perr != nil {
+		return fmt.Errorf("%s: harness config in %q not imported: %w", p.Label(), filepath.Base(dir), &unusableHarnessConfigError{perr: perr})
 	}
-	return ""
+	return nil
 }
 
-// extractNoAuthBehavior loads config.yaml from dir and stamps the
-// no_auth.behavior value onto the HarnessConfig's Config data so the
-// hub can use it for auto no-auth fallback decisions.
-func extractNoAuthBehavior(hc *store.HarnessConfig, dir string) {
-	if dir == "" {
-		return
+// ensureStoragePath gives a legacy row without a storage path the computed
+// path the shared ResourceStore uploads to, so the commit verifies (and
+// records) that path.
+func (p *harnessConfigPersistence) ensureStoragePath(hc *store.HarnessConfig) {
+	if hc.StoragePath == "" {
+		hc.StoragePath = storage.ResourceStoragePath(p.s.HubID(), p.Kind(), hc.Scope, hc.ScopeID, hc.Slug)
 	}
-	hcDir, err := config.LoadHarnessConfigDir(dir)
+}
+
+// targetHarnessConfigPersistence is the harness-config persistence used by
+// reimport (ptone/scion#4219). It always resolves the record to update by
+// the target's ID, never by the slug of the source entry, so a reimport
+// writes into the row it was asked to refresh even if that row's slug
+// changed meanwhile, and it never creates a harness-config.
+type targetHarnessConfigPersistence struct {
+	*harnessConfigPersistence
+	id string
+}
+
+func (p *targetHarnessConfigPersistence) GetBySlug(ctx context.Context, _, scope, scopeID string) (*ResourceRecord, error) {
+	hc, err := p.s.store.GetHarnessConfig(ctx, p.id)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("harness config to reimport could not be loaded: %w", err)
 	}
-	if hcDir.Config.NoAuthConfig != nil && hcDir.Config.NoAuthConfig.Behavior != "" {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
-		}
-		hc.Config.NoAuthBehavior = hcDir.Config.NoAuthConfig.Behavior
-	} else if hc.Config != nil {
-		hc.Config.NoAuthBehavior = ""
+	if hc.Scope != scope || hc.ScopeID != scopeID {
+		return nil, errors.New("harness config scope changed during reimport")
 	}
+	p.model = hc
+	return harnessConfigToRecord(hc), nil
 }
 
-// extractAuthMeta loads config.yaml from dir and stamps the declarative
-// auth metadata onto the HarnessConfig's Config data so the hub can
-// evaluate required_files (including SkippedWhenGCPServiceAccountAssigned)
-// at pre-dispatch time.
-func extractAuthMeta(hc *store.HarnessConfig, dir string) {
-	if dir == "" {
-		return
-	}
-	hcDir, err := config.LoadHarnessConfigDir(dir)
-	if err != nil {
-		return
-	}
-	if hcDir != nil && hcDir.Config.Auth != nil && len(hcDir.Config.Auth.Types) > 0 {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
-		}
-		hc.Config.AuthMeta = hcDir.Config.Auth
-	} else if hc.Config != nil {
-		hc.Config.AuthMeta = nil
-	}
+func (p *targetHarnessConfigPersistence) Create(context.Context, *ResourceRecord, string) error {
+	return errors.New("reimporting a harness config never creates a new harness config")
 }
 
-// extractModelConfig loads config.yaml from dir and stamps its default
-// model and model_aliases onto the HarnessConfig's Config data, so the hub's
-// stored record reflects config.yaml as the source of truth for the
-// harness's default model and size-alias table. resolveModelAliasForAgent
-// (harness_capabilities.go) reads these instead of falling back to the
-// alias table baked into the hub binary at build time
-// (harness.DefaultModelAliases), which otherwise goes stale the moment
-// config.yaml's aliases are updated without a hub rebuild/redeploy.
-//
-// Like extractImage, a field is only overwritten when config.yaml declares
-// it (non-empty/non-nil) — an absent field preserves whatever value is
-// already stored, so a hub-side manual edit to Config.Model or
-// Config.ModelAliases (e.g. via the harness-config API) survives a re-sync
-// of a config.yaml that doesn't mention that field. This mirrors the
-// contract already exercised by TestSyncHarnessConfig_PreservesTypedConfig.
-//
-// One consequence: deleting model_aliases (or model) from config.yaml does
-// NOT clear the stored value — the record keeps resolving with the last
-// aliases it saw. If stale-alias drift shows up again, check whether
-// config.yaml actually still declares model_aliases before assuming this
-// stamping is broken; an intentional removal needs an explicit clear (e.g.
-// a hub-side PATCH), not just deleting the key from config.yaml.
-func extractModelConfig(hc *store.HarnessConfig, dir string) {
-	if dir == "" {
-		return
-	}
-	hcDir, err := config.LoadHarnessConfigDir(dir)
-	if err != nil {
-		return
-	}
-	applyModelConfigFromEntry(hc, hcDir.Config)
-}
-
-// applyModelConfigFromEntry stamps the Model and ModelAliases fields from a
-// parsed config.yaml entry onto hc.Config, initializing it if necessary.
-// Fields config.yaml doesn't declare are left untouched (see
-// extractModelConfig for why). Shared by the directory-based sync path
-// (extractModelConfig above) and the storage/content-based harness-config
-// file write, upload, and finalize handlers, so every path that can update a
-// harness config's config.yaml keeps Model/ModelAliases in sync.
-func applyModelConfigFromEntry(hc *store.HarnessConfig, entry config.HarnessConfigEntry) {
-	if entry.Model == "" && len(entry.ModelAliases) == 0 {
-		return
-	}
-	if hc.Config == nil {
-		hc.Config = &store.HarnessConfigData{}
-	}
-	if entry.Model != "" {
-		hc.Config.Model = entry.Model
-	}
-	if len(entry.ModelAliases) > 0 {
-		hc.Config.ModelAliases = entry.ModelAliases
+// targetHarnessConfigStore returns a ResourceStore that writes only into the
+// harness-config with the given ID.
+func (s *Server) targetHarnessConfigStore(id string) *ResourceStore {
+	return &ResourceStore{
+		srv:                  s,
+		pers:                 &targetHarnessConfigPersistence{harnessConfigPersistence: &harnessConfigPersistence{s: s}, id: id},
+		hubID:                s.HubID(),
+		excludePatterns:      config.HarnessConfigTransientPatterns,
+		reconcileAfterCommit: true,
 	}
 }
 

@@ -23,7 +23,7 @@
 //     route and no store.Store method can reach it; a pkg/hub test asserts
 //     that no non-test pkg/hub file references Mark or the marker's ent
 //     create builder.
-//   - Read is called only at server startup, by the test admin gate in cmd,
+//   - Read is called only at server startup, by the --test-mode gate in cmd,
 //     before the hub serves any request. ReadWebSessionKey is likewise
 //     called only at server startup, in cmd, when test identities are on.
 //   - Unmark, like Mark, is called only by the offline host command

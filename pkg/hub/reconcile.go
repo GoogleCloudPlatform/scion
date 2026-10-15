@@ -615,7 +615,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		env = args.Env
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes (ptone/scion#4817).
+	finalized, err := dispatcher.DispatchFinalizeEnv(withKeepCredentialOnUnknownOutcome(ctx), agent, env)
 	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
@@ -636,7 +640,12 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 		return "", fmt.Errorf("no dispatcher available")
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	// The requesting node keeps the agent when its wait for this
+	// dispatch expires (ErrDispatchFailed, an unknown outcome), so an
+	// unknown outcome here keeps the credential too; a definite failure
+	// still revokes, and the requester revokes when it rolls back
+	// (ptone/scion#4817).
+	created, err := dispatcher.DispatchAgentCreateWithGather(withKeepCredentialOnUnknownOutcome(ctx), agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}

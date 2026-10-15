@@ -53,7 +53,7 @@ func (s *Server) handleAgentHoldLift(w http.ResponseWriter, r *http.Request, age
 		Forbidden(w)
 		return
 	}
-	user, ok := s.requireAdminFor(w, r, authzop.ReasonGovernancePending)
+	user, ok := s.requireAdminAt(w, r, authzop.ReasonGovernancePending, "agents.hold.lift")
 	if !ok {
 		return
 	}

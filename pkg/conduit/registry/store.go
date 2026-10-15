@@ -95,4 +95,7 @@ type Store interface {
 	DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error)
 	// DeletePrincipalEpoch removes a principal's epoch row (agent deletion).
 	DeletePrincipalEpoch(ctx context.Context, principalKind, principalID string) error
+	// ListRelays returns every relay row, ordered by instance_id. It only
+	// reads.
+	ListRelays(ctx context.Context) ([]RelayInstance, error)
 }

@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -1388,6 +1389,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.telemetryPolicy = projectTelemetryPolicy(project)
 
 	// First check if the broker has a registered local path for this project.
+	localPath := ""
 	if agent.RuntimeBrokerID != "" {
 		provider, provErr := d.store.GetProjectProvider(ctx, agent.ProjectID, agent.RuntimeBrokerID)
 		if provErr != nil {
@@ -1395,9 +1397,9 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 				d.log.Warn("Failed to get project provider for path lookup", "error", provErr)
 			}
 		} else if provider.LocalPath != "" {
-			info.projectPath = provider.LocalPath
+			localPath = provider.LocalPath
 			if d.debug {
-				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", info.projectPath)
+				d.log.Debug("Found project path for broker", "brokerID", agent.RuntimeBrokerID, "path", localPath)
 			}
 		}
 	}
@@ -1405,16 +1407,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// slug. This applies to both hub-native projects (no git remote) and
 	// git-anchored projects — the broker needs a project identity to create
 	// agent directories under ~/.scion/projects/<slug>/ rather than falling
-	// back to the global project.
-	if info.projectPath == "" {
-		info.projectSlug = project.Slug
-	} else if isGlobalHubProject(project.Slug) {
-		// The global project's slug travels with its provider path so the
-		// broker can tell the global project apart from another project
-		// whose path points at the broker's global directory. The broker
-		// keeps resolving the project from the path.
-		info.projectSlug = globalProjectSlug
-	}
+	// back to the global project. The global project's slug travels with its
+	// provider path so the broker can tell the global project apart from
+	// another project whose path points at the broker's global directory.
+	// The same helper decides the path the built-in profile reference count
+	// reads agent-info.json from (ptone/scion#5113).
+	info.projectPath, info.projectSlug = config.ProjectDispatchLocation(localPath, project.Slug, isGlobalHubProject(project.Slug))
 	return info, nil
 }
 
@@ -1834,7 +1832,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	// revokeAgentCredentialsBestEffort's doc comment.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2142,7 +2143,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// deferredCreateWithGather fallback, does go through this defer.
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2331,7 +2335,10 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// non-error needs-still-missing case).
 	issued := false
 	defer func() {
-		if err != nil && issued {
+		// A caller that keeps the agent on an unknown outcome keeps the
+		// credential too: the broker may still be starting the agent with
+		// it (ptone/scion#4817; keepCredentialOnDispatchError).
+		if err != nil && issued && !keepCredentialOnDispatchError(ctx, err) {
 			revokeAgentCredentialsBestEffort(ctx, d.store, agent.ID, agentCredentialRevokeReasonCreateFailed)
 		}
 	}()
@@ -2749,7 +2756,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 		return result, plain, nil
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
@@ -2846,7 +2853,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	delete(keySet, agentTZEnvKey)
 
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -2935,6 +2942,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+		if err == nil {
+			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+		}
 		if err != nil {
 			if d.debug {
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
@@ -3004,7 +3014,7 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 		return sources
 	}
 
-	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
+	for _, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			if d.debug {
@@ -4281,10 +4291,15 @@ func injectThinkingLevelEnv(env map[string]string, cfg *store.AgentAppliedConfig
 // =============================================================================
 
 // isStartTerminal returns true for terminal phases of a start/restart op.
-func isStartTerminal(phase string) bool { return phase == "running" || phase == "error" }
+// error and halted end it as a failure.
+func isStartTerminal(phase string) bool {
+	return phase == "running" || phase == "error" || phase == "halted"
+}
 
 // isStopTerminal returns true for terminal phases of a stop op.
-func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "error" }
+func isStopTerminal(phase string) bool {
+	return phase == "stopped" || phase == "error" || phase == "halted"
+}
 
 // deferredStart handles a cross-node agent start: subscribe → write intent →
 // signal → wait for the terminal phase. Called when client.StartAgent returns
@@ -4614,6 +4629,7 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if err != nil {
 		return nil, nil, err
 	}
+	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {

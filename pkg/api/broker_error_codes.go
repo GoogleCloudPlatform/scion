@@ -62,6 +62,17 @@ const (
 	// (409). Retry only if the create is still wanted (ptone/scion#2632).
 	BrokerErrCodeStartCancelled = "start_cancelled"
 
+	// BrokerErrCodeBrokerDraining marks a create, start or restart the
+	// broker refused because it is shutting down (503, with Retry-After).
+	// The handlers refuse at entry, before any work. An async create can
+	// also be refused later, in admission, after its start context (and
+	// so possibly its worktree) was prepared but before the launch was
+	// accepted, like the other pre-acceptance refusals (start_cancelled,
+	// prior_start_in_progress). Either way no agent was started; retrying
+	// shortly, against the restarted broker, is expected to succeed
+	// (ptone/scion#4668).
+	BrokerErrCodeBrokerDraining = "broker_draining"
+
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the
 	// checkout failed verification (409). Nothing was created. The hub
