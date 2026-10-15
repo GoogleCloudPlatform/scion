@@ -43,7 +43,7 @@ type ReadOnlyQueries interface {
 	// HubSettings returns the hub_settings rows of sections that exist.
 	HubSettings(ctx context.Context, sections []string) ([]HubSettingRow, error)
 	// Agents returns the non-deleted agents. An applied_config that does
-	// not decode (agent.AppliedConfigProfile) gives AppliedProfile "" and is
+	// not decode (store.AppliedConfigProfile) gives AppliedProfile "" and is
 	// counted in unparseable.
 	Agents(ctx context.Context) (rows []agent.ProfileRefAgentRow, unparseable int, err error)
 	// Projects returns every project, SharedWorkspace evaluated through

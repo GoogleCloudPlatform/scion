@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,7 +31,6 @@ import (
 	entproject "github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	entcontributor "github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +38,7 @@ import (
 
 // columnRestrictedRefInputs reads the reference-count inputs the way the
 // rebuild preflight does (ptone/scion#5057): column-restricted queries on
-// the raw rows, applied_config decoded by agent.AppliedConfigProfile, and
+// the raw rows, applied_config decoded by store.AppliedConfigProfile, and
 // the shared-workspace flag through store.Project.IsSharedWorkspace.
 func columnRestrictedRefInputs(t *testing.T, ctx context.Context, client *ent.Client, brokerID string) agent.ProfileRefInputs {
 	t.Helper()
@@ -69,7 +67,7 @@ func columnRestrictedRefInputs(t *testing.T, ctx context.Context, client *ent.Cl
 		Select(entagent.FieldSlug, entagent.FieldProjectID, entagent.FieldRuntimeBrokerID, entagent.FieldAppliedConfig).All(ctx)
 	require.NoError(t, err)
 	for _, a := range agents {
-		profile, _ := agent.AppliedConfigProfile(a.AppliedConfig)
+		profile, _ := store.AppliedConfigProfile(a.AppliedConfig)
 		in.Agents = append(in.Agents, agent.ProfileRefAgentRow{
 			Slug: a.Slug, ProjectID: a.ProjectID.String(), RuntimeBrokerID: a.RuntimeBrokerID, AppliedProfile: profile,
 		})
@@ -89,11 +87,8 @@ func columnRestrictedRefInputs(t *testing.T, ctx context.Context, client *ent.Cl
 func TestProfileReferences_HubAndPreflightInputsAgree(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	ctx := context.Background()
-	client, err := openTestClient(fmt.Sprintf("file:hubrefsagree%d?mode=memory&cache=shared", testStoreSeq.Add(1)))
+	cs, client, err := newTestStoreWithClient(t)
 	require.NoError(t, err)
-	cs := entadapter.NewCompositeStore(client)
-	require.NoError(t, restoreTestStoreTemplate(ctx, cs))
-	t.Cleanup(func() { _ = cs.Close() })
 	srv, s := testServerOnMigratedStore(t, cs)
 
 	globalDir := t.TempDir()

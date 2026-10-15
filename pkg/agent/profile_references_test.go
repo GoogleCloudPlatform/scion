@@ -182,25 +182,3 @@ func TestBuildProfileReferencesDetailed_SharedWorkspaceProvenance(t *testing.T) 
 		}
 	}
 }
-
-// AppliedConfigProfile decodes as the hub's agent store does: any decode
-// error, including a mistyped field other than profile, gives "".
-func TestAppliedConfigProfile(t *testing.T) {
-	for _, c := range []struct {
-		raw     string
-		profile string
-		decoded bool
-	}{
-		{``, "", true},
-		{`{"profile":"local"}`, "local", true},
-		{`{"image":"img:1"}`, "", true},
-		{`{"profile":"local"`, "", false},
-		{`{"profile":"local","thinkingLevel":"high"}`, "", false},
-		{`{"profile":7}`, "", false},
-	} {
-		p, ok := AppliedConfigProfile(c.raw)
-		if p != c.profile || ok != c.decoded {
-			t.Errorf("AppliedConfigProfile(%q) = (%q, %v), want (%q, %v)", c.raw, p, ok, c.profile, c.decoded)
-		}
-	}
-}

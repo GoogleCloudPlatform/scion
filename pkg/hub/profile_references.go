@@ -241,18 +241,15 @@ func (s *Server) onProjectActiveProfileSaved(ctx context.Context, project *store
 	s.triggerProfileReferences()
 }
 
-// countProfileReferences reads the store and the co-located broker's agent
-// directories and counts the references (config.CountProfileReferences).
+// countProfileReferences reads the store and counts the references with
+// agent.BuildProfileReferences (which wraps config.CountProfileReferences);
+// that function's doc comment, on BuildProfileReferencesDetailed, is the
+// one description of which agent-info.json is read and when the hub's
+// AppliedConfig.Profile counts instead.
 //
-// An agent's saved profile is read from its agent-info.json on this host
-// (agent.SavedProfileOnDisk), at the project path dispatch would send and
-// the broker would resolve (config.ProjectDispatchLocation, then
-// config.BrokerProjectPath). agent-info.json, not the image provenance
-// record, is the source: both are written from the same profile at
-// provision, and agent-info.json only gains a profile later when it had
-// none, so it is never less specific. When the file is missing (never
-// provisioned here), or the agent is unplaced, the hub's
-// AppliedConfig.Profile is counted: that is what the first start sends.
+// agent-info.json, not the image provenance record, is the source: both
+// are written from the same profile at provision, and agent-info.json only
+// gains a profile later when it had none, so it is never less specific.
 // Agents on flat Runtime Brokers carry their instance's broker ID, never
 // the legacy co-located one, so the broker filter excludes them.
 func (s *Server) countProfileReferences(ctx context.Context, brokerID, globalDir string) (config.ProfileReferences, error) {

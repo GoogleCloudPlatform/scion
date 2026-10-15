@@ -14,12 +14,7 @@
 
 package agent
 
-import (
-	"encoding/json"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
-)
+import "github.com/GoogleCloudPlatform/scion/pkg/config"
 
 // The built-in profile reference count (ptone/scion#5113) from plain rows,
 // shared by the hub's settings overlay and the rebuild preflight
@@ -49,26 +44,9 @@ type ProfileRefAgentRow struct {
 	ProjectID       string
 	RuntimeBrokerID string
 	// AppliedProfile is the hub's AppliedConfig.Profile: "" when the
-	// applied config is absent or does not decode as
-	// store.AgentAppliedConfig (the hub then has no AppliedConfig).
+	// applied config is absent or does not decode
+	// (store.AppliedConfigProfile; the hub then has no AppliedConfig).
 	AppliedProfile string
-}
-
-// AppliedConfigProfile returns the profile of a stored applied_config
-// document as the hub's agent store sees it: the document is decoded as
-// store.AgentAppliedConfig, and one that does not decode (invalid JSON, or a
-// field of the wrong type anywhere) gives the hub no AppliedConfig, so the
-// profile is "" and decoded is false. An empty document is no applied
-// config: "", true.
-func AppliedConfigProfile(raw string) (profile string, decoded bool) {
-	if raw == "" {
-		return "", true
-	}
-	var cfg store.AgentAppliedConfig
-	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
-		return "", false
-	}
-	return cfg.Profile, true
 }
 
 // ProfileRefInputs is the store data the reference count reads.
@@ -146,7 +124,7 @@ func BuildProfileReferencesDetailed(globalDir, colocatedBrokerID string, in Prof
 		profile := a.AppliedProfile
 		pr := projects[a.ProjectID]
 		if a.RuntimeBrokerID == colocatedBrokerID && pr != nil {
-			path, slug := config.ProjectDispatchLocation(localPaths[pr.ID], pr.Slug, pr.Slug == config.GlobalProjectSlug)
+			path, slug := config.ProjectDispatchLocation(localPaths[pr.ID], pr.Slug, config.IsGlobalProjectSlug(pr.Slug))
 			if projectPath := config.BrokerProjectPath(globalDir, path, slug); projectPath != "" {
 				disk, state := SavedProfileOnDisk(projectPath, a.Slug, pr.SharedWorkspace, pr.ID)
 				switch state {

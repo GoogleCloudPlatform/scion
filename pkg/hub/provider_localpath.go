@@ -75,7 +75,7 @@ const globalProjectSlug = config.GlobalProjectSlug
 // isReservedProjectSlug); project names and labels can be set by clients and
 // do not identify the global project.
 func isGlobalHubProject(slug string) bool {
-	return slug == globalProjectSlug
+	return config.IsGlobalProjectSlug(slug)
 }
 
 // isBrokerGlobalDirPath reports whether localPath has the shape of a broker's
