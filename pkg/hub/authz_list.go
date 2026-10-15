@@ -184,13 +184,10 @@ func applyCredentialCaveats(identity Identity, permissionID string, scopes Scope
 		if id == nil {
 			return ScopeSetNone()
 		}
-		boundary := id.Boundary()
-		if !boundary.Valid() {
-			return ScopeSetNone()
-		}
 		if !uatListPermitted(id, permissionID) {
 			return ScopeSetNone()
 		}
+		boundary := id.Boundary()
 		switch boundary.Kind {
 		case BoundaryKindProject:
 			return scopes.Intersection(ScopeSetExplicit(boundary.ProjectID))

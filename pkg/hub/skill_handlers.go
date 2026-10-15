@@ -411,6 +411,8 @@ func (s *Server) listSkillsForToken(w http.ResponseWriter, r *http.Request, toke
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// The read gate above decides only ActionRead per candidate; the full
+	// capability set is computed once, for the returned page only.
 	resources := make([]Resource, len(result.Items))
 	for i := range result.Items {
 		resources[i] = skillResource(&result.Items[i])

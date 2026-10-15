@@ -165,7 +165,7 @@ var catalogResourceOperations = []OperationSpec{
 	{
 		ID:          "template.list",
 		Domain:      "template",
-		Description: "List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by template read",
+		Description: "List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "GET"},
 		},
@@ -181,7 +181,7 @@ var catalogResourceOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestCatalogWideList_UsesListSelectorThroughEvidence"},
 		},
-		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryProject, BearerBoundaryHub),
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "template.read",
@@ -279,7 +279,7 @@ var catalogResourceOperations = []OperationSpec{
 	{
 		ID:          "harnessconfig.list",
 		Domain:      "harnessconfig",
-		Description: "List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it, and otherwise each row is filtered by harness config read",
+		Description: "List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "GET"},
 		},
@@ -295,7 +295,7 @@ var catalogResourceOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestCatalogWideList_UsesListSelectorThroughEvidence"},
 		},
-		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryProject, BearerBoundaryHub),
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "harnessconfig.read",
