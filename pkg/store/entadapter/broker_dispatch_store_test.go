@@ -771,11 +771,12 @@ func TestExpireAndListStuckPendingMessages_InsideWithTx(t *testing.T) {
 	require.NoError(t, cs.CreateMessage(ctx, stuck))
 
 	var expired []store.ExpiredPendingMessage
-	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+	txErr := cs.WithTx(ctx, func(tx store.Store) error {
 		var err error
 		expired, err = tx.ExpireAndListStuckPendingMessages(ctx, time.Now().Add(-24*time.Hour), store.MessageExpiredStuckPendingReason)
 		return err
-	}))
+	})
+	require.NoError(t, txErr, "the expiry joins the caller's transaction")
 	require.Len(t, expired, 1)
 	assert.Equal(t, stuck.ID, expired[0].ID)
 
