@@ -375,6 +375,11 @@ type Server struct {
 	// boot recovery's sends. Zero in production; only tests set it.
 	launchRecoveryTTL time.Duration
 
+	// agentFilesLockWait, when positive, replaces the 60s a launch's file
+	// clean-up waits for the agent's workspace lock. Zero in production;
+	// only tests set it.
+	agentFilesLockWait time.Duration
+
 	// createSupersedeWait overrides defaultCreateSupersedeWait when
 	// positive (see beginCreateRegistration). Zero in production.
 	createSupersedeWait time.Duration
