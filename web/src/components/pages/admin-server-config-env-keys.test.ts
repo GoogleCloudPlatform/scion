@@ -25,22 +25,11 @@ import {
 } from './__fixtures__/settings-registry.js';
 
 /**
- * Badge keys that are not koanf paths today, with the reason. The list may
- * only shrink: a new mismatch fails, and so does an entry that now matches
- * or is no longer rendered. ptone/scion#3911 drains it.
+ * Badge keys that are not koanf paths, with the reason. ptone/scion#3911
+ * drained it; it must stay empty: a new mismatch fails, and so does an
+ * entry that now matches or is no longer rendered.
  */
-const KNOWN_MISMATCHES: Record<string, string> = {
-  // The koanf keys are server.broker.broker_name and broker_nickname
-  // (ptone/scion#4418).
-  'server.broker.name':
-    'koanf key is server.broker.broker_name (ptone/scion#4418, ptone/scion#3911)',
-  'server.broker.nickname':
-    'koanf key is server.broker.broker_nickname (ptone/scion#4418, ptone/scion#3911)',
-  // Not in the telemetry registry section, so the server never reports them
-  // (ptone/scion#3723).
-  'telemetry.cloud.gcp_project_id': 'not a registry koanf path (ptone/scion#3911)',
-  'telemetry.cloud.cloud_logging': 'not a registry koanf path (ptone/scion#3911)',
-};
+const KNOWN_MISMATCHES: Record<string, string> = {};
 
 /** The page methods whose first argument(s) are env_overrides keys. */
 const ENV_KEY_PROBES = ['renderEnvBadge', 'renderEnvBadgeUnder', 'readOnlyReason'] as const;
