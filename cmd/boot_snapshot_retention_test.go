@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,6 +135,7 @@ func TestUTCTimestampNormalizeIncomplete(t *testing.T) {
 		{name: "key a string", op: op(store.MaintenanceStatusFailed, "system:hub-start", `{"autoRunIncomplete":"true"}`)},
 		{name: "not JSON", op: op(store.MaintenanceStatusFailed, "system:hub-start", "autoRunIncomplete")},
 		{name: "JSON array", op: op(store.MaintenanceStatusFailed, "system:hub-start", `[true]`)},
+		{name: "empty JSON object", op: op(store.MaintenanceStatusFailed, "system:hub-start", `{}`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeMaintenanceStore{op: tc.op, err: tc.err}
@@ -201,6 +203,42 @@ func TestUTCTimestampRepair_ReportsSnapshotPath(t *testing.T) {
 		res := repairUnreadableTimestamps(ctx, s.(timestampRepairDB))
 		assert.False(t, res.Completed)
 		assert.True(t, res.ProbeFailed, "after a panic the repair state is unknown")
+	})
+
+	t.Run("panic after the snapshot", func(t *testing.T) {
+		f := newRepairFixture(t)
+		s := f.boot(t)
+		f.seed(t, s)
+		f.corrupt(t, s.(timestampRepairDB).DB())
+		orig := normalizeUTCTimestamps
+		t.Cleanup(func() { normalizeUTCTimestamps = orig })
+		normalizeUTCTimestamps = func(context.Context, *sql.DB, string, io.Writer, entadapter.TimestampNormalizeOptions) (entadapter.TimestampNormalizeReport, error) {
+			panic("injected")
+		}
+		res := repairUnreadableTimestamps(ctx, s.(timestampRepairDB))
+		assert.False(t, res.Completed)
+		assert.True(t, res.ProbeFailed)
+		snaps := f.snapshots(t)
+		require.Len(t, snaps, 1)
+		assert.Equal(t, snaps[0], res.SnapshotPath, "the snapshot taken before the panic is kept")
+	})
+
+	t.Run("rewrite error after the snapshot", func(t *testing.T) {
+		f := newRepairFixture(t)
+		s := f.boot(t)
+		f.seed(t, s)
+		f.corrupt(t, s.(timestampRepairDB).DB())
+		orig := normalizeUTCTimestamps
+		t.Cleanup(func() { normalizeUTCTimestamps = orig })
+		normalizeUTCTimestamps = func(context.Context, *sql.DB, string, io.Writer, entadapter.TimestampNormalizeOptions) (entadapter.TimestampNormalizeReport, error) {
+			return entadapter.TimestampNormalizeReport{}, errors.New("injected rewrite failure")
+		}
+		res := repairUnreadableTimestamps(ctx, s.(timestampRepairDB))
+		assert.False(t, res.Completed)
+		assert.False(t, res.ProbeFailed)
+		snaps := f.snapshots(t)
+		require.Len(t, snaps, 1)
+		assert.Equal(t, snaps[0], res.SnapshotPath)
 	})
 
 	t.Run("probe failure", func(t *testing.T) {
@@ -335,4 +373,31 @@ func TestMigrateThenPrune_RealPredicate(t *testing.T) {
 	assert.NoFileExists(t, fx.oldTS)
 	assert.NoFileExists(t, fx.oldFK)
 	assert.FileExists(t, fx.other)
+}
+
+// snapshotBeforeFKReconcileRecord passes the snapshot it writes, and the
+// one it reuses, to record.
+func TestSnapshotBeforeFKReconcileRecord(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "hub.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec("CREATE TABLE t (id TEXT PRIMARY KEY)")
+	require.NoError(t, err)
+	groups := []entc.FKRepairGroup{{Table: "t", Columns: []string{"c"}, Parent: "p", Action: "CASCADE", Rows: 1}}
+
+	var recorded []string
+	record := func(p string) { recorded = append(recorded, p) }
+	require.NoError(t, snapshotBeforeFKReconcileRecord(ctx, db, groups, record))
+	snaps := fkSnapshots(t, path)
+	require.Len(t, snaps, 1)
+	assert.Equal(t, snaps, recorded)
+
+	require.NoError(t, snapshotBeforeFKReconcileRecord(ctx, db, groups, record))
+	assert.Equal(t, []string{snaps[0], snaps[0]}, recorded, "a reused snapshot is recorded too")
+
+	// A nil record is allowed (the maintenance commands).
+	require.NoError(t, snapshotBeforeFKReconcile(ctx, db, groups))
 }

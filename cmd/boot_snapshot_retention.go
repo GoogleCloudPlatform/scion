@@ -48,6 +48,8 @@ func startupSnapshotPatterns() []string {
 // utcTimestampAutoRunIncompleteKey is the key in the utc-timestamp-normalize
 // maintenance operation's metadata that marks an automatic run that started
 // and has not completed.
+//
+// replaced by entadapter.UTCTimestampAutoRunIncompleteKey (ptone/scion#5194)
 const utcTimestampAutoRunIncompleteKey = "autoRunIncomplete"
 
 // utcTimestampNormalizeIncomplete reports whether an automatic run of the
