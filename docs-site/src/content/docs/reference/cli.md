@@ -912,13 +912,13 @@ Manages the Scion workspace (Project). `scion projects` is an alias of the group
     - `set [project]`: Set the inbound messaging policy.
         - Flags: `--policy <string>` (one of `none`, `members`, `all`), `--revision <int>` (required, optimistic concurrency revision).
     - `get [project]`: Show the current messaging policy and revision.
-- `scion project visitors`: Grant users of a trusted issuer visitor access to a project by email (experimental: needs the `federation.project_visitors` experiment, an issuer with `allow_visitor_grants`, project owner or admin or hub admin, and an interactive session; granting and extending also need the `project-visitor` permissions on the project). Not available in agent mode.
-    - `list`: List the project's visitors with email, issuer, status (`pending` until the visitor's first request, then `active`, or `suspended`; marked `(issuer not accepted)` while the Hub does not accept visitors from that issuer) and expiry.
+- `scion project visitors`: Grant users of a trusted issuer visitor access to a project by email or by email domain (experimental: needs the `federation.project_visitors` experiment, an issuer with `allow_visitor_grants`, project owner or admin or hub admin, and an interactive session; granting and extending also need the `project-visitor` permissions on the project). Not available in agent mode.
+    - `list`: List the project's visitors with email, issuer, status (`pending` until the visitor's first request, then `active`, or `suspended`; marked `(issuer not accepted)` while the Hub does not accept visitors from that issuer), source (`email`, or the domain of the visitor rule that added them) and expiry, then the visitor rules with how many visitors each has added. `--json` prints `{"visitors": [...], "rules": [...]}`.
         - Flags: `--json`.
-    - `add`: Grant visitor access.
-        - Flags: `--issuer <url>` (required, a trusted issuer URL), `--email <email>` (required), `--expires <duration>` (optional, for example `30d`), `--json`.
-    - `remove <email or id>`: Revoke a visitor's access; the next request is refused.
-        - Flags: `--issuer <url>` (when the email is a visitor from more than one issuer).
+    - `add`: Grant visitor access by email, or with `--domain` add a visitor rule: every user of the issuer whose verified email is in exactly that domain (no subdomains) becomes a visitor on their first request. A rule replaces an expired or not yet started grant by email, never an active one; a person who is a visitor through a rule is granted by email only after `remove`.
+        - Flags: `--issuer <url>` (required, a trusted issuer URL), `--email <email>` or `--domain <domain>` (exactly one), `--expires <duration>` (optional, for example `30d`), `--json`.
+    - `remove <email or id>` or `remove --domain <domain>`: Revoke a visitor's access (the next request is refused; a visitor a rule added is not added again by that rule), or remove a visitor rule and every visitor it added (a rule can also be named by the rule ID `list` shows). Visitors granted by email keep their access when a rule is removed.
+        - Flags: `--issuer <url>` (when the email is a visitor, or the domain has rules, from more than one issuer), `--domain <domain>`.
     - `extend <email or id>`: Set a new expiry.
         - Flags: `--expires <duration>` (required), `--issuer <url>`, `--json`.
     - Flags: `--project <id or slug>`.
