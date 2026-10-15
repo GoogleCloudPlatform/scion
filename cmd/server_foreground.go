@@ -1570,6 +1570,7 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
+	warnConduitTargetStreamDeadlines(cfg.Hub.Conduit)
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
@@ -2574,6 +2575,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		ConduitAuthzRecheckInterval:  conduitAuthzRecheckIntervalSetting(cfg),
 		ConduitUserStreamAuthzMax:    conduitUserStreamAuthzMaxSetting(cfg),
 		ConduitProxySessionMaxAge:    conduitProxySessionMaxAgeSetting(cfg),
+		ConduitTargetStreamDeadlines: cfg.Hub.Conduit.TargetStreamDeadlinesValue(),
 		AgentRunScope:                agentRunScopeSetting(cfg),
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
@@ -2723,6 +2725,11 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub conduit stream authz metrics disabled: %v", err)
 	} else {
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
+	}
+	if refusedRec, err := hub.NewOTelConduitOpenRefusedMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit stream open refusal metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitOpenRefusedMetrics(refusedRec)
 	}
 
 	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {

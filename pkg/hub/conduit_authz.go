@@ -271,14 +271,26 @@ type conduitGrantRequest struct {
 	// registry (kind, id, endpoint_incarnation, session_id,
 	// connection_epoch).
 	Target grant.Target
-	// ViaTunnel marks a request from the `scion tunnel` / `scion ssh`
-	// path, which also requires ActionTunnel.
-	ViaTunnel bool
+	// Via is the origin that admitted the stream (grant.ViaTunnel,
+	// grant.ViaProxy or grant.ViaPTY). The caller sets it from the route
+	// it serves, never from a request or relay field. The open is
+	// authorized for the action set of (Via, Stream.Kind). Empty means no
+	// origin (agent callers and library uses such as broker targets): the
+	// kind's action alone, and the grant is never stamped.
+	Via string
+	// TargetRenews reports that the target session row the grant binds to
+	// advertises conduit.FeatureStreamRenewal (conduitTargetRenews).
+	TargetRenews bool
+	// CanRenew reports that this node can deliver renewals for the stream
+	// on the resolved route.
+	CanRenew bool
 }
 
 // mintConduitGrant authorizes req and, only if every check passes, mints a
 // single-use grant for it. Errors wrap errConduitDisabled,
-// errConduitInvalid or errConduitForbidden.
+// errConduitInvalid, errConduitForbidden,
+// errConduitStreamRenewalUnavailable (503 stream_renewal_unavailable) or
+// errConduitGrantInternal (500 internal_error, nothing minted).
 func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) ([]byte, *grant.Claims, error) {
 	if !s.experimentEnabled(conduitExperiment) {
 		return nil, nil, errConduitDisabled
@@ -287,9 +299,19 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		return nil, nil, fmt.Errorf("%w: missing identity or agent", errConduitInvalid)
 	}
 	agent := req.Agent
-	action := conduitStreamAction(req.Stream.Kind)
-	if action == "" {
+	if conduitStreamAction(req.Stream.Kind) == "" {
 		return nil, nil, fmt.Errorf("%w: unknown stream kind %q", errConduitInvalid, req.Stream.Kind)
+	}
+	var actions []Action
+	if req.Via == "" {
+		// No origin: agent callers and library uses (broker targets,
+		// logs, events). Authorized as before; never stamped (below).
+		actions = conduitStreamActions(req.Stream.Kind, false)
+	} else {
+		actions = conduitViaActions(req.Via, req.Stream.Kind)
+	}
+	if actions == nil {
+		return nil, nil, fmt.Errorf("%w: origin %q does not carry kind %q", errConduitInvalid, req.Via, req.Stream.Kind)
 	}
 	switch req.Target.Kind {
 	case grant.TargetKindAgent:
@@ -316,13 +338,21 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 
 	// Permission first, so a caller without it learns nothing about the
 	// target (for example which ports are exposed).
-	if err := s.authorizeConduitAction(ctx, req.Identity, agent, action); err != nil {
-		return nil, nil, err
-	}
-	if req.ViaTunnel {
-		if err := s.authorizeConduitAction(ctx, req.Identity, agent, ActionTunnel); err != nil {
+	for _, a := range actions {
+		if err := s.authorizeConduitAction(ctx, req.Identity, agent, a); err != nil {
 			return nil, nil, err
 		}
+	}
+	stamp := conduitStampsDeadline(req.Identity, req.TargetRenews)
+	if stamp && req.Via == "" {
+		return nil, nil, fmt.Errorf("%w: a stream to a renewal target needs an origin", errConduitInvalid)
+	}
+	// Renewal path (contracts, Renewal path unavailable): after
+	// authorization, before the placement guard and the mint. The route
+	// decides this at resolution; this is the backstop for a re-resolution
+	// onto another row after that check.
+	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
+		return nil, nil, errConduitStreamRenewalUnavailable
 	}
 	// Flat placement guard (requirePinnedPlacement), after the permission
 	// checks so a caller without permission learns nothing about the
@@ -369,6 +399,20 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 			return nil, nil, err
 		}
 	}
+	var scope *grant.Scope
+	if stamp {
+		// The scope claim is the design §3.5 credential context that the
+		// renewal re-check rebuilds the identity from
+		// (conduitScopedIdentity). A scoped stream's grant is never minted
+		// without it.
+		sc, err := s.conduitScopeOf(req.Identity)
+		if err != nil {
+			slog.Error("Conduit open grant not minted: stream scope cannot be determined",
+				"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via)
+			return nil, nil, fmt.Errorf("%w: %w", errConduitGrantInternal, err)
+		}
+		scope = sc
+	}
 
 	keys := s.conduitGrantKeySet()
 	signer, err := keys.signer(ctx)
@@ -385,6 +429,13 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		NotBefore: now,
 		Expiry:    now.Add(conduitGrantTTL),
 	}
+	if stamp {
+		// Design §3.5 Open grant: a user stream to a stream_renewal.v2
+		// target carries its origin, scope and authorization deadline.
+		iv := s.conduitUserStreamAuthzInterval().Truncate(time.Second)
+		claims.Via, claims.Scope = req.Via, scope
+		claims.AuthzUntil, claims.AuthzInterval = now.Add(iv), iv
+	}
 	jti, err := grant.NewJTI()
 	if err != nil {
 		return nil, nil, err
@@ -392,6 +443,11 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	claims.JTI = jti
 	tok, err := grant.Mint(signer, claims)
 	if err != nil {
+		if errors.Is(err, grant.ErrTooLarge) {
+			slog.Error("Conduit open grant exceeds the grant size limit; not minted",
+				"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via)
+			return nil, nil, fmt.Errorf("%w: %w", errConduitGrantInternal, err)
+		}
 		return nil, nil, err
 	}
 	claims.KeyID = signer.KeyID

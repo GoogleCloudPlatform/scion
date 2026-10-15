@@ -156,6 +156,12 @@ type ServerConfig struct {
 	// admitted through trusted-proxy authentication may open new tunnels
 	// (conduit.proxy_session_max_age; 0 = 1h).
 	ConduitProxySessionMaxAge time.Duration
+	// ConduitTargetStreamDeadlines is server.hub.conduit.target_stream_deadlines
+	// ("off", "enforce"; "" = off): published to targets with the grant
+	// keys, and with "enforce" a user stream to a renewal-capable target is
+	// opened only on a route this node can renew (design §3.5). Only used
+	// behind the hub.conduit experiment.
+	ConduitTargetStreamDeadlines string
 	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
 	// response headers on the conduit port proxy, the WebSocket handshake
 	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
@@ -1706,6 +1712,12 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// conduitOpenRefusedMetrics counts user stream opens refused before
+	// any grant is minted (scion.hub.conduit.stream_open_refused).
+	conduitOpenRefusedMetrics atomic.Pointer[conduitOpenRefusedMetrics]
+	// conduitScopeOfTest, when set (tests only, never in production),
+	// replaces conduitScopeFor in the open mint (conduitScopeOf).
+	conduitScopeOfTest  conduitScopeFunc
 	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.

@@ -1544,6 +1544,13 @@
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_RELAYMODE",
               "x-since": "1"
             },
+            "target_stream_deadlines": {
+              "type": "string",
+              "enum": ["off", "enforce"],
+              "description": "Whether targets enforce user streams' authorization deadlines locally: 'off' (default) or 'enforce'. Published to targets with the grant keys. Enforce requires the hub's renewal driver, which lands in a follow-up change; until then, enforce refuses user streams to renewal-capable targets (503 unavailable, stream_renewal_unavailable). Requires the hub.conduit experiment.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_TARGETSTREAMDEADLINES",
+              "x-since": "1"
+            },
             "peer_secret": {
               "type": "string",
               "description": "Dedicated relay-peer secret, raw octets (no decoding; one trailing newline is removed), at least 32 octets with at least 16 distinct (generate with 'openssl rand -base64 32'): the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",

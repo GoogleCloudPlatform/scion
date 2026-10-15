@@ -1987,6 +1987,14 @@ type V1ServerHubConduitConfig struct {
 	// scion server --role relay, hold the conduit sessions). Read at
 	// startup.
 	RelayMode string `json:"relay_mode,omitempty" yaml:"relay_mode,omitempty" koanf:"relay_mode"`
+	// TargetStreamDeadlines is "off" (default) or "enforce": whether
+	// targets enforce user streams' authorization deadlines locally
+	// (design §3.5, Target-side deadlines). The value is published to
+	// targets with the grant keys. Enforce requires the hub's renewal
+	// driver, which lands in a follow-up change; until then, enforce
+	// refuses user streams to renewal-capable targets (503 unavailable,
+	// stream_renewal_unavailable). Requires the hub.conduit experiment.
+	TargetStreamDeadlines string `json:"target_stream_deadlines,omitempty" yaml:"target_stream_deadlines,omitempty" koanf:"target_stream_deadlines"`
 	// PeerSecret is the dedicated relay-peer secret: raw octets (one
 	// trailing newline removed), at least 32 of them, 16 distinct:
 	// the HMAC key of every relay-peer call is derived from it wherever a
@@ -4321,21 +4329,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if c := v1.Hub.Conduit; c != nil {
 			gc.Hub.Conduit = HubConduitConfig{
-				GrantKeyActivation:   c.GrantKeyActivation,
-				TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-				InternalListen:       c.InternalListen,
-				InternalAdvertise:    c.InternalAdvertise,
-				PeerAuth:             c.PeerAuth,
-				PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-				PeerAudience:         c.PeerAudience,
-				ReconnectWindow:      c.ReconnectWindow,
-				InstanceID:           c.InstanceID,
-				AuthzRecheckInterval: c.AuthzRecheckInterval,
-				LifetimeCap:          c.LifetimeCap,
-				ShutdownGrace:        c.ShutdownGrace,
-				ProxySessionMaxAge:   c.ProxySessionMaxAge,
-				RelayMode:            c.RelayMode,
-				PeerSecret:           c.PeerSecret,
+				GrantKeyActivation:    c.GrantKeyActivation,
+				TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+				InternalListen:        c.InternalListen,
+				InternalAdvertise:     c.InternalAdvertise,
+				PeerAuth:              c.PeerAuth,
+				PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+				PeerAudience:          c.PeerAudience,
+				ReconnectWindow:       c.ReconnectWindow,
+				InstanceID:            c.InstanceID,
+				AuthzRecheckInterval:  c.AuthzRecheckInterval,
+				LifetimeCap:           c.LifetimeCap,
+				ShutdownGrace:         c.ShutdownGrace,
+				ProxySessionMaxAge:    c.ProxySessionMaxAge,
+				RelayMode:             c.RelayMode,
+				TargetStreamDeadlines: c.TargetStreamDeadlines,
+				PeerSecret:            c.PeerSecret,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4695,21 +4704,22 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if c := gc.Hub.Conduit; !c.IsZero() {
 		v1Hub.Conduit = &V1ServerHubConduitConfig{
-			GrantKeyActivation:   c.GrantKeyActivation,
-			TCPAllowedPorts:      append([]int(nil), c.TCPAllowedPorts...),
-			InternalListen:       c.InternalListen,
-			InternalAdvertise:    c.InternalAdvertise,
-			PeerAuth:             c.PeerAuth,
-			PeerServiceAccounts:  append([]string(nil), c.PeerServiceAccounts...),
-			PeerAudience:         c.PeerAudience,
-			ReconnectWindow:      c.ReconnectWindow,
-			InstanceID:           c.InstanceID,
-			AuthzRecheckInterval: c.AuthzRecheckInterval,
-			LifetimeCap:          c.LifetimeCap,
-			ShutdownGrace:        c.ShutdownGrace,
-			ProxySessionMaxAge:   c.ProxySessionMaxAge,
-			RelayMode:            c.RelayMode,
-			PeerSecret:           c.PeerSecret,
+			GrantKeyActivation:    c.GrantKeyActivation,
+			TCPAllowedPorts:       append([]int(nil), c.TCPAllowedPorts...),
+			InternalListen:        c.InternalListen,
+			InternalAdvertise:     c.InternalAdvertise,
+			PeerAuth:              c.PeerAuth,
+			PeerServiceAccounts:   append([]string(nil), c.PeerServiceAccounts...),
+			PeerAudience:          c.PeerAudience,
+			ReconnectWindow:       c.ReconnectWindow,
+			InstanceID:            c.InstanceID,
+			AuthzRecheckInterval:  c.AuthzRecheckInterval,
+			LifetimeCap:           c.LifetimeCap,
+			ShutdownGrace:         c.ShutdownGrace,
+			ProxySessionMaxAge:    c.ProxySessionMaxAge,
+			RelayMode:             c.RelayMode,
+			TargetStreamDeadlines: c.TargetStreamDeadlines,
+			PeerSecret:            c.PeerSecret,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
