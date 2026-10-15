@@ -278,8 +278,7 @@ func TestProfilesCheck_Scope(t *testing.T) {
 		providers: []agent.ProfileRefProvider{{ProjectID: "p1"}},
 	}
 	rep := runProfiles(t, globalDir, db, testBroker)
-	wantCodes(t, rep, "settings.profiles.agent_saved_profile.pre_existing",
-		"settings.profiles.project_active_profile.pre_existing", "settings.profiles.unparseable_applied_config")
+	wantCodes(t, rep, "settings.profiles.agent_saved_profile.pre_existing", "settings.profiles.project_active_profile.pre_existing", "settings.profiles.unparseable_applied_config")
 	if f := rep.Findings[0]; f.Data["profile"] != "gone-unplaced" || !reflect.DeepEqual(f.Subjects, []string{"one/unplaced"}) {
 		t.Fatalf("agent finding %+v, want gone-unplaced with subject one/unplaced", f)
 	}
