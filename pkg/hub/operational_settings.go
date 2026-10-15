@@ -791,6 +791,18 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		o.runPollBackstop(propCtx, server)
 	}()
 
+	// --- Built-in profile reference counts (ptone/scion#5113) ---
+	o.propagationWg.Add(1)
+	go func() {
+		defer o.propagationWg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Built-in profile reference worker panicked — reference counts stopped on this replica", "panic", r)
+			}
+		}()
+		server.runProfileReferenceWorker(propCtx)
+	}()
+
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
 	// Use propCtx (not the parent ctx) so reconnect refreshes respect the
 	// propagation lifecycle and stop when StopPropagation cancels propCtx.
@@ -862,6 +874,9 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 			return
 		case <-ticker.C:
 			o.refreshAndApply(ctx, server)
+			// Recount built-in profile references every tick, changed
+			// sections or not (ptone/scion#5113).
+			server.triggerProfileReferences()
 		}
 	}
 }
@@ -1533,6 +1548,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
 			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+			// Recount the built-in profile references the overlay retains
+			// (ptone/scion#5113); never blocks.
+			s.triggerProfileReferences()
 			if snap.Runtimes != nil {
 				applied = append(applied, "runtimes")
 			}

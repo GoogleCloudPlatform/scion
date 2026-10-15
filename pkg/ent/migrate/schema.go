@@ -216,6 +216,9 @@ var (
 		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_cause", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_prior_phase", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_revoke_on_fail", Type: field.TypeBool, Default: false},
+		{Name: "launch_resume_phase", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_claim", Type: field.TypeInt64, Default: 0},
 		{Name: "deletion_lease_at", Type: field.TypeTime, Nullable: true},
@@ -249,7 +252,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[89]},
+				Columns:    []*schema.Column{AgentsColumns[92]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -268,17 +271,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[89]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[92]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -296,12 +299,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[75]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[78]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[84]},
+				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[87]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -1515,6 +1518,7 @@ var (
 		{Name: "storage_uri", Type: field.TypeString, Nullable: true},
 		{Name: "storage_bucket", Type: field.TypeString, Nullable: true},
 		{Name: "storage_path", Type: field.TypeString, Nullable: true},
+		{Name: "layout", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "files", Type: field.TypeString, Nullable: true},
 		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "active", "archived"}, Default: "active"},
 		{Name: "image_status", Type: field.TypeEnum, Enums: []string{"unknown", "valid", "invalid", "error"}, Default: "unknown"},
@@ -1546,7 +1550,7 @@ var (
 			{
 				Name:    "harnessconfig_status",
 				Unique:  false,
-				Columns: []*schema.Column{HarnessConfigsColumns[14]},
+				Columns: []*schema.Column{HarnessConfigsColumns[15]},
 			},
 			{
 				Name:    "harnessconfig_content_hash",
@@ -1907,6 +1911,11 @@ var (
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
+			},
+			{
+				Name:    "message_project_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[21], MessagesColumns[0]},
 			},
 		},
 	}

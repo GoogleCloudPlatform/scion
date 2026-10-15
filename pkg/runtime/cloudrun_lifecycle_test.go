@@ -38,9 +38,25 @@ import (
 type fakeInstanceOperation struct {
 	instance *runpb.Instance
 	waitErr  error
+	// name is the operation name Name reports.
+	name string
+	// blocks makes Wait block until its ctx ends, then return blockErr,
+	// or the ctx's error when blockErr is nil.
+	blocks   bool
+	blockErr error
 }
 
+// Name reports the operation name, as the Cloud Run client's operations do.
+func (o *fakeInstanceOperation) Name() string { return o.name }
+
 func (o *fakeInstanceOperation) Wait(ctx context.Context, opts ...gax.CallOption) (*runpb.Instance, error) {
+	if o.blocks {
+		<-ctx.Done()
+		if o.blockErr != nil {
+			return nil, o.blockErr
+		}
+		return nil, ctx.Err()
+	}
 	if o.waitErr != nil {
 		return nil, o.waitErr
 	}
@@ -71,6 +87,9 @@ type fakeGetResult struct {
 	err  error
 }
 
+// fakeDeleteOpName is the name of every delete operation the fake returns.
+const fakeDeleteOpName = "projects/test-project/locations/us-central1/operations/delete-op-1"
+
 type fakeInstancesClient struct {
 	// Canned responses.
 	getInstance *runpb.Instance
@@ -96,6 +115,11 @@ type fakeInstancesClient struct {
 	// create and the delete operation.
 	createWaitErr error
 	deleteWaitErr error
+	// deleteWaitBlocks makes the delete operation's Wait block until its
+	// ctx ends, then return deleteWaitBlockErr, or the ctx's error when
+	// that is nil (ptone/scion#5154).
+	deleteWaitBlocks   bool
+	deleteWaitBlockErr error
 	// onCreate, when set, runs at the start of CreateInstance.
 	onCreate func()
 	// reconcilingReads is the number of further GetInstance calls that
@@ -183,10 +207,13 @@ func (c *fakeInstancesClient) DeleteInstance(ctx context.Context, req *runpb.Del
 	if err != nil {
 		return nil, err
 	}
-	if c.deleteWaitErr != nil {
-		return &fakeInstanceOperation{waitErr: c.deleteWaitErr}, nil
+	if c.deleteWaitBlocks {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, blocks: true, blockErr: c.deleteWaitBlockErr}, nil
 	}
-	return &fakeInstanceOperation{waitErr: c.waitErr}, nil
+	if c.deleteWaitErr != nil {
+		return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.deleteWaitErr}, nil
+	}
+	return &fakeInstanceOperation{name: fakeDeleteOpName, waitErr: c.waitErr}, nil
 }
 
 func (c *fakeInstancesClient) ListInstances(ctx context.Context, req *runpb.ListInstancesRequest, opts ...gax.CallOption) cloudrun.InstanceIterator {

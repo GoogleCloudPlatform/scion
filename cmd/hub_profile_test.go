@@ -49,11 +49,11 @@ func profileGateEnv(t *testing.T, name string) {
 	if name != "" {
 		t.Setenv(hubprofile.EnvHubProfile, name)
 	}
-	origFlag, origAs, origRun, origHub, origNoHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub
+	origFlag, origAs, origRun, origHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint
 	t.Cleanup(func() {
-		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = origFlag, origAs, origRun, origHub, origNoHub
+		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = origFlag, origAs, origRun, origHub
 	})
-	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = "", "", "", "", false
+	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = "", "", "", ""
 }
 
 func realCommand(t *testing.T, path string) *cobra.Command {
@@ -108,6 +108,8 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 // too: root checks it before the hub-profile gate.
 func TestHubProfileGate_NoHubGetsRemovalError(t *testing.T) {
 	profileGateEnv(t, "t1")
+	// Parsing --no-hub sets the flag variable; clear it for later tests.
+	t.Cleanup(func() { noHub = false })
 	_, err := runProfileRoot(t, "hub", "status", "--no-hub")
 	require.ErrorIs(t, err, errNoHubRemoved)
 }
