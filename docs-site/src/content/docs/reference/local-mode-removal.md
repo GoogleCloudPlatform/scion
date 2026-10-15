@@ -48,6 +48,9 @@ re-link it. See [Linked git projects](/scion/local/workspace/#linked-git-project
 | Hint "To use local-only mode, run: scion hub disable" after hub errors | For the local hub: start it with `scion server start` (check with `scion server status`). For a remote hub: check it with `scion hub status`. |
 | `templates show/delete/clone` silently falling back to the filesystem when the hub fails | The hub error is shown. `--local` is the explicit filesystem view, now also on `scion templates list --local`. |
 | `scion hub unlink` putting a project into local-only mode | `scion hub unlink` now only records that the project is unlinked. Agent commands in that project then refuse with a pointer to `scion hub link`. Agents that already exist keep running on the broker; manage them with `--project <hub-slug>`. |
+| `scion logs --follow` (it only worked for local agents) | Removed. `scion logs <agent>` shows the latest lines through the hub (`--tail` sets how many); `scion attach <agent>` follows the session live. |
+| `scion sync <agent>` with no direction | The direction is required: `scion sync to <agent>` or `scion sync from <agent>`. |
+| The `image_registry` check before project commands | Removed from the CLI. The workstation server and the Runtime Broker still require `image_registry` before they run agents (see [Missing image registry](#missing-image-registry)). |
 
 With no hub configured, any command that needs one fails with:
 
