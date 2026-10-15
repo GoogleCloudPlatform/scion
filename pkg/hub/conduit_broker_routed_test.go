@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -37,6 +38,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/envelope"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -364,16 +367,17 @@ func TestRoutedBrokerRPC_RefusalMarkerNeverForwarded(t *testing.T) {
 	assert.Equal(t, 0, f.legacy.calls)
 }
 
-// drainOnExec returns an Interceptor for a broker session that, on an
-// inbound exec RpcRequest, puts the session into drain (GoAway) before the
+// drainOnExec returns an Interceptor for a broker session that puts the
+// session into drain (GoAway) when one of the first limit exec RpcRequests
+// arriving across the sessions sharing arrivals reaches it, before the
 // request is dispatched, so the session layer refuses it with the marked
-// 503. With every false, only the first exec across the sessions sharing
-// first is refused.
-func drainOnExec(first *atomic.Bool, ls *atomic.Pointer[conduit.LocalSession], every bool) conduit.Interceptor {
+// 503. drains counts the sessions drained.
+func drainOnExec(arrivals, drains *atomic.Int32, ls *atomic.Pointer[conduit.LocalSession], limit int32) conduit.Interceptor {
 	return func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
 		req := f.GetRpcRequest()
-		if dir == conduit.Inbound && req != nil && strings.HasSuffix(req.GetPath(), "/exec") && (every || first.CompareAndSwap(false, true)) {
+		if dir == conduit.Inbound && req != nil && strings.HasSuffix(req.GetPath(), "/exec") && arrivals.Add(1) <= limit {
 			if p := ls.Load(); p != nil {
+				drains.Add(1)
 				_ = (*p).GoAway(conduit.GoAwayOptions{DrainDeadline: time.Minute})
 			}
 		}
@@ -381,82 +385,120 @@ func drainOnExec(first *atomic.Bool, ls *atomic.Pointer[conduit.LocalSession], e
 	}
 }
 
-// holdingAnswer answers "other" requests only once release is closed, and
-// every other operation as a healthy broker does.
-func holdingAnswer(entered chan<- struct{}, release <-chan struct{}) func(context.Context, string, *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope {
-	return func(ctx context.Context, op string, env *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope {
-		if op == "other" {
-			entered <- struct{}{}
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-			return wsprotocol.NewResponseEnvelope(env.RequestID, http.StatusOK, nil, nil)
-		}
-		return defaultBrokerAnswer(ctx, op, env)
-	}
+// drainRetryWorld is a router on relay "relay-r" and one session of the
+// same broker on each of n other relays, so every session is current
+// (broker epoch currency is per relay, design §3.4). The first drainFirst
+// exec requests to arrive put their session into drain. Each session holds
+// one RPC in flight, so a GoAway leaves it draining instead of closing it.
+type drainRetryWorld struct {
+	client *HybridBrokerClient
+	legacy *mockControlChannelTunnel
+	execs  []*atomic.Int32 // exec requests each session ran
+	drains *atomic.Int32   // sessions that refused an exec while draining
 }
 
-// holdRPC keeps one RPC in flight on b's session (sent by the hub's side
-// of that session directly), so a GoAway leaves the session draining
-// instead of closing it at once.
-func (f *routedBrokerFixture) holdRPC(t *testing.T, b *routedTestBroker, entered <-chan struct{}) {
+func newDrainRetryWorld(t *testing.T, n int, drainFirst int32) *drainRetryWorld {
 	t.Helper()
-	rt := f.srv.conduit.Load()
-	require.NotNil(t, rt)
-	hubSide, _, ok := rt.relay.Local(context.Background(), b.sessionID)
-	require.True(t, ok, "the hub holds the broker session")
-	go func() {
-		_, _ = hubSide.Call(context.Background(), &conduitv1.RpcRequest{Method: http.MethodGet, Path: "/hold"})
-	}()
-	waitSignal(t, entered, "held RPC reached the broker")
+	w := relaytest.NewWorld(t)
+	r := w.StartNode("relay-r", nil)
+	const brokerID = "broker-dr"
+	w.SetPrincipal("bdr", relay.Principal{Kind: registry.PrincipalBroker, ID: brokerID, Incarnation: "proc-dr"})
+	hello := &conduitv1.Hello{
+		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
+		PrincipalId:   brokerID,
+		Capabilities:  &conduitv1.Capabilities{Rpc: conduit.BrokerRPCs(), EndpointIncarnation: "proc-dr"},
+	}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	entered := make(chan struct{}, n)
+	arrivals := &atomic.Int32{}
+	d := &drainRetryWorld{drains: &atomic.Int32{}}
+	for i := 0; i < n; i++ {
+		node := w.StartNode(fmt.Sprintf("relay-%d", i), nil)
+		execs := &atomic.Int32{}
+		d.execs = append(d.execs, execs)
+		var ls atomic.Pointer[conduit.LocalSession]
+		handler := conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+			env := envelope.RPCToRequest(req)
+			if env.Path == "/hold" {
+				entered <- struct{}{}
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+				return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(env.RequestID, http.StatusOK, nil, nil))
+			}
+			if strings.HasSuffix(env.Path, "/exec") {
+				execs.Add(1)
+			}
+			return envelope.ResponseToRPC(wsprotocol.NewResponseEnvelope(env.RequestID, http.StatusOK, nil, []byte(`{"output":"routed","exitCode":0}`)))
+		})
+		target, welcome := node.MustDial("bdr", hello, conduit.Config{RPCHandler: handler, Interceptor: drainOnExec(arrivals, d.drains, &ls, drainFirst)})
+		ls.Store(&target)
+		relaySide, _, ok := node.Relay.Local(context.Background(), welcome.GetSessionId())
+		require.True(t, ok, "relay %d holds the broker session", i)
+		go func() {
+			_, _ = relaySide.Call(context.Background(), &conduitv1.RpcRequest{Method: http.MethodGet, Path: "/hold"})
+		}()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("held RPC did not reach the session on relay %d", i)
+		}
+	}
+
+	rt, err := router.New(router.Config{Relay: r.Relay, Registry: w.Registry, Store: w.Store, Peers: r.Peers, Now: w.Now, Brokers: noBrokerControlChannel{}})
+	require.NoError(t, err)
+	d.legacy = &mockControlChannelTunnel{connected: true, body: []byte(`{"output":"legacy","exitCode":0}`)}
+	d.client = &HybridBrokerClient{
+		controlChannel: &ControlChannelBrokerClient{manager: d.legacy, signer: &mockBrokerSigner{}},
+		httpClient:     &mockRuntimeBrokerClient{},
+	}
+	d.client.SetConduitRouting(&routedBrokerTunnel{
+		router:    func() brokerRPCRouter { return rt },
+		enabled:   func() bool { return true },
+		execScope: func(context.Context, string) (string, error) { return "", nil },
+	})
+	return d
+}
+
+func (d *drainRetryWorld) execTotal() int32 {
+	var n int32
+	for _, e := range d.execs {
+		n += e.Load()
+	}
+	return n
 }
 
 // TestRoutedBrokerRPC_DrainRefusalRetriedOnceOnReplacement: a draining
-// session's refusal is retried once on a replacement session; a second
-// draining refusal takes the fallback instead of trying a third session.
+// session's refusal is retried once on a replacement session (here on
+// another relay, where it is current); a second draining refusal takes
+// the fallback, although a third session could serve the request.
+//
+// If the retry broke (the refusal fell back at once), subtest 1 would get
+// the legacy answer and no session would run the exec; if the refusal
+// were taken as the broker's answer, ExecAgent would return its 503. If
+// the one-retry limit broke, subtest 2 would reach the third session,
+// which serves the exec, and get the routed answer instead of the legacy
+// one.
 func TestRoutedBrokerRPC_DrainRefusalRetriedOnceOnReplacement(t *testing.T) {
 	t.Run("retried on the replacement", func(t *testing.T) {
-		f := newRoutedBrokerFixture(t, nil)
-		entered := make(chan struct{}, 4)
-		release := make(chan struct{})
-		defer close(release)
-		var first atomic.Bool
-		var ps [2]atomic.Pointer[conduit.LocalSession]
-		var bs [2]*routedTestBroker
-		for i := range bs {
-			bs[i] = f.dialRoutedBroker(t, routedBrokerOpts{interceptor: drainOnExec(&first, &ps[i], false), answer: holdingAnswer(entered, release)})
-			ps[i].Store(&bs[i].ls)
-			f.holdRPC(t, bs[i], entered)
-		}
-
-		out, _, err := f.client.ExecAgent(context.Background(), f.brokerID, "", "agent-a", "p1", []string{"true"}, 5)
+		d := newDrainRetryWorld(t, 2, 1)
+		out, _, err := d.client.ExecAgent(context.Background(), "broker-dr", "", "agent-a", "p1", []string{"true"}, 5)
 		require.NoError(t, err)
-		assert.Equal(t, "routed", out)
-		assert.True(t, first.Load(), "a session refused while draining")
-		assert.Equal(t, 1, bs[0].count(conduit.RPCAgentExec)+bs[1].count(conduit.RPCAgentExec), "exactly one session ran the request")
-		assert.Equal(t, 0, f.legacy.calls)
+		assert.Equal(t, int32(1), d.drains.Load(), "the first session refused while draining")
+		assert.Equal(t, "routed", out, "served by the replacement, not the fallback")
+		assert.Equal(t, int32(1), d.execTotal(), "exactly one session ran the request")
+		assert.Equal(t, 0, d.legacy.calls)
 	})
 	t.Run("a second drain falls back", func(t *testing.T) {
-		f := newRoutedBrokerFixture(t, nil)
-		entered := make(chan struct{}, 4)
-		release := make(chan struct{})
-		defer close(release)
-		var unused atomic.Bool
-		var ps [3]atomic.Pointer[conduit.LocalSession]
-		var bs [3]*routedTestBroker
-		for i := range bs {
-			bs[i] = f.dialRoutedBroker(t, routedBrokerOpts{interceptor: drainOnExec(&unused, &ps[i], true), answer: holdingAnswer(entered, release)})
-			ps[i].Store(&bs[i].ls)
-			f.holdRPC(t, bs[i], entered)
-		}
-		out, _, err := f.client.ExecAgent(context.Background(), f.brokerID, "", "agent-a", "p1", []string{"true"}, 5)
+		d := newDrainRetryWorld(t, 3, 2)
+		out, _, err := d.client.ExecAgent(context.Background(), "broker-dr", "", "agent-a", "p1", []string{"true"}, 5)
 		require.NoError(t, err)
-		assert.Equal(t, "legacy", out)
-		assert.Equal(t, 1, f.legacy.calls)
-		for i, b := range bs {
-			assert.Equal(t, 0, b.count(conduit.RPCAgentExec), "session %d ran the request", i)
-		}
+		assert.Equal(t, int32(2), d.drains.Load(), "two sessions refused while draining")
+		assert.Equal(t, "legacy", out, "the second drain takes the fallback, not the third session")
+		assert.Equal(t, 1, d.legacy.calls)
+		assert.Equal(t, int32(0), d.execTotal(), "no session ran the request")
 	})
 }
 
