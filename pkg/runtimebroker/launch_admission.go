@@ -57,7 +57,7 @@ const minAsyncLaunchTimeoutSeconds = 20
 // needs (the resolved hub connection name, opts, the request body already
 // decoded into req) is plain data copied out here, in this synchronous
 // handler goroutine, before go runLaunch starts (design §7 P1b-1 B-6).
-func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, ss *syncStart, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
+func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, req CreateAgentRequest, opts api.StartOptions, mgr agent.Manager, runtimeName string, ss *syncStart, owned *ownedStart, attempt *dispatchAttempt, markAttemptFailed func(int, string), span trace.Span, receivedAt time.Time) bool {
 	// The GCS download itself runs in runLaunch (design §3.1), but its
 	// directory check only reads the filesystem, so an invalid workspace
 	// directory is answered here with the same 400 the synchronous path
@@ -128,10 +128,27 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// Manager.Start needs just as much on the async path as on the
 	// synchronous one.
 	deadline := receivedAt.Add(time.Duration(req.LaunchTimeoutSeconds) * time.Second)
-	runCtx, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline.Add(-scionrt.AsyncLaunchAdmissionSkew))
+	// The cause-carrying parent lets a shutdown cancel ctx' with
+	// errBrokerShutdown, which runLaunch tells apart from a local stop or
+	// delete (rec.cancel, cause context.Canceled; design wave 3 §1 C-e).
+	causeCtx, cancelCause := context.WithCancelCause(context.WithoutCancel(ctx))
+	runCtx, cancelDeadline := context.WithDeadline(causeCtx, deadline.Add(-scionrt.AsyncLaunchAdmissionSkew))
+	cancel := func() {
+		cancelDeadline()
+		cancelCause(context.Canceled)
+	}
 
 	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
 	rec.RunID = req.RunID
+	rec.shutdown = func() { cancelCause(errBrokerShutdown) }
+	// A drain that began after the handler's own check refuses here, before
+	// the launch is accepted; once tracked, the drain cancels it instead.
+	if !s.trackAsyncLaunch(rec) {
+		cancel()
+		markAttemptFailed(http.StatusServiceUnavailable, api.BrokerErrCodeBrokerDraining)
+		writeBrokerDraining(w, "create")
+		return false
+	}
 	// The create already registered under the name and waited for any
 	// earlier start of it before buildStartContext (createAgent,
 	// beginCreateRegistration), so the launch takes that registration over
@@ -139,10 +156,24 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// a stop, delete or newer start took the name in the meantime, refuse
 	// with the 409 the wait itself gives, before accepting anything.
 	if !ss.handOff(rec) {
+		s.untrackAsyncLaunch(rec)
 		cancel()
 		s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
 		return false
 	}
+	// Journal the launch before it is accepted (design wave 3 §1 C-a write
+	// 1). A journal failure is logged and the launch proceeds.
+	rec.journal = s.launchJournal.admit(rec, journalRecord{
+		ProjectID:       key.ProjectID,
+		Slug:            key.Slug,
+		AgentName:       opts.Name,
+		ProjectPath:     opts.ProjectPath,
+		HubProjectID:    opts.HubProjectID,
+		SharedWorkspace: opts.SharedWorkspace,
+		RuntimeName:     runtimeName,
+		RuntimeIdentity: s.launchRuntimeIdentity(mgr),
+		Profile:         opts.Profile,
+	})
 
 	resp := CreateAgentResponse{
 		LaunchPending:    true,

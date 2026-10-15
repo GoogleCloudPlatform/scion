@@ -26,10 +26,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// template_blob_gc.go deletes template blobs that no manifest references and
-// abandoned staged uploads (ptone/scion#4221). A commit never deletes blobs,
-// so a hydration that read an older manifest keeps finding its files; this
-// collector removes them once they are older than the grace period.
+// template_blob_gc.go deletes template and harness-config blobs that no
+// manifest references and abandoned staged uploads (ptone/scion#4221,
+// ptone/scion#4219). A commit never deletes blobs, so a hydration that read
+// an older manifest keeps finding its files; this collector removes them once
+// they are older than the grace period. Both kinds run in the same pass and
+// the same maintenance executor, with the same grace period.
 //
 // An object's age is measured from max(Created, Updated). A commit that
 // re-references a blob that was present but unreferenced rewrites it first
@@ -58,11 +60,12 @@ const (
 
 // templateBlobGCReport counts what one collection pass did.
 type templateBlobGCReport struct {
-	Templates     int `json:"templates"`
-	DeletedBlobs  int `json:"deletedBlobs"`
-	KeptYoung     int `json:"keptYoung"`
-	DeletedStaged int `json:"deletedStaged"`
-	Errors        int `json:"errors"`
+	Templates      int `json:"templates"`
+	HarnessConfigs int `json:"harnessConfigs"`
+	DeletedBlobs   int `json:"deletedBlobs"`
+	KeptYoung      int `json:"keptYoung"`
+	DeletedStaged  int `json:"deletedStaged"`
+	Errors         int `json:"errors"`
 }
 
 // templateBlobGCGrace returns the configured grace period, at least
@@ -98,7 +101,7 @@ func (s *Server) startTemplateBlobGC(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				report, err := s.collectTemplateBlobGarbage(ctx, s.templateBlobGCGrace(), time.Now())
+				report, err := s.collectBlobGarbage(ctx, s.templateBlobGCGrace(), time.Now())
 				if err != nil {
 					s.templateLog.Warn("template blob gc: pass failed", "error", err)
 				} else if report.DeletedBlobs > 0 || report.DeletedStaged > 0 {
@@ -126,16 +129,100 @@ func templateObjectAge(obj storage.Object, now time.Time) time.Duration {
 // templateBlobRefs returns the hex digests t's manifest references (none for
 // a legacy row, whose files are not blobs).
 func templateBlobRefs(t *store.Template) map[string]bool {
+	return blobRowRefs(templateBlobRow(t))
+}
+
+// blobRowRefs returns the hex digests r's manifest references (none for a
+// legacy row, whose files are not blobs).
+func blobRowRefs(r *blobRow) map[string]bool {
 	refs := make(map[string]bool)
-	if !isBlobLayout(t) {
+	if !r.isBlobs() {
 		return refs
 	}
-	for _, f := range t.Files {
+	for _, f := range r.Files {
 		if hex, ok := templateBlobHex(f.Hash); ok {
 			refs[hex] = true
 		}
 	}
 	return refs
+}
+
+// collectBlobGarbage runs one collection pass over every template and every
+// harness-config, with one grace period. Both kinds are attempted even when
+// the first fails; the report adds up both, and the first error is returned.
+func (s *Server) collectBlobGarbage(ctx context.Context, grace time.Duration, now time.Time) (templateBlobGCReport, error) {
+	report, err := s.collectTemplateBlobGarbage(ctx, grace, now)
+	if ctx.Err() != nil {
+		return report, err
+	}
+	hcReport, hcErr := s.collectHarnessConfigBlobGarbage(ctx, grace, now)
+	report.HarnessConfigs = hcReport.HarnessConfigs
+	report.DeletedBlobs += hcReport.DeletedBlobs
+	report.KeptYoung += hcReport.KeptYoung
+	report.DeletedStaged += hcReport.DeletedStaged
+	report.Errors += hcReport.Errors
+	if err == nil {
+		err = hcErr
+	}
+	return report, err
+}
+
+// collectHarnessConfigBlobGarbage runs one collection pass over every
+// harness-config row (ptone/scion#4219): for each row it deletes the blobs
+// under its content base that its manifest does not reference and that are
+// older than grace, and staged uploads older than grace.
+func (s *Server) collectHarnessConfigBlobGarbage(ctx context.Context, grace time.Duration, now time.Time) (templateBlobGCReport, error) {
+	grace = clampTemplateBlobGCGrace(grace)
+	var report templateBlobGCReport
+	stor := s.GetStorage()
+	if stor == nil {
+		return report, nil
+	}
+	cursor := ""
+	for {
+		res, err := s.store.ListHarnessConfigs(ctx, store.HarnessConfigFilter{}, store.ListOptions{
+			Limit:          templateBlobGCPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return report, fmt.Errorf("list harness configs: %w", err)
+		}
+		if res == nil {
+			return report, nil
+		}
+		for i := range res.Items {
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
+			report.HarnessConfigs++
+			s.collectHarnessConfigGarbage(ctx, stor, &res.Items[i], grace, now, &report)
+		}
+		if res.NextCursor == "" {
+			return report, nil
+		}
+		cursor = res.NextCursor
+	}
+}
+
+// collectHarnessConfigGarbage runs the collector for one harness-config row.
+func (s *Server) collectHarnessConfigGarbage(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, grace time.Duration, now time.Time, report *templateBlobGCReport) {
+	if hc.ID == "" || (isHarnessConfigBlobLayout(hc) && hc.StoragePath == "") {
+		return
+	}
+	s.collectRowBlobGarbage(ctx, stor, blobGCTarget{
+		label: "harness-config",
+		id:    hc.ID,
+		base:  s.harnessConfigContentBase(hc),
+		refs:  blobRowRefs(harnessConfigBlobRow(hc)),
+		reread: func(ctx context.Context) (string, map[string]bool, error) {
+			fresh, err := s.store.GetHarnessConfig(ctx, hc.ID)
+			if err != nil {
+				return "", nil, err
+			}
+			return s.harnessConfigContentBase(fresh), blobRowRefs(harnessConfigBlobRow(fresh)), nil
+		},
+	}, grace, now, report)
 }
 
 // collectTemplateBlobGarbage runs one collection pass over every template.
@@ -181,17 +268,50 @@ func (s *Server) collectTemplateGarbage(ctx context.Context, stor storage.Storag
 	if t.ID == "" || (isBlobLayout(t) && t.StoragePath == "") {
 		return
 	}
-	base := s.templateContentBase(t)
+	s.collectRowBlobGarbage(ctx, stor, blobGCTarget{
+		label: "template",
+		id:    t.ID,
+		base:  s.templateContentBase(t),
+		refs:  templateBlobRefs(t),
+		reread: func(ctx context.Context) (string, map[string]bool, error) {
+			fresh, err := s.store.GetTemplate(ctx, t.ID)
+			if err != nil {
+				return "", nil, err
+			}
+			return s.templateContentBase(fresh), templateBlobRefs(fresh), nil
+		},
+	}, grace, now, report)
+}
+
+// blobGCTarget is one row the collector looks at: its content base and the
+// blobs its manifest references as listed, and how to re-read both.
+type blobGCTarget struct {
+	label string // "template" or "harness-config", for logs
+	id    string
+	base  string
+	refs  map[string]bool
+	// reread returns the row's current content base and references; a
+	// store.ErrNotFound error means the row is gone.
+	reread func(ctx context.Context) (string, map[string]bool, error)
+}
+
+// collectRowBlobGarbage runs the collector for one row of any kind. It
+// deletes the blobs under the row's content base that its manifest does not
+// reference and that are older than grace, re-reading the row first so a
+// blob a commit referenced since the list survives, and staged uploads older
+// than grace.
+func (s *Server) collectRowBlobGarbage(ctx context.Context, stor storage.Storage, tgt blobGCTarget, grace time.Duration, now time.Time, report *templateBlobGCReport) {
+	base := tgt.base
 
 	// Unreferenced, aged blobs.
 	blobPrefix := templateBlobPrefix(base)
 	listed, err := stor.List(ctx, storage.ListOptions{Prefix: blobPrefix})
 	if err != nil {
 		report.Errors++
-		s.templateLog.Warn("template blob gc: list blobs failed", "template", t.ID, "error", err)
+		s.templateLog.Warn("blob gc: list blobs failed", "kind", tgt.label, "id", tgt.id, "error", err)
 		return
 	}
-	refs := templateBlobRefs(t)
+	refs := tgt.refs
 	var candidates []storage.Object
 	for _, obj := range listed.Objects {
 		hex := strings.TrimPrefix(obj.Name, blobPrefix)
@@ -207,20 +327,20 @@ func (s *Server) collectTemplateGarbage(ctx context.Context, stor storage.Storag
 	if len(candidates) > 0 {
 		// Re-read the row: a commit may have referenced a candidate since
 		// the list above.
-		fresh, err := s.store.GetTemplate(ctx, t.ID)
+		freshBase, freshRefs, err := tgt.reread(ctx)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			candidates = nil
 		case err != nil:
 			report.Errors++
-			s.templateLog.Warn("template blob gc: re-read failed", "template", t.ID, "error", err)
+			s.templateLog.Warn("blob gc: re-read failed", "kind", tgt.label, "id", tgt.id, "error", err)
 			candidates = nil
-		case s.templateContentBase(fresh) != base:
+		case freshBase != base:
 			// The row moved to another path since the list; the next pass
 			// looks at it again.
 			candidates = nil
 		default:
-			refs = templateBlobRefs(fresh)
+			refs = freshRefs
 		}
 		for _, obj := range candidates {
 			if refs[strings.TrimPrefix(obj.Name, blobPrefix)] {
@@ -236,7 +356,7 @@ func (s *Server) collectTemplateGarbage(ctx context.Context, stor storage.Storag
 	staged, err := stor.List(ctx, storage.ListOptions{Prefix: templateStagingPrefix(base)})
 	if err != nil {
 		report.Errors++
-		s.templateLog.Warn("template blob gc: list staged uploads failed", "template", t.ID, "error", err)
+		s.templateLog.Warn("blob gc: list staged uploads failed", "kind", tgt.label, "id", tgt.id, "error", err)
 		return
 	}
 	for _, obj := range staged.Objects {
@@ -295,8 +415,8 @@ func (s *Server) deleteAgedTemplateObject(ctx context.Context, stor storage.Stor
 	return true
 }
 
-// TemplateBlobGCExecutor runs one template blob garbage collection pass as a
-// maintenance operation. The optional "grace" parameter (a Go duration such
+// TemplateBlobGCExecutor runs one blob garbage collection pass over
+// templates and harness-configs as a maintenance operation. The optional "grace" parameter (a Go duration such
 // as "48h") overrides the configured grace period for that run.
 type TemplateBlobGCExecutor struct {
 	srv *Server
@@ -312,9 +432,9 @@ func (e *TemplateBlobGCExecutor) Run(ctx context.Context, logger io.Writer, para
 		}
 		grace = d
 	}
-	_, _ = fmt.Fprintf(logger, "Collecting unreferenced template blobs older than %s\n", grace)
-	report, err := e.srv.collectTemplateBlobGarbage(ctx, grace, time.Now())
-	_, _ = fmt.Fprintf(logger, "Templates: %d, deleted blobs: %d, kept (within grace): %d, deleted staged uploads: %d, errors: %d\n",
-		report.Templates, report.DeletedBlobs, report.KeptYoung, report.DeletedStaged, report.Errors)
+	_, _ = fmt.Fprintf(logger, "Collecting unreferenced template and harness-config blobs older than %s\n", grace)
+	report, err := e.srv.collectBlobGarbage(ctx, grace, time.Now())
+	_, _ = fmt.Fprintf(logger, "Templates: %d, harness configs: %d, deleted blobs: %d, kept (within grace): %d, deleted staged uploads: %d, errors: %d\n",
+		report.Templates, report.HarnessConfigs, report.DeletedBlobs, report.KeptYoung, report.DeletedStaged, report.Errors)
 	return err
 }

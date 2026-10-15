@@ -819,6 +819,10 @@ export class ScionArtifactShareDialog extends LitElement {
           Give a person who can already read “${a.title}” review access. They will be able to
           publish reviews of it, and nothing else.
         </p>
+        <p class="hint">
+          Review access is only for people who can already read this artifact: members of its home
+          project, or of a project it is shared with.
+        </p>
         ${this.reviewers.map(
           (r) =>
             html`<sl-alert class="granted" variant="success" open>

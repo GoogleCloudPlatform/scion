@@ -120,7 +120,7 @@ func (c *LogClient) GetLogs(ctx context.Context, instanceName string, opts LogOp
 	return entries, nil
 }
 
-// StreamLogs tails log output in real time (for scion look / scion logs -f).
+// StreamLogs tails log output in real time.
 func (c *LogClient) StreamLogs(ctx context.Context, instanceName string, opts LogOptions) (<-chan LogEntry, error) {
 	ch := make(chan LogEntry, 100)
 

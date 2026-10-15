@@ -188,7 +188,7 @@ func (s *Server) modelAliasesForHarnessConfig(ctx context.Context, hc *store.Har
 	if stor == nil || hc.StoragePath == "" {
 		return nil
 	}
-	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath)
+	entry, ok := s.extractHarnessConfigEntryFromStorage(ctx, stor, hc)
 	if !ok {
 		return nil
 	}

@@ -103,6 +103,7 @@ func TestPrepareFlatInstance_RegistersBoundRow(t *testing.T) {
 }
 
 func TestPrepareFlatInstance_RefusalsAreNotActivated(t *testing.T) {
+	isolateKubernetesEnv(t)
 	ctx := context.Background()
 	opts := hub.EmbeddedFlatRegistrationOptions{Endpoint: "http://localhost:9800"}
 

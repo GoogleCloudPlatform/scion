@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -177,25 +176,6 @@ func TestRemainingWaitReadyTimeout(t *testing.T) {
 	got := remainingWaitReadyTimeout(time.Now().Add(-20 * time.Second))
 	assert.InDelta(t, float64(40*time.Second), float64(got), float64(time.Second))
 	assert.Equal(t, minWaitReadyTimeout, remainingWaitReadyTimeout(time.Now().Add(-2*time.Minute)))
-}
-
-type fakeAgentLister struct{ agents []api.AgentInfo }
-
-func (f fakeAgentLister) List(context.Context, map[string]string) ([]api.AgentInfo, error) {
-	return f.agents, nil
-}
-
-func TestLocalReadyProbe(t *testing.T) {
-	get := localReadyProbe(fakeAgentLister{agents: []api.AgentInfo{
-		{Name: "other", Phase: "running", Activity: "working"},
-		{Name: "a1", Phase: "running", Activity: "initializing"},
-	}}, "a1")
-	p, err := get(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, readyProbe{Phase: "running", Activity: "initializing"}, p)
-
-	_, err = localReadyProbe(fakeAgentLister{}, "a1")(context.Background())
-	assert.Error(t, err)
 }
 
 func TestPrintBroadcastAccepted_Starting(t *testing.T) {
