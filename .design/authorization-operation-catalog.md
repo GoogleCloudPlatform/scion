@@ -295,7 +295,7 @@
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
 - [testidentity.admin.residue](#testidentityadminresidue) — Read the residue report of an admin-kind test identity, live or purged: the grants and resources stamped with it, and its changes to rows without its stamp, for a human super-admin session
-- [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+- [testidentity.delegation.create](#testidentitydelegationcreate) — Delegate test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope: test_identity:issue (member and viewer; member cap, lifetime at most 7 days), or on a hub running the admin tier test_identity:issue_admin (admin cap 1-2, at most 8 h) or test_identity:issue_super_admin (admin cap 1, at most 2 h)
 - [testidentity.delegation.list](#testidentitydelegationlist) — List test identity issuer delegations: the caller's own, or every delegation for an unscoped platform admin session
 - [testidentity.delegation.revoke](#testidentitydelegationrevoke) — Revoke a test identity issuer delegation, for its grantor or an unscoped platform admin session; the next mint through it is refused
 - [agent.delegation.create](#agentdelegationcreate) — Issue an agent delegation grant binding one agent the issuer controls to a boundary, a frozen permission ceiling and an expiry
@@ -10757,7 +10757,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -10770,18 +10770,18 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. The binding expires with the identity
+- The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. A workload issuer delegation (phase X4) acts for its human grantor within its one admin scope (test_identity:issue_admin or test_identity:issue_super_admin), which must be the requested kind's; inside the issuance transaction the delegation is re-read and the grantor is re-checked as a live human super-admin holding the capability (recheckTestAdminDelegationGrantor). The binding expires with the identity
 
 ### Governance
 
 - **Kind:** issuer_credential
-- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub of which at most one test super-admin; issuance is rate limited per issuer (6/h hub-admin, 2/h super-admin)
+- The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level, and is issue-only. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)
 
 ### Audit
 
 - **Event Type:** `test_admin_issue`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** user_id, kind, role, issued_by, issuer_credential_id, issuance_id, purpose, expires_at, token_ttl_seconds
+- **After Fields:** user_id, kind, role, issued_by, issuer_credential_id, issuance_id, purpose, expires_at, token_ttl_seconds, workload_delegation
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`
@@ -10790,6 +10790,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestAdmin_IssuanceMatrix`
+- `pkg/hub:TestWorkloadAdminDelegation_IssuanceSinkLineAndAudit`
 
 ---
 
@@ -10882,7 +10883,7 @@
 
 **Domain:** testidentity
 
-**Description:** Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days
+**Description:** Delegate test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope: test_identity:issue (member and viewer; member cap, lifetime at most 7 days), or on a hub running the admin tier test_identity:issue_admin (admin cap 1-2, at most 8 h) or test_identity:issue_super_admin (admin cap 1, at most 2 h)
 
 ### Entry Points
 
@@ -10905,13 +10906,13 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only a live human user's interactive session may delegate; the scope is exactly test_identity:issue, the subject must be allow-listed for its tier, and every mint re-checks the grantor's live bindings, the delegation and the allowlist
+- Only a live human user's interactive session may delegate; the subject must be allow-listed for the scope's tier (max_tier admin for an admin scope). An admin scope is accepted only at its --test-mode level with A2 in place, and only from a live human super-admin's interactive session holding the scope's capability (canIssueTestAdmin). Every mint re-checks the grantor's live bindings, the delegation (including its scope's maximum age from creation) and the allowlist; an admin mint re-checks the grantor inside the issuance transaction
 
 ### Audit
 
 - **Event Type:** `test_identity_delegation_create`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** delegation_id, grantor, workload_sub, scope, member_cap, label, expires_at
+- **After Fields:** delegation_id, grantor, workload_sub, scope, member_cap, admin_cap, label, expires_at
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`, `validation_error`
@@ -10920,6 +10921,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentityDelegation_CreateAuthorization`
+- `pkg/hub:TestWorkloadAdminDelegation_SuperAdminCreateOnlyFromLiveHumanSuperAdminSession`
 
 ---
 

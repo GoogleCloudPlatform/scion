@@ -1133,7 +1133,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// only by super-admin. The handlers return 404 unless the hub started
 	// with --test-mode=admin or above, and re-check the issuer (human, live
 	// super-admin, the requested kind's capability, exact-scope hub token at
-	// most 8 h old).
+	// most 8 h old). A workload issuer delegation of the kind's scope (X4)
+	// reaches issuance too, as its grantor within that one scope.
 	"POST /api/v1/test-identities/admin": {
 		Pattern: "POST /api/v1/test-identities/admin", RouteID: "testIdentities.admin.create",
 		Classification: RouteHubAdmin,
@@ -1157,11 +1158,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
-	// Workload-bound issuer delegations (phase X2): test_identity.issue at
-	// hub scope from an interactive session only (no PAT, agent or
+	// Workload-bound issuer delegations (phases X2, X4): test_identity.issue
+	// at hub scope from an interactive session only (no PAT, agent or
 	// workload credential). The handlers further require a live human
-	// user row and limit list and revoke to the grantor or an unscoped
-	// platform admin session.
+	// user row, for an admin scope also the scope's capability and a live
+	// super-admin grantor, and limit list and revoke to the grantor or an
+	// unscoped platform admin session.
 	"POST /api/v1/test-identity-delegations": {
 		Pattern: "POST /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.create",
 		Classification: RouteHubAdmin,

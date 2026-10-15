@@ -66,9 +66,9 @@ scion hub test-identity issue --admin-role hub-admin \
 
 The hub also limits issuance:
 
-- one live identity with an admin role per issuer;
-- two per hub, of which at most one is a super-admin;
-- per issuer, six hub-admin and two super-admin issuances per hour.
+- one live identity with an admin role per issuer; for a [workload issuer delegation](/scion/hosted/user/test-identity-target-hubs/#admin-tier-delegations-systemd-test-hubs) instead, its admin cap (at most two hub-admins, or one super-admin);
+- four per hub, of which at most one is a super-admin, counted across every issuer, access token and delegation (identities issued through a delegation count too);
+- per issuer (or per delegation), six hub-admin and two super-admin issuances per hour.
 
 ## Inspect what an identity left: residue
 
