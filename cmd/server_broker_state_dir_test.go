@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -88,8 +89,10 @@ func TestFlatInstancesStateDirWarning(t *testing.T) {
 
 // TestBrokerLocalStatePathsFor_ConfiguredStateDir: deregister
 // --purge-local removes the state directory under the configured
-// server.broker.state_dir, and falls back to the default when it is unset,
-// invalid, or the settings cannot be loaded.
+// server.broker.state_dir, and the default one when it is unset. When the
+// settings cannot be loaded or the value is invalid, the paths hold the
+// default directory only as a guess and an error says why, so the purge
+// can refuse (fail closed).
 func TestBrokerLocalStatePathsFor_ConfiguredStateDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -110,21 +113,58 @@ func TestBrokerLocalStatePathsFor_ConfiguredStateDir(t *testing.T) {
 
 	t.Run("configured", func(t *testing.T) {
 		setConfig(t, "/srv/broker-state", nil)
-		paths := brokerLocalStatePathsFor(globalDir, "b-1")
+		paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+		require.NoError(t, err)
 		assert.Contains(t, paths, "/srv/broker-state/b-1", "purge-local ignores the configured state_dir")
 		assert.NotContains(t, paths, defaultState)
 	})
+	t.Run("unset", func(t *testing.T) {
+		setConfig(t, "", nil)
+		paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+		require.NoError(t, err)
+		assert.Contains(t, paths, defaultState, "purge-local did not use the default state dir")
+	})
 	for name, tc := range map[string]struct {
-		dir string
-		err error
+		dir     string
+		err     error
+		errText string
 	}{
-		"unset":       {"", nil},
-		"invalid":     {"relative", nil},
-		"load failed": {"", errors.New("boom")},
+		"invalid":     {"relative", nil, `server.broker.state_dir "relative" must be an absolute path`},
+		"load failed": {"", errors.New("boom"), "server.broker.state_dir could not be read"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			setConfig(t, tc.dir, tc.err)
-			assert.Contains(t, brokerLocalStatePathsFor(globalDir, "b-1"), defaultState, "purge-local did not fall back to the default state dir")
+			paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+			require.Error(t, err, "unresolved state_dir fell back silently")
+			assert.Contains(t, err.Error(), tc.errText)
+			assert.Contains(t, paths, defaultState, "the default state dir is not listed as the guess")
 		})
 	}
+}
+
+// TestCleanupAfterDeregister_StateDirUnresolved: with server.broker.state_dir
+// unresolved, --purge-local refuses, removes nothing and returns an error
+// that names the cause; a plain deregister warns and lists the default
+// path with a note.
+func TestCleanupAfterDeregister_StateDirUnresolved(t *testing.T) {
+	stateErr := errors.New(`server.broker.state_dir "relative" must be an absolute path or start with ~/`)
+	t.Run("purge refuses", func(t *testing.T) {
+		home, paths := brokerStateFixture(t)
+		var out bytes.Buffer
+		err := cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, stateErr, false, true, paths)
+		require.Error(t, err, "purge-local ran with an unresolved state_dir")
+		assert.Contains(t, err.Error(), "cannot resolve the broker state directory")
+		assert.Contains(t, err.Error(), `"relative"`)
+		assert.FileExists(t, filepath.Join(home, "runtime-broker-state", "b-1", "state.db"), "purge removed the state dir")
+		assert.FileExists(t, filepath.Join(home, "broker.log"), "purge removed the broker log")
+	})
+	t.Run("plain deregister warns", func(t *testing.T) {
+		home, paths := brokerStateFixture(t)
+		var out bytes.Buffer
+		require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, stateErr, false, false, paths))
+		assert.Contains(t, out.String(), "Warning: cannot resolve the broker state directory", "no warning for an unresolved state_dir")
+		assert.Contains(t, out.String(), "listed is the default")
+		assert.Contains(t, out.String(), filepath.Join(home, "runtime-broker-state", "b-1"))
+		assert.FileExists(t, filepath.Join(home, "runtime-broker-state", "b-1", "state.db"))
+	})
 }

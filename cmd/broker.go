@@ -195,8 +195,10 @@ Use --broker-only to only remove the broker record without affecting project pro
 Local state: deregister removes this hub's credentials file, its
 hub_connections entry and (when no connections remain) the empty
 hub-credentials/ directory. Broker-local state stays: the broker daemon log
-(broker.log), the broker's state directory (runtime-broker-state/<broker-id>)
-and the broker template cache (cache/templates). Pass --purge-local to remove
+(broker.log), the broker's state directory (<server.broker.state_dir>/<broker-id>,
+default ~/.scion/runtime-broker-state/<broker-id>; read from the global settings
+and environment of the shell that runs deregister) and the broker template
+cache (cache/templates). Pass --purge-local to remove
 them as well once the last hub connection is gone and the broker is stopped;
 it also works on a host that is no longer registered. When the purge cannot
 run, the command exits non-zero (after a successful deregister) and says why.
@@ -428,7 +430,7 @@ func init() {
 	// Deregister flags
 	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
 	brokerDeregisterCmd.Flags().StringVar(&brokerDeregisterName, "name", "", "Name of the hub connection to deregister")
-	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterPurgeLocal, "purge-local", false, "After deregistering the last hub connection, also remove broker-local state (broker.log, runtime-broker-state/<broker-id>, cache/templates); never settings, the hub-id file or other hubs' credentials. Skipped while the broker is running")
+	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterPurgeLocal, "purge-local", false, "After deregistering the last hub connection, also remove broker-local state (broker.log, the state directory <server.broker.state_dir>/<broker-id> (default ~/.scion/runtime-broker-state/<broker-id>), cache/templates); never settings, the hub-id file or other hubs' credentials. server.broker.state_dir is read from the settings and environment of the shell that runs it; if it cannot be resolved, nothing is removed. Skipped while the broker is running")
 
 	// Hubs flags
 	brokerHubsCmd.Flags().BoolVar(&brokerHubsJSON, "json", false, "Output in JSON format")
@@ -982,8 +984,9 @@ func runBrokerDeregister(cmd *cobra.Command, args []string) error {
 		if daemonRunning, _, _ := daemon.Status(globalDir); daemonRunning {
 			brokerRunning = true
 		}
-		if err := cleanupAfterDeregister(os.Stdout, multiStore.Dir(), remaining, listErr, brokerRunning,
-			brokerDeregisterPurgeLocal, brokerLocalStatePathsFor(globalDir, brokerID)); err != nil {
+		statePaths, stateDirErr := brokerLocalStatePathsFor(globalDir, brokerID)
+		if err := cleanupAfterDeregister(os.Stdout, multiStore.Dir(), remaining, listErr, stateDirErr, brokerRunning,
+			brokerDeregisterPurgeLocal, statePaths); err != nil {
 			return fmt.Errorf("broker '%s' was deregistered, but %w", brokerID, err)
 		}
 	}
@@ -1001,10 +1004,14 @@ func brokerScionHome(globalDir string) string {
 }
 
 // brokerLocalStatePathsFor is brokerLocalStatePaths for this host: the
-// default scion home and the configured state root.
-func brokerLocalStatePathsFor(globalDir, brokerID string) []string {
+// default scion home and the configured state root. When
+// server.broker.state_dir cannot be resolved, the paths hold the default
+// state directory as a guess and err says why (cleanupAfterDeregister then
+// refuses the purge and only lists the guess).
+func brokerLocalStatePathsFor(globalDir, brokerID string) (paths []string, err error) {
 	home := brokerScionHome(globalDir)
-	return brokerLocalStatePaths(globalDir, home, configuredBrokerStateRoot(home), brokerID)
+	root, err := configuredBrokerStateRoot(home)
+	return brokerLocalStatePaths(globalDir, home, root, brokerID), err
 }
 
 // purgeLocalBrokerStateOnly runs 'deregister --purge-local' when there is
@@ -1032,8 +1039,9 @@ func purgeLocalBrokerStateOnly(cmd *cobra.Command, selected string) error {
 		fmt.Printf("The credentials file of hub connection '%s' has no broker ID and is left in place; remove it by hand if it is no longer needed: %s\n",
 			selected, filepath.Join(credsDir, selected+".json"))
 	}
-	return cleanupAfterDeregister(os.Stdout, credsDir, excludeConnection(conns, selected), listErr, running, true,
-		brokerLocalStatePathsFor(globalDir, getLocalBrokerID()))
+	statePaths, stateDirErr := brokerLocalStatePathsFor(globalDir, getLocalBrokerID())
+	return cleanupAfterDeregister(os.Stdout, credsDir, excludeConnection(conns, selected), listErr, stateDirErr, running, true,
+		statePaths)
 }
 
 // brokerConnectionsLeft returns the credentials store directory and the hub
