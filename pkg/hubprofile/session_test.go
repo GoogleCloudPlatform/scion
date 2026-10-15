@@ -338,14 +338,15 @@ func TestSession_CacheEntryBoundToExactEndpoint(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Admin tiers are out of scope: refused with a clear message.
+// The member issue path never issues an admin kind: it points to
+// issue-admin (X4b), which issues through an admin delegation.
 func TestIssueToCache_RefusesAdminRoles(t *testing.T) {
 	h := newHarness(t, false)
 	s := h.mustOpen(testProfile(h.target, TransportNone), "", "r1")
 	for _, role := range []string{"hub-admin", "super-admin", "admin"} {
 		_, err := IssueToCache(context.Background(), s, IssueRequest{Alias: "a", Role: role})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "member and viewer identities only")
+		assert.Contains(t, err.Error(), "issue-admin")
 	}
 	assert.Empty(t, h.target.Recorded())
 	_, err := IssueToCache(context.Background(), h.mustOpen(testProfile(h.target, TransportNone), "", ""), IssueRequest{Alias: "a"})
@@ -396,27 +397,28 @@ func TestSession_MemberAutoReissueBeforeExpiry(t *testing.T) {
 	assert.Len(t, h.target.Recorded(), before)
 }
 
+// An entry of a kind that is neither member-tier nor an admin kind (here
+// an unknown kind, with a stored role that looks member-tier) is never
+// re-issued: its token is used until it expires.
 func TestSession_AdminTierTokenIsNotReissued(t *testing.T) {
 	h := newHarness(t, false)
 	p := testProfile(h.target, TransportNone)
 	now := h.clk.Now()
-	// An admin-tier entry (admin tiers cannot be issued through a profile;
-	// the cache must still refuse to re-issue one).
 	res, err := ReserveEntry(h.home, "t1", "r1", "admin")
 	require.NoError(t, err)
-	require.NoError(t, res.Fill(&CacheEntry{Alias: "admin", Run: "r1", Profile: "t1", Endpoint: h.target.Srv.URL, IdentityID: "fx-adm", Email: "a@scion-fixture.invalid", Kind: "test_admin", Role: "hub-admin", ExpiresAt: now.Add(time.Hour), TokenExpiresAt: now.Add(time.Minute), Token: "ADMIN-TOKEN"}))
+	require.NoError(t, res.Fill(&CacheEntry{Alias: "admin", Run: "r1", Profile: "t1", Endpoint: h.target.Srv.URL, IdentityID: "fx-adm", Email: "a@scion-fixture.invalid", Kind: "test_admin", Role: "member", ExpiresAt: now.Add(time.Hour), TokenExpiresAt: now.Add(time.Minute), Token: "ADMIN-TOKEN"}))
 
 	s := h.mustOpen(p, "admin", "r1")
 	_, err = s.Reissue(context.Background(), 0)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "admin-tier tokens are not re-issued")
+	assert.Contains(t, err.Error(), "not an admin-kind identity")
 
 	h.clk.Set(now.Add(2 * time.Minute))
 	s = h.mustOpen(p, "admin", "r1")
 	client, _ := s.Client()
 	_, err = client.Auth().Me(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "admin-tier tokens are not re-issued, issue a new identity")
+	assert.Contains(t, err.Error(), "has an expired token")
 	assert.Equal(t, 0, h.target.TokenHits())
 }
 

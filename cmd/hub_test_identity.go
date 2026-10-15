@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile"
 	"github.com/spf13/cobra"
 )
 
@@ -72,8 +73,10 @@ profile's issuer delegation on another test hub, issued identities go to the
 run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
 removes a whole run, and the commands also run in agent mode, but only
 against a profile for another hub. 'web-code' with a profile mints the code
-through the issuer delegation, for an identity issued through it. 'delegate'
-is the human consent step on the target hub.
+through the issuer delegation, for an identity issued through it.
+'issue-admin' issues a test hub-admin or test super-admin through the
+profile's admin delegation (systemd test hubs running the admin tier).
+'delegate' is the human consent step on the target hub.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
@@ -126,7 +129,9 @@ write it to --out (which must not exist; created with mode 0600).
 
 With a hub profile and --as <alias> (and --run), the token of that cached
 identity is re-issued through the profile's issuer delegation and stored in
-the run cache instead (no ID, no --out).
+the run cache instead (no ID, no --out). An admin-kind identity ('issue-admin')
+is re-issued only through the admin delegation that issued it, within the
+kind's token lifetime and never past the identity's expiry.
 
 Examples:
   scion hub test-identity token 6f1c... --out ./fixture-2.token
@@ -203,13 +208,19 @@ only the identity ID, the code ID, the code expiry and the file path are.
 With a target-hub profile (--hub-profile or SCION_HUB_PROFILE), the code is
 minted on the target hub through the profile's issuer delegation, for a
 member identity issued through that delegation ('scion hub test-identity
-list' shows their IDs); --as does not apply. In agent mode web-code runs
-only with a profile for another hub, never this agent's own.
+list' shows their IDs); --as does not apply. With --admin-role hub-admin or
+super-admin the code is minted through the profile's admin delegation of
+that tier instead, for an admin-kind identity that delegation issued
+('issue-admin' prints its ID), only when the target's admin web session
+setting is on; otherwise the target answers that the identity is not found.
+In agent mode web-code runs only with a profile for another hub, never this
+agent's own.
 
 Examples:
   scion hub test-identity web-code 6f1c... --out ./code.txt
   scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json
-  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt`,
+  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt
+  scion --hub-profile t9 hub test-identity web-code 7a2d... --admin-role hub-admin --out ./admin-code.txt`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubTestIdentityWebCode,
 }
@@ -249,6 +260,7 @@ func init() {
 
 	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the code to (required; must not exist; created 0600)")
 	hubTestIdentityWebCodeCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the code ID, expiry and file as JSON (never the code)")
+	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityAdminRole, "admin-role", "", `With a hub profile: mint through the admin delegation of this tier, "hub-admin" or "super-admin", for an admin-kind identity it issued`)
 	_ = hubTestIdentityWebCodeCmd.MarkFlagRequired("out")
 
 	hubTestIdentityListCmd.Flags().IntVar(&testIdentityListLimit, "limit", 0, "Maximum number of identities to list (default: the hub's, 100)")
@@ -322,9 +334,10 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 }
 
 func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
-	// With a profile: the issuer delegation on the target hub (--as is
+	// With a profile: the member issuer delegation on the target hub, or
+	// with --admin-role the admin delegation of that tier (--as is
 	// refused); without one: the CLI's usual hub client.
-	client, err := testIdentityIssuerClient()
+	client, err := testIdentityWebCodeClient()
 	if err != nil {
 		return err
 	}
@@ -333,6 +346,31 @@ func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
 	return mintTestIdentityWebCode(ctx, cmd.OutOrStdout(), client.TestIdentities(), testIdentityWebCodeOptions{
 		ID: args[0], Out: testIdentityOut, JSON: testIdentityJSON,
 	})
+}
+
+// testIdentityWebCodeClient returns the client web-code mints with:
+// testIdentityIssuerClient, or with --admin-role the profile's admin issuer
+// delegation of that tier (ptone/scion#4240, X4b). --admin-role needs a
+// hub profile; --as is refused either way.
+func testIdentityWebCodeClient() (hubclient.Client, error) {
+	role := strings.TrimSpace(testIdentityAdminRole)
+	if role == "" {
+		return testIdentityIssuerClient()
+	}
+	if !hubprofile.IsAdminTier(role) {
+		return nil, newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
+	}
+	if !hubProfileSelected() {
+		return nil, newUsageError("--admin-role needs a hub profile: it selects the profile's admin issuer delegation")
+	}
+	if hubProfileAs != "" {
+		return nil, errors.New("--as does not apply to this command: test identity commands act as the profile's issuer delegation")
+	}
+	s, err := openHubProfileSession(false)
+	if err != nil {
+		return nil, err
+	}
+	return s.AdminIssuerClient(role)
 }
 
 // testIdentityIssuerClient returns the client test identity commands act

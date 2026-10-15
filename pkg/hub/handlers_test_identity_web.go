@@ -37,6 +37,7 @@ import (
 	"github.com/gorilla/sessions"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Browser web sessions for hub-issued test identities (ptone/scion#4240,
@@ -248,20 +249,30 @@ func (s *Server) logTestIdentityWebSessionState() {
 
 // workloadWebCodeAdmitted reports whether the request may mint a web-login
 // code for u as far as a workload delegation is concerned. A request that
-// is not a workload delegation request is not restricted here. A workload
-// delegation is admitted only with the member scope, and only for a
-// member-tier identity (kind test_fixture, never an admin kind; admin tiers
-// come with X4). The caller answers 404 otherwise, as for an identity the
-// delegation did not issue.
+// is not a workload delegation request is not restricted here. A
+// member-scope delegation is admitted only for a member-tier identity
+// (kind test_fixture, never an admin kind). An admin-scope delegation
+// (phase X4b) is admitted only for an admin-kind identity of its scope's
+// kind; testAdminCredentialIssuer and canManageTestIdentity then require
+// that it issued the identity itself. Any other scope is refused. The
+// caller answers 404 otherwise, as for an identity the delegation did not
+// issue.
 func workloadWebCodeAdmitted(ctx context.Context, u *store.User) bool {
 	st := workloadDelegationCaller(ctx)
 	if st == nil {
 		return GetCredentialContextFromContext(ctx).Kind != CredentialKindWorkloadDelegation
 	}
-	if st.delegation == nil || st.delegation.Scope != testIdentityDelegationScope {
+	if st.delegation == nil {
 		return false
 	}
-	return u.IsTestFixture() && !u.IsTestAdmin()
+	if st.delegation.Scope == testIdentityDelegationScope {
+		return u.IsTestFixture() && !u.IsTestAdmin()
+	}
+	spec, ok := testIdentityDelegationScopes[st.delegation.Scope]
+	if !ok || !spec.isAdmin() {
+		return false
+	}
+	return u.IsTestAdmin() && !u.IsTestFixture() && u.Kind == string(spec.adminKind)
 }
 
 // writeTestIdentityWebUnavailable answers 404 with the unavailable reason.
@@ -310,8 +321,10 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	ctx := r.Context()
 	// test_identity.issue admits the member tier. The admin kinds'
 	// capabilities admit a code for an admin-kind identity, which also
-	// needs the issuer checks of that kind (testAdminWebCodeIssuer).
-	caller, allowed, ok := s.testIdentityCallerFor(w, r, permissionTestIdentityIssue,
+	// needs the issuer checks of that kind (testAdminCredentialIssuer). An
+	// admin-scope workload delegation is admitted for the admin-kind
+	// identities of its kind that it issued (phase X4b).
+	caller, allowed, ok := s.testIdentityCallerAdmitting(w, r, true, permissionTestIdentityIssue,
 		permissionTestIdentityIssueAdmin, permissionTestIdentityIssueSuperAdmin)
 	if !ok {
 		return
@@ -331,10 +344,11 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	u, err := s.store.GetUser(ctx, id)
 	// One answer for a missing user, a user of a kind that cannot hold a
 	// web session, and an identity the caller did not issue, as for
-	// re-issue: the route is no user-existence oracle. A workload
-	// delegation (ptone/scion#4240, X3b) reaches only the member-tier
-	// identities it issued itself (canManageTestIdentity,
-	// workloadWebCodeAdmitted). An admin-kind identity is admitted only
+	// re-issue: the route is no user-existence oracle. A member-scope
+	// workload delegation (ptone/scion#4240, X3b) reaches only the
+	// member-tier identities it issued itself, an admin-scope one (X4b)
+	// only the admin-kind identities of its kind it issued itself
+	// (canManageTestIdentity, workloadWebCodeAdmitted). An admin-kind identity is admitted only
 	// while its kind's web sessions are on (testIdentityWebKindAdmitted,
 	// WS4); a member-tier identity needs test_identity.issue.
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!s.testIdentityWebKindAdmitted(u) ||
@@ -346,11 +360,14 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if u.IsTestAdmin() && !s.testAdminWebCodeIssuer(w, r, caller, u, allowed) {
+	if u.IsTestAdmin() && !s.testAdminCredentialIssuer(w, r, caller, u, allowed) {
 		return
 	}
 	now := s.testIdentities.clock()
-	if u.ExpiresAt == nil || !now.Before(*u.ExpiresAt) {
+	// deadline is the identity's expiry; for an admin kind never later than
+	// its creation plus the kind's maximum lifetime (X4b).
+	deadline, live := testIdentityCredentialDeadline(u)
+	if !live || !now.Before(deadline) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "test identity has expired",
 			map[string]interface{}{"reason": testIdentityReasonExpired})
 		return
@@ -369,11 +386,24 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		return
 	}
 	expiresAt := now.Add(testIdentityWebCodeTTL)
-	if expiresAt.After(*u.ExpiresAt) {
-		expiresAt = *u.ExpiresAt
+	if expiresAt.After(deadline) {
+		expiresAt = deadline
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	workload := workloadDelegationCaller(ctx)
+	// An admin-kind code through an admin-scope workload delegation (X4b)
+	// also re-checks the grantor and the identity inside the transaction,
+	// and writes a test admin audit sink line.
+	var adminSpec testAdminKindSpec
+	adminThroughDelegation := false
+	if workload != nil && u.IsTestAdmin() {
+		spec, ok := testAdminKindSpecFor(u.Kind)
+		if !ok {
+			NotFound(w, "test identity")
+			return
+		}
+		adminSpec, adminThroughDelegation = spec, true
+	}
 	row := &store.TestIdentityLoginCode{
 		UserID:             u.ID,
 		CodeHash:           hash,
@@ -383,10 +413,25 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		Created:            now,
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		// An admin-kind code through a delegation runs under the issuance
+		// lock, as admin issuance and re-issue do.
+		if adminThroughDelegation {
+			if err := tx.LockTestFixtureIssuance(ctx); err != nil {
+				return err
+			}
+		}
 		// A workload delegation must still be live at the mint itself
 		// (DEC-3 C3), as for token re-issue.
 		if workload != nil {
 			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+		}
+		if adminThroughDelegation {
+			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.GrantorID, adminSpec.permission); err != nil {
+				return err
+			}
+			if err := recheckTestAdminIdentityForDelegation(ctx, tx, workload, u.ID, now); err != nil {
 				return err
 			}
 		}
@@ -409,12 +454,40 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 			Timestamp:    now,
 		}
 		auditActor.ApplyActor(record)
-		return s.testIdentities.hooks.writeAudit(ctx, tx, record)
+		if err := s.testIdentities.hooks.writeAudit(ctx, tx, record); err != nil {
+			return err
+		}
+		if adminThroughDelegation {
+			// Written last, inside the transaction: if it fails, no code.
+			if err := s.testAdminAudit.emit(testAdminAuditEventWebCodeIssue, map[string]any{
+				"test_identity_id":     u.ID,
+				"kind":                 u.Kind,
+				"code_id":              row.ID,
+				"code_expires_at":      expiresAt.UTC().Format(time.RFC3339),
+				"issuer_id":            workload.delegation.GrantorID,
+				"issuer_credential_id": workload.delegation.ID,
+				"issuer_delegation_id": workload.delegation.ID,
+				"workload_sub":         workload.sub,
+				"request_id":           logging.RequestIDFromContext(ctx),
+			}); err != nil {
+				return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, errTestIdentityDelegationNotLive):
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
+		case errors.Is(err, errTestAdminIssuerNotLive):
+			slog.WarnContext(ctx, "test admin web-login code refused: grantor no longer a live super-admin", "test_identity_id", u.ID, "delegation_id", workload.delegation.ID)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "requires "+adminSpec.permission+" permission",
+				map[string]interface{}{"reason": testAdminReasonNotLiveAdmin})
+		case errors.Is(err, errTestAdminIdentityNotManaged):
+			NotFound(w, "test identity")
+		case errors.Is(err, errTestAdminSinkWrite):
+			slog.ErrorContext(ctx, "test admin web-login code refused: audit sink write failed", "test_identity_id", u.ID)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "test admin audit is unavailable", nil)
 		case errors.Is(err, store.ErrAlreadyExists), isTransientIssuanceConflict(err):
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "web-login code issuance is busy; retry shortly",
