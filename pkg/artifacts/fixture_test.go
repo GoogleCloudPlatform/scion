@@ -66,6 +66,11 @@ type fakeHost struct {
 	admins map[string]bool
 	// subjectErr, when set, makes ReviewSubjectAuthorize fail.
 	subjectErr error
+	// stewards maps "userRef ownerAgentID homeScope" to the clause
+	// StewardClause answers; stewardAll, when set, is answered for every
+	// other question (a host that would make anyone a steward).
+	stewards   map[string]string
+	stewardAll string
 }
 
 // ReviewSubjectAuthorize answers from the same table as Authorize, for
@@ -376,4 +381,30 @@ func errCode(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatalf("not a JSON error (%d): %q", rec.Code, rec.Body.String())
 	}
 	return e.Error.Code
+}
+
+// allowSteward makes StewardClause answer clause for u on artifacts owned
+// by agent homed in scope.
+func (h *fakeHost) allowSteward(u principal, agent, scope, clause string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.stewards == nil {
+		h.stewards = map[string]string{}
+	}
+	h.stewards[PrincipalRef(u.kind, u.ref)+" "+agent+" "+scope] = clause
+}
+
+// StewardClause implements Stewardship from the stewards table.
+func (h *fakeHost) StewardClause(ctx context.Context, ownerAgentID, homeScope, _ string, _ bool) string {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = append(h.calls, "steward "+ownerAgentID+" "+homeScope)
+	if c, ok := h.stewards[PrincipalRef(kind, ref)+" "+ownerAgentID+" "+homeScope]; ok {
+		return c
+	}
+	return h.stewardAll
 }

@@ -31,15 +31,17 @@ import (
 // the same for every artifact and every reason, and never why this caller
 // was refused.
 const retireForbiddenMessage = "only the artifact's owner, a user with an admin grant on it, " +
-	"or an admin of its home project may delete it"
+	"an admin of its home project, or, on an artifact owned by an agent, the agent's delegating user " +
+	"while they hold a role in its home project, may delete it"
 
 func writeRetireForbidden(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, "forbidden", retireForbiddenMessage)
 }
 
 // retireAuthority reports the authority by which the caller may delete a,
-// an artifact it can read: AuthorityOwner or AuthorityAdminGrant (the
-// administration rule, canAdminister), or AuthorityCustodianProjectAdmin
+// an artifact it can read: AuthorityOwner, AuthorityAdminGrant or a
+// steward authority (the administration rule, adminAuthorityWith), or
+// AuthorityCustodianProjectAdmin
 // when it administers a's current home project (ScopeAdministrator). Every
 // authority needs a user whose credential permits artifact.manage in the
 // home project. "" means it may not.
@@ -81,8 +83,9 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 	}
 	// The delete applies only while the artifact is still homed where the
 	// authority was decided; after a concurrent move it answers 404.
-	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, authority), ScopeRef: a.ScopeRef}); {
+	switch _, err := b.store.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: s.callerActor(ctx, a, authority), ScopeRef: a.ScopeRef}); {
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionDelete, a, err)
 		writeNotFound(w)
 	case err != nil:
 		slog.ErrorContext(ctx, "artifacts: delete artifact failed", "error", err)
