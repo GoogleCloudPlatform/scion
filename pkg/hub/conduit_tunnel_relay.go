@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -89,10 +90,18 @@ func (ts *conduitTunnelSession) openForRelay(ctx context.Context, rt *conduitExt
 	if err != nil {
 		return nil, nil, conduitTunnelOpenError(err)
 	}
-	rs, ok := res.Session.(*relay.RemoteSession)
+	return ts.mintRelayTunnel(ctx, log, sessionID, agent, kind, params, res)
+}
+
+// mintRelayTunnel mints the open grant for res, the target session the
+// router resolved, and builds the instruction to open the tunnel and the
+// success answer. A resolution that is not a relay-held session (external
+// relay mode resolves only to those; a nil session is refused the same way)
+// is refused as agent session unavailable, before anything is minted.
+func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.Logger, sessionID string, agent *store.Agent, kind string, params map[string]string, res router.Resolved) (*conduitTunnelResponse, *relay.HubTunnelOpen, error) {
+	rs, ok := relayHeldSession(res)
 	if !ok {
-		// External relay mode resolves only to relay-held sessions.
-		return nil, nil, fmt.Errorf("tunnel target: %w", errConduitLeafNotRelayHeld)
+		return nil, nil, conduitTunnelOpenError(fmt.Errorf("tunnel target: %w", errConduitLeafNotRelayHeld))
 	}
 	// The grant binds the row Resolve picked: its session, connection
 	// epoch and incarnation.

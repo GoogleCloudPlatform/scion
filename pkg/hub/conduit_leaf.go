@@ -40,7 +40,7 @@ var errConduitLeafNotRelayHeld = errors.New("conduit: in external relay mode the
 // stream as before and return no bridge.
 func (s *Server) openConduitTargetStream(ctx context.Context, res router.Resolved, open *conduitv1.StreamOpen) (conduit.Stream, relay.Bridge, error) {
 	if s.conduitExternal.Load() != nil {
-		rs, ok := res.Session.(*relay.RemoteSession)
+		rs, ok := relayHeldSession(res)
 		if !ok {
 			return nil, nil, errConduitLeafNotRelayHeld
 		}
@@ -65,4 +65,13 @@ func conduitLeafTarget(res router.Resolved, st conduit.Stream, b relay.Bridge) r
 		return b.Target()
 	}
 	return conduitTargetOf(res, st)
+}
+
+// relayHeldSession returns the session res resolved to as one held by a
+// separate relay. A session of another type, no session, or a nil
+// *relay.RemoteSession reports false, so the caller refuses the stream as
+// unavailable instead of using the session.
+func relayHeldSession(res router.Resolved) (*relay.RemoteSession, bool) {
+	rs, ok := res.Session.(*relay.RemoteSession)
+	return rs, ok && rs != nil
 }
