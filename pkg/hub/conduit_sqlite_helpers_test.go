@@ -361,6 +361,8 @@ type conduitProxyFixture struct {
 	// receives its reconnect decisions.
 	agentClock *clock.Fake
 	onEnd      func(end conduit.End, delay time.Duration, err error)
+	// agentSession, when set, is the sciontool agent's session config.
+	agentSession conduit.Config
 }
 
 func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture {
@@ -724,6 +726,7 @@ func (f *conduitProxyFixture) runAgent(t *testing.T, launchID string, admitted c
 		OnEnd:   f.onEnd,
 		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
 		Clock:   fixtureClock{Fake: f.agentClock, now: f.clock.Now},
+		Session: f.agentSession,
 	})
 	require.NoError(t, err)
 	f.sciontool = a

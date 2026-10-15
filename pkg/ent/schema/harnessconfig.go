@@ -74,6 +74,14 @@ func (HarnessConfig) Fields() []ent.Field {
 		field.Time("image_status_checked_at").
 			Optional().
 			Nillable(),
+		// built_image is the image the hub's image-build executor last
+		// built for this harness-config (ptone/scion#4219). It is
+		// operational state, not derived from config.yaml: only the build
+		// executor writes it (UpdateHarnessConfigBuiltImage), and the
+		// commit path never touches it.
+		field.String("built_image").
+			Optional().
+			Default(""),
 		field.String("owner_id").
 			Optional(),
 		field.String("created_by").

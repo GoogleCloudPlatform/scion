@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -348,7 +349,7 @@ func NextSlugFromMatches(baseSlug string, matches []ProjectMatch) string {
 func ShowBrokerRegistrationPrompt(endpoint string, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "This will register this host as a Runtime Broker with the Hub.")
-	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
+	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", config.RedactURL(endpoint))
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "The broker will be able to:")
 	_, _ = fmt.Fprintln(promptOut, "  - Execute agents on behalf of authorized Hub users")
@@ -386,7 +387,7 @@ func ShowBrokerDeregistrationPrompt(brokerID string, projects []string, autoConf
 func ShowProjectLinkPrompt(projectName, endpoint string, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintf(promptOut, "This will link project '%s' to the Hub.\n", projectName)
-	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", endpoint)
+	_, _ = fmt.Fprintf(promptOut, "Hub endpoint: %s\n", config.RedactURL(endpoint))
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "When linked:")
 	_, _ = fmt.Fprintln(promptOut, "  - Agent operations will be coordinated through the Hub")

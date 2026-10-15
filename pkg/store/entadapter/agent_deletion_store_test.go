@@ -356,7 +356,7 @@ func TestAgentStore_MarkAgentContainerMissing_DeletionGuard(t *testing.T) {
 		t.Run(label+" is left alone", func(t *testing.T) {
 			a := create("dd-" + label)
 			seedDeletion(t, s, a.ID, st, time.Now().Add(tc.leaseIn), "")
-			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 			require.NoError(t, err)
 			assert.Nil(t, got, "0 rows affected")
 			stored, err := s.GetAgent(ctx, a.ID)
@@ -368,7 +368,7 @@ func TestAgentStore_MarkAgentContainerMissing_DeletionGuard(t *testing.T) {
 	t.Run("failed still applies", func(t *testing.T) {
 		a := create("dd-failed")
 		seedDeletion(t, s, a.ID, store.DeletionStateFailed, time.Now().Add(-time.Minute), store.DeletionCodeRuntimeError)
-		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
+		got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "", "gone")
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, "error", got.Phase)

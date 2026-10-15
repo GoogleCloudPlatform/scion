@@ -294,7 +294,16 @@ func (p *PostgresEventPublisher) buildAndNotify(ctx context.Context, exec pgExec
 		}
 	}
 
+	conduitPayload := conduitNoticeFor(subject, event)
 	for _, channel := range channelsForSubject(subject) {
+		if channel == pgGlobalChannel && conduitPayload != "" {
+			// The conduit notice goes in the same statement as the global
+			// one: both are delivered on commit, or neither is.
+			if _, err := exec.Exec(ctx, `SELECT pg_notify($1, $2), pg_notify($3, $4)`, channel, string(payload), pgConduitChannel, conduitPayload); err != nil {
+				return fmt.Errorf("pg_notify on %s and %s: %w", channel, pgConduitChannel, err)
+			}
+			continue
+		}
 		if _, err := exec.Exec(ctx, `SELECT pg_notify($1, $2)`, channel, string(payload)); err != nil {
 			return fmt.Errorf("pg_notify on %s: %w", channel, err)
 		}

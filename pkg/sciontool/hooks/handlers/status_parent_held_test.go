@@ -76,6 +76,27 @@ func parentHeldClaude(t *testing.T, hookEventName, toolName string, agentID inte
 	return event
 }
 
+// parentHeldSessionStart parses a claude SessionStart with source: the
+// parent's when agentID is empty, otherwise that sub-agent's.
+func parentHeldSessionStart(t *testing.T, source, agentID string) *hooks.Event {
+	t.Helper()
+	payload := map[string]interface{}{
+		"hook_event_name": "SessionStart",
+		"session_id":      claudeSubagentParentSession,
+		"cwd":             "/workspace",
+		"source":          source,
+	}
+	if agentID != "" {
+		payload["agent_id"] = agentID
+		payload["agent_type"] = "general-purpose"
+	}
+	event, err := dialects.NewClaudeDialect().Parse(payload)
+	require.NoError(t, err)
+	require.Equal(t, source, event.Data.Source)
+	require.Equal(t, agentID, subagentID(event))
+	return event
+}
+
 func parentHeldSub(t *testing.T, hookEventName, toolName, agentID string) *hooks.Event {
 	return parentHeldClaude(t, hookEventName, toolName, agentID)
 }

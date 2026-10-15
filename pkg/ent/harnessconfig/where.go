@@ -125,6 +125,11 @@ func ImageStatusCheckedAt(v time.Time) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldImageStatusCheckedAt, v))
 }
 
+// BuiltImage applies equality check predicate on the "built_image" field. It's identical to BuiltImageEQ.
+func BuiltImage(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldBuiltImage, v))
+}
+
 // OwnerID applies equality check predicate on the "owner_id" field. It's identical to OwnerIDEQ.
 func OwnerID(v string) predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldEQ(FieldOwnerID, v))
@@ -1178,6 +1183,81 @@ func ImageStatusCheckedAtIsNil() predicate.HarnessConfig {
 // ImageStatusCheckedAtNotNil applies the NotNil predicate on the "image_status_checked_at" field.
 func ImageStatusCheckedAtNotNil() predicate.HarnessConfig {
 	return predicate.HarnessConfig(sql.FieldNotNull(FieldImageStatusCheckedAt))
+}
+
+// BuiltImageEQ applies the EQ predicate on the "built_image" field.
+func BuiltImageEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEQ(FieldBuiltImage, v))
+}
+
+// BuiltImageNEQ applies the NEQ predicate on the "built_image" field.
+func BuiltImageNEQ(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNEQ(FieldBuiltImage, v))
+}
+
+// BuiltImageIn applies the In predicate on the "built_image" field.
+func BuiltImageIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIn(FieldBuiltImage, vs...))
+}
+
+// BuiltImageNotIn applies the NotIn predicate on the "built_image" field.
+func BuiltImageNotIn(vs ...string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotIn(FieldBuiltImage, vs...))
+}
+
+// BuiltImageGT applies the GT predicate on the "built_image" field.
+func BuiltImageGT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGT(FieldBuiltImage, v))
+}
+
+// BuiltImageGTE applies the GTE predicate on the "built_image" field.
+func BuiltImageGTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldGTE(FieldBuiltImage, v))
+}
+
+// BuiltImageLT applies the LT predicate on the "built_image" field.
+func BuiltImageLT(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLT(FieldBuiltImage, v))
+}
+
+// BuiltImageLTE applies the LTE predicate on the "built_image" field.
+func BuiltImageLTE(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldLTE(FieldBuiltImage, v))
+}
+
+// BuiltImageContains applies the Contains predicate on the "built_image" field.
+func BuiltImageContains(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContains(FieldBuiltImage, v))
+}
+
+// BuiltImageHasPrefix applies the HasPrefix predicate on the "built_image" field.
+func BuiltImageHasPrefix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasPrefix(FieldBuiltImage, v))
+}
+
+// BuiltImageHasSuffix applies the HasSuffix predicate on the "built_image" field.
+func BuiltImageHasSuffix(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldHasSuffix(FieldBuiltImage, v))
+}
+
+// BuiltImageIsNil applies the IsNil predicate on the "built_image" field.
+func BuiltImageIsNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldIsNull(FieldBuiltImage))
+}
+
+// BuiltImageNotNil applies the NotNil predicate on the "built_image" field.
+func BuiltImageNotNil() predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldNotNull(FieldBuiltImage))
+}
+
+// BuiltImageEqualFold applies the EqualFold predicate on the "built_image" field.
+func BuiltImageEqualFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldEqualFold(FieldBuiltImage, v))
+}
+
+// BuiltImageContainsFold applies the ContainsFold predicate on the "built_image" field.
+func BuiltImageContainsFold(v string) predicate.HarnessConfig {
+	return predicate.HarnessConfig(sql.FieldContainsFold(FieldBuiltImage, v))
 }
 
 // OwnerIDEQ applies the EQ predicate on the "owner_id" field.
