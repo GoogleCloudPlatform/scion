@@ -41,8 +41,16 @@
       scion-page-chat {
         width: 100%;
       }
+      /*
+       * The shell sizes itself to the full viewport height (chat-shell.ts,
+       * var(--scion-app-height, 100dvh)), which in this page would overflow
+       * by the height of #outside-invoker above it and push anything pinned
+       * to the bottom of the chat columns off screen. Here it stretches to
+       * the outlet's height instead (a document rule outranks :host).
+       */
       scion-chat-shell {
         width: 100%;
+        height: auto;
         min-height: 0;
       }
       scion-terminal-pane {
