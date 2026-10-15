@@ -226,9 +226,10 @@ func (a *conduitStreamAuthz) retryRenewal(st *conduitUserStream, now time.Time) 
 		delay = conduitRenewalRetryFloor
 	}
 	at := now.Add(delay)
-	if last := st.AuthzUntil.Add(-conduitRenewalLastAttempt); !at.Before(st.AuthzUntil) {
-		// The last attempt comes strictly before authz_until, so it never
-		// races the close at the deadline; none when that moment has passed.
+	if last := st.AuthzUntil.Add(-conduitRenewalLastAttempt); !at.Before(last) {
+		// No attempt inside the final conduitRenewalLastAttempt: the last
+		// one comes that long before authz_until, so it never races the
+		// close at the deadline; none when that moment has passed.
 		if !last.After(now) {
 			return
 		}

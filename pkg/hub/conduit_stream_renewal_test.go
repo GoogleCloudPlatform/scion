@@ -613,6 +613,7 @@ func TestRenewalDriver_LastRetryStrictlyBeforeDeadline(t *testing.T) {
 		want time.Duration // when the retry comes; 0 means none
 	}{
 		{"room for the floor", 40 * time.Second, 30 * time.Second},
+		{"floor would land inside the final second", 30500 * time.Millisecond, 29500 * time.Millisecond},
 		{"capped to 1s before authz_until", 20 * time.Second, 19 * time.Second},
 		{"just over 1s left", 1500 * time.Millisecond, 500 * time.Millisecond},
 		{"exactly 1s left", time.Second, 0},

@@ -662,6 +662,14 @@ func (k *conduitGrantKeys) recheckKeysGen(ctx context.Context) (grant.KeySet, ui
 // (another renewal already reloaded it, or a key change was applied), that
 // newer ring is used without another read, so many streams meeting the same
 // new kid share one reload. A failed reload returns its error.
+//
+// Known edge: freshPublicKeys reads the ring without k.mu and installs its
+// result if the cache did not change during its read. One installed just
+// after this renewal's first read bumps gen with a ring that may be a read's
+// latency older than the store, so the reload is skipped. A false deny
+// would need the grant's kid committed within that latency and the grant
+// already due for renewal; the activation delay of a new key rules that
+// out. Comparing load times instead of generations is a 6.6c candidate.
 func (k *conduitGrantKeys) reloadRecheckKeys(ctx context.Context, seen uint64) (grant.KeySet, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
