@@ -132,7 +132,7 @@ func pfSetup(t *testing.T, srv *httptest.Server) (cwd, globalDir string) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	for _, name := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_HUB_TOKEN", "SCION_AUTH_TOKEN", "SCION_AGENT_ID", "SCION_DEV_TOKEN_FILE"} {
+	for _, name := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_HUB_TOKEN", "SCION_AUTH_TOKEN", "SCION_AGENT_ID", "SCION_DEV_TOKEN_FILE", "SCION_HUB_PROFILE"} {
 		t.Setenv(name, "")
 	}
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_pftest")
@@ -366,27 +366,34 @@ func TestRequireHubForUpload_PathTargetsStillResolve(t *testing.T) {
 	assert.Zero(t, registers)
 }
 
-// TestLocalProjectDir_HubRefReadsGlobalOnly: inside a project with its own
-// harness-config "foo", --project <slug> reads local harness-configs from
-// the global directory only, so the project's own "foo" is never uploaded
-// into another project's scope.
-func TestLocalProjectDir_HubRefReadsGlobalOnly(t *testing.T) {
-	_, srv := newPFHub(t, "")
+// TestHarnessConfigSync_HubRefReadsGlobalOnly: inside a project with its
+// own harness-config "foo", 'harness-config sync foo --project <slug>'
+// uploads the global "foo" into the slug's project, so the walked
+// project's own "foo" is never uploaded into another project's scope.
+func TestHarnessConfigSync_HubRefReadsGlobalOnly(t *testing.T) {
+	hub, srv := newPFHub(t, "")
 	cwd, globalDir := pfSetup(t, srv)
 	writeHC := func(base, harness string) {
 		dir := filepath.Join(base, "harness-configs", "foo")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(pfHCConfig(harness)), 0o644))
 	}
-	projectScion := filepath.Join(cwd, config.DotScion)
-	writeHC(projectScion, "claude")
+	writeHC(filepath.Join(cwd, config.DotScion), "claude")
 	writeHC(globalDir, "codex")
 	projectPath = pfExistingSlug
 
 	assert.Equal(t, "", localProjectDir())
-	hcDir, err := config.FindHarnessConfigDir("foo", localProjectDir())
-	require.NoError(t, err)
-	assert.Equal(t, "codex", hcDir.Config.Harness, "the global foo must be read, not the walked project's")
+	c := &cobra.Command{}
+	c.Flags().String("name", "", "")
+	require.NoError(t, harnessConfigSyncCmd.RunE(c, []string{"foo"}))
+
+	require.Len(t, hub.rec.createReqs, 1)
+	assert.Equal(t, "codex", hub.rec.createReqs[0].Harness, "the global foo must be uploaded, not the walked project's")
+	assert.Equal(t, "project", hub.rec.createReqs[0].Scope)
+	assert.Equal(t, pfExistingID, hub.rec.createReqs[0].ScopeID)
+	registers, writes := hub.counts()
+	assert.Zero(t, registers)
+	assert.Empty(t, writes)
 }
 
 // TestSyncBuildToHub_GlobalDoesNotLink: the post-build sync of 'scion build

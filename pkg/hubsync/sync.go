@@ -235,7 +235,10 @@ type EnsureHubReadyOptions struct {
 	// SkipProjectLink makes EnsureHubReady return a hub context without
 	// binding the project to the hub: no project_id is generated, nothing is
 	// linked or registered, and the broker's provider path is not updated.
-	// The checks that refuse an operation still run. The returned context
+	// The unlinked, linked-elsewhere and health checks still run. The
+	// registration check, and with it the not-found refusal for a user
+	// access token on a project that is not linked elsewhere, is skipped:
+	// the hub authorizes a global-scope write itself. The returned context
 	// has an empty ProjectID. The CLI sets it for global-scope uploads
 	// (--global), which never read a project ID.
 	SkipProjectLink bool
@@ -377,13 +380,18 @@ func errProjectMustBeLinked() error {
 // It never returns a nil HubContext without an error: every agent operation
 // goes through a hub. It will:
 //  1. Resolve a hub project reference (slug, name, UUID, git URL) on the hub
-//  2. Refuse a project the user unlinked (ErrProjectUnlinked)
-//  3. Resolve the endpoint (override, then environment); with
+//  2. Refuse a project directory named with --project that does not
+//     exist (outside a hub-connected context), before any write
+//  3. Refuse a project the user unlinked (ErrProjectUnlinked)
+//  4. Resolve the endpoint (override, then environment); with
 //     none, return a HubNotConfiguredError
-//  4. Ensure project_id exists (generate if missing)
-//  5. Check Hub connectivity; a local workstation endpoint that does not
+//  5. Ensure project_id exists (generate if missing; not with
+//     SkipProjectLink)
+//  6. Check Hub connectivity; a local workstation endpoint that does not
 //     answer returns LocalServerNotRunningError
-//  6. Check project registration: on the local workstation hub an
+//  7. With SkipProjectLink, return here without a project ID, after
+//     refusing a project linked to another hub (see skipProjectLink)
+//  8. Check project registration: on the local workstation hub an
 //     unregistered project with no name match is linked without a prompt;
 //     otherwise the link prompt (or the matching-projects prompt) is shown.
 //     A project linked here runs the one-release import of agents left

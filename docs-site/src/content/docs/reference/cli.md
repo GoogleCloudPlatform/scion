@@ -65,13 +65,13 @@ project, or you do not have access to it, the command fails with an error that n
 `--project <slug|id>` as the alternative.
 
 A `--project` value that is a Hub project slug, name, ID or git URL selects that existing Hub
-project; nothing is created or registered for it, and an unknown value fails with
+project; nothing is created or registered for it, and an unknown slug or name fails with
 `project '<value>' not found on hub`. A directory of the same name in the current directory takes
 precedence over a slug. Outside agent containers, a `--project` path that does not exist is refused
-instead of being created. With `--global`, the commands that upload to or read from the Hub's
-global scope (`harness-config install`, `sync`, `push`, `update`, `delete`, `pull`, `show` and `list`,
-`templates sync` and `push`, and the Hub sync after `scion build`) do not link the global project
-to the Hub or register this machine's Runtime Broker.
+instead of being created. With `--global`, these commands do not link the global project to the Hub
+or register this machine's Runtime Broker: `harness-config install`, `sync`, `push`, `update`,
+`delete`, `pull`, `show` and `list`, `templates sync` and `push`, and the Hub sync after
+`scion build`.
 
 **Commands that need no project.** Commands that act on the Hub connection, a login, this machine's
 Runtime Broker, or the server run outside a project without `--global` or `--project`:
