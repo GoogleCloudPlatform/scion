@@ -273,44 +273,65 @@ func (s *FileSource) Status() FileSourceStatus {
 	return st
 }
 
+// reloadAttempts bounds how many times reloadLocked reads the file in one
+// call when the file keeps being replaced during the read.
+const reloadAttempts = 3
+
 // reloadLocked re-reads the file when it has been replaced or its
 // modification time or size has changed since the last read.
+//
+// Each write replaces the file by rename. A read that opens the file just
+// before it is replaced sees the old file with no link left, and the reader
+// refuses it. When a read fails and the path now names a different file, the
+// new file is read through the same reader, up to reloadAttempts reads in
+// total. A read that fails on a file that was not replaced, or the last
+// allowed read failing, clears the file value and records the error.
 func (s *FileSource) reloadLocked() {
 	if s.path == "" {
 		return
 	}
-	fi, err := os.Lstat(s.path)
-	if err != nil {
-		s.fileToken, s.fileExpiry = "", time.Time{}
-		s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
-		s.fileErr = err
-		return
-	}
-	// Only reuse successful reads: a failure can be caused by properties
-	// such as the link count that are not part of this metadata check.
-	if s.fileErr == nil && s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
-		fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
-		return
-	}
-	s.fileInfo = fi
-	s.fileModTime = fi.ModTime()
-	s.fileSize = fi.Size()
+	for attempt := 1; attempt <= reloadAttempts; attempt++ {
+		fi, err := os.Lstat(s.path)
+		if err != nil {
+			s.fileToken, s.fileExpiry = "", time.Time{}
+			s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
+			s.fileErr = err
+			return
+		}
+		// Only reuse successful reads: a failure can be caused by properties
+		// such as the link count that are not part of this metadata check.
+		if s.fileErr == nil && s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
+			fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
+			return
+		}
+		s.fileInfo = fi
+		s.fileModTime = fi.ModTime()
+		s.fileSize = fi.Size()
 
-	data, err := s.read(s.path)
-	if err != nil {
-		s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
+		data, err := s.read(s.path)
+		if err != nil {
+			s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
+			// Retry only when the path was replaced during the read. Both
+			// identities come from Lstat, which does not follow a link.
+			if attempt < reloadAttempts {
+				if now, lerr := os.Lstat(s.path); lerr == nil && !os.SameFile(fi, now) {
+					continue
+				}
+			}
+			return
+		}
+		s.fileErr = nil
+		s.fileToken = strings.TrimSpace(data)
+		s.fileExpiry = time.Time{}
+		if s.fileToken == "" {
+			return
+		}
+		// An unparseable value keeps a zero expiry: it is used only when no
+		// candidate with a known expiry exists.
+		if exp, err := ParseTokenExpiry(s.fileToken); err == nil {
+			s.fileExpiry = exp
+		}
 		return
-	}
-	s.fileErr = nil
-	s.fileToken = strings.TrimSpace(data)
-	s.fileExpiry = time.Time{}
-	if s.fileToken == "" {
-		return
-	}
-	// An unparseable value keeps a zero expiry: it is used only when no
-	// candidate with a known expiry exists.
-	if exp, err := ParseTokenExpiry(s.fileToken); err == nil {
-		s.fileExpiry = exp
 	}
 }
 

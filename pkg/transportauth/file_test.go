@@ -365,6 +365,82 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 	assert.Equal(t, values[writes-1], got)
 }
 
+// A read that opens the file just before a refresh renames a new file over
+// it fails, because the old file has no link left. The source must read the
+// new file instead of dropping the value. The injected reader forces that
+// interleaving deterministically: it replaces the file, then fails the way
+// the default reader does on the unlinked old file. ptone/scion#5038.
+func TestFileSource_ReadRacingReplaceRereadsNewFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	second := makeTestJWT(time.Now().Add(20 * time.Minute))
+	third := makeTestJWT(time.Now().Add(30 * time.Minute))
+	writeTokenFile(t, path, first)
+
+	armed := false
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		if armed {
+			armed = false
+			writeTokenFile(t, p, third)
+			return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+		}
+		return ReadTransportTokenFile(p)
+	})
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	writeTokenFile(t, path, second)
+	armed = true
+	reads = 0
+	got, err = src.Token()
+	require.NoError(t, err, "a read racing a replacement must not drop the credential")
+	assert.Equal(t, third, got)
+	assert.Equal(t, 2, reads)
+	st := src.Status()
+	assert.NoError(t, st.FileError)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+}
+
+// A read that fails on a file that was not replaced is a genuine refusal:
+// it is not retried within the call, and the file value is cleared.
+func TestFileSource_ReadFailureWithoutReplaceNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
+// A file replaced during every read is read at most three times in
+// one call; then the failure is reported and no value is kept.
+func TestFileSource_ReadRetryIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		writeTokenFile(t, p, makeTestJWT(time.Now().Add(time.Duration(reads+10)*time.Minute)))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 3, reads)
+	assert.ErrorIs(t, src.Status().FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
 // TestReadTransportTokenFile_RefusesNonRegular verifies the default reader
 // refuses a symlink at the leaf (at open time, not via a separate check), a
 // FIFO (without blocking), and a directory, and reads a regular file.
