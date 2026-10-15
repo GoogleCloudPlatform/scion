@@ -57,10 +57,8 @@ func TestExpiredPendingLogAttrs_NamesEachExpiredMessage(t *testing.T) {
 	}
 	rec := renderExpiredPendingLine(t, expiredPendingLogAttrs(expired, expiredLogFixedNow, expiredMessageLogIDCap))
 
-	assert.Equal(t, []string{
-		"expired", "level", "message_ids", "message_ids_truncated", "msg",
-		"pending_durations", "recipients", "time", "ttl",
-	}, expiredLogRecordKeys(rec), "exact key set of the expiry line")
+	wantKeys := []string{"expired", "level", "message_ids", "message_ids_truncated", "msg", "pending_durations", "recipients", "time", "ttl"}
+	assert.Equal(t, wantKeys, expiredLogRecordKeys(rec), "exact key set of the expiry line")
 	assert.Equal(t, "INFO", rec["level"])
 	assert.Equal(t, float64(2), rec["expired"])
 	assert.Equal(t, "24h0m0s", rec["ttl"])
@@ -72,14 +70,14 @@ func TestExpiredPendingLogAttrs_NamesEachExpiredMessage(t *testing.T) {
 
 func TestExpiredPendingLogAttrs_CapsNamedMessages(t *testing.T) {
 	expired := []store.ExpiredPendingMessage{
-		{ID: "id-1", Recipient: "agent:a", CreatedAt: expiredLogFixedNow.Add(-27 * time.Hour)},
-		{ID: "id-2", Recipient: "agent:b", CreatedAt: expiredLogFixedNow.Add(-26 * time.Hour)},
-		{ID: "id-3", Recipient: "agent:c", CreatedAt: expiredLogFixedNow.Add(-25 * time.Hour)},
+		{ID: "cap-1", Recipient: "agent:a", CreatedAt: expiredLogFixedNow.Add(-27 * time.Hour)},
+		{ID: "cap-2", Recipient: "agent:b", CreatedAt: expiredLogFixedNow.Add(-26 * time.Hour)},
+		{ID: "cap-3", Recipient: "agent:c", CreatedAt: expiredLogFixedNow.Add(-25 * time.Hour)},
 	}
 	rec := renderExpiredPendingLine(t, expiredPendingLogAttrs(expired, expiredLogFixedNow, 2))
 
 	assert.Equal(t, float64(3), rec["expired"], "count is the full number expired")
-	assert.Equal(t, []any{"id-1", "id-2"}, rec["message_ids"])
+	assert.Equal(t, []any{"cap-1", "cap-2"}, rec["message_ids"])
 	assert.Equal(t, []any{"agent:a", "agent:b"}, rec["recipients"])
 	assert.Equal(t, []any{"27h0m0s", "26h0m0s"}, rec["pending_durations"])
 	assert.Equal(t, true, rec["message_ids_truncated"])

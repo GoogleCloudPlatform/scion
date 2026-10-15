@@ -736,9 +736,9 @@ func TestExpireAndListStuckPendingMessages(t *testing.T) {
 	for _, m := range []*store.Message{older, newer} {
 		got, err := cs.GetMessage(ctx, m.ID)
 		require.NoError(t, err)
-		assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+		assert.Equal(t, store.MessageDispatchFailed, got.DispatchState, "row %s is expired", m.Recipient)
 		require.NotNil(t, got.DispatchFailureReason)
-		assert.Equal(t, reason, *got.DispatchFailureReason)
+		assert.Equal(t, reason, *got.DispatchFailureReason, "row %s carries the TTL reason", m.Recipient)
 	}
 	for _, m := range []*store.Message{recent, userRow} {
 		got, err := cs.GetMessage(ctx, m.ID)
@@ -781,5 +781,5 @@ func TestExpireAndListStuckPendingMessages_InsideWithTx(t *testing.T) {
 
 	got, err := cs.GetMessage(ctx, stuck.ID)
 	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState, "the expiry inside WithTx is committed with it")
 }
