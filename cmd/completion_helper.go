@@ -17,7 +17,6 @@ package cmd
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -67,32 +66,6 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		}
 	}
 
-	// Helper to scan a project directory for local agents
-	scanProject := func(projectDir string) {
-		if projectDir == "" {
-			return
-		}
-		agentsDir := filepath.Join(projectDir, "agents")
-		entries, err := os.ReadDir(agentsDir)
-		if err != nil {
-			return
-		}
-
-		for _, e := range entries {
-			if e.IsDir() && strings.HasPrefix(e.Name(), toComplete) {
-				// Verify it looks like an agent (has scion-agent.json)
-				// This check might be too slow for thousands of dirs, but for typical usage it's fine
-				// and prevents completing random directories.
-				if _, err := os.Stat(filepath.Join(agentsDir, e.Name(), "scion-agent.json")); err == nil {
-					if !seen[e.Name()] {
-						names = append(names, e.Name())
-						seen[e.Name()] = true
-					}
-				}
-			}
-		}
-	}
-
 	// Try to get project path from flag if specified by user in the command line so far
 	currentProjectPath, _ := cmd.Flags().GetString("project")
 
@@ -104,16 +77,7 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 
 	resolvedPath, _ := config.GetResolvedProjectDir(currentProjectPath)
 
-	// 1. Scan local/current project
-	scanProject(resolvedPath)
-
-	// 2. Scan global project if not already scanned
-	globalDir, _ := config.GetGlobalDir()
-	if globalDir != "" && globalDir != resolvedPath {
-		scanProject(globalDir)
-	}
-
-	// 3. Fetch Hub agents (when a hub endpoint is configured)
+	// Fetch Hub agents (when a hub endpoint is configured)
 	addNames(fetchHubAgentsForCompletion(cmd, resolvedPath))
 
 	return names, cobra.ShellCompDirectiveNoFileComp

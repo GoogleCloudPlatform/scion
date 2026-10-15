@@ -76,6 +76,7 @@ capabilities:
     oauth_token: { support: "no" }
     vertex_ai: { support: "yes" }
   resume: { support: "yes" }
+  agent_plugins: { support: "no", reason: "Gemini CLI extensions need a generated gemini-extension.json shim; not yet supported" }
 no_auth:
   behavior: drop-to-shell
   message: |

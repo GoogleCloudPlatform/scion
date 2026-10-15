@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 // httpHubClient implements HubClient using HTTP calls to the Hub API.
@@ -254,10 +255,7 @@ func (c *httpHubClient) listProjectTemplates(req *http.Request) ([]hubTemplate, 
 // hubCreateAgentResponse mirrors the relevant fields of the hub's CreateAgentResponse.
 // The hub returns {"agent": {...}, "warnings": [...], ...}; we only need the agent.
 type hubCreateAgentResponse struct {
-	Agent struct {
-		Slug string `json:"slug"`
-		Name string `json:"name"`
-	} `json:"agent"`
+	Agent hubclient.Agent `json:"agent"`
 }
 
 func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error) {
@@ -299,9 +297,12 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 			return nil, fmt.Errorf("decode create agent response: %w", err)
 		}
+		agent := result.Agent
 		return &CreateAgentResponse{
-			Slug: result.Agent.Slug,
-			Name: result.Agent.Name,
+			ID:    agent.ID,
+			Slug:  agent.Slug,
+			Name:  agent.Name,
+			Agent: &agent,
 		}, nil
 
 	case http.StatusOK: // 200 — hub resumed/started an existing agent; treat as conflict per design decision 7b
@@ -328,6 +329,37 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		he.text = fmt.Sprintf("create agent returned status %d: %s", resp.StatusCode, createAgentErrorMessage(he))
 		return nil, he
 	}
+}
+
+// GetAgent reads one agent of the project by ID or slug, for the linked user.
+// A non-OK answer is returned as a *HubError.
+func (c *httpHubClient) GetAgent(ctx context.Context, projectID, agentID, onBehalfOf string) (*hubclient.Agent, error) {
+	u := fmt.Sprintf("%s/api/v1/projects/%s/agents/%s", c.hubURL, url.PathEscape(projectID), url.PathEscape(agentID))
+
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get agent request: %w", err)
+	}
+	setOnBehalfOf(req, onBehalfOf)
+	if err := c.signRequest(req); err != nil {
+		return nil, fmt.Errorf("sign request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("get agent request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, newHubError("get agent", resp)
+	}
+
+	var agent hubclient.Agent
+	if err := json.NewDecoder(resp.Body).Decode(&agent); err != nil {
+		return nil, fmt.Errorf("decode get agent response: %w", err)
+	}
+	return &agent, nil
 }
 
 // createAgentErrorMessage returns the hub's error message for a failed

@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -100,6 +101,7 @@ func entRoleDefinitionToStore(rd *ent.RoleDefinition) *store.RoleDefinition {
 		CreatedAt:         rd.Created,
 		UpdatedAt:         rd.Updated,
 		ConfersMembership: &confers,
+		IssuanceID:        rd.IssuanceID,
 	}
 }
 
@@ -115,6 +117,7 @@ func entRoleBindingToStore(rb *ent.RoleBinding) *store.RoleBinding {
 		ExpiresAt:     rb.ExpiresAt,
 		CreatedBy:     rb.CreatedBy,
 		CreatedAt:     rb.Created,
+		IssuanceID:    rb.IssuanceID,
 	}
 	if rb.RoleDefinitionID != nil {
 		result.RoleDefinitionID = rb.RoleDefinitionID.String()
@@ -196,11 +199,23 @@ func (r *RoleStore) ListRoleDefinitions(ctx context.Context) ([]*store.RoleDefin
 }
 
 // CreateRoleDefinition creates a new role definition.
+//
+// A role defined by an admin-kind test identity carries its issuance ID
+// (grant shaping), so the identity's purge removes it; it can never be a
+// system role.
 func (r *RoleStore) CreateRoleDefinition(ctx context.Context, rd *store.RoleDefinition) (*store.RoleDefinition, error) {
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil && rd.System {
+		return nil, store.ErrTestAdminGrantRefused
+	}
 	builder := r.client.RoleDefinition.Create().
 		SetName(rd.Name).
 		SetScopeType(roledefinition.ScopeType(rd.ScopeType)).
-		SetSystem(rd.System)
+		SetSystem(rd.System).
+		SetNillableIssuanceID(issuanceStamp(shaping))
 
 	if rd.ID != "" {
 		uid, err := parseUUID(rd.ID)
@@ -234,17 +249,51 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	if err != nil {
 		return nil, err
 	}
+	// The grant shaping check and the update run in one transaction (the
+	// caller's, inside store.WithTx).
+	var out *store.RoleDefinition
+	err = withEntTx(ctx, r.client, func(c *ent.Client) error {
+		var uerr error
+		out, uerr = updateRoleDefinition(ctx, c, uid, rd)
+		return uerr
+	})
+	return out, err
+}
 
-	// Fetch existing to check system flag.
-	existing, err := r.client.RoleDefinition.Get(ctx, uid)
+// updateRoleDefinition is UpdateRoleDefinition on client c. Under shaping
+// (an admin-kind test identity, admin tier A3) only a role stamped with the
+// same issuance may change, and only while no role binding without that
+// stamp names it: a change to any other role, or to a role a person's
+// binding names, could not be bounded by the identity's expiry.
+func updateRoleDefinition(ctx context.Context, c *ent.Client, uid uuid.UUID, rd *store.RoleDefinition) (*store.RoleDefinition, error) {
+	existing, err := c.RoleDefinition.Get(ctx, uid)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	if existing.System {
 		return nil, fmt.Errorf("%w: system roles cannot be modified", store.ErrInvalidInput)
 	}
+	shaping, err := grantShapingFor(ctx, c)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil {
+		if !shapedByIssuance(shaping, existing.IssuanceID) {
+			return nil, store.ErrTestAdminGrantRefused
+		}
+		boundOutside, err := c.RoleBinding.Query().
+			Where(rolebinding.RoleDefinitionIDEQ(uid), rolebinding.Or(
+				rolebinding.IssuanceIDIsNil(), rolebinding.IssuanceIDNEQ(shaping.IssuanceID))).
+			Exist(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if boundOutside {
+			return nil, store.ErrTestAdminGrantRefused
+		}
+	}
 
-	builder := r.client.RoleDefinition.UpdateOneID(uid).
+	builder := c.RoleDefinition.UpdateOneID(uid).
 		SetName(rd.Name).
 		SetDescription(rd.Description).
 		SetPermissions(rd.Permissions)
@@ -257,6 +306,23 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	return entRoleDefinitionToStore(updated), nil
 }
 
+// withEntTx runs fn in a transaction on client, or on client itself when
+// client is already transactional (inside store.WithTx).
+func withEntTx(ctx context.Context, client *ent.Client, fn func(*ent.Client) error) error {
+	tx, err := client.Tx(ctx)
+	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			return fn(client)
+		}
+		return err
+	}
+	if err := fn(tx.Client()); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // UpdateSystemRoleDefinitionPermissions updates the permissions list of a
 // system role definition. Unlike UpdateRoleDefinition, this method bypasses
 // the system-role guard and is intended for startup backfill operations.
@@ -264,6 +330,14 @@ func (r *RoleStore) UpdateSystemRoleDefinitionPermissions(ctx context.Context, i
 	uid, err := parseGetID(id)
 	if err != nil {
 		return err
+	}
+	// Startup backfill only: never under an admin-kind test identity.
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		return store.ErrTestAdminGrantRefused
 	}
 
 	_, err = r.client.RoleDefinition.UpdateOneID(uid).
@@ -616,6 +690,20 @@ func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id strin
 	if existing.RoleDefinitionID == nil || *existing.RoleDefinitionID != rd.ID {
 		return nil, store.ErrVisitorBindingRefused
 	}
+	// Grant shaping (admin tier A3): an admin-kind test identity changes the
+	// window only of a visitor binding it made (the same issuance), and the
+	// window still ends no later than the identity; any other change could
+	// not be bounded by its expiry.
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil {
+		if !shapedByIssuance(shaping, existing.IssuanceID) {
+			return nil, store.ErrTestAdminGrantRefused
+		}
+		expiresAt = shaping.ClampExpiry(expiresAt)
+	}
 	update := r.client.RoleBinding.UpdateOneID(uid)
 	if notBefore != nil {
 		update.SetNotBefore(*notBefore)
@@ -681,6 +769,28 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 	if rb.ScopeType != string(rd.ScopeType) {
 		return nil, fmt.Errorf("%w: role %q requires scope %q but got %q",
 			store.ErrScopeMismatch, rd.Name, string(rd.ScopeType), rb.ScopeType)
+	}
+
+	// Grant shaping (admin tier A3): a binding written for an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID; one written by such an identity without the shaping is
+	// refused. The shaped binding still passes every guard below,
+	// including D10: its CreatedBy is the identity, never a reconciler or
+	// issuance sentinel, so a super-admin binding is refused.
+	shaping, err := grantShapingFor(ctx, r.client, rb.CreatedBy)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil {
+		stored := *rb
+		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
+		rb = &stored
+	}
+
+	// No super-admin binding is ever written under shaping, whatever
+	// CreatedBy the caller names (design §4.5).
+	if shaping != nil && rd.Name == store.SystemRoleSuperAdmin {
+		return nil, store.ErrSuperAdminBindingRestricted
 	}
 
 	// D10 guard: refuse super-admin bindings from non-reconciler callers.
@@ -796,7 +906,8 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		SetPrincipalID(rb.PrincipalID).
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
 		SetScopeID(rb.ScopeID).
-		SetNillableMembershipKind(membershipKind)
+		SetNillableMembershipKind(membershipKind).
+		SetNillableIssuanceID(issuanceStamp(shaping))
 
 	if rb.ID != "" {
 		uid, err := parseUUID(rb.ID)

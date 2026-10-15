@@ -52,9 +52,11 @@ func hostCredentialHoldsSignIn(f HostCredentialFile, data []byte) bool {
 // copilot CLI's config schema as quoted from its bundled code in
 // github/copilot-cli issue #207 (banner, beep, last_logged_in_user,
 // logged_in_users, model, render_markdown, screen_reader, theme,
-// trusted_folders, copilot_integration_id, copilot_url); and scion's own
+// trusted_folders, copilot_integration_id, copilot_url); scion's own
 // copilot provisioner (harnesses/copilot/provision.py), which writes
-// trustedFolders.
+// trustedFolders; and `copilot plugin install` (CLI 1.0.97), which records
+// installed plugins under installedPlugins (kept as [] after the last
+// uninstall).
 // The copilot provisioner applies the same rule inside the agent container
 // (_COPILOT_SETTINGS_KEYS and _config_holds_sign_in in
 // harnesses/copilot/provision.py). Keep the two in sync: its tests compare
@@ -67,6 +69,7 @@ var copilotSettingsKeys = map[string]struct{}{
 	"beep":                   {},
 	"copilot_integration_id": {},
 	"copilot_url":            {},
+	"installedplugins":       {},
 	"last_logged_in_user":    {},
 	"logged_in_users":        {},
 	"model":                  {},

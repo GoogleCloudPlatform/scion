@@ -69,18 +69,29 @@ const conduitRefreshRoute = "/api/v1/conduit"
 // Sessions of other principals (brokers, users) do not refresh in band;
 // their AuthRefresh is refused with 4401, as before agent refresh existed.
 func (s *Server) conduitAgentRefresh(ctx context.Context, p relay.Principal, sess relay.RefreshSession, ar *conduitv1.AuthRefresh) error {
-	log := slog.Default().With("subsystem", "hub.conduit",
-		"principal_kind", p.Kind, "principal_id", p.ID, "session_id", sess.SessionID)
-	refuse := func(reason string) error {
-		log.Warn("Conduit agent credential refresh refused", "outcome", conduitRefreshRefused, "reason", reason)
-		s.recordConduitAgentRefresh(conduitRefreshRefused)
+	if outcome, _ := s.conduitAgentRefreshCheck(ctx, p, sess, ar); outcome == conduitRefreshRefused {
 		return conduit.Reject(conduit.CloseUnauthenticated, relay.ReasonUnauthenticated)
 	}
-	unevaluated := func(err error) error {
+	return nil
+}
+
+// conduitAgentRefreshCheck runs conduitAgentRefresh's checks and returns
+// their outcome (conduitRefreshOK, conduitRefreshRefused or
+// conduitRefreshUnevaluated) and, on ok, the refreshed credential's expiry
+// (zero: none). It logs and counts the outcome.
+func (s *Server) conduitAgentRefreshCheck(ctx context.Context, p relay.Principal, sess relay.RefreshSession, ar *conduitv1.AuthRefresh) (string, time.Time) {
+	log := slog.Default().With("subsystem", "hub.conduit",
+		"principal_kind", p.Kind, "principal_id", p.ID, "session_id", sess.SessionID)
+	refuse := func(reason string) (string, time.Time) {
+		log.Warn("Conduit agent credential refresh refused", "outcome", conduitRefreshRefused, "reason", reason)
+		s.recordConduitAgentRefresh(conduitRefreshRefused)
+		return conduitRefreshRefused, time.Time{}
+	}
+	unevaluated := func(err error) (string, time.Time) {
 		log.Warn("Conduit agent credential refresh could not be checked; keeping the session",
 			"outcome", conduitRefreshUnevaluated, "error", err)
 		s.recordConduitAgentRefresh(conduitRefreshUnevaluated)
-		return nil
+		return conduitRefreshUnevaluated, time.Time{}
 	}
 
 	if p.Kind != registry.PrincipalAgent {
@@ -143,7 +154,7 @@ func (s *Server) conduitAgentRefresh(ctx context.Context, p relay.Principal, ses
 	}
 	log.Info("Conduit agent credential refreshed", "outcome", conduitRefreshOK, "agent_id", p.ID, "expires_at", exp)
 	s.recordConduitAgentRefresh(conduitRefreshOK)
-	return nil
+	return conduitRefreshOK, exp
 }
 
 // OTelConduitAgentRefreshMetrics counts agent AuthRefresh outcomes as

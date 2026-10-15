@@ -122,22 +122,6 @@ func TestRunAgentRejectsInvalidAgentLogLevel(t *testing.T) {
 	}
 }
 
-// Local path: the initial agent env carries SCION_LOG_LEVEL only when
-// --agent-log-level is given, and never anything from the CLI's --debug.
-func TestLocalAgentStartEnv(t *testing.T) {
-	t.Run("debug without flag adds nothing", func(t *testing.T) {
-		resetAgentLogLevelGlobals(t)
-		debugMode = true
-		assert.Nil(t, localAgentStartEnv())
-	})
-	t.Run("flag sets SCION_LOG_LEVEL", func(t *testing.T) {
-		resetAgentLogLevelGlobals(t)
-		debugMode = true
-		agentLogLevelFlag = " info,hubsync=debug "
-		assert.Equal(t, map[string]string{"SCION_LOG_LEVEL": "info,hubsync=debug"}, localAgentStartEnv())
-	})
-}
-
 // createConfigEnv returns config.env from the captured hub create body.
 func createConfigEnv(t *testing.T, body map[string]interface{}) (map[string]interface{}, bool) {
 	t.Helper()
