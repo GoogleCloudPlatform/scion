@@ -237,6 +237,21 @@ func ResolverReasonForLog(uri, reason string) string {
 	return RedactURLsInText(reason)
 }
 
+// SkillNameWithheld replaces, in the log, a skill name or destination name
+// that comes from a declared skill reference whose logged form is redacted
+// (see LoggedSkillName).
+const SkillNameWithheld = "(skill name withheld)"
+
+// LoggedSkillName returns name, a skill name or destination name that
+// comes from the declared skill reference uri, for the server-side log:
+// SkillNameWithheld when SkillRefRedacted(uri), else name.
+func LoggedSkillName(uri, name string) string {
+	if SkillRefRedacted(uri) {
+		return SkillNameWithheld
+	}
+	return name
+}
+
 // LoggedSkillRef is a declared skill reference as it is written to the
 // log: its String and LogValue give the redacted form (see
 // RedactSkillRef). Log a declared skill reference as

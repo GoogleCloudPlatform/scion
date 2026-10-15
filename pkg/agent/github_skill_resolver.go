@@ -929,7 +929,7 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 	if token == "" {
 		fmt.Fprintf(os.Stderr, "github: WARNING: no GITHUB_TOKEN configured for %s; "+
 			"making unauthenticated GitHub API call (limit: 60 req/hr per IP). "+
-			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", ghRef.Raw)
+			"Set a GITHUB_TOKEN project secret or broker env var to increase the limit.\n", LoggedSkillRef(ghRef.Raw))
 	}
 
 	// Short-circuit: if the ref is already a full 40-char lowercase hex commit SHA,
