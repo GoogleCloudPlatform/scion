@@ -74,7 +74,7 @@ func (r *scriptedRouter) Do(ctx context.Context, req router.Request, fn func(con
 	for attempt := 0; ; attempt++ {
 		idx := -1
 		for i, s := range r.sessions {
-			if !excluded[i] && !(s.relayID != "" && excludedRelays[s.relayID]) {
+			if !excluded[i] && (s.relayID == "" || !excludedRelays[s.relayID]) {
 				idx = i
 				break
 			}
