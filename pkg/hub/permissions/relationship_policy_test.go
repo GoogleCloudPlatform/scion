@@ -14,7 +14,10 @@
 
 package permissions
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // relationshipPolicyExceptionKey identifies one permission in one
 // RelationshipPolicies row for one principal kind.
@@ -162,7 +165,7 @@ func TestMintEligibilityRegistry_RelationshipTypesResolveToMintEligibleRow(t *te
 					if !row.MintEligible || row.Relationship != relType || row.ResourceType != resourceType {
 						continue
 					}
-					if containsString(row.PermissionIDs, permID) {
+					if slices.Contains(row.PermissionIDs, permID) {
 						found = true
 						break
 					}

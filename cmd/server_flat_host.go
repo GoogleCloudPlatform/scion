@@ -64,6 +64,13 @@ func flatHostMode(cfg *config.GlobalConfig, s store.Store) brokerhost.Mode {
 	return brokerhost.ModeRemote
 }
 
+// flatDefaultKubernetesClient builds the client of a Kubernetes instance
+// with no kubeconfig: the default loading rules, then the in-cluster config.
+// cmd's tests replace it with a constructor that has no in-cluster fallback
+// (TestMain), so a test never uses the service account of the pod it runs in
+// (ptone/scion#5088).
+var flatDefaultKubernetesClient = k8s.NewClientWithContext
+
 // newFlatInstanceRuntime builds an instance's runtime from its own explicit
 // configuration, never from Runtime Broker Profile resolution or a change to
 // process-wide settings (KUBECONFIG, HOME, cwd, current context).
@@ -91,13 +98,14 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 			// rules and no in-cluster fallback.
 			client, err = k8s.NewClientFromKubeconfigFile(t.Kubeconfig, t.Context)
 		} else {
-			client, err = k8s.NewClientWithContext("", t.Context)
+			client, err = flatDefaultKubernetesClient("", t.Context)
 		}
 		if err != nil {
 			return nil, err // a configuration error: the file, its parse or its context
 		}
-		rt, err := runtime.NewKubernetesRuntimeFromClient(client, config.V1RuntimeConfig{
-			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
+		// The instance's own GKE mode and default priority class apply;
+		// cross-namespace listing never does (one cluster and namespace).
+		rt, err := runtime.NewKubernetesRuntimeFromClient(client, t.KubernetesRuntimeConfig())
 		if err != nil {
 			// The connection check failed: the cluster cannot be identified.
 			return nil, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the API server is unreachable or the request failed; "+

@@ -320,7 +320,7 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	switch a.Phase {
-	case "suspended", "stopping", "stopped", "error":
+	case "suspended", "stopping", "stopped", "error", "halted":
 	default:
 		return false
 	}
@@ -1352,6 +1352,14 @@ type HarnessConfig struct {
 	ImageStatus          string     `json:"imageStatus"`                    // unknown, valid, invalid, error
 	ImageStatusCheckedAt *time.Time `json:"imageStatusCheckedAt,omitempty"` // last image check timestamp
 
+	// BuiltImage is the image the hub's image-build executor last built for
+	// this harness-config (ptone/scion#4219). It is operational state, not
+	// derived from config.yaml: only UpdateHarnessConfigBuiltImage writes it
+	// (CreateHarnessConfig stores it as given), and neither
+	// UpdateHarnessConfig nor UpdateHarnessConfigContent touches it. Readers
+	// that show or check "the image" prefer it over Config.Image.
+	BuiltImage string `json:"builtImage,omitempty"`
+
 	// Ownership
 	OwnerID   string `json:"ownerId,omitempty"`
 	CreatedBy string `json:"createdBy,omitempty"`
@@ -1385,8 +1393,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"
@@ -1618,8 +1629,8 @@ const (
 	// expiring system hub-admin binding (admin tier, ptone/scion#4240).
 	UserKindTestHubAdmin = "test_hub_admin"
 	// UserKindTestSuperAdmin is a hub-issued test identity holding a real,
-	// expiring system super-admin binding. Its issuance stays refused until
-	// the admin tier's policy phase ships.
+	// expiring system super-admin binding. It is issued only on a hub
+	// started with --test-mode=super-admin.
 	UserKindTestSuperAdmin = "test_super_admin"
 	// UserKindFederated is a local account for a user of a trusted
 	// external issuer. Only Store.CreateFederatedUser writes it.
@@ -2050,6 +2061,14 @@ type NotificationSubscription struct {
 	CreatedBy         string    `json:"createdBy"`
 }
 
+// CreatorFallbackSubscriptionID is the SubscriptionID of a notification
+// sent to an agent's creator without a subscription: the HALTED
+// notification a halted agent's creator gets when none of the creator's
+// subscriptions matched (ptone/scion#4853). It is the nil UUID, which no
+// subscription has; the column carries no foreign key, and the retry sweep
+// rebuilds such a notification's subscriber from the notification itself.
+const CreatorFallbackSubscriptionID = "00000000-0000-0000-0000-000000000000"
+
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
 func (s *NotificationSubscription) MatchesActivity(activity string) bool {
@@ -2086,7 +2105,27 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`   // Whether dispatch was attempted
 	Acknowledged   bool      `json:"acknowledged"` // Whether acknowledged (for human targets)
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent. Rows
+	// stored before attempts were recorded read 0.
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is NotificationOutcomeDelivered, NotificationOutcomeFailed,
+	// or empty when no outcome is recorded (pending, in flight, or a row
+	// stored before outcomes were recorded, whose Dispatched flag keeps its
+	// old meaning).
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
+
+// Notification.DispatchOutcome values.
+const (
+	// NotificationOutcomeDelivered: the notification was delivered to its
+	// subscriber agent.
+	NotificationOutcomeDelivered = "delivered"
+	// NotificationOutcomeFailed: dispatch gave up without delivering, either
+	// because retries were exhausted (notificationRetryMaxAge in pkg/hub) or
+	// because the subscription, subscriber or watched agent is gone. The row
+	// stays dispatched so the sweep does not retry it.
+	NotificationOutcomeFailed = "failed"
+)
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -2484,6 +2523,9 @@ const (
 	LifecycleHookTriggerSuspended = "suspended"
 	LifecycleHookTriggerStopped   = "stopped"
 	LifecycleHookTriggerError     = "error"
+	// LifecycleHookTriggerHalted fires when the platform halts an agent
+	// (ptone/scion#4853).
+	LifecycleHookTriggerHalted = "halted"
 )
 
 // LifecycleHookActionType constants (v1).

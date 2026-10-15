@@ -6,7 +6,7 @@
  * project detail (grid default), project detail (list/table view),
  * tree/graph view, and chat membership sidebar.
  *
- * Covers: workspace-enabled hrefs, flag-off legacy hrefs, modified-click
+ * Covers: workspace hrefs, modified-click
  * delegation (Ctrl-click actually opens new tab), cross-tab ownership
  * delegation, chat source state retained via actual membership control,
  * repeated pending and connected duplicate opens, and direct legacy redirect.
@@ -19,15 +19,14 @@ import { agentA, apiAgent, defaultAgents, projectId, setup, switchView } from '.
 // Table-driven entry point: href verification
 //
 // Each row describes a page that contains a terminal link, how to find the
-// link, and the expected href value under both flag-on and flag-off.
+// link, and the expected href value.
 // ---------------------------------------------------------------------------
 
 interface EntryPointRow {
   name: string;
   page: string;
   locator: (page: Page) => ReturnType<Page['locator']>;
-  hrefEnabled: string;
-  hrefDisabled: string;
+  href: string;
   /** Optional setup step before locating (e.g. switch view mode). */
   before?: (page: Page) => Promise<void>;
 }
@@ -37,38 +36,33 @@ const entryPoints: EntryPointRow[] = [
     name: 'agent list (grid view)',
     page: '/agents',
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
   {
     name: 'agent list (table view)',
     page: '/agents',
     before: (p) => switchView(p, 'scion-view-agents', 'list'),
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
   {
     name: 'agent detail page',
     page: `/agents/${agentA}`,
     locator: (p) => p.locator('a[href*="terminal"][style*="text-decoration"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
   {
     name: 'project detail (grid view)',
     page: `/projects/${projectId}`,
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
   {
     name: 'project detail (list/table view)',
     page: `/projects/${projectId}`,
     before: (p) => switchView(p, 'scion-view-project-agents', 'list'),
     locator: (p) => p.locator('sl-button[aria-label="Terminal"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
   {
     name: 'tree/graph view',
@@ -76,45 +70,28 @@ const entryPoints: EntryPointRow[] = [
     before: (p) => switchView(p, 'scion-view-agents', 'graph'),
     // Tree view uses sl-icon-button with label="Terminal"
     locator: (p) => p.locator('sl-icon-button[label="Terminal"]').first(),
-    hrefEnabled: `/terminals/${agentA}`,
-    hrefDisabled: `/agents/${agentA}/terminal`,
+    href: `/terminals/${agentA}`,
   },
 ];
 
 // ---------------------------------------------------------------------------
-// Flag-ON: verify every entry point produces workspace hrefs
+// Verify every entry point produces workspace hrefs
 // ---------------------------------------------------------------------------
 
 for (const row of entryPoints) {
-  test(`entry point "${row.name}" has workspace href when flag is ON`, async ({ page }) => {
-    await setup(page, { enabled: true });
+  test(`entry point "${row.name}" has workspace href`, async ({ page }) => {
+    await setup(page);
     await page.goto(row.page);
     if (row.before) await row.before(page);
     const link = row.locator(page);
     await expect(link).toBeVisible({ timeout: 15000 });
     const href = await link.getAttribute('href');
-    expect(href).toBe(row.hrefEnabled);
+    expect(href).toBe(row.href);
   });
 }
 
 // ---------------------------------------------------------------------------
-// Flag-OFF: verify every entry point falls back to legacy hrefs
-// ---------------------------------------------------------------------------
-
-for (const row of entryPoints) {
-  test(`entry point "${row.name}" has legacy href when flag is OFF`, async ({ page }) => {
-    await setup(page, { enabled: false });
-    await page.goto(row.page);
-    if (row.before) await row.before(page);
-    const link = row.locator(page);
-    await expect(link).toBeVisible({ timeout: 15000 });
-    const href = await link.getAttribute('href');
-    expect(href).toBe(row.hrefDisabled);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Workspace-enabled: clicking each entry-point link routes to /terminals/{id}
+// Clicking each entry-point link routes to /terminals/{id}
 // and the retained workspace attaches a WebSocket.
 // ---------------------------------------------------------------------------
 
@@ -161,13 +138,11 @@ test('Ctrl-click on terminal link opens new tab via real href', async ({ context
 // ---------------------------------------------------------------------------
 // Chat membership terminal control: the actual scion-chat-members component
 // renders a terminal link for agents with canAttach=true. Clicking it must
-// route through openTerminalFromChat and navigate to the workspace.
+// route through openTerminal and navigate to the workspace.
 // ---------------------------------------------------------------------------
 
-test('chat membership terminal control routes through workspace when flag is ON', async ({
-  page,
-}) => {
-  const socket = await setup(page, { enabled: true, nativeChatEnabled: true });
+test('chat membership terminal control routes through workspace', async ({ page }) => {
+  const socket = await setup(page, { nativeChatEnabled: true });
   await page.goto('/chat');
   await expect(page.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
 
@@ -207,37 +182,6 @@ test('chat membership terminal control routes through workspace when flag is ON'
   await expect.poll(() => socket.attaches).toBe(1);
 });
 
-test('chat membership terminal control uses legacy popup when flag is OFF', async ({ page }) => {
-  await setup(page, { enabled: false, nativeChatEnabled: true });
-  await page.goto('/chat');
-  await expect(page.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
-
-  // Inject chat members component
-  await page.evaluate((id) => {
-    const members = document.createElement('scion-chat-members') as HTMLElement & {
-      agents: unknown[];
-    };
-    members.agents = [
-      {
-        id,
-        kind: 'agent',
-        displayName: 'test-agent',
-        slug: 'test-agent',
-        phase: 'running',
-        canAttach: true,
-      },
-    ];
-    document.body.appendChild(members);
-  }, agentA);
-
-  const terminalLink = page.locator('scion-chat-members a.agent-terminal').first();
-  await expect(terminalLink).toBeAttached({ timeout: 5000 });
-
-  // Verify it has the legacy href
-  const href = await terminalLink.getAttribute('href');
-  expect(href).toBe(`/agents/${agentA}/terminal`);
-});
-
 // ---------------------------------------------------------------------------
 // Chat source state retained: navigate from chat to terminal and back.
 // The route outlet (with the chat shell) must be hidden, not destroyed.
@@ -245,7 +189,7 @@ test('chat membership terminal control uses legacy popup when flag is OFF', asyn
 // ---------------------------------------------------------------------------
 
 test('chat source state is retained when opening terminal from chat', async ({ page }) => {
-  const socket = await setup(page, { enabled: true, nativeChatEnabled: true });
+  const socket = await setup(page, { nativeChatEnabled: true });
   await page.goto('/chat');
   await expect(page.locator('scion-page-chat')).toBeAttached({ timeout: 10000 });
 
@@ -389,23 +333,17 @@ test('cross-tab: chat state retained when another tab owns terminals', async ({ 
 // Direct legacy route redirect
 // ---------------------------------------------------------------------------
 
-test('legacy /agents/{id}/terminal redirects to /terminals/{id} when workspace is ON', async ({
-  page,
-}) => {
-  const socket = await setup(page, { enabled: true });
+test('legacy /agents/{id}/terminal redirects to /terminals/{id}', async ({ page }) => {
+  const socket = await setup(page);
   await page.goto(`/agents/${agentA}/terminal`);
   await expect(page).toHaveURL(`/terminals/${agentA}`);
   await expect.poll(() => socket.attaches).toBe(1);
 });
 
-test('legacy /agents/{id}/terminal loads standalone terminal when flag is OFF', async ({
-  page,
-}) => {
-  const socket = await setup(page, { enabled: false });
-  await page.goto(`/agents/${agentA}/terminal`);
-  await expect(page).toHaveURL(`/agents/${agentA}/terminal`);
-  await expect.poll(() => socket.attaches).toBe(1);
-  expect(await page.locator('#terminal-workspace').count()).toBe(0);
+test('legacy /agents/{id}/terminal redirects any id, not only a UUID', async ({ page }) => {
+  await setup(page);
+  await page.goto('/agents/not-a-uuid/terminal');
+  await expect(page).toHaveURL('/terminals/not-a-uuid');
 });
 
 // ---------------------------------------------------------------------------

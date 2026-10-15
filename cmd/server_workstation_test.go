@@ -16,10 +16,12 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -30,6 +32,7 @@ import (
 // resetServerFlags resets the package-level server flag variables to their
 // cobra default values so tests don't leak state.
 func resetServerFlags() {
+	serverRole = serverRoleHub
 	enableHub = false
 	enableRuntimeBroker = false
 	enableWeb = false
@@ -381,9 +384,10 @@ func TestPrintWorkstationQuickstart_SettingsToken(t *testing.T) {
 	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call uses the settings token")
 }
 
-// TestPrintWorkstationQuickstart_RelativeTokenFile: the daemon child runs in
-// the global directory, so a relative server.auth.dev_token_file is shown
-// and read from there, not from the directory 'server start' was run in.
+// TestPrintWorkstationQuickstart_RelativeTokenFile: a relative
+// server.auth.dev_token_file names a file under the global directory, so it
+// is shown and read from there, not from the directory 'server start' was
+// run in.
 func TestPrintWorkstationQuickstart_RelativeTokenFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(t.TempDir())
@@ -405,28 +409,67 @@ func TestPrintWorkstationQuickstart_RelativeTokenFile(t *testing.T) {
 }
 
 // TestPrintWorkstationQuickstart_RelativeTokenFileGlobal: with --global the
-// daemon child changes to the home directory, so a relative token file is
-// shown and read from there.
+// server changes to the home directory, but a relative token file still
+// names the file under the global directory, so it is shown and read from
+// there, not from the home directory.
 func TestPrintWorkstationQuickstart_RelativeTokenFileGlobal(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(t.TempDir())
 	prevGlobal := globalMode
 	t.Cleanup(func() { globalMode = prevGlobal })
 	globalMode = true
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "tokens"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tokens", "dev-token"), []byte(fixtureDevToken+"\n"), 0600))
 	cfg := &config.GlobalConfig{Auth: config.DevAuthConfig{Enabled: true, TokenFile: filepath.Join("tokens", "dev-token")}}
 
-	// stubQuickstartProbes points HOME at a fresh temp dir.
+	// stubQuickstartProbes points HOME at a fresh temp dir; a different
+	// file at the same relative path there must not be used.
 	rec := stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
 	home := os.Getenv("HOME")
 	require.NoError(t, os.MkdirAll(filepath.Join(home, "tokens"), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(home, "tokens", "dev-token"), []byte(fixtureDevToken+"\n"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(home, "tokens", "dev-token"), []byte("scion_dev_stale\n"), 0600))
 	output := captureStdout(t, func() {
 		printWorkstationQuickstart(false, dir, cfg, "127.0.0.1", 8080, true, true, true, true)
 	})
 
-	assert.Contains(t, output, wantDevTokenExport(filepath.Join(home, "tokens", "dev-token")), "should show the file under the home directory")
+	assert.Contains(t, output, wantDevTokenExport(filepath.Join(dir, "tokens", "dev-token")), "should show the file under the global directory")
+	assert.NotContains(t, output, filepath.Join(home, "tokens"), "should not show the file under the home directory")
 	assert.NotContains(t, output, "scion_dev_", "should not print the dev token value")
-	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call reads the file under the home directory")
+	assert.Equal(t, fixtureDevToken, rec.statusToken, "status call reads the file under the global directory")
+}
+
+// TestPrintWorkstationQuickstart_ShowsServerTokenFile ties the quickstart to
+// the server: for a relative token file, in either mode, the quickstart
+// shows and reads the very file the server's dev auth created.
+func TestPrintWorkstationQuickstart_ShowsServerTokenFile(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Run(fmt.Sprintf("global=%t", global), func(t *testing.T) {
+			t.Setenv("SCION_DEV_TOKEN", "")
+			t.Setenv("SCION_AUTH_TOKEN", "")
+			prevGlobal := globalMode
+			t.Cleanup(func() { globalMode = prevGlobal })
+			globalMode = global
+			rec := stubQuickstartProbes(t, true, onboardingStatusResult{Complete: true, EmbeddedBrokerID: "b1"}, nil)
+			t.Chdir(t.TempDir())
+			dir := t.TempDir()
+			cfg := &config.GlobalConfig{Auth: config.DevAuthConfig{Enabled: true, TokenFile: filepath.Join("tokens", "dev-token")}}
+
+			// The server generates the token and writes its file.
+			captureDevTokenLog(t)
+			token, err := initDevAuth(cfg, dir)
+			require.NoError(t, err)
+			require.NotEmpty(t, token)
+
+			output := captureStdout(t, func() {
+				printWorkstationQuickstart(false, dir, cfg, "127.0.0.1", 8080, true, true, true, true)
+			})
+
+			// Compare without printing the output or the generated token.
+			assert.True(t, strings.Contains(output, wantDevTokenExport(filepath.Join(dir, "tokens", "dev-token"))), "should show the file the server created")
+			assert.False(t, strings.Contains(output, token), "should not print the dev token value")
+			assert.True(t, rec.statusToken == token, "status call should use the server's token")
+		})
+	}
 }
 
 func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
@@ -475,20 +518,11 @@ func TestGenerateSystemdUnit(t *testing.T) {
 		t.Skip("systemd tests only run on linux")
 	}
 
-	// Capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateSystemdUnit("/usr/local/bin/scion", false)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateSystemdUnit("/usr/local/bin/scion", false)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "[Unit]")
 	assert.Contains(t, output, "Scion Workstation Server")
@@ -502,19 +536,11 @@ func TestGenerateSystemdUnit_Hosted(t *testing.T) {
 		t.Skip("systemd tests only run on linux")
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateSystemdUnit("/usr/local/bin/scion", true)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateSystemdUnit("/usr/local/bin/scion", true)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "Scion Server (Hosted)")
 	assert.Contains(t, output, "--hosted")
@@ -525,19 +551,11 @@ func TestGenerateLaunchdPlist(t *testing.T) {
 		t.Skip("launchd tests only run on darwin")
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := generateLaunchdPlist("/usr/local/bin/scion", false)
+	var err error
+	output := captureStdout(t, func() {
+		err = generateLaunchdPlist("/usr/local/bin/scion", false)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = old
-
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	output := buf.String()
 
 	assert.Contains(t, output, "io.scion.server")
 	assert.Contains(t, output, "<string>/usr/local/bin/scion</string>")

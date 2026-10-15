@@ -238,19 +238,6 @@ func TestStopCmd_RmOutsideAgentProceeds(t *testing.T) {
 	assert.Equal(t, []string{"stop:" + selfAgentName, "delete:" + selfAgentName}, events.list())
 }
 
-// Without a Hub, stop --rm of the current agent is refused (by name, fail
-// closed) before the local stop.
-func TestStopCmd_LocalRmCurrentAgentWithoutSelfRefused(t *testing.T) {
-	setupStopSelf(t, selfAgentName, selfAgentID, selfProjectID)
-	noHub = true
-	stopRm = true
-
-	_, err := runStop(t, selfAgentName)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--self is required",
-		"the local stop --rm must be refused by the guard, not fail later in the runtime")
-}
-
 // stop --all --rm skips the current agent, notes it, and stops and removes
 // the others.
 func TestStopAllViaHub_RmSkipsCurrentAgent(t *testing.T) {

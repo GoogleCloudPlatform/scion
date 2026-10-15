@@ -1413,12 +1413,16 @@ func init() {
 	harnessconfigDescScope := harnessconfigFields[8].Descriptor()
 	// harnessconfig.DefaultScope holds the default value on creation for the scope field.
 	harnessconfig.DefaultScope = harnessconfigDescScope.Default.(string)
+	// harnessconfigDescBuiltImage is the schema descriptor for built_image field.
+	harnessconfigDescBuiltImage := harnessconfigFields[17].Descriptor()
+	// harnessconfig.DefaultBuiltImage holds the default value on creation for the built_image field.
+	harnessconfig.DefaultBuiltImage = harnessconfigDescBuiltImage.Default.(string)
 	// harnessconfigDescCreated is the schema descriptor for created field.
-	harnessconfigDescCreated := harnessconfigFields[21].Descriptor()
+	harnessconfigDescCreated := harnessconfigFields[22].Descriptor()
 	// harnessconfig.DefaultCreated holds the default value on creation for the created field.
 	harnessconfig.DefaultCreated = harnessconfigDescCreated.Default.(func() time.Time)
 	// harnessconfigDescUpdated is the schema descriptor for updated field.
-	harnessconfigDescUpdated := harnessconfigFields[22].Descriptor()
+	harnessconfigDescUpdated := harnessconfigFields[23].Descriptor()
 	// harnessconfig.DefaultUpdated holds the default value on creation for the updated field.
 	harnessconfig.DefaultUpdated = harnessconfigDescUpdated.Default.(func() time.Time)
 	// harnessconfig.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -1859,8 +1863,18 @@ func init() {
 	notificationDescAcknowledged := notificationFields[9].Descriptor()
 	// notification.DefaultAcknowledged holds the default value on creation for the acknowledged field.
 	notification.DefaultAcknowledged = notificationDescAcknowledged.Default.(bool)
+	// notificationDescDispatchAttempts is the schema descriptor for dispatch_attempts field.
+	notificationDescDispatchAttempts := notificationFields[10].Descriptor()
+	// notification.DefaultDispatchAttempts holds the default value on creation for the dispatch_attempts field.
+	notification.DefaultDispatchAttempts = notificationDescDispatchAttempts.Default.(int)
+	// notification.DispatchAttemptsValidator is a validator for the "dispatch_attempts" field. It is called by the builders before save.
+	notification.DispatchAttemptsValidator = notificationDescDispatchAttempts.Validators[0].(func(int) error)
+	// notificationDescDispatchOutcome is the schema descriptor for dispatch_outcome field.
+	notificationDescDispatchOutcome := notificationFields[11].Descriptor()
+	// notification.DefaultDispatchOutcome holds the default value on creation for the dispatch_outcome field.
+	notification.DefaultDispatchOutcome = notificationDescDispatchOutcome.Default.(string)
 	// notificationDescCreated is the schema descriptor for created field.
-	notificationDescCreated := notificationFields[10].Descriptor()
+	notificationDescCreated := notificationFields[12].Descriptor()
 	// notification.DefaultCreated holds the default value on creation for the created field.
 	notification.DefaultCreated = notificationDescCreated.Default.(func() time.Time)
 	// notificationDescID is the schema descriptor for id field.

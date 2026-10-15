@@ -62,17 +62,46 @@ const (
 	// (409). Retry only if the create is still wanted (ptone/scion#2632).
 	BrokerErrCodeStartCancelled = "start_cancelled"
 
+	// BrokerErrCodeBrokerDraining marks a create, start or restart the
+	// broker refused because it is shutting down (503, with Retry-After).
+	// The handlers refuse at entry, before any work. An async create can
+	// also be refused later, in admission, after its start context (and
+	// so possibly its worktree) was prepared but before the launch was
+	// accepted, like the other pre-acceptance refusals (start_cancelled,
+	// prior_start_in_progress). Either way no agent was started; retrying
+	// shortly, against the restarted broker, is expected to succeed
+	// (ptone/scion#4668).
+	BrokerErrCodeBrokerDraining = "broker_draining"
+
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the
 	// checkout failed verification (409). Nothing was created. The hub
 	// relays it like any other broker failure; the CLI reads
 	// BrokerErrDetailReason from its details to show the cause and the fix.
 	BrokerErrCodeLocalWorktreeRefused = "local_worktree_refused"
+
+	// BrokerErrCodeRetainedFilesRefused marks a PurgeRetainedQueryParam
+	// delete that removed nothing because the files are not, or may not
+	// be, the retained files of a soft-deleted agent (409): a runtime entry
+	// still holds the agent, a start of it is in flight, its project
+	// directory is unknown, its agent-info.json carries no soft-delete mark,
+	// or one of its directories is a symlink (ptone/scion#4744). The cause
+	// is in BrokerErrDetailReason. A retry gets the same answer while that
+	// state lasts.
+	BrokerErrCodeRetainedFilesRefused = "retained_files_refused"
+
+	// BrokerErrCodeRetainedPurgeInProgress marks a start, restart or create
+	// the broker refused because a removal of the agent's retained files
+	// (PurgeRetainedQueryParam) is running there (409, with Retry-After).
+	// Nothing was started or written. Retry after the removal ends.
+	BrokerErrCodeRetainedPurgeInProgress = "retained_purge_in_progress"
 )
 
 // BrokerErrDetailReason is the details key of a
-// BrokerErrCodeLocalWorktreeRefused error: the client-facing message, with
-// any remote shown without credentials.
+// BrokerErrCodeLocalWorktreeRefused error (the client-facing message, with
+// any remote shown without credentials) and of a
+// BrokerErrCodeRetainedFilesRefused or BrokerErrCodeRetainedPurgeInProgress
+// error (the cause, naming no host path).
 const BrokerErrDetailReason = "reason"
 
 // Values of details.cause on a broker runtime_error answer to a create

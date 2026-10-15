@@ -213,11 +213,12 @@ func writeGateGlobalSettings(t *testing.T, home, content string) {
 
 // TestRegistryCheckSkippedForHubDispatch covers ptone/scion#3318: the
 // image_registry check is skipped for hub-dispatched work whether the hub
-// endpoint comes from --hub, settings or the environment.
+// comes from --hub, the hub list or the environment. A hub.endpoint in
+// settings selects no hub.
 func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
 	newListCmd := func() *cobra.Command { return &cobra.Command{Use: "list"} }
 
-	t.Run("baseline: local work needs a registry", func(t *testing.T) {
+	t.Run("baseline: no hub endpoint keeps the registry check", func(t *testing.T) {
 		setupProjectWithoutRegistry(t)
 		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
 		require.Error(t, err)
@@ -231,9 +232,17 @@ func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
 		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
-	t.Run("endpoint from settings", func(t *testing.T) {
+	t.Run("endpoint from settings is not hub dispatch", func(t *testing.T) {
 		home := setupProjectWithoutRegistry(t)
 		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
+		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "image_registry is not configured")
+	})
+
+	t.Run("the current hub", func(t *testing.T) {
+		setupProjectWithoutRegistry(t)
+		saveTestContext(t, "https://hub.example.test", "")
 		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
@@ -249,20 +258,25 @@ func TestRegistryCheckSkippedForHubDispatch(t *testing.T) {
 		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
-	t.Run("--hub flag without hub enabled is still local", func(t *testing.T) {
+	t.Run("--hub flag alone is hub dispatch (hub.enabled is not read)", func(t *testing.T) {
 		setupProjectWithoutRegistry(t)
 		hubEndpoint = "https://hub.example.test"
-		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "image_registry is not configured")
+		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
 	})
 
-	t.Run("--no-hub keeps the check", func(t *testing.T) {
+	t.Run("stale hub.enabled=false with a current hub is hub dispatch", func(t *testing.T) {
 		home := setupProjectWithoutRegistry(t)
-		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: https://hub.example.test\n")
+		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  enabled: false\n")
+		saveTestContext(t, "https://hub.example.test", "")
+		assert.NoError(t, rootCmd.PersistentPreRunE(newListCmd(), []string{}))
+	})
+
+	t.Run("--no-hub fails with the removal guidance", func(t *testing.T) {
+		home := setupProjectWithoutRegistry(t)
+		writeGateGlobalSettings(t, home, "schema_version: \"1\"\nhub:\n  endpoint: https://hub.example.test\n")
 		noHub = true
 		err := rootCmd.PersistentPreRunE(newListCmd(), []string{})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "image_registry is not configured")
+		require.ErrorIs(t, err, errNoHubRemoved)
+		assert.Contains(t, err.Error(), "--no-hub was removed together with local-only mode")
 	})
 }

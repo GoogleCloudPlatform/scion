@@ -53,7 +53,8 @@ import (
 //     host-state.json with a nil error, so a non-error, non-zero result
 //     does not show that the root is right.
 //
-// Mapping project layouts to roots is the caller's job (ptone/scion#4771).
+// HostStateRootFor maps project layouts to roots from broker-held identity
+// (ptone/scion#4771); callers outside it must follow the same contract.
 // The agent name comes from the broker request or dispatch context, not
 // from the project tree. Symlinks in the root's own path are resolved once
 // (EvalSymlinks) and trusted; below the root, every component (.scion,
@@ -82,6 +83,11 @@ const HostStateFile = "host-state.json"
 type HostState struct {
 	// RunID is the agent's run ID.
 	RunID string `json:"runId,omitempty"`
+
+	// StartFailedRunID is the run ID of the last start whose runtime
+	// launch failed, "" when the last start got past the launch
+	// (ptone/scion#4815). See setStartFailedRunID.
+	StartFailedRunID string `json:"startFailedRunId,omitempty"`
 
 	// unknown holds the top-level keys read from the file that HostState
 	// has no field for, with their raw values.

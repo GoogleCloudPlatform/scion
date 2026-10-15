@@ -1,0 +1,34 @@
+# Behavioural fixture (not a conversion pair): the active profile gives new
+# Kubernetes agents an NFS home, and the flat instance's own policy gives
+# them a local home. A flat start of an agent with no shared dirs must
+# resolve, and record, the instance's local home: the profile tier never
+# applies to a flat instance, whichever settings load the start takes.
+schema_version: "1"
+active_profile: batch
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+profiles:
+  batch:
+    runtime: cluster
+    home_storage_backend: nfs
+    shared_dir_storage_backend: nfs
+server:
+  home_storage:
+    allow_incomplete_phases: true
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+  broker:
+    instances:
+      - key: k8s
+        name: k8s
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          home_storage_backend: local

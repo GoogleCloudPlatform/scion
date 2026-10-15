@@ -852,8 +852,8 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
-        // Take the hub's async launch path when it has it on
-        // (server.hub.async_agent_launch); a hub with it off ignores this
+        // Take the hub's async launch path when it has it on (the
+        // hub.async_agent_launch experiment); a hub with it off ignores this
         // and answers synchronously as before.
         acceptAsyncLaunch: true,
       };

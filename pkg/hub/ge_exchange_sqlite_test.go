@@ -42,7 +42,7 @@ func newPersistentTestExchangeService(t *testing.T, dbPath string) (*GEExchangeS
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = client.Close() })
-	if err := autoMigrateTestClient(context.Background(), client); err != nil {
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
