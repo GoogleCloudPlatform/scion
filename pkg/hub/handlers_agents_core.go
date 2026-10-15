@@ -2284,8 +2284,9 @@ func (s *Server) createAgentInProject(
 	//
 	// gVisor sandboxes cannot reach the real GCE metadata server at
 	// 169.254.169.254, so passthrough mode produces no credentials. When
-	// the target broker runs a cloudrun-sandbox profile, translate
-	// passthrough to assign using the broker's host service account —
+	// the agent's resolved runtime profile on the target broker is a
+	// cloudrun-sandbox profile, translate passthrough to assign using the
+	// broker's host service account —
 	// semantically equivalent (same identity) and the assign machinery
 	// works inside the sandbox.
 	//
@@ -2295,7 +2296,7 @@ func (s *Server) createAgentInProject(
 		agent.AppliedConfig.GCPIdentity != nil &&
 		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
 		runtimeBrokerID != "" {
-		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
+		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID, project); err != nil {
 			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
 				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -4577,7 +4578,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
 			// (same logic as the create path — see createAgentInProject).
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+			// The project supplies its active profile when the agent names
+			// none; a failed lookup fails the request rather than resolving
+			// the profile without it.
+			passthroughProject, err := s.store.GetProject(ctx, agent.ProjectID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, passthroughProject); err != nil {
 				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
 					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -5959,20 +5968,28 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 // Passthrough-to-assign translation for cloudrun-sandbox runtimes
 // ---------------------------------------------------------------------------
 
-// brokerHasCloudRunSandboxProfile reports whether any profile on the broker has
-// the "cloudrun-sandbox" runtime type. This indicates the broker runs gVisor
-// sandboxes that cannot reach the real GCE metadata server.
-func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
-	for _, p := range broker.Profiles {
-		if p.Type == "cloudrun-sandbox" {
-			return true
-		}
-	}
-	return false
+// passthroughProfileIsCloudRunSandbox reports whether the runtime profile an
+// agent resolves to on broker has the "cloudrun-sandbox" type: such a profile
+// runs gVisor sandboxes that cannot reach the real GCE metadata server.
+// profileName is the agent's effective profile (see
+// effectiveRuntimeProfileName); resolveAgentRuntimeProfileType falls back to
+// the broker's default profile, then to a sole profile. A profile that cannot
+// be resolved (including any flat Runtime Broker, which stores no profiles)
+// is reported as not cloudrun-sandbox, so no host service account is
+// assigned on a guess.
+func passthroughProfileIsCloudRunSandbox(broker *store.RuntimeBroker, profileName string) bool {
+	_, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
+	return ok && runtimeType == "cloudrun-sandbox"
 }
 
 // translatePassthroughForSandbox translates a passthrough GCP identity config
-// to assign mode when the target broker runs a cloudrun-sandbox runtime.
+// to assign mode when the runtime profile the agent resolves to on the target
+// broker has the cloudrun-sandbox type. The mode follows that one profile's
+// type: other profiles the broker also offers play no part.
+//
+// project supplies the project's active profile when the agent names none
+// (effectiveRuntimeProfileName); it may be nil only where the project has no
+// active profile to contribute.
 //
 // Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
 // unreachable, so passthrough mode produces no credentials. The translation
@@ -5983,7 +6000,8 @@ func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
 //
 // The method is a no-op when:
 //   - the agent's config is not passthrough,
-//   - the broker has no cloudrun-sandbox profile, or
+//   - the agent's resolved profile is not a cloudrun-sandbox profile, or
+//     cannot be resolved (passthrough is kept), or
 //   - the broker has no host SA registered (leaves passthrough as-is with a
 //     warning — identical to pre-fix behavior).
 //
@@ -5994,6 +6012,7 @@ func (s *Server) translatePassthroughForSandbox(
 	ctx context.Context,
 	agent *store.Agent,
 	brokerID string,
+	project *store.Project,
 ) error {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return nil
@@ -6010,8 +6029,9 @@ func (s *Server) translatePassthroughForSandbox(
 	if err != nil {
 		return fmt.Errorf("load broker %s: %w", brokerID, err)
 	}
-	if !brokerHasCloudRunSandboxProfile(broker) {
-		return nil // not a sandbox runtime — passthrough works as-is
+	profileName := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+	if !passthroughProfileIsCloudRunSandbox(broker, profileName) {
+		return nil // not a sandbox profile — passthrough works as-is
 	}
 
 	if broker.GCPHostServiceAccountEmail == "" {

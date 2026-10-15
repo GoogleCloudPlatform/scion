@@ -114,6 +114,27 @@ func (s *Server) artifactLog() *slog.Logger {
 	return s.artifactDecisionLog
 }
 
+// attachmentService returns the artifact service over this server's
+// artifacts.Host, for the attachment paths. Like artifactRefResolver it
+// asks the server for its store and storage on each call; the chat routes
+// that use it admit only request-authenticated users, so the host sees
+// only identities derived from request credentials.
+func (s *Server) attachmentService() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetLimits(s.artifactLimits)
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
+}
+
+// attachmentCallerIsSession reports whether the request's caller is one the
+// artifact service lets read attachments (artifactHost.PermitsMessageRead:
+// a session of a user or the dev user). The attachment upload, send,
+// history and event paths use it to keep every other credential on the
+// AttachmentStore path (user access tokens: ptone/scion#4596).
+func (s *Server) attachmentCallerIsSession(ctx context.Context) bool {
+	return newArtifactHost(s).PermitsMessageRead(ctx)
+}
+
 // artifactBackend reports the server's current artifact store, resource
 // storage and hub id.
 func (s *Server) artifactBackend() artifacts.Backend {
@@ -153,8 +174,9 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 // artifacts deleted first, so their files stop counting as references,
 // then one blob sweep pass runs. Between the reap and the expiry sweep,
 // the owner liveness reconciler marks the artifacts of deleted agents and
-// users (and clears the mark of restored ones); a failure there is logged
-// once and does not stop the rest of the pass.
+// users (and clears the mark of restored ones), and unsent uploads and the
+// attachments of messages that are gone are retired; a failure in either is
+// logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
 	st := s.ArtifactStore()
 	if st == nil {
@@ -170,6 +192,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
 	}
 	s.reconcileArtifactOwners(ctx, st, now)
+	s.retireArtifactAttachments(ctx, st, now)
 	n, err = artifacts.SweepExpired(ctx, st, now, artifactReapBatch, s.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)
@@ -213,6 +236,25 @@ func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store
 	if res.Orphaned > 0 || res.Unorphaned > 0 {
 		slog.InfoContext(ctx, "artifacts: owner liveness marks changed",
 			"orphaned", res.Orphaned, "unorphaned", res.Unorphaned, "owners_checked", res.Owners)
+	}
+}
+
+// retireArtifactAttachments runs one attachment maintenance pass
+// (artifacts.AttachmentRetirer) with this server's artifacts.Host as the
+// scope checker: uploads not sent within artifacts.UploadTTL are retired,
+// and so are the attachments of messages that are gone, including those
+// removed without the delete hook, checking a bounded number of messages
+// per pass from where the last pass stopped. A failure is logged once and
+// the rest of the pass goes on; the next pass retries. Only the
+// maintenance loop calls it, one pass at a time.
+func (s *Server) retireArtifactAttachments(ctx context.Context, st artifacts.Store, now time.Time) {
+	res, err := s.artifactAttachmentRetirer.Retire(ctx, st, newArtifactHost(s), now)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment retirement failed", "error", err,
+			"unsent", res.Unsent, "orphaned", res.Orphaned)
+	}
+	if res.Unsent > 0 || res.Orphaned > 0 {
+		slog.InfoContext(ctx, "artifacts: retired attachments", "unsent", res.Unsent, "orphaned", res.Orphaned)
 	}
 }
 

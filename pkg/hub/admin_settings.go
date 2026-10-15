@@ -99,6 +99,16 @@ type ServerConfigResponse struct {
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
+	// RetainedBuiltinProfiles and RetainedBuiltinRuntimes list, read-only,
+	// the built-in default profiles and runtimes the co-located broker's
+	// settings overlay retains beside the stored ones because they are still
+	// referenced (ptone/scion#5113). They are never part of Profiles or
+	// Runtimes, which stay the stored sets, and there is no request field
+	// for them, so a settings save cannot store a built-in by accident. Set
+	// only in the DB-tier response.
+	RetainedBuiltinProfiles []config.RetainedProfile `json:"retained_builtin_profiles,omitempty"`
+	RetainedBuiltinRuntimes []config.RetainedRuntime `json:"retained_builtin_runtimes,omitempty"`
+
 	// EnvOverrides lists koanf keys overridden by SCION_SERVER_* env vars
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.

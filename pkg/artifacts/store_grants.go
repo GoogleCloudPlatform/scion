@@ -91,6 +91,9 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 	if err := s.lockLiveArtifact(ctx, tx, g.ArtifactID); err != nil {
 		return false, err
 	}
+	if err := s.refuseAttachmentTx(ctx, tx, g.ArtifactID); err != nil {
+		return false, err
+	}
 	if reviewHome != "" {
 		var home, ownerKind string
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT scope_ref, owner_kind FROM artifact WHERE id = ?`), g.ArtifactID).Scan(&home, &ownerKind); err != nil {
@@ -121,9 +124,8 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
-		if reviewHome != "" && perm != GrantReview {
-			return false, ErrReviewGrantRefused
-		}
+		// PutReviewGrant's grant is always a review grant, so this refuses
+		// it too.
 		if g.Permission == GrantReview && perm != GrantReview {
 			return false, ErrReviewReplacesAccess
 		}
@@ -238,6 +240,9 @@ func (s *sqlStore) UpdateArtifact(ctx context.Context, artifactID string, u Arti
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := s.lockLiveArtifact(ctx, tx, artifactID); err != nil {
+		return nil, err
+	}
+	if err := s.refuseAttachmentTx(ctx, tx, artifactID); err != nil {
 		return nil, err
 	}
 	if u.HomeGrant != nil {

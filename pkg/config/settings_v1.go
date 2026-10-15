@@ -183,7 +183,7 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
 		if vs.storedProfileNames != nil {
-			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames, Retained: vs.retainedProfileNames}
 		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
@@ -1393,28 +1393,6 @@ func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (strin
 	return "", ""
 }
 
-// RequireImageRegistry checks that image_registry is configured and returns an
-// actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(projectPath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(projectPath)
-	if err != nil {
-		// Can't load settings — let other code handle this error
-		return nil
-	}
-	if vs == nil {
-		return nil
-	}
-	if vs.IsImageRegistryConfigured(profileName) {
-		return nil
-	}
-	return fmt.Errorf("image_registry is not configured.\n\n" +
-		"Scion requires container images to run agents. To get started:\n\n" +
-		"  1. Build your images:  image-build/scripts/build-images.sh --registry <your-registry> --push\n" +
-		"     See image-build/README.md for detailed instructions.\n\n" +
-		"  2. Configure scion:   scion config set --global image_registry <your-registry>\n" +
-		"     Example:           scion config set --global image_registry ghcr.io/myorg")
-}
-
 // RewriteImageRegistry replaces the registry prefix of a container image reference
 // with newRegistry for any short-form (non-fully-qualified) image.
 // If newRegistry is empty, the original image is returned unchanged.
@@ -1495,6 +1473,16 @@ type VersionedSettings struct {
 	// settings overlay replaced Profiles (non-nil exactly then); nil
 	// otherwise. It is not serialized.
 	storedProfileNames []string
+	// retainedProfileNames is the sorted list of built-in default profiles
+	// the hub settings overlay retained beside the stored ones because they
+	// are referenced (ptone/scion#5113); nil when none were. Disjoint from
+	// storedProfileNames. It is not serialized.
+	retainedProfileNames []string
+	// retainedRuntimeNames is the sorted list of built-in runtimes the
+	// overlay retained because an effective profile names them and the
+	// non-empty stored runtimes lack them (ptone/scion#5113); nil when none
+	// were. It is not serialized.
+	retainedRuntimeNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`

@@ -525,7 +525,9 @@ async function fetchAttachmentText(id: string): Promise<string> {
   let pending = contentInFlight.get(id);
   if (!pending) {
     pending = (async () => {
-      const res = await apiFetch(attachmentURL(id));
+      // stream=1: the hub serves the bytes itself instead of redirecting to
+      // object storage, which fetch() could not follow (cross-origin).
+      const res = await apiFetch(`${attachmentURL(id)}?stream=1`);
       if (!res.ok) throw new Error(`Preview unavailable (HTTP ${res.status})`);
       return res.text();
     })();

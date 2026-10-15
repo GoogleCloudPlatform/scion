@@ -219,7 +219,12 @@ func TestHarnessConfigAuthz_OwnerAllowed(t *testing.T) {
 	rec = doRequestAsUser(t, srv, alice, http.MethodPut, base+"/files/Dockerfile",
 		map[string]string{"content": "FROM owner\n"})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, "FROM owner\n", string(stor.content[hc.StoragePath+"/Dockerfile"]))
+	// The write is committed as a blob (ptone/scion#4219 part 2).
+	got, err := s.GetHarnessConfig(context.Background(), hc.ID)
+	require.NoError(t, err)
+	entry, ok := templateFileByPath(got.Files, "Dockerfile")
+	require.True(t, ok)
+	assert.Equal(t, "FROM owner\n", string(stor.content[srv.harnessConfigObjectPath(got, entry)]))
 }
 
 func TestHarnessConfigAuthz_BrokerReadOnly(t *testing.T) {

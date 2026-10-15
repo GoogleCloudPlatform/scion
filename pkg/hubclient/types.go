@@ -97,6 +97,11 @@ type AgentLaunch struct {
 	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
 	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden
 	EndReason string `json:"endReason,omitempty"`
+	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
+	// the resting phase the agent is treated as being in for a later start or
+	// resume (store.EffectiveRestingPhase), set only when it differs from the
+	// agent's phase.
+	ResumePhase string `json:"resumePhase,omitempty"`
 	// Deadline and RemainingSeconds are present only while the launch is
 	// active. RemainingSeconds is never negative.
 	Deadline         *time.Time `json:"deadline,omitempty"`

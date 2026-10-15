@@ -526,7 +526,7 @@ Line numbers are from ae24a3c and from the findings' Appendix A and B. "Stays" m
 
 ### Scripts
 
-hack/test_oauth.sh:51-65 and hack/merge-work.sh:48,65 use the local CLI. They are updated in phase 4: they work unchanged once auto-start exists, but their comments describe local mode. hack/workstation-smoke.sh is added in phase 1.
+hack/test_oauth.sh:51-65 and hack/merge-work.sh:48,65 use the local CLI. They were to be updated in phase 4 on the premise that they work unchanged once auto-start exists; Amendment 3 removed that premise. Phase 4 therefore deletes hack/test_oauth.sh: it mocked the CLI's HOME and checked for a local agent directory, which tests nothing once the broker discovers credentials (the phase-2b co-located credential tests and Phase V (d) cover that path). hack/merge-work.sh gets a note that it needs a hub. hack/workstation-smoke.sh is added in phase 1; phase 4 makes it pick docker over a stale podman for the workstation broker.
 
 ## Risks
 

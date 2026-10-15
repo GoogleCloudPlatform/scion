@@ -90,6 +90,9 @@ type fixturePurgeBasis struct {
 	RunID string `json:"purge_run_id"`
 	// Trigger is test_identity_purge or test_identity_expire.
 	Trigger string `json:"trigger"`
+	// IssuanceID is set on the audit rows of grant rows removed by their
+	// issuance stamp (admin kinds, test_admin_purge.go).
+	IssuanceID string `json:"issuance_id,omitempty"`
 }
 
 // fixturePurgeBasisKey is the context key of the basis. It is unexported
@@ -117,6 +120,9 @@ type TestIdentityPurgeCounts struct {
 	Schedules int `json:"schedules"`
 	Groups    int `json:"groups"`
 	Projects  int `json:"projects"`
+	// Grants counts the grant rows removed by their issuance stamp
+	// (admin kinds only).
+	Grants int `json:"grants,omitempty"`
 }
 
 // TestIdentityPurgeItem is one resource the purge did not remove.
@@ -179,6 +185,12 @@ type TestIdentityPurgeReport struct {
 	// Truncated is true when more stamped resources exist than one run
 	// handles.
 	Truncated bool `json:"truncated,omitempty"`
+	// KeptGrants lists issuance-stamped grant rows the purge kept: a
+	// custom role a binding without the stamp still names (admin kinds).
+	KeptGrants []TestIdentityPurgeItem `json:"keptGrants,omitempty"`
+	// Residue is the residue report of an admin-kind identity, computed
+	// before anything was removed (test_admin_residue.go).
+	Residue *TestAdminResidueReport `json:"residue,omitempty"`
 }
 
 // emptyTestIdentityPurgeReport is the answer when nothing is selected: an
@@ -203,12 +215,25 @@ type fixturePurgeRun struct {
 	requestedBy string
 	// actor attributes the identity-level audit row.
 	actor AuditActor
+	// issuanceID is the issuance of an admin-kind identity: its stamped
+	// grants are removed first (purgeTestAdminGrants). Empty for the
+	// member tier.
+	issuanceID string
 }
 
 // purgeTestIdentity runs one purge and returns its report. A returned
 // error is a store failure that stopped the run; the report is still the
 // partial one.
 func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*TestIdentityPurgeReport, error) {
+	report, err := s.purgeTestIdentityRun(ctx, run)
+	// An admin-kind identity's purge run is written to the test admin
+	// audit sink (admin tier A3), whatever its outcome.
+	s.emitTestAdminPurge(ctx, run, report)
+	return report, err
+}
+
+// purgeTestIdentityRun is one purge run; see purgeTestIdentity.
+func (s *Server) purgeTestIdentityRun(ctx context.Context, run fixturePurgeRun) (*TestIdentityPurgeReport, error) {
 	report := &TestIdentityPurgeReport{IdentityID: run.rootID}
 	runID := logging.RequestIDFromContext(ctx)
 	if runID == "" {
@@ -228,11 +253,25 @@ func (s *Server) purgeTestIdentity(ctx context.Context, run fixturePurgeRun) (*T
 	}
 	run.actor.ExecutorKind, run.actor.ExecutorID = run.executor, "test_identity:"+run.rootID
 
+	// 0. Admin kinds: the residue report, before anything is removed,
+	// then every grant stamped with the issuance.
+	if run.issuanceID != "" {
+		residue, err := s.testAdminResidue(ctx, run.rootID, run.issuanceID)
+		if err != nil {
+			return report, fmt.Errorf("residue report: %w", err)
+		}
+		report.Residue = residue
+		s.emitTestAdminResidueWarning(ctx, residue)
+		if err := s.purgeTestAdminGrants(ctx, run, basis, report); err != nil {
+			return report, err
+		}
+	}
+
 	set, err := s.store.ListFixtureRootedResources(ctx, run.rootID, fixturePurgeListLimit)
 	if err != nil {
 		return report, fmt.Errorf("list stamped resources: %w", err)
 	}
-	report.Truncated = set.Truncated
+	report.Truncated = report.Truncated || set.Truncated
 
 	// 1. Agents, deepest ancestry first, so a sub-agent goes before the
 	// agent that created it. A scheduled child has no ancestry.
