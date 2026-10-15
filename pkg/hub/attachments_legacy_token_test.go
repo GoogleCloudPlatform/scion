@@ -173,36 +173,6 @@ func TestLegacyAttachmentDownloadToken_SentUploadFollowsMessageForUploader(t *te
 	assert.Equal(t, http.StatusOK, f.download(t, f.ua, file).status, "the uploader's session reads it")
 }
 
-// legacyStoreFault fails selected store calls of the server: GetAgent while
-// failGetAgent is set, and every GetConversation after the first
-// conversationCallsOK calls once armConversation is set. Counting lets the
-// lookup canReadNativeMessage makes succeed while the token check's own
-// lookup of the same record fails.
-type legacyStoreFault struct {
-	store.Store
-	failGetAgent        bool
-	armConversation     bool
-	conversationCallsOK int
-	conversationCalls   int
-}
-
-func (s *legacyStoreFault) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.failGetAgent {
-		return nil, errRefStoreFault
-	}
-	return s.Store.GetAgent(ctx, id)
-}
-
-func (s *legacyStoreFault) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
-	if s.armConversation {
-		s.conversationCalls++
-		if s.conversationCalls > s.conversationCallsOK {
-			return nil, errRefStoreFault
-		}
-	}
-	return s.Store.GetConversation(ctx, id)
-}
-
 // legacyTopicFault fails every GetTopic after the first topicCallsOK calls.
 type legacyTopicFault struct {
 	WebChatStore
@@ -235,9 +205,8 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
 
 		missing := f.downloadAs(t, tok, uuid.NewString())
-		faulty := &legacyStoreFault{Store: f.srv.store}
-		f.srv.store = faulty
-		faulty.failGetAgent = true
+		f.faults.failGetAgent = true
+		f.fault.Arm()
 		assert.Equal(t, missing, f.downloadAs(t, tok, file))
 	})
 
@@ -250,14 +219,13 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
 
 		missing := f.downloadAs(t, tok, uuid.NewString())
-		faulty := &legacyStoreFault{Store: f.srv.store}
-		f.srv.store = faulty
 		// The first lookup is canReadNativeMessage's; the second is the
 		// token check's.
-		faulty.armConversation = true
-		faulty.conversationCallsOK = 1
+		f.faults.failGetConversation = true
+		f.faults.conversationCallsOK = 1
+		f.fault.Arm()
 		assert.Equal(t, missing, f.downloadAs(t, tok, file))
-		assert.Equal(t, 2, faulty.conversationCalls, "the token check must make the failing lookup")
+		assert.Equal(t, 2, f.faults.conversationCalls, "the token check must make the failing lookup")
 	})
 
 	t.Run("topic lookup", func(t *testing.T) {
