@@ -68,7 +68,10 @@ func reviewGrantArtifact(t *testing.T, f reviewGrantFixture, st artifacts.Store,
 // admins and owners of the home project, and for nobody else; a review
 // grant to a user who can already read the artifact, by the same caller,
 // succeeds exactly when canManage or canGrantReview is true; a caller that
-// cannot read the artifact gets the 404 of a missing one.
+// cannot read the artifact gets the 404 of a missing one; a review grant
+// by the delegating user to a user who cannot read it, or who holds a read
+// grant, gets 403 review_subject_cannot_read or review_replaces_access
+// (ptone/scion#5119).
 func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 	type caller struct {
 		name     string
@@ -152,17 +155,54 @@ func TestArtifactCanGrantReviewOnRoutes(t *testing.T) {
 		baseline := identityArtifactRequest(t, f.srv, f.user(f.member), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte("junk"))
 		require.Equal(t, http.StatusForbidden, baseline.Code)
 		// outside is a member of another project only; the second subject
-		// does not exist.
+		// does not exist. The delegating user, who holds review-grant
+		// authority, learns why (ptone/scion#5119); a member, who does not,
+		// gets the uniform 403.
 		for _, subject := range []string{f.outside, tid("rg-ui-nobody")} {
 			body := `{"subjectKind":"principal","subjectRef":"user:` + subject + `","permission":"review"}`
 			post := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
-			assert.Equal(t, baseline.Code, post.Code, "subject %s: %s", subject, post.Body.String())
-			assert.Equal(t, baseline.Body.String(), post.Body.String(), "subject %s", subject)
+			require.Equal(t, http.StatusForbidden, post.Code, "subject %s: %s", subject, post.Body.String())
+			var e struct {
+				Error struct{ Code, Message string } `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(post.Body.Bytes(), &e))
+			assert.Equal(t, artifacts.CodeReviewSubjectCannotRead, e.Error.Code, "subject %s", subject)
+			assert.Contains(t, e.Error.Message, "cannot read this artifact", "subject %s", subject)
+			plain := identityArtifactRequest(t, f.srv, f.user(f.member), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
+			assert.Equal(t, baseline.Code, plain.Code, "member, subject %s", subject)
+			assert.Equal(t, baseline.Body.String(), plain.Body.String(), "member, subject %s", subject)
 		}
 		grants, err := st.ListGrants(context.Background(), id)
 		require.NoError(t, err)
 		for _, g := range grants {
 			assert.NotEqual(t, artifacts.GrantReview, g.Permission, "review grant written: %+v", g)
+		}
+	})
+
+	t.Run("subject holding a grant is refused", func(t *testing.T) {
+		f := newReviewGrantFixture(t)
+		st, blobs := enableArtifactsForTest(t, f.srv)
+		id := reviewGrantArtifact(t, f, st, blobs)
+		// member reads through the home project and holds a read grant.
+		subject := artifacts.PrincipalRef(artifacts.PrincipalKindUser, f.member)
+		_, err := st.PutGrant(context.Background(), &artifacts.Grant{ID: tid("rg-ui-read"), ArtifactID: id,
+			SubjectKind: artifacts.SubjectPrincipal, SubjectRef: subject, Permission: artifacts.GrantRead,
+			CreatedAt: time.Now()}, artifacts.MaxGrantsPerArtifact, false)
+		require.NoError(t, err)
+		body := `{"subjectKind":"principal","subjectRef":"` + subject + `","permission":"review"}`
+		post := identityArtifactRequest(t, f.srv, f.user(f.delegator), http.MethodPost, "/api/v1/artifacts/"+id+"/grants", []byte(body))
+		require.Equal(t, http.StatusForbidden, post.Code, post.Body.String())
+		var e struct {
+			Error struct{ Code string } `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(post.Body.Bytes(), &e))
+		assert.Equal(t, artifacts.CodeReviewReplacesAccess, e.Error.Code)
+		grants, err := st.ListGrants(context.Background(), id)
+		require.NoError(t, err)
+		for _, g := range grants {
+			if g.SubjectRef == subject {
+				assert.Equal(t, artifacts.GrantRead, g.Permission, "read grant changed")
+			}
 		}
 	})
 

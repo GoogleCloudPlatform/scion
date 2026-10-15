@@ -92,6 +92,8 @@ interface Server {
   clamped: boolean;
   /** When set, POST /grants answers the 403 of a refused request. */
   refuseGrant?: boolean;
+  /** When set, POST /grants answers the 403 of a review grantee who cannot read the artifact. */
+  refuseSubject?: boolean;
   /** When set, POST /grants answers the 409 of an artifact at its grant limit. */
   grantsFull?: boolean;
   /** The hub's link lifetimes GET /links reports; absent like an older hub. */
@@ -162,6 +164,18 @@ function mockServer(init: Partial<Server> = {}): Server {
               },
             },
             409
+          );
+        }
+        if (s.refuseSubject) {
+          return json(
+            {
+              error: {
+                code: 'review_subject_cannot_read',
+                message:
+                  'This user cannot read this artifact. Review access is only for people who can already read it (members of its home project, or of a project it is shared with).',
+              },
+            },
+            403
           );
         }
         if (s.refuseGrant) {
@@ -676,6 +690,9 @@ describe('share dialog', () => {
       expect(text).toContain(
         'Give a person who can already read “Draft plan” review access. They will be able to publish reviews of it, and nothing else.'
       );
+      expect(text).toContain(
+        'Review access is only for people who can already read this artifact: members of its home project, or of a project it is shared with.'
+      );
       expect(text).toContain('Permission: Can review');
       expect(text).not.toContain('read it');
       expect($(el, '#links-heading')).toBeNull();
@@ -725,6 +742,20 @@ describe('share dialog', () => {
       await settle(el);
       expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
         'You can view this artifact but not share it'
+      );
+      expect($$(el, '.granted')).toEqual([]);
+    });
+
+    it('shows the hub message when the person cannot read the artifact', async () => {
+      mockServer({ refuseSubject: true });
+      const el = await mount(agentOwned(), 'review');
+      await searchFor(el, 're');
+      $$(el, '.suggestions button')[0].click();
+      await settle(el);
+      button(el, 'Add').click();
+      await settle(el);
+      expect($(el, 'sl-alert[variant="danger"]')!.textContent).toContain(
+        'This user cannot read this artifact. Review access is only for people who can already read it'
       );
       expect($$(el, '.granted')).toEqual([]);
     });

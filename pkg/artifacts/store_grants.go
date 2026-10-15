@@ -121,9 +121,8 @@ func (s *sqlStore) putGrant(ctx context.Context, g *Grant, maxGrants int, crossS
 		WHERE artifact_id = ? AND subject_kind = ? AND subject_ref = ?`), g.ArtifactID, g.SubjectKind, g.SubjectRef).Scan(&id, &perm, &created)
 	switch {
 	case err == nil:
-		if reviewHome != "" && perm != GrantReview {
-			return false, ErrReviewGrantRefused
-		}
+		// PutReviewGrant's grant is always a review grant, so this refuses
+		// it too.
 		if g.Permission == GrantReview && perm != GrantReview {
 			return false, ErrReviewReplacesAccess
 		}
