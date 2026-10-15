@@ -234,3 +234,85 @@ func TestCallOnEndedSessionIsNotSent(t *testing.T) {
 		t.Fatalf("Call err = %v, want ErrRequestNotSent and ErrSessionClosed", err)
 	}
 }
+
+// TestCallCancelledBeforeWriteIsNeverWritten: a request still queued when
+// its caller cancels is never written, and no RpcCancel is sent for it;
+// the session carries on.
+func TestCallCancelledBeforeWriteIsNeverWritten(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	var written []string
+	icpt := func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if dir != Outbound {
+			return []*conduitv1.Frame{f}
+		}
+		switch {
+		case f.GetRpcRequest() != nil:
+			mu.Lock()
+			written = append(written, "request "+f.GetRpcRequest().GetRequestId())
+			mu.Unlock()
+			if f.GetRpcRequest().GetRequestId() == "a" {
+				once.Do(func() { close(entered) })
+				<-release // hold the writer on the first request
+			}
+		case f.GetRpcCancel() != nil:
+			mu.Lock()
+			written = append(written, "cancel "+f.GetRpcCancel().GetRequestId())
+			mu.Unlock()
+		}
+		return []*conduitv1.Frame{f}
+	}
+	p := newPair(t, Config{Interceptor: icpt}, Config{RPCHandler: echoRPC()})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+
+	callA := make(chan error, 1)
+	go func() {
+		_, err := p.dialer.Call(context.Background(), &conduitv1.RpcRequest{RequestId: "a", Path: "/a"})
+		callA <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(waitTimeout):
+		t.Fatal("first request not taken by the writer")
+	}
+	ctxB, cancelB := context.WithCancel(context.Background())
+	callB := make(chan error, 1)
+	go func() {
+		_, err := p.dialer.Call(ctxB, &conduitv1.RpcRequest{RequestId: "b", Path: "/b"})
+		callB <- err
+	}()
+	eventually(t, "second request queued", func() bool {
+		p.dialer.sched.mu.Lock()
+		defer p.dialer.sched.mu.Unlock()
+		return len(p.dialer.sched.control) > 0
+	})
+	cancelB()
+	if err := <-callB; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled call err = %v, want context.Canceled", err)
+	}
+
+	close(release)
+	released = true
+	if err := <-callA; err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	// A later call is written after anything queued before it, so once it
+	// is answered the writer has passed B's slot.
+	if _, err := p.dialer.Call(context.Background(), &conduitv1.RpcRequest{RequestId: "c", Path: "/c"}); err != nil {
+		t.Fatalf("later call: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, w := range written {
+		if w == "request b" || w == "cancel b" {
+			t.Fatalf("frames written = %v: the cancelled request or its cancel was written", written)
+		}
+	}
+}

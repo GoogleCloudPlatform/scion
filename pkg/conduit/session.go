@@ -1434,6 +1434,11 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 	case resp := <-ch:
 		return resp, nil
 	case <-ctx.Done():
+		if write.CompareAndSwap(writeQueued, writeAbandoned) {
+			// Not yet handed to the transport: it is never written, so
+			// the peer has nothing to cancel.
+			return nil, ctx.Err()
+		}
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcCancel{RpcCancel: &conduitv1.RpcCancel{RequestId: id}}})
 		return nil, ctx.Err()
 	case <-s.done:
