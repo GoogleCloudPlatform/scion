@@ -80,3 +80,7 @@
   delegated-credential admission in agent_delegation_routes.go, rather than
   the per-pattern method list alone).
 - A `GET` of the visitor's own grants.
+
+## Merge forward
+
+- 2026-10-15: merged upstream main forward; the visitor grant code now comes from upstream, and this item's changes are unchanged.
