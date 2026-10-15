@@ -18,11 +18,13 @@ package entadapter
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"entgo.io/ent/dialect"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -266,4 +268,104 @@ func columnIndexed(t *testing.T, cs *CompositeStore, table, col string) bool {
 		}
 	}
 	return false
+}
+
+// ListFixtureRoots (Phase 3c) returns each distinct stamp once, from every
+// stamped table (a soft-deleted agent included), ordered by root; the
+// issuer filter keeps only that issuer's stamps; unstamped rows never
+// count; the limit truncates.
+func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	issuerI := uuid.NewString()
+	issuerJ := uuid.NewString()
+	rootA := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // agents and a project
+	rootB := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a schedule only (its project is unstamped)
+	rootC := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerI} // a group only
+	rootD := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: issuerJ} // a soft-deleted agent only
+
+	projA := newStampTestProject(t, cs, rootA)
+	plain := newStampTestProject(t, cs, store.FixtureProvenance{})
+	mkAgent := func(projectID string, st store.FixtureProvenance, owner string) string {
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateAgent(ctx, &store.Agent{ID: id, Slug: "a-" + id[:8], Name: "a-" + id[:8], ProjectID: projectID,
+			Phase: "created", CreatedBy: owner, OwnerID: owner, Fixture: st}))
+		return id
+	}
+	mkAgent(projA.ID, rootA, rootA.RootID)
+	mkAgent(projA.ID, rootA, rootA.RootID)
+	mkAgent(plain.ID, store.FixtureProvenance{}, issuerI) // unstamped: never counted
+	softDeleted := mkAgent(plain.ID, rootD, rootD.RootID)
+	_, err := cs.DB().ExecContext(ctx, rebind(cs, "UPDATE agents SET deleted_at = ? WHERE id = ?"), time.Now().UTC(), softDeleted)
+	require.NoError(t, err)
+	require.NoError(t, cs.CreateSchedule(ctx, &store.Schedule{ID: uuid.NewString(), ProjectID: plain.ID, Name: "s", CronExpr: "0 * * * *", EventType: "message", Fixture: rootB}))
+	gid := uuid.NewString()
+	require.NoError(t, cs.CreateGroup(ctx, &store.Group{ID: gid, Name: "g", Slug: "g-" + gid[:8], Fixture: rootC}))
+
+	sorted := func(in ...store.FixtureProvenance) []store.FixtureProvenance {
+		out := append([]store.FixtureProvenance(nil), in...)
+		for i := range out {
+			for j := i + 1; j < len(out); j++ {
+				if out[j].RootID < out[i].RootID {
+					out[i], out[j] = out[j], out[i]
+				}
+			}
+		}
+		return out
+	}
+
+	all, truncated, err := cs.ListFixtureRoots(ctx, "", 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Equal(t, sorted(rootA, rootB, rootC, rootD), all)
+
+	ofI, truncated, err := cs.ListFixtureRoots(ctx, issuerI, 0)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+	assert.Equal(t, sorted(rootA, rootB, rootC), ofI)
+
+	ofJ, _, err := cs.ListFixtureRoots(ctx, issuerJ, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []store.FixtureProvenance{rootD}, ofJ)
+
+	none, _, err := cs.ListFixtureRoots(ctx, uuid.NewString(), 0)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	limited, truncated, err := cs.ListFixtureRoots(ctx, issuerI, 2)
+	require.NoError(t, err)
+	assert.True(t, truncated)
+	assert.Equal(t, sorted(rootA, rootB, rootC)[:2], limited)
+
+	_, _, err = cs.ListFixtureRoots(ctx, "not-a-uuid", 0)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+// mutation_audits.provenance_basis (Phase 3c) round-trips, stays empty
+// when a record does not set it, and cannot be changed after the insert:
+// the ent update builders have no setter for it.
+func TestMutationAuditStore_ProvenanceBasis(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	basis := `{"fixture_root_id":"r","fixture_issuer_id":"i","basis":"fixture_root_id","purge_run_id":"run-1","trigger":"test_identity_cleanup"}`
+	with := &store.MutationAuditRecord{MutationType: "agent_hard_delete", ActorPrincipalKind: "user", ActorPrincipalID: "pb-user",
+		TargetType: "agent", TargetID: "pb-agent", CorrelationID: "pb-run", ProvenanceBasis: basis}
+	require.NoError(t, cs.CreateMutationAudit(ctx, with))
+	without := &store.MutationAuditRecord{MutationType: "agent_hard_delete", ActorPrincipalKind: "user", ActorPrincipalID: "pb-user",
+		TargetType: "agent", TargetID: "pb-plain"}
+	require.NoError(t, cs.CreateMutationAudit(ctx, without))
+
+	got, _, err := cs.ListMutationAudits(ctx, store.MutationAuditFilter{TargetID: "pb-agent", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, basis, got[0].ProvenanceBasis)
+	got, _, err = cs.ListMutationAudits(ctx, store.MutationAuditFilter{TargetID: "pb-plain", Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Empty(t, got[0].ProvenanceBasis)
+
+	for _, builder := range []any{&ent.MutationAuditUpdate{}, &ent.MutationAuditUpdateOne{}} {
+		_, has := reflect.TypeOf(builder).MethodByName("SetProvenanceBasis")
+		assert.False(t, has, "%T must not set provenance_basis", builder)
+	}
 }

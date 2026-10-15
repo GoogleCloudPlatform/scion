@@ -1120,6 +1120,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
+	// Issuer-scoped orphan cleanup (Phase 3c). The handler selects the
+	// targets from the provenance stamps of expired or deleted test
+	// identities of the caller's issuer scope (its own identities, its own
+	// workload delegation's, or every issuer's for an unscoped platform
+	// admin session); the request names none.
+	"POST /api/v1/test-identities/cleanup": {
+		Pattern: "POST /api/v1/test-identities/cleanup", RouteID: "testIdentities.cleanup",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Provenance explain (Phase 3c): proven or unproven for one resource;
+	// no owner or creator data for an unproven one.
+	"GET /api/v1/test-identities/provenance": {
+		Pattern: "GET /api/v1/test-identities/provenance", RouteID: "testIdentities.provenance",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
 	// Admin-kind test identities (admin tier A1, A2): test_identity.issue_admin
 	// (or, for issuance, test_identity.issue_super_admin) at hub scope, held
 	// only by super-admin. The handlers return 404 unless the hub started

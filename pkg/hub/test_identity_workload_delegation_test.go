@@ -785,6 +785,14 @@ func TestIsTestIdentityIssuanceRoute(t *testing.T) {
 		{http.MethodDelete, "/api/v1/test-identities/a%2Fb", false},
 		{http.MethodPost, "/api/v1/test-identity-delegations", false},
 		{http.MethodGet, "/api/v1/test-identities/", false},
+		// The issuer cleanup and provenance (Phase 3c).
+		{http.MethodPost, "/api/v1/test-identities/cleanup", true},
+		{http.MethodGet, "/api/v1/test-identities/cleanup", false},
+		{http.MethodPost, "/api/v1/test-identities/cleanup/x", false},
+		{http.MethodGet, "/api/v1/test-identities/provenance", true},
+		{http.MethodPost, "/api/v1/test-identities/provenance", false},
+		{http.MethodGet, "/api/v1/test-identities/provenance/x", false},
+		{http.MethodGet, "/api/v1/test-identities/%70rovenance", false},
 	} {
 		req := httptest.NewRequest(tc.method, tc.target, nil)
 		assert.Equal(t, tc.want, isTestIdentityIssuanceRoute(req), "%s %s", tc.method, tc.target)

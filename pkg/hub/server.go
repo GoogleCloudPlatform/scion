@@ -7082,6 +7082,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
+	// Issuer-scoped orphan cleanup and the provenance explain endpoint
+	// (Phase 3c), behind the same flag.
+	s.mux.HandleFunc("POST /api/v1/test-identities/cleanup", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/cleanup", s.handleTestIdentityCleanup)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/provenance", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities/provenance", s.handleTestIdentityProvenance)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
 	s.mux.HandleFunc("GET /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identity-delegations", s.handleListTestIdentityDelegations)))

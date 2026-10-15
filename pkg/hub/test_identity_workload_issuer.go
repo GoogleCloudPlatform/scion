@@ -304,8 +304,9 @@ func isWorkloadDelegationRequest(r *http.Request, a *workloadIssuerAuthenticator
 
 // isTestIdentityIssuanceRoute reports whether r targets one of the test
 // identity routes a workload token is accepted on: issue and list, token
-// re-issue, delete, and the web-login code (ptone/scion#4240, X3b). The
-// handlers scope each one to the identities the same delegation issued.
+// re-issue, delete, the web-login code (ptone/scion#4240, X3b), and the
+// issuer cleanup and provenance (Phase 3c). The handlers scope each one to
+// the identities the same delegation issued.
 // The match is exact on the decoded path; an escaped path is refused.
 func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	if r.URL.RawPath != "" {
@@ -315,6 +316,12 @@ func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	switch {
 	case p == testIdentityIssuanceRoutePath:
 		return r.Method == http.MethodPost || r.Method == http.MethodGet
+	case p == testIdentityIssuanceRoutePath+"/cleanup":
+		// The issuer cleanup (Phase 3c): a delegation reaches only the
+		// identities issued through it (resolveFixturePurgeRun).
+		return r.Method == http.MethodPost
+	case p == testIdentityIssuanceRoutePath+"/provenance":
+		return r.Method == http.MethodGet
 	case strings.HasPrefix(p, testIdentityIssuanceRoutePath+"/"):
 		rest := strings.TrimPrefix(p, testIdentityIssuanceRoutePath+"/")
 		if id, ok := strings.CutSuffix(rest, "/token"); ok {

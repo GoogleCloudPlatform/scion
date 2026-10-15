@@ -286,6 +286,16 @@ type Store interface {
 	// Truncated reports whether any kind had more.
 	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
 
+	// ListFixtureRoots returns the distinct creation-time provenance stamps
+	// (fixture_root_id, fixture_issuer_id) carried by agents (soft-deleted
+	// ones included), schedules, groups and projects (ptone/scion#4240,
+	// Phase 3c), ordered by root ID. A non-empty issuerID keeps only the
+	// stamps whose fixture_issuer_id is issuerID; an empty one keeps every
+	// stamp. Only the stamp columns select: an unstamped row is never
+	// counted. At most limit stamps are returned (limit <= 0: no limit), and
+	// truncated reports whether more exist.
+	ListFixtureRoots(ctx context.Context, issuerID string, limit int) (roots []FixtureProvenance, truncated bool, err error)
+
 	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
 	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
 	// bindings, group memberships, role definitions, invite codes and

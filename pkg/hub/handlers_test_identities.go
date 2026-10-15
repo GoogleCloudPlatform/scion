@@ -1160,89 +1160,29 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 	}
 
 	id := r.PathValue("id")
-	run := fixturePurgeRun{
-		rootID:      id,
-		trigger:     testIdentityPurgeMutation,
-		executor:    fixturePurgeExecutorRequest,
-		requestedBy: caller.ID(),
-		actor:       s.buildAuditActorFromContext(ctx),
-	}
-	u, err := s.store.GetUser(ctx, id)
-	switch {
+	var u *store.User
+	switch got, err := s.store.GetUser(ctx, id); {
 	case err == nil:
-		if u.IssuedBy != nil {
-			run.issuerID = *u.IssuedBy
-		}
-		switch {
-		case u.IsTestFixture():
-			if !s.canDeleteTestIdentity(ctx, caller, u) {
-				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
-				return
-			}
-		case store.IsTestAdminKind(u.Kind) && u.IssuanceID != nil && *u.IssuanceID != "":
-			// An admin-kind identity (admin tier A3): its issuer or a
-			// super-admin purges it, with every grant stamped with its
-			// issuance.
-			if !s.canPurgeTestAdminIdentity(ctx, caller, run.issuerID) {
-				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
-				return
-			}
-			run.issuanceID = *u.IssuanceID
-		default:
-			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
-			return
-		}
-		run.user = u
+		u = got
 	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
-		issuer, ok, lerr := s.fixtureLeftoverIssuer(ctx, id)
-		if lerr != nil {
-			slog.ErrorContext(ctx, "test identity purge: reading leftovers failed", "test_identity_id", id, "error", lerr)
-			InternalError(w)
-			return
-		}
-		// An admin-kind identity whose row is gone (revoke-all, or an
-		// earlier purge that did not finish): its issuance comes from its
-		// issuance audit record, and its stamped grants are leftovers too.
-		issuanceID, auditIssuer, isAdmin, aerr := s.testAdminIssuanceFromAudit(ctx, id)
-		if aerr != nil {
-			slog.ErrorContext(ctx, "test identity purge: reading the issuance record failed", "test_identity_id", id, "error", aerr)
-			InternalError(w)
-			return
-		}
-		if isAdmin {
-			if !ok {
-				grants, _, gerr := s.store.ListIssuanceStampedGrants(ctx, issuanceID, 1)
-				if gerr != nil {
-					slog.ErrorContext(ctx, "test identity purge: reading leftover grants failed", "test_identity_id", id, "error", gerr)
-					InternalError(w)
-					return
-				}
-				ok = len(grants) > 0
-			}
-			if !ok || !s.canPurgeTestAdminIdentity(ctx, caller, auditIssuer) {
-				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
-				return
-			}
-			run.issuerID = auditIssuer
-			run.issuanceID = issuanceID
-			break
-		}
-		// A workload delegation manages only identities stamped with its own
-		// delegation (canManageTestIdentity). The leftovers of a deleted
-		// identity record only the issuing user, not the delegation, so a
-		// workload delegation request cannot be shown to own them and gets
-		// the same empty report; the grantor's session or an admin session
-		// purges them.
-		if !ok || GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation ||
-			(!s.testIdentityCallerSeesAll(ctx, caller) && issuer != caller.ID()) {
-			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
-			return
-		}
-		run.issuerID = issuer
 	default:
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	run, ok, err := s.resolveFixturePurgeRun(ctx, caller, id, u, false)
+	if err != nil {
+		slog.ErrorContext(ctx, "test identity purge: resolving the identity failed", "test_identity_id", id, "error", err)
+		InternalError(w)
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+		return
+	}
+	run.trigger = testIdentityPurgeMutation
+	run.executor = fixturePurgeExecutorRequest
+	run.requestedBy = caller.ID()
+	run.actor = s.buildAuditActorFromContext(ctx)
 
 	report, err := s.purgeTestIdentity(ctx, run)
 	if err != nil {
@@ -1265,6 +1205,140 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+// resolveFixturePurgeRun decides whether caller may purge the test identity
+// id and, when it may, returns the run's identity part (root, issuer, user
+// row, issuance); the caller fills in the trigger, executor, requester and
+// actor. u is the identity's row, nil when it is gone. ok is false for
+// every case the purge route answers with the same empty report: an ID
+// that is no test identity, a human user, a test identity the caller may
+// not purge, an identity with nothing left. The rules:
+//
+//   - a member or viewer identity (kind=test_fixture): canDeleteTestIdentity
+//     (its issuer, an unscoped platform admin session, a holder of
+//     user.delete; a workload delegation request only for the identities
+//     issued through its own delegation);
+//   - an admin-kind identity (admin tier A3): its issuer or a human
+//     super-admin (canPurgeTestAdminIdentity), never a workload delegation,
+//     with every grant stamped with its issuance;
+//   - an identity whose row is gone: its stamped leftovers, for the issuer
+//     recorded on them or an unscoped platform admin session; an admin-kind
+//     identity's issuance and issuer come from its issuance audit record.
+//     A workload delegation request is refused here unless
+//     delegationLeftovers is set (the issuer cleanup, Phase 3c), and then
+//     only for an identity whose issuance audit record names the same
+//     delegation and grantor (fixtureIssuedThroughDelegation).
+func (s *Server) resolveFixturePurgeRun(ctx context.Context, caller UserIdentity, id string, u *store.User, delegationLeftovers bool) (fixturePurgeRun, bool, error) {
+	run := fixturePurgeRun{rootID: id}
+	if u != nil {
+		if u.IssuedBy != nil {
+			run.issuerID = *u.IssuedBy
+		}
+		switch {
+		case u.IsTestFixture():
+			if !s.canDeleteTestIdentity(ctx, caller, u) {
+				return run, false, nil
+			}
+		case store.IsTestAdminKind(u.Kind) && u.IssuanceID != nil && *u.IssuanceID != "":
+			// An admin-kind identity (admin tier A3): its issuer or a
+			// super-admin purges it, with every grant stamped with its
+			// issuance.
+			if !s.canPurgeTestAdminIdentity(ctx, caller, run.issuerID) {
+				return run, false, nil
+			}
+			run.issuanceID = *u.IssuanceID
+		default:
+			return run, false, nil
+		}
+		run.user = u
+		return run, true, nil
+	}
+
+	issuer, ok, err := s.fixtureLeftoverIssuer(ctx, id)
+	if err != nil {
+		return run, false, fmt.Errorf("reading leftovers: %w", err)
+	}
+	// An admin-kind identity whose row is gone (revoke-all, or an earlier
+	// purge that did not finish): its issuance comes from its issuance
+	// audit record, and its stamped grants are leftovers too.
+	issuanceID, auditIssuer, isAdmin, err := s.testAdminIssuanceFromAudit(ctx, id)
+	if err != nil {
+		return run, false, fmt.Errorf("reading the issuance record: %w", err)
+	}
+	if isAdmin {
+		if !ok {
+			grants, _, gerr := s.store.ListIssuanceStampedGrants(ctx, issuanceID, 1)
+			if gerr != nil {
+				return run, false, fmt.Errorf("reading leftover grants: %w", gerr)
+			}
+			ok = len(grants) > 0
+		}
+		if !ok || !s.canPurgeTestAdminIdentity(ctx, caller, auditIssuer) {
+			return run, false, nil
+		}
+		run.issuerID = auditIssuer
+		run.issuanceID = issuanceID
+		return run, true, nil
+	}
+	if !ok {
+		return run, false, nil
+	}
+	// A workload delegation manages only identities issued through its own
+	// delegation (canManageTestIdentity). The leftovers of a deleted
+	// identity record only the issuing user, not the delegation; only the
+	// issuer cleanup reads the delegation from the identity's issuance
+	// audit record. Every other workload delegation request gets the same
+	// empty report; the grantor's session or an admin session purges them.
+	if GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation {
+		if !delegationLeftovers {
+			return run, false, nil
+		}
+		through, err := s.fixtureIssuedThroughDelegation(ctx, id, issuer)
+		if err != nil {
+			return run, false, err
+		}
+		if !through {
+			return run, false, nil
+		}
+	} else if !s.testIdentityCallerSeesAll(ctx, caller) && issuer != caller.ID() {
+		return run, false, nil
+	}
+	run.issuerID = issuer
+	return run, true, nil
+}
+
+// fixtureIssuedThroughDelegation reports whether the member-tier identity
+// id, whose row is gone, was issued through the workload delegation of the
+// current request, by the issuer recorded on its leftovers: its
+// test_identity_issue audit record (immutable) names that delegation and
+// grantor. It is false for a request that is not a workload delegation
+// request, and when the record is missing or names anything else.
+func (s *Server) fixtureIssuedThroughDelegation(ctx context.Context, id, issuer string) (bool, error) {
+	st := workloadDelegationCaller(ctx)
+	if st == nil || !isUUID(id) || issuer == "" || issuer != st.delegation.GrantorID {
+		return false, nil
+	}
+	recs, _, err := s.store.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: testIdentityIssueMutation,
+		TargetType:   testIdentityAuditTargetType,
+		TargetID:     id,
+		Limit:        1,
+	})
+	if err != nil {
+		return false, fmt.Errorf("reading the issuance record: %w", err)
+	}
+	if len(recs) == 0 {
+		return false, nil
+	}
+	var sum struct {
+		IssuedBy string                     `json:"issued_by"`
+		Workload *testIdentityWorkloadAudit `json:"workload_delegation"`
+	}
+	if err := json.Unmarshal([]byte(recs[0].AfterSummary), &sum); err != nil || sum.Workload == nil {
+		return false, nil
+	}
+	return sum.IssuedBy == issuer && sum.Workload.DelegationID == st.delegation.ID && sum.Workload.Grantor == st.delegation.GrantorID, nil
 }
 
 // fixtureLeftoverIssuer returns the issuer recorded on the resources still
