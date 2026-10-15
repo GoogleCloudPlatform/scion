@@ -176,6 +176,45 @@ func TestClearUTCTimestampAutoRunKey(t *testing.T) {
 	assert.False(t, cleared)
 }
 
+// TestClearAutoRunKeyCAS pins the SQL guards of the compare-and-set itself,
+// which the caller's read cannot stand in for: a row that became running, or
+// whose Metadata changed, after that read is left alone.
+func TestClearAutoRunKeyCAS(t *testing.T) {
+	ctx := context.Background()
+	cs, db, _ := newMaintenanceTestStore(t)
+	key := `{"other":1,"autoRunIncomplete":true}`
+
+	// (a) A manual run started after the read: the status guard holds.
+	setNormalizeRow(t, cs, store.MaintenanceStatusRunning, "admin@example.com", key)
+	changed, err := clearAutoRunKeyCAS(ctx, db, key)
+	require.NoError(t, err)
+	assert.False(t, changed)
+	op, err := cs.GetMaintenanceOperation(ctx, UTCTimestampNormalizeKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusRunning, op.Status)
+	assert.Equal(t, key, op.Metadata)
+
+	// (b) Metadata changed after the read: the metadata guard holds.
+	setNormalizeRow(t, cs, store.MaintenanceStatusFailed, "system:hub-start", key)
+	changed, err = clearAutoRunKeyCAS(ctx, db, `{"autoRunIncomplete":true}`)
+	require.NoError(t, err)
+	assert.False(t, changed, "a concurrent Metadata change makes the clear a no-op")
+	op, err = cs.GetMaintenanceOperation(ctx, UTCTimestampNormalizeKey)
+	require.NoError(t, err)
+	assert.Equal(t, key, op.Metadata)
+
+	// (c) The current text: one row, only Metadata changes.
+	changed, err = clearAutoRunKeyCAS(ctx, db, key)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	op, err = cs.GetMaintenanceOperation(ctx, UTCTimestampNormalizeKey)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusFailed, op.Status)
+	assert.Equal(t, "system:hub-start", op.StartedBy)
+	assert.Equal(t, `{"log":"kept"}`, op.Result)
+	assert.JSONEq(t, `{"other":1}`, op.Metadata)
+}
+
 func TestRemoveStaleSnapshotTemp(t *testing.T) {
 	ctx := context.Background()
 	db, path := openOldSchema(t)

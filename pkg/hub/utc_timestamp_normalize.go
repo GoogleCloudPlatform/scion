@@ -274,7 +274,7 @@ func (s *Server) checkAndNormalizeTimestamps(ctx context.Context) (autoRunOutcom
 		// Nothing left to rewrite: a key left by an earlier run that did not
 		// complete no longer protects anything.
 		if _, err := entadapter.ClearUTCTimestampAutoRunKey(ctx, db, dbDialect); err != nil && ctx.Err() == nil {
-			slog.Debug("timestamp check: could not clear the incomplete-run key", "error", err)
+			slog.Warn("timestamp check: could not clear the incomplete-run key; the hub retries at the next start", "error", err)
 		}
 		logUnparseableTimestamps(ctx, chk)
 		return autoRunNothing, time.Time{}
@@ -382,7 +382,7 @@ func (s *Server) autoNormalizeTimestamps(ctx context.Context, db *sql.DB, dbDial
 	}
 
 	label := entadapter.UTCTimestampSnapshotLabel
-	slog.Info("timestamp normalize: rewriting non-canonical stored timestamps at hub start; writing a database snapshot first",
+	slog.Info("timestamp normalize: rewriting non-canonical stored timestamps at hub start; taking (or reusing) a database snapshot first",
 		"tables", tables)
 	removed, tmpMod, err := entadapter.RemoveStaleSnapshotTemp(runCtx, db, label, timestampStaleTmpAge, timestampNow())
 	switch {

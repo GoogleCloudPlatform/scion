@@ -115,9 +115,19 @@ func ClearUTCTimestampAutoRunKey(ctx context.Context, db *sql.DB, dbDialect stri
 	if status == store.MaintenanceStatusRunning || !AutoRunIncompleteSet(metadata) {
 		return false, nil
 	}
+	return clearAutoRunKeyCAS(ctx, db, metadata)
+}
+
+// clearAutoRunKeyCAS writes metadata without UTCTimestampAutoRunIncompleteKey
+// to the utc-timestamp-normalize row, only if the row is not running and its
+// Metadata is still exactly old (the text read before). The SQL guards, not
+// the caller's read, make it safe against a manual run that starts, or a
+// write that lands, between that read and this write. It reports whether a
+// row changed.
+func clearAutoRunKeyCAS(ctx context.Context, db *sql.DB, old string) (bool, error) {
 	res, err := db.ExecContext(ctx,
 		`UPDATE maintenance_operations SET metadata = ? WHERE "key" = ? AND status <> ? AND metadata = ?`,
-		WithAutoRunIncomplete(metadata, false), UTCTimestampNormalizeKey, store.MaintenanceStatusRunning, metadata)
+		WithAutoRunIncomplete(old, false), UTCTimestampNormalizeKey, store.MaintenanceStatusRunning, old)
 	if err != nil {
 		return false, err
 	}

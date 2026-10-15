@@ -486,9 +486,6 @@ func (c *cancelOnWrite) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestUTCTimestampNormalize_StartupCheck covers the hub-start probe: it is
-// silent on a canonical store, reports a named-zone row and a numeric-zone
-// row by table, and is silent again after the operation runs.
 // TestUTCTimestampNormalize_ExecutorWiring checks the seed, the executor
 // registration, a dry run and a real run through the migrations endpoint.
 func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {

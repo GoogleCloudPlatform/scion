@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,7 +183,9 @@ func TestUTCTimestampAutoRun_FailureRetriedNextStart(t *testing.T) {
 	srv, s, db, path := newFileNormServer(t)
 	ctx := context.Background()
 	const legacy = "2026-10-01 13:00:00 +0900 JST"
+	const unreadable = "2026-10-01 09:45:00 +0545 +0545"
 	id := seedNormMsg(t, s, db, "fail", legacy)
+	idU := seedNormMsg(t, s, db, "fail-unreadable", unreadable)
 
 	orig := timestampSnapshot
 	setVar(t, &timestampSnapshot, func(context.Context, *sql.DB, string, time.Time) (entadapter.SQLiteSnapshot, error) {
@@ -194,7 +197,9 @@ func TestUTCTimestampAutoRun_FailureRetriedNextStart(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, "level=ERROR"), out)
 	assert.Contains(t, out, "retries it at the next start")
 	assert.Contains(t, out, "tables=[messages]")
+	assert.Contains(t, out, "tables_unreadable=[messages]")
 	assert.Equal(t, legacy, msgCreated(t, db, id), "nothing is written without a snapshot")
+	assert.Equal(t, unreadable, msgCreated(t, db, idU))
 	op := normOp(t, s)
 	assert.Equal(t, store.MaintenanceStatusFailed, op.Status)
 	assert.Contains(t, op.Result, "no space left on device")
@@ -205,9 +210,55 @@ func TestUTCTimestampAutoRun_FailureRetriedNextStart(t *testing.T) {
 	(&Server{store: s}).checkStoredTimestamps(ctx)
 	assert.NotContains(t, logs.String(), "level=ERROR")
 	assert.Equal(t, "2026-10-01 04:00:00 +0000 UTC", msgCreated(t, db, id))
+	assert.Equal(t, "2026-10-01 04:00:00 +0000 UTC", msgCreated(t, db, idU))
 	assert.Equal(t, store.MaintenanceStatusCompleted, normOp(t, s).Status)
 	assert.False(t, normIncomplete(t, s))
 	assert.Len(t, normSnapshots(t, path), 1)
+}
+
+// TestUTCTimestampAutoRun_BudgetStopIsWarning: a run stopped by its time
+// budget is a warning, not an error, and stays incomplete.
+func TestUTCTimestampAutoRun_BudgetStopIsWarning(t *testing.T) {
+	srv, s, db, _ := newFileNormServer(t)
+	const legacy = "2026-10-01 13:00:00 +0900 JST"
+	id := seedNormMsg(t, s, db, "budget-stop", legacy)
+	setVar(t, &timestampAutoRunBudget, 100*time.Millisecond)
+	setVar(t, &timestampSnapshot, func(ctx context.Context, _ *sql.DB, _ string, _ time.Time) (entadapter.SQLiteSnapshot, error) {
+		<-ctx.Done()
+		return entadapter.SQLiteSnapshot{}, ctx.Err()
+	})
+	logs := captureSlog(t)
+	srv.checkStoredTimestamps(context.Background())
+	out := logs.String()
+	assert.Contains(t, out, "stopped at hub shutdown or at its time budget")
+	assert.NotContains(t, out, "level=ERROR")
+	assert.Equal(t, legacy, msgCreated(t, db, id))
+	assert.Equal(t, store.MaintenanceStatusFailed, normOp(t, s).Status)
+	assert.True(t, normIncomplete(t, s))
+}
+
+// TestUTCTimestampAutoRun_RecheckHasItsOwnBound: a first check that uses up
+// its whole bound does not turn a successful run into a re-check error.
+func TestUTCTimestampAutoRun_RecheckHasItsOwnBound(t *testing.T) {
+	srv, s, db, _ := newFileNormServer(t)
+	_ = seedNormMsg(t, s, db, "slow-check", "2026-10-01 13:00:00 +0900 JST")
+	setVar(t, &startupTimestampCheckTimeout, 300*time.Millisecond)
+	calls := 0
+	orig := checkStoredTimestampsFn
+	setVar(t, &checkStoredTimestampsFn, func(ctx context.Context, db *sql.DB, d string) (entadapter.TimestampCheck, error) {
+		calls++
+		if calls == 1 {
+			<-ctx.Done() // the first check takes its whole bound
+			return orig(context.Background(), db, d)
+		}
+		return orig(ctx, db, d)
+	})
+	logs := captureSlog(t)
+	srv.checkStoredTimestamps(context.Background())
+	assert.Equal(t, 2, calls)
+	assert.NotContains(t, logs.String(), "level=ERROR")
+	assert.Contains(t, logs.String(), "stored timestamps normalized at hub start")
+	assert.Equal(t, store.MaintenanceStatusCompleted, normOp(t, s).Status)
 }
 
 // TestUTCTimestampAutoRun_RunInProgressSkipped: a run already in flight is
@@ -364,16 +415,36 @@ func TestUTCTimestampAutoRun_PanicFinalizesRow(t *testing.T) {
 
 // TestUTCTimestampAutoRun_RearmAfterYoungTmp: a young snapshot temporary file
 // defers the run once; when the file has aged it is removed and the run
-// completes, with no ERROR.
+// completes, with no ERROR. The clock is injected: it stands still at the
+// file's modification time until the first attempt has met the file, then
+// moves past the stale age, so no decision depends on scheduling.
 func TestUTCTimestampAutoRun_RearmAfterYoungTmp(t *testing.T) {
 	srv, s, db, path := newFileNormServer(t)
 	id := seedNormMsg(t, s, db, "rearm", "2026-10-01 13:00:00 +0900 JST")
-	setVar(t, &timestampStaleTmpAge, 300*time.Millisecond)
+	const stale = time.Hour
+	t0 := time.Now().Truncate(time.Second)
+	var clock atomic.Int64
+	clock.Store(t0.UnixNano())
+	setVar(t, &timestampNow, func() time.Time { return time.Unix(0, clock.Load()) })
+	setVar(t, &timestampStaleTmpAge, stale)
 	require.NoError(t, os.WriteFile(normTmp(path), nil, 0o600))
+	require.NoError(t, os.Chtimes(normTmp(path), t0, t0))
+	calls := 0
+	orig := timestampSnapshot
+	setVar(t, &timestampSnapshot, func(ctx context.Context, db *sql.DB, label string, now time.Time) (entadapter.SQLiteSnapshot, error) {
+		calls++
+		snap, err := orig(ctx, db, label, now)
+		if calls == 1 {
+			require.ErrorIs(t, err, entadapter.ErrSnapshotInProgress)
+			clock.Add(int64(stale)) // the file is now exactly stale; the re-arm fires at once
+		}
+		return snap, err
+	})
 
 	logs := captureSlog(t)
 	srv.checkStoredTimestamps(context.Background())
 	out := logs.String()
+	assert.Equal(t, 2, calls)
 	assert.Equal(t, 1, strings.Count(out, "nothing was written, the hub retries later"), out)
 	assert.Contains(t, out, "removed the temporary file of an interrupted snapshot")
 	assert.NotContains(t, out, "level=ERROR")
@@ -443,8 +514,15 @@ func TestUTCTimestampAutoRun_ManualCompletionDuringWait(t *testing.T) {
 	srv, s, db, path := newFileNormServer(t)
 	ctx := context.Background()
 	id := seedNormMsg(t, s, db, "manual", "2026-10-01 13:00:00 +0900 JST")
-	setVar(t, &timestampStaleTmpAge, 500*time.Millisecond)
+	// The clock stands still at the file's modification time, so the
+	// re-armed attempt can never count the file as stale: it can only find
+	// nothing left to do. The wait (the stale age) leaves time for the
+	// manual run below.
+	t0 := time.Now().Truncate(time.Second)
+	setVar(t, &timestampNow, func() time.Time { return t0 })
+	setVar(t, &timestampStaleTmpAge, 5*time.Second)
 	require.NoError(t, os.WriteFile(normTmp(path), nil, 0o600))
+	require.NoError(t, os.Chtimes(normTmp(path), t0, t0))
 	logs := syncSlog(t)
 
 	srv.startStoredTimestampCheck(ctx)
@@ -460,7 +538,7 @@ func TestUTCTimestampAutoRun_ManualCompletionDuringWait(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		return !entadapter.AutoRunIncompleteSet(normOp(t, s).Metadata)
-	}, 10*time.Second, 20*time.Millisecond)
+	}, 20*time.Second, 20*time.Millisecond)
 	srv.stopStoredTimestampCheck()
 	assert.Empty(t, normSnapshots(t, path))
 	op = normOp(t, s)
