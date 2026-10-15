@@ -481,20 +481,6 @@ func TestMessageLogStream_UsesFullHistoryRule(t *testing.T) {
 	}
 }
 
-// grantSuperAdmin binds the seeded super-admin role to userID at system
-// scope.
-func grantSuperAdmin(t *testing.T, s store.Store, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
-		ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
-	})
-	require.NoError(t, err)
-}
-
 // revokeSuperAdmin removes every super-admin binding of userID.
 func revokeSuperAdmin(t *testing.T, s store.Store, userID string) {
 	t.Helper()
