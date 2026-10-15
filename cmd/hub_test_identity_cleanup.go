@@ -75,11 +75,14 @@ owner, or resources from someone else, is kept.
 one "<type>:<id>" per line (type agent, project, schedule or group; blank
 lines and lines starting with # are ignored). Before the cleanup, each one
 is checked with the hub's provenance record. A proven one is reported as
-cleaned once the run removed it. An unproven one (the hub has no record
-that a test identity created it, for example a resource from before
-provenance recording) is never removed: it is printed with proven:false,
-the reason and "real-admin action required". The command exits non-zero
-when any expected resource is unproven or still present.
+cleaned once the run removed it. One that is already gone (the expiry
+reaper, a purge or an earlier cleanup removed it) is reported as absent,
+proven by its deletion record. An unproven one (the hub has no record, in
+your issuer scope, that a test identity created or deleted it; for example
+a resource from before provenance recording) is never removed: it is
+printed with proven:false, the reason and "real-admin action required".
+The command exits non-zero when any expected resource is unproven or
+still present.
 
 A run that cannot finish (for example a broker is offline) lists what is
 left and exits non-zero; run it again to finish.
@@ -99,13 +102,17 @@ var hubTestIdentityProvenanceCmd = &cobra.Command{
 	Long: `Ask the hub whether it recorded one resource as created under a test
 identity. TYPE is agent, project, schedule or group.
 
-A proven resource shows the test identity it is recorded under, that
-identity's issuer and its state (live, expired or absent). 'cleanup'
-removes a proven resource once its identity has expired or been deleted, if
-you issued that identity. An unproven resource shows only the reason; the
-hub never reports its owner or creator, and a resource that does not exist
-gets the same answer. An unproven resource is never removed by cleanup: a
-real administrator must decide.
+The answer covers your issuer scope only: test identities you issued
+(with a hub profile, those issued through the profile's issuer
+delegation), or every issuer's for an admin sign-in. A proven resource
+shows the test identity it is recorded under, that identity's issuer and
+its state (live, expired or absent). 'cleanup' removes it once its identity
+has expired or been deleted. A resource that is already gone is proven by
+its deletion record, whose correlation ID is shown. An unproven resource
+shows only the reason; the hub never reports its owner or creator, and a
+resource that does not exist, or another issuer's, gets the same answer.
+An unproven resource is never removed by cleanup: a real administrator
+must decide.
 
 Examples:
   scion hub test-identity provenance agent:6f1c...
@@ -232,6 +239,9 @@ type expectAbsentResult struct {
 	// FixtureRootID and FixtureState are set for a proven resource.
 	FixtureRootID string `json:"fixtureRootId,omitempty"`
 	FixtureState  string `json:"fixtureState,omitempty"`
+	// DeletionRecord is the correlation ID of the deletion record that
+	// proves an absent resource.
+	DeletionRecord string `json:"deletionRecord,omitempty"`
 }
 
 // Outcomes of an --expect-absent resource.
@@ -270,9 +280,19 @@ func cleanupTestIdentities(ctx context.Context, out io.Writer, svc hubclient.Tes
 		switch {
 		case !before[i].Proven:
 			r.Outcome, r.Reason = expectAbsentUnproven, before[i].Reason
+		case before[i].Deleted:
+			// Already gone, proven by its deletion record (the reaper, a
+			// purge or an earlier cleanup removed it).
+			r.FixtureRootID, r.FixtureState = before[i].FixtureRootID, before[i].FixtureState
+			r.Outcome, r.DeletionRecord = expectAbsentAbsent, before[i].DeletionRecord
 		default:
 			r.FixtureRootID, r.FixtureState = before[i].FixtureRootID, before[i].FixtureState
 			r.Outcome, r.Reason = settleExpectAbsent(ctx, svc, report, res, opts.DryRun)
+			if r.Outcome == expectAbsentAbsent {
+				// settleExpectAbsent returns the deletion record, if any,
+				// as the reason of an absent outcome.
+				r.DeletionRecord, r.Reason = r.Reason, ""
+			}
 		}
 		if r.Outcome == expectAbsentUnproven || r.Outcome == expectAbsentNotCleaned {
 			residuals++
@@ -307,8 +327,11 @@ func cleanupTestIdentities(ctx context.Context, out io.Writer, svc hubclient.Tes
 // from the run's targets: cleaned (would_clean for a dry run) when the run
 // removed it, not_cleaned when it selected it but did not remove it.
 // When the run did not select it, a dry run reports not_cleaned; a real
-// run asks the hub again: gone (no longer proven) is absent, still proven
-// is not_cleaned with its identity's state.
+// run asks the hub again: gone with an in-scope deletion record is absent,
+// and the second value is then that record's correlation ID; gone without
+// one (no longer proven) is absent with an empty second value; still
+// present is not_cleaned with its identity's state. For every other
+// outcome the second value is the reason.
 func settleExpectAbsent(ctx context.Context, svc hubclient.TestIdentityService, report *hubclient.TestIdentityCleanupReport, res string, dryRun bool) (string, string) {
 	typ, id, _ := strings.Cut(res, ":")
 	for _, t := range report.Targets {
@@ -334,6 +357,9 @@ func settleExpectAbsent(ctx context.Context, svc hubclient.TestIdentityService, 
 	after, err := svc.Provenance(ctx, res)
 	if err != nil {
 		return expectAbsentNotCleaned, "provenance check after the cleanup failed"
+	}
+	if after.Proven && after.Deleted {
+		return expectAbsentAbsent, after.DeletionRecord
 	}
 	if !after.Proven {
 		return expectAbsentAbsent, ""
@@ -388,7 +414,11 @@ func printExpectAbsent(out io.Writer, results []expectAbsentResult) {
 		case expectAbsentWouldClean:
 			_, _ = fmt.Fprintf(out, "  %s: would be cleaned (proven, test identity %s)\n", r.Resource, r.FixtureRootID)
 		case expectAbsentAbsent:
-			_, _ = fmt.Fprintf(out, "  %s: absent (proven before the run, gone after it)\n", r.Resource)
+			if r.DeletionRecord != "" {
+				_, _ = fmt.Fprintf(out, "  %s: absent (proven by deletion record %s)\n", r.Resource, r.DeletionRecord)
+			} else {
+				_, _ = fmt.Fprintf(out, "  %s: absent (proven before the run, gone after it)\n", r.Resource)
+			}
 		default:
 			_, _ = fmt.Fprintf(out, "  %s: NOT cleaned (proven, test identity %s): %s\n", r.Resource, r.FixtureRootID, r.Reason)
 		}
@@ -410,6 +440,10 @@ func showTestIdentityProvenance(ctx context.Context, out io.Writer, svc hubclien
 	if !p.Proven {
 		_, _ = fmt.Fprintf(out, "%s: proven:false, reason: %s\n", p.Resource, p.Reason)
 		_, _ = fmt.Fprintln(out, "Cleanup never removes it; a real administrator must decide.")
+		return nil
+	}
+	if p.Deleted {
+		_, _ = fmt.Fprintf(out, "%s: proven:true, deleted (deletion record %s), test identity %s (%s), issuer %s\n", p.Resource, p.DeletionRecord, p.FixtureRootID, p.FixtureState, p.FixtureIssuerID)
 		return nil
 	}
 	_, _ = fmt.Fprintf(out, "%s: proven:true, test identity %s (%s), issuer %s\n", p.Resource, p.FixtureRootID, p.FixtureState, p.FixtureIssuerID)

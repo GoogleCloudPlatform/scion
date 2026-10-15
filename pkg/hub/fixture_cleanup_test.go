@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -478,6 +479,39 @@ func TestFixtureCleanup_DelegationIsolation(t *testing.T) {
 	assert.Equal(t, d1.ID, b.DelegationID)
 	assert.Equal(t, grantor.ID, b.IssuerID)
 
+	// Provenance under a delegation is scoped the same way (R1, R3): D1
+	// proves its own live group and its own deleted one (by the deletion
+	// record); D2's and the grantor's own resources, and D1's deleted one
+	// asked by D2, get the neutral unproven answer.
+	wprov := func(delegationID, res string) (TestIdentityProvenance, map[string]any) {
+		rec := e.workload(t, http.MethodGet, fcProvenancePath+"?resource="+res, tok(), delegationID, nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var p TestIdentityProvenance
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p))
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		return p, raw
+	}
+	p, _ := wprov(d1.ID, "group:"+d1LiveGroup)
+	assert.True(t, p.Proven)
+	assert.False(t, p.Deleted)
+	p, _ = wprov(d1.ID, "group:"+d1ExpiredGroup)
+	assert.True(t, p.Proven)
+	assert.True(t, p.Deleted)
+	assert.Equal(t, r.RunID, p.DeletionRecord)
+	for _, tc := range []struct{ delegation, res string }{
+		{d2.ID, "group:" + d1ExpiredGroup},
+		{d2.ID, "group:" + d1LiveGroup},
+		{d1.ID, "group:" + d2ExpiredGroup},
+		{d1.ID, "group:" + humanGroup},
+	} {
+		_, raw := wprov(tc.delegation, tc.res)
+		fcUnprovenShape(t, raw, tc.res)
+	}
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodGet, fcProvenancePath+"?resource=group:"+d1LiveGroup, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"proven":true`, "the grantor's own session sees its delegations' stamps")
+
 	// D2's cleanup reaches only D2's.
 	rec = e.workload(t, http.MethodPost, fcCleanupPath, tok(), d2.ID, nil, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -691,4 +725,232 @@ func TestFixtureCleanup_RequestCannotNameTargets(t *testing.T) {
 	rec = doRequestWithToken(t, e.srv, e.fx.AccessToken, http.MethodPost, fcCleanupPath, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.True(t, fcGroupExists(t, e.store, g1))
+}
+
+// fcProvenance asks for res with token and decodes the answer and its raw
+// key set.
+func fcProvenance(t *testing.T, srv *Server, token, res string) (TestIdentityProvenance, map[string]any) {
+	t.Helper()
+	rec := doRequestWithToken(t, srv, token, http.MethodGet, fcProvenancePath+"?resource="+res, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var p TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &p), rec.Body.String())
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	return p, raw
+}
+
+// fcUnprovenShape asserts the neutral unproven answer: exactly resource,
+// proven:false and the reason.
+func fcUnprovenShape(t *testing.T, raw map[string]any, res string) {
+	t.Helper()
+	assert.Equal(t, map[string]any{"resource": res, "proven": false, "reason": "no fixture stamp"}, raw)
+}
+
+// R1 and R3 (review round 1): provenance is scoped like the cleanup.
+// Another issuer's stamped resource gets the neutral unproven answer, with
+// no stamp fields; the issuer's own is proven. A resource that is gone is
+// proven by its deletion record when that record's provenance_basis is in
+// scope, for a purge-deleted and a reaper-deleted resource alike, and is
+// unproven for another issuer; a never-stamped resource and a missing one
+// stay unproven.
+func TestFixtureProvenance_ScopeAndDeletionRecords(t *testing.T) {
+	e := newFPEnv(t, "fc-scope")
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	ctx := context.Background()
+	_, jTok := tiIssuer(t, e.srv, e.store, "fc-scope-j")
+	mine := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fc-scope-mine")
+	fj := tiIssue(t, e.srv, jTok, map[string]any{"role": "member"})
+	jGroup := fpCreateGroup(t, e.srv, fj.AccessToken, CreateGroupRequest{Name: "fc-scope-j"})
+
+	// Live stamps: proven for their own issuer only.
+	p, _ := fcProvenance(t, e.srv, e.issuerTok, "agent:"+mine)
+	assert.True(t, p.Proven)
+	assert.Equal(t, e.fx.Identity.ID, p.FixtureRootID)
+	_, raw := fcProvenance(t, e.srv, jTok, "agent:"+mine)
+	fcUnprovenShape(t, raw, "agent:"+mine)
+	_, raw = fcProvenance(t, e.srv, e.issuerTok, "group:"+jGroup)
+	fcUnprovenShape(t, raw, "group:"+jGroup)
+	p, _ = fcProvenance(t, e.srv, jTok, "group:"+jGroup)
+	assert.True(t, p.Proven)
+	assert.Equal(t, fj.Identity.ID, p.FixtureRootID)
+
+	// Purge-deleted: I purges F2; its agent is proven by its deletion
+	// record for I, unproven for J.
+	f2 := tiIssue(t, e.srv, e.issuerTok, map[string]any{"role": "member"})
+	p2 := tiCreateProject(t, e.srv, f2.AccessToken, "fc-scope-p2")
+	fpAddProvider(t, e.store, p2)
+	purged := fpCreateAgent(t, e.srv, f2.AccessToken, p2, "fc-scope-purged")
+	rec := tiPurge(t, e.srv, e.issuerTok, f2.Identity.ID, "", nil)
+	require.True(t, fpPurgeReport(t, rec).Complete, rec.Body.String())
+	require.False(t, fpAgentExists(t, e.store, purged))
+	rows := fpPurgeAudits(t, e.store, mutationTypeAgentHardDelete, purged)
+	require.Len(t, rows, 1)
+	p, raw = fcProvenance(t, e.srv, e.issuerTok, "agent:"+purged)
+	assert.Equal(t, TestIdentityProvenance{Resource: "agent:" + purged, Proven: true, FixtureRootID: f2.Identity.ID, FixtureIssuerID: e.issuerID,
+		FixtureState: fixtureStateAbsent, Deleted: true, DeletionRecord: rows[0].CorrelationID, Reason: "deleted under fixture stamp"}, p)
+	assert.NotEmpty(t, raw["deletionRecord"])
+	_, raw = fcProvenance(t, e.srv, jTok, "agent:"+purged)
+	fcUnprovenShape(t, raw, "agent:"+purged)
+
+	// Reaper-deleted: F3 expires and the reaper purges it after the grace
+	// period; its group is proven by its deletion record.
+	f3 := fcIssueShort(t, e.srv, e.issuerTok)
+	reaped := fpCreateGroup(t, e.srv, f3.AccessToken, CreateGroupRequest{Name: "fc-scope-reaped"})
+	clock := f3.Identity.ExpiresAt.Add(testIdentityReaperGrace + time.Second)
+	e.srv.testIdentities.now = func() time.Time { return clock }
+	res, err := e.srv.reapTestIdentities(ctx, clock)
+	require.NoError(t, err)
+	require.Contains(t, res.Purged, f3.Identity.ID)
+	require.False(t, fcGroupExists(t, e.store, reaped))
+	groupRows := fpPurgeAudits(t, e.store, fixturePurgeGroupDeleteMutation, reaped)
+	require.Len(t, groupRows, 1)
+	p, _ = fcProvenance(t, e.srv, e.issuerTok, "group:"+reaped)
+	assert.True(t, p.Proven)
+	assert.True(t, p.Deleted)
+	assert.Equal(t, groupRows[0].CorrelationID, p.DeletionRecord)
+	assert.Equal(t, f3.Identity.ID, p.FixtureRootID)
+	_, raw = fcProvenance(t, e.srv, jTok, "group:"+reaped)
+	fcUnprovenShape(t, raw, "group:"+reaped)
+
+	// Never stamped, and missing: unproven for everyone.
+	broker := fpProjectBrokerID(t, e.store, e.project)
+	never := fpStampedAgentRow(t, e.store, e.project, broker, "fc-scope-never", e.human.ID, []string{e.human.ID}, store.FixtureProvenance{}, state.PhaseCreated)
+	_, raw = fcProvenance(t, e.srv, e.issuerTok, "agent:"+never.ID)
+	fcUnprovenShape(t, raw, "agent:"+never.ID)
+	missing := generateID()
+	_, raw = fcProvenance(t, e.srv, e.issuerTok, "agent:"+missing)
+	fcUnprovenShape(t, raw, "agent:"+missing)
+
+	// An admin session sees every issuer's stamps and deletion records.
+	admin := taUser(t, e.store, "fc-scope-admin", store.SystemRoleSuperAdmin)
+	for _, res := range []string{"group:" + jGroup, "agent:" + purged} {
+		rec := doRequestAsUser(t, e.srv, admin, http.MethodGet, fcProvenancePath+"?resource="+res, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var ap TestIdentityProvenance
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ap))
+		assert.True(t, ap.Proven, res)
+	}
+}
+
+// fcStoreFixtureWithGroup writes a test identity with the given ID and
+// expiry for issuer, and one group stamped with it, through the store.
+func fcStoreFixtureWithGroup(t *testing.T, s store.Store, id, issuer string, expiresAt time.Time) string {
+	t.Helper()
+	ctx := context.Background()
+	u := &store.User{
+		ID: id, Email: "test-identity-" + id[:8] + id[len(id)-4:] + "@" + store.TestFixtureEmailDomain, DisplayName: "Stored fixture",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Kind: store.UserKindTestFixture,
+		ExpiresAt: &expiresAt, IssuedBy: &issuer, Created: time.Now(),
+	}
+	require.NoError(t, s.CreateTestFixtureUser(ctx, u))
+	gid := generateID()
+	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: gid, Name: "fc-lim-" + gid[:8], Slug: "fc-lim-" + gid[:8], CreatedBy: id,
+		Fixture: store.FixtureProvenance{RootID: id, IssuerID: issuer}}))
+	return gid
+}
+
+// R2 (review round 1): the run limit counts only admitted, non-live
+// identities. With more than fixtureCleanupRootLimit live identities of the
+// issuer whose roots all sort before an expired one's, the run still
+// reaches the expired identity and completes; live identities are counted,
+// never touched. With the limit lowered to 1 and two expired identities,
+// the first run is truncated after one and the second finishes.
+func TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive(t *testing.T) {
+	e := newFPEnv(t, "fc-lim")
+	e.srv.SetDispatcher(&purgeRecDispatcher{})
+	now := time.Now()
+	nLive := fixtureCleanupRootLimit + 5
+	liveGroups := make([]string, 0, nLive)
+	for i := 0; i < nLive; i++ {
+		id := fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		liveGroups = append(liveGroups, fcStoreFixtureWithGroup(t, e.store, id, e.issuerID, now.Add(time.Hour)))
+	}
+	lastExpired := fcStoreFixtureWithGroup(t, e.store, "ffffffff-ffff-4fff-bfff-ffffffffffff", e.issuerID, now.Add(-time.Minute))
+
+	rec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, fcCleanupPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fcReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.False(t, r.Truncated)
+	assert.Equal(t, map[string]string{"ffffffff-ffff-4fff-bfff-ffffffffffff": fixtureStateExpired}, fcIdentities(r))
+	assert.Equal(t, nLive+1, r.LiveSkipped, "the stored live identities and the env's own")
+	assert.False(t, fcGroupExists(t, e.store, lastExpired))
+	for _, g := range liveGroups {
+		require.True(t, fcGroupExists(t, e.store, g))
+	}
+
+	// A lowered limit: two expired identities take two runs.
+	prev := fixtureCleanupRootLimit
+	fixtureCleanupRootLimit = 1
+	t.Cleanup(func() { fixtureCleanupRootLimit = prev })
+	ga := fcStoreFixtureWithGroup(t, e.store, "eeeeeeee-eeee-4eee-beee-eeeeeeeeeee1", e.issuerID, now.Add(-time.Minute))
+	gb := fcStoreFixtureWithGroup(t, e.store, "eeeeeeee-eeee-4eee-beee-eeeeeeeeeee2", e.issuerID, now.Add(-time.Minute))
+	rec = doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, fcCleanupPath, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	r = fcReport(t, rec)
+	assert.True(t, r.Truncated)
+	assert.Len(t, r.Identities, 1)
+	assert.Equal(t, 1, boolCount(fcGroupExists(t, e.store, ga), fcGroupExists(t, e.store, gb)), "one of the two is cleaned")
+	rec = doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, fcCleanupPath, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r = fcReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.Len(t, r.Identities, 1)
+	assert.False(t, fcGroupExists(t, e.store, ga))
+	assert.False(t, fcGroupExists(t, e.store, gb))
+}
+
+func boolCount(bs ...bool) int {
+	n := 0
+	for _, b := range bs {
+		if b {
+			n++
+		}
+	}
+	return n
+}
+
+// O1 (review round 1): an issuer's cleanup reaches its expired admin-kind
+// identity through the A3 purge: the identity and every grant stamped with
+// its issuance are removed, each grant row with provenance_basis naming
+// the identity and the issuance, and the run's trigger.
+func TestFixtureCleanup_AdminKindTargets(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	kinds, issuers := a3Kinds(t, srv, s, "fc-akt")
+	target := kinds[store.UserKindTestHubAdmin]
+	row := a3Row(t, s, target.Identity.ID)
+	projectID := tiCreateProject(t, srv, target.AccessToken, "fc-akt-project")
+	grantee := taUser(t, s, "fc-akt-grantee", store.SystemRoleHubMember)
+	rec := doRequestWithToken(t, srv, target.AccessToken, http.MethodPost, "/api/v1/projects/"+projectID+"/members",
+		addProjectMemberRequest{RoleDefinitionID: a3ProjectRoleID(t, s, store.ProjectRoleAdmin), PrincipalType: "user", PrincipalID: grantee.ID})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	stamped, _, err := s.ListIssuanceStampedGrants(ctx, *row.IssuanceID, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, stamped)
+
+	// Past the target's expiry.
+	clock := row.ExpiresAt.Add(time.Second)
+	srv.testIdentities.now = func() time.Time { return clock }
+
+	rec = doRequestAsUser(t, srv, issuers[store.UserKindTestHubAdmin], http.MethodPost, fcCleanupPath, nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusConflict}, rec.Code, rec.Body.String())
+	r := fcReport(t, rec)
+	assert.Equal(t, fixtureStateExpired, fcIdentities(r)[target.Identity.ID])
+	_, err = s.GetUser(ctx, target.Identity.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the expired admin-kind identity is purged")
+	after, _, err := s.ListIssuanceStampedGrants(ctx, *row.IssuanceID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, after, "its stamped grants are removed")
+	grantRows, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: testAdminGrantPurgeMutation, CorrelationID: r.RunID, Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, grantRows, len(stamped))
+	for _, gr := range grantRows {
+		var b fixturePurgeBasis
+		require.NoError(t, json.Unmarshal([]byte(gr.ProvenanceBasis), &b), gr.ProvenanceBasis)
+		assert.Equal(t, target.Identity.ID, b.RootID)
+		assert.Equal(t, *row.IssuanceID, b.IssuanceID)
+		assert.Equal(t, testIdentityCleanupMutation, b.Trigger)
+	}
 }

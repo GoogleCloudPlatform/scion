@@ -144,16 +144,29 @@ func (s *UserStore) ListExpiredTestFixtureUsers(ctx context.Context, q store.Exp
 }
 
 // ListFixtureRoots returns the distinct provenance stamps on agents,
-// schedules, groups and projects, optionally for one issuer (ptone/scion#4240,
-// Phase 3c); see store.Store.ListFixtureRoots.
-func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID string, limit int) ([]store.FixtureProvenance, bool, error) {
-	var issuer *uuid.UUID
+// schedules, groups and projects, optionally for one issuer and after a
+// root cursor (ptone/scion#4240, Phase 3c); see store.Store.ListFixtureRoots.
+// Each table is read in root order from the cursor, at most limit+1
+// distinct stamps, so the merged first limit roots are exact.
+func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID, afterRootID string, limit int) ([]store.FixtureProvenance, bool, error) {
+	var issuer, after *uuid.UUID
 	if issuerID != "" {
 		u, err := parseUUID(issuerID)
 		if err != nil {
 			return nil, false, err
 		}
 		issuer = &u
+	}
+	if afterRootID != "" {
+		u, err := parseUUID(afterRootID)
+		if err != nil {
+			return nil, false, err
+		}
+		after = &u
+	}
+	fetch := 0
+	if limit > 0 {
+		fetch = limit + 1
 	}
 	seen := map[store.FixtureProvenance]bool{}
 	add := func(root, iss *uuid.UUID) {
@@ -167,7 +180,14 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID string, 
 	if issuer != nil {
 		aq = aq.Where(agent.FixtureIssuerIDEQ(*issuer))
 	}
-	agents, err := aq.Unique(true).Select(agent.FieldFixtureRootID, agent.FieldFixtureIssuerID).All(ctx)
+	if after != nil {
+		aq = aq.Where(agent.FixtureRootIDGT(*after))
+	}
+	aq = aq.Unique(true).Order(agent.ByFixtureRootID())
+	if fetch > 0 {
+		aq = aq.Limit(fetch)
+	}
+	agents, err := aq.Select(agent.FieldFixtureRootID, agent.FieldFixtureIssuerID).All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
 	}
@@ -179,7 +199,14 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID string, 
 	if issuer != nil {
 		sq = sq.Where(schedule.FixtureIssuerIDEQ(*issuer))
 	}
-	schedules, err := sq.Unique(true).Select(schedule.FieldFixtureRootID, schedule.FieldFixtureIssuerID).All(ctx)
+	if after != nil {
+		sq = sq.Where(schedule.FixtureRootIDGT(*after))
+	}
+	sq = sq.Unique(true).Order(schedule.ByFixtureRootID())
+	if fetch > 0 {
+		sq = sq.Limit(fetch)
+	}
+	schedules, err := sq.Select(schedule.FieldFixtureRootID, schedule.FieldFixtureIssuerID).All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
 	}
@@ -191,7 +218,14 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID string, 
 	if issuer != nil {
 		gq = gq.Where(group.FixtureIssuerIDEQ(*issuer))
 	}
-	groups, err := gq.Unique(true).Select(group.FieldFixtureRootID, group.FieldFixtureIssuerID).All(ctx)
+	if after != nil {
+		gq = gq.Where(group.FixtureRootIDGT(*after))
+	}
+	gq = gq.Unique(true).Order(group.ByFixtureRootID())
+	if fetch > 0 {
+		gq = gq.Limit(fetch)
+	}
+	groups, err := gq.Select(group.FieldFixtureRootID, group.FieldFixtureIssuerID).All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
 	}
@@ -203,7 +237,14 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID string, 
 	if issuer != nil {
 		pq = pq.Where(project.FixtureIssuerIDEQ(*issuer))
 	}
-	projects, err := pq.Unique(true).Select(project.FieldFixtureRootID, project.FieldFixtureIssuerID).All(ctx)
+	if after != nil {
+		pq = pq.Where(project.FixtureRootIDGT(*after))
+	}
+	pq = pq.Unique(true).Order(project.ByFixtureRootID())
+	if fetch > 0 {
+		pq = pq.Limit(fetch)
+	}
+	projects, err := pq.Select(project.FieldFixtureRootID, project.FieldFixtureIssuerID).All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
 	}

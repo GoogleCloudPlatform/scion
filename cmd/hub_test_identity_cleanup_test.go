@@ -410,3 +410,64 @@ func TestHubTestIdentityCleanup_WireTypesMatchHub(t *testing.T) {
 		})
 	}
 }
+
+func tiDeleted(res, root, record string) string {
+	return `{"resource":"` + res + `","proven":true,"fixtureRootId":"` + root + `","fixtureIssuerId":"iss-1","fixtureState":"absent",` +
+		`"deleted":true,"deletionRecord":"` + record + `","reason":"deleted under fixture stamp"}`
+}
+
+// R3 (EM decision): an expected-absent resource that is already gone (the
+// reaper, a purge or an earlier cleanup removed it) and that the hub proves
+// by an in-scope deletion record is "absent (proven by deletion record
+// <correlation id>)", not unproven, and the command exits 0 when every ID
+// is proven; a never-stamped ID stays unproven with the real-admin line and
+// a non-zero exit. A resource proven live before the run and proven
+// deleted after it is absent by its deletion record too.
+func TestHubTestIdentityCleanup_ExpectAbsentProvenByDeletionRecord(t *testing.T) {
+	emptyRun := `{"runId":"run-9","scope":"issuer","complete":true,"identities":[],"targets":[],"deleted":{"agents":0,"schedules":0,"groups":0,"projects":0}}`
+	h := &tiCleanupHub{cleanupBody: emptyRun, provenance: map[string][]string{
+		"agent:a-reaped": {tiDeleted("agent:a-reaped", "fx-1", "reaper-run-1")},
+		"group:g-purged": {tiDeleted("group:g-purged", "fx-2", "purge-req-2")},
+		"agent:a-later":  {tiProven("agent:a-later", "fx-3", "expired"), tiDeleted("agent:a-later", "fx-3", "other-run-3")},
+	}}
+	var out bytes.Buffer
+	ids := []string{"agent:a-reaped", "group:g-purged", "agent:a-later"}
+	require.NoError(t, cleanupTestIdentities(context.Background(), &out, h.client(t).TestIdentities(), testIdentityCleanupOptions{ExpectAbsent: ids}))
+	got := out.String()
+	assert.Equal(t, "Expected absent:\n"+
+		"  agent:a-reaped: absent (proven by deletion record reaper-run-1)\n"+
+		"  group:g-purged: absent (proven by deletion record purge-req-2)\n"+
+		"  agent:a-later: absent (proven by deletion record other-run-3)\n", got[strings.Index(got, "Expected absent:\n"):])
+	assert.NotContains(t, got, "real-admin")
+	// Deleted ones are not asked again; the one proven live before is.
+	assert.Equal(t, []string{
+		"GET /api/v1/test-identities/provenance?resource=agent%3Aa-reaped",
+		"GET /api/v1/test-identities/provenance?resource=group%3Ag-purged",
+		"GET /api/v1/test-identities/provenance?resource=agent%3Aa-later",
+		"POST /api/v1/test-identities/cleanup",
+		"GET /api/v1/test-identities/provenance?resource=agent%3Aa-later",
+	}, h.seen())
+
+	// A never-stamped ID next to a deletion-proven one: unproven, real-admin
+	// line, non-zero exit.
+	h2 := &tiCleanupHub{cleanupBody: emptyRun, provenance: map[string][]string{
+		"agent:a-reaped": {tiDeleted("agent:a-reaped", "fx-1", "reaper-run-1")},
+		"agent:never":    {tiUnproven("agent:never")},
+	}}
+	out.Reset()
+	err := cleanupTestIdentities(context.Background(), &out, h2.client(t).TestIdentities(), testIdentityCleanupOptions{ExpectAbsent: []string{"agent:a-reaped", "agent:never"}, JSON: true})
+	require.ErrorIs(t, err, errExpectAbsentResiduals)
+	var doc struct {
+		ExpectAbsent []expectAbsentResult `json:"expectAbsent"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &doc), out.String())
+	assert.Equal(t, []expectAbsentResult{
+		{Resource: "agent:a-reaped", Proven: true, Outcome: expectAbsentAbsent, FixtureRootID: "fx-1", FixtureState: "absent", DeletionRecord: "reaper-run-1"},
+		{Resource: "agent:never", Proven: false, Outcome: expectAbsentUnproven, Reason: "no fixture stamp"},
+	}, doc.ExpectAbsent)
+
+	// provenance prints the deletion record.
+	out.Reset()
+	require.NoError(t, showTestIdentityProvenance(context.Background(), &out, h2.client(t).TestIdentities(), "agent:a-reaped", false))
+	assert.Equal(t, "agent:a-reaped: proven:true, deleted (deletion record reaper-run-1), test identity fx-1 (absent), issuer iss-1\n", out.String())
+}

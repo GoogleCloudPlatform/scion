@@ -57,11 +57,14 @@ import (
 // which carries its provenance_basis.
 //
 // GET /api/v1/test-identities/provenance?resource=<type>:<id> answers
-// whether the hub recorded the resource as created under a test identity.
-// An unstamped resource and a missing one get the same answer
-// (proven:false, reason "no fixture stamp"), with no owner, creator or
-// other field, so the route is no existence oracle for real users'
-// resources.
+// whether the hub recorded the resource as created under a test identity
+// of the caller's scope (the same issuer bound as the cleanup). A resource
+// that is gone is proven by its deletion record (a delete row with an
+// in-scope provenance_basis), so a run can verify by absence after the
+// reaper or a purge. An unstamped resource, a missing one and a stamp of
+// another issuer or delegation get the same answer (proven:false, reason
+// "no fixture stamp"), with no owner, creator or other field, so the route
+// is no existence oracle and leaks no other issuer's stamp.
 
 const (
 	// testIdentityCleanupMutation is the audit type of one cleanup run.
@@ -71,9 +74,6 @@ const (
 	testIdentityCleanupTargetType = "test_identity_issuer"
 	// fixturePurgeExecutorCleanup is the executor of the cleanup's deletes.
 	fixturePurgeExecutorCleanup = "system:test_identity_cleanup"
-	// fixtureCleanupRootLimit bounds the identities one cleanup run reaches;
-	// a run that hits it is truncated and the next run continues.
-	fixtureCleanupRootLimit = 200
 	// fixtureCleanupBasisName is provenance_basis.basis of the run row.
 	fixtureCleanupBasisName = "fixture_issuer_id"
 	// fixtureProvenanceNoStamp is the reason of every unproven answer.
@@ -81,6 +81,18 @@ const (
 	// fixtureProvenanceStamped is the reason of every proven answer.
 	fixtureProvenanceStamped = "fixture stamp"
 )
+
+// fixtureCleanupRootLimit bounds the identities one cleanup run purges:
+// admitted (in the caller's scope) and not live. Live and out-of-scope
+// candidates do not count, so they can never fill a run. A run that stops
+// at the limit with candidates left is truncated, and the next run, which
+// no longer sees the identities this one removed, continues. A variable
+// so tests can lower it.
+var fixtureCleanupRootLimit = 200
+
+// fixtureCleanupPage is the page size of the candidate reads (stamp roots
+// and expired identities).
+const fixtureCleanupPage = 500
 
 // Issuer scopes of a cleanup run.
 const (
@@ -174,7 +186,13 @@ type TestIdentityProvenance struct {
 	FixtureIssuerID string `json:"fixtureIssuerId,omitempty"`
 	// FixtureState is live, expired or absent.
 	FixtureState string `json:"fixtureState,omitempty"`
-	Reason       string `json:"reason"`
+	// Deleted is true when the resource is gone and its deletion record
+	// (a purge, reaper or cleanup delete row with an in-scope
+	// provenance_basis) proves it; DeletionRecord is that row's
+	// correlation ID.
+	Deleted        bool   `json:"deleted,omitempty"`
+	DeletionRecord string `json:"deletionRecord,omitempty"`
+	Reason         string `json:"reason"`
 }
 
 // fixtureCleanupBasis is the provenance_basis of the run row: the column
@@ -224,109 +242,108 @@ type fixtureCleanupPlan struct {
 }
 
 // planTestIdentityCleanup selects the identities caller's cleanup reaches
-// and their stamped resources. It writes nothing.
+// and their stamped resources. It writes nothing. The candidates are, in
+// order, every identity a stamp of the scope names (read in pages by root
+// ID) and then the scope's expired identities (member and admin kinds) that
+// no stamp names any more, for example because an earlier run removed
+// their resources but not the identity. Each candidate is admitted by the
+// purge route's rules; live ones are counted and skipped. At most
+// fixtureCleanupRootLimit admitted, non-live identities are planned.
 func (s *Server) planTestIdentityCleanup(ctx context.Context, caller UserIdentity, scope fixtureCleanupScope, report *TestIdentityCleanupReport) ([]fixtureCleanupPlan, error) {
-	roots, truncated, err := s.store.ListFixtureRoots(ctx, scope.issuerID, fixtureCleanupRootLimit)
-	if err != nil {
-		return nil, fmt.Errorf("list stamped identities: %w", err)
-	}
-	report.Truncated = report.Truncated || truncated
-	now := s.testIdentities.clock()
-	// The candidates: every identity a stamp of the scope names (expired,
-	// deleted or live), then the scope's expired identities that no stamp
-	// names any more (for example an earlier run removed their resources
-	// but not the identity).
-	var candidates []string
-	for _, root := range roots {
-		candidates = append(candidates, root.RootID)
-	}
-	expired, more, err := s.expiredScopeIdentities(ctx, scope, now)
-	if err != nil {
-		return nil, err
-	}
-	report.Truncated = report.Truncated || more
-	candidates = append(candidates, expired...)
-	seen := map[string]bool{}
-	var plans []fixtureCleanupPlan
-	for _, rootID := range candidates {
-		if seen[rootID] {
-			continue
+	p := &fixtureCleanupPlanner{s: s, caller: caller, report: report, now: s.testIdentities.clock(), seen: map[string]bool{}}
+	after := ""
+	for {
+		roots, more, err := s.store.ListFixtureRoots(ctx, scope.issuerID, after, fixtureCleanupPage)
+		if err != nil {
+			return nil, fmt.Errorf("list stamped identities: %w", err)
 		}
-		seen[rootID] = true
-		if len(seen) > fixtureCleanupRootLimit {
-			report.Truncated = true
+		for _, root := range roots {
+			if full, err := p.consider(ctx, root.RootID); err != nil || full {
+				return p.plans, err
+			}
+		}
+		if !more || len(roots) == 0 {
 			break
 		}
-		var u *store.User
-		state := fixtureStateAbsent
-		switch got, err := s.store.GetUser(ctx, rootID); {
-		case err == nil:
-			u, state = got, fixtureStateExpired
-		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
-		default:
-			return nil, fmt.Errorf("read test identity %s: %w", rootID, err)
-		}
-		// The purge route's rules decide whether the caller reaches the
-		// identity (its issuer, its own delegation, or an admin session);
-		// a row that is no test identity is never reached.
-		run, ok, err := s.resolveFixturePurgeRun(ctx, caller, rootID, u, true)
-		if err != nil {
-			return nil, fmt.Errorf("test identity %s: %w", rootID, err)
-		}
-		if !ok {
-			continue
-		}
-		if u != nil && (u.ExpiresAt == nil || u.ExpiresAt.After(now)) {
-			// A live identity is never touched.
-			report.LiveSkipped++
-			continue
-		}
-		targets, more, err := s.fixtureCleanupTargets(ctx, rootID, u)
-		if err != nil {
-			return nil, err
-		}
-		report.Truncated = report.Truncated || more
-		plans = append(plans, fixtureCleanupPlan{run: run, state: state, targets: targets})
+		after = roots[len(roots)-1].RootID
 	}
-	return plans, nil
-}
-
-// fixtureCleanupExpiredPage is the page size of expiredScopeIdentities.
-const fixtureCleanupExpiredPage = 500
-
-// expiredScopeIdentities returns the IDs of the test identities (member
-// and admin kinds) that expired at or before now and were issued by the
-// scope's issuer (every issuer for the all scope), at most
-// fixtureCleanupRootLimit; more is true when others remain. Whether the
-// caller reaches each one is decided afterwards, by the purge route's
-// rules.
-func (s *Server) expiredScopeIdentities(ctx context.Context, scope fixtureCleanupScope, now time.Time) ([]string, bool, error) {
-	var out []string
-	q := store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: now, IncludeAdminKinds: true, Limit: fixtureCleanupExpiredPage}
+	q := store.ExpiredTestFixtureQuery{ExpiredAtOrBefore: p.now, IncludeAdminKinds: true, Limit: fixtureCleanupPage}
 	for {
 		page, err := s.store.ListExpiredTestFixtureUsers(ctx, q)
 		if err != nil {
-			return nil, false, fmt.Errorf("list expired test identities: %w", err)
+			return nil, fmt.Errorf("list expired test identities: %w", err)
 		}
 		for i := range page {
 			u := &page[i]
 			if scope.issuerID != "" && (u.IssuedBy == nil || *u.IssuedBy != scope.issuerID) {
 				continue
 			}
-			if len(out) == fixtureCleanupRootLimit {
-				return out, true, nil
+			if full, err := p.consider(ctx, u.ID); err != nil || full {
+				return p.plans, err
 			}
-			out = append(out, u.ID)
 		}
-		if len(page) < fixtureCleanupExpiredPage {
-			return out, false, nil
+		if len(page) < fixtureCleanupPage || page[len(page)-1].ExpiresAt == nil {
+			break
 		}
 		last := page[len(page)-1]
-		if last.ExpiresAt == nil {
-			return out, false, nil
-		}
 		q.AfterExpiresAt, q.AfterID = *last.ExpiresAt, last.ID
 	}
+	return p.plans, nil
+}
+
+// fixtureCleanupPlanner collects the plans of one cleanup run.
+type fixtureCleanupPlanner struct {
+	s      *Server
+	caller UserIdentity
+	report *TestIdentityCleanupReport
+	now    time.Time
+	seen   map[string]bool
+	plans  []fixtureCleanupPlan
+}
+
+// consider plans candidate rootID when the caller reaches it and it is not
+// live. full is true when the plan limit was already reached before this
+// candidate: the run is then truncated and planning stops.
+func (p *fixtureCleanupPlanner) consider(ctx context.Context, rootID string) (full bool, err error) {
+	if p.seen[rootID] {
+		return false, nil
+	}
+	p.seen[rootID] = true
+	var u *store.User
+	state := fixtureStateAbsent
+	switch got, err := p.s.store.GetUser(ctx, rootID); {
+	case err == nil:
+		u, state = got, fixtureStateExpired
+	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
+	default:
+		return false, fmt.Errorf("read test identity %s: %w", rootID, err)
+	}
+	// The purge route's rules decide whether the caller reaches the
+	// identity (its issuer, its own delegation, or an admin session); a row
+	// that is no test identity is never reached.
+	run, ok, err := p.s.resolveFixturePurgeRun(ctx, p.caller, rootID, u, true)
+	if err != nil {
+		return false, fmt.Errorf("test identity %s: %w", rootID, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	if u != nil && (u.ExpiresAt == nil || u.ExpiresAt.After(p.now)) {
+		// A live identity is never touched.
+		p.report.LiveSkipped++
+		return false, nil
+	}
+	if len(p.plans) >= fixtureCleanupRootLimit {
+		p.report.Truncated = true
+		return true, nil
+	}
+	targets, more, err := p.s.fixtureCleanupTargets(ctx, rootID, u)
+	if err != nil {
+		return false, err
+	}
+	p.report.Truncated = p.report.Truncated || more
+	p.plans = append(p.plans, fixtureCleanupPlan{run: run, state: state, targets: targets})
+	return false, nil
 }
 
 // fixtureCleanupTargets lists the resources stamped with rootID that its
@@ -614,16 +631,38 @@ func (s *Server) writeTestIdentityCleanupAudit(ctx context.Context, scope fixtur
 	return s.store.CreateMutationAudit(ctx, record)
 }
 
+// fixtureDeleteMutations maps each provenance resource type to the audit
+// type of its removal by the purge, the reaper or the cleanup; those rows
+// carry provenance_basis.
+var fixtureDeleteMutations = map[string]string{
+	fixtureResourceAgent:    mutationTypeAgentHardDelete,
+	fixtureResourceSchedule: mutationTypeScheduleDelete,
+	fixtureResourceGroup:    fixturePurgeGroupDeleteMutation,
+	fixtureResourceProject:  "project_delete",
+}
+
+// fixtureProvenanceDeleted is the reason of a proven answer for a resource
+// that is gone, proven by its deletion record.
+const fixtureProvenanceDeleted = "deleted under fixture stamp"
+
 // handleTestIdentityProvenance handles GET
 // /api/v1/test-identities/provenance?resource=<type>:<id>, type one of
 // agent, project, schedule, group. It needs test_identity.issue with the
 // feature on (testIdentityCaller: 404 off, 403 without the permission,
-// test identities refused). A resource without a stamp and a missing one
-// get the same proven:false answer with only the reason; a stamped one
-// gets its stamp and its identity's state.
+// test identities refused). The answer is proven only for a stamp in the
+// caller's cleanup scope (stampInScope): its own identities, its own
+// delegation's, or every issuer's for an unscoped platform admin session.
+// A stamped resource in scope gets its stamp and its identity's state. A
+// resource that is gone is proven by its deletion record: a purge, reaper
+// or cleanup delete row for it whose provenance_basis is in scope
+// (deleted:true, deletionRecord = that row's correlation ID). Everything
+// else, an unstamped resource, a missing one and a stamp outside the
+// scope, gets the same proven:false answer with only the reason, so the
+// route reveals neither other issuers' stamps nor which IDs exist.
 func (s *Server) handleTestIdentityProvenance(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.testIdentityCaller(w, r); !ok {
+	caller, ok := s.testIdentityCaller(w, r)
+	if !ok {
 		return
 	}
 	q := r.URL.Query()
@@ -643,6 +682,28 @@ func (s *Server) handleTestIdentityProvenance(w http.ResponseWriter, r *http.Req
 		BadRequest(w, "invalid resource: must be <type>:<id>, type one of agent, project, schedule, group")
 		return
 	}
+	if _, known := fixtureDeleteMutations[typ]; !known {
+		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, group")
+		return
+	}
+	scope, ok := s.cleanupScopeFor(ctx, caller)
+	if !ok {
+		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+		return
+	}
+	answer, err := s.fixtureProvenance(ctx, caller, scope, typ, id)
+	if err != nil {
+		slog.ErrorContext(ctx, "test identity provenance: read failed", "resource_type", typ, "error", err)
+		InternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, answer)
+}
+
+// fixtureProvenance computes the provenance answer for typ:id as seen from
+// scope (see handleTestIdentityProvenance).
+func (s *Server) fixtureProvenance(ctx context.Context, caller UserIdentity, scope fixtureCleanupScope, typ, id string) (TestIdentityProvenance, error) {
+	unproven := TestIdentityProvenance{Resource: typ + ":" + id, Reason: fixtureProvenanceNoStamp}
 	var (
 		stamp store.FixtureProvenance
 		err   error
@@ -668,32 +729,100 @@ func (s *Server) handleTestIdentityProvenance(w http.ResponseWriter, r *http.Req
 		if g, err = s.store.GetGroup(ctx, id); err == nil && g != nil {
 			stamp = g.Fixture
 		}
-	default:
-		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, group")
-		return
 	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
-		slog.ErrorContext(ctx, "test identity provenance: read failed", "resource_type", typ, "error", err)
-		InternalError(w)
-		return
+	gone := errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput)
+	if err != nil && !gone {
+		return unproven, err
 	}
-	answer := TestIdentityProvenance{Resource: typ + ":" + id, Reason: fixtureProvenanceNoStamp}
-	if err != nil || stamp.RootID == "" || !stamp.Valid() {
-		writeJSON(w, http.StatusOK, answer)
-		return
+	deletionRecord := ""
+	if gone {
+		// The resource is gone: its deletion record proves it, when the
+		// purge, the reaper or the cleanup removed it.
+		var rec *store.MutationAuditRecord
+		if stamp, rec, err = s.fixtureDeletionRecord(ctx, caller, scope, typ, id); err != nil || rec == nil {
+			return unproven, err
+		}
+		deletionRecord = rec.CorrelationID
+	} else {
+		if stamp.RootID == "" || !stamp.Valid() {
+			return unproven, nil
+		}
+		in, err := s.stampInScope(ctx, caller, scope, stamp)
+		if err != nil || !in {
+			return unproven, err
+		}
 	}
 	state, err := s.fixtureRootState(ctx, stamp.RootID)
 	if err != nil {
-		slog.ErrorContext(ctx, "test identity provenance: identity read failed", "fixture_root_id", stamp.RootID, "error", err)
-		InternalError(w)
-		return
+		return unproven, err
 	}
-	answer.Proven = true
-	answer.FixtureRootID = stamp.RootID
-	answer.FixtureIssuerID = stamp.IssuerID
-	answer.FixtureState = state
-	answer.Reason = fixtureProvenanceStamped
-	writeJSON(w, http.StatusOK, answer)
+	answer := TestIdentityProvenance{
+		Resource: unproven.Resource, Proven: true,
+		FixtureRootID: stamp.RootID, FixtureIssuerID: stamp.IssuerID, FixtureState: state,
+		Reason: fixtureProvenanceStamped,
+	}
+	if gone {
+		answer.Deleted, answer.DeletionRecord, answer.Reason = true, deletionRecord, fixtureProvenanceDeleted
+	}
+	return answer, nil
+}
+
+// fixtureDeletionRecord returns the newest deletion record of typ:id, a
+// delete row of fixtureDeleteMutations[typ] with a provenance_basis whose
+// stamp is in scope, and that stamp; rec is nil when there is none.
+func (s *Server) fixtureDeletionRecord(ctx context.Context, caller UserIdentity, scope fixtureCleanupScope, typ, id string) (store.FixtureProvenance, *store.MutationAuditRecord, error) {
+	recs, _, err := s.store.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: fixtureDeleteMutations[typ],
+		TargetType:   typ,
+		TargetID:     id,
+		Limit:        20,
+	})
+	if err != nil {
+		return store.FixtureProvenance{}, nil, err
+	}
+	for _, rec := range recs {
+		if rec.ProvenanceBasis == "" {
+			continue
+		}
+		var b fixturePurgeBasis
+		if json.Unmarshal([]byte(rec.ProvenanceBasis), &b) != nil || b.RootID == "" || b.IssuerID == "" {
+			continue
+		}
+		stamp := store.FixtureProvenance{RootID: b.RootID, IssuerID: b.IssuerID}
+		in, err := s.stampInScope(ctx, caller, scope, stamp)
+		if err != nil {
+			return store.FixtureProvenance{}, nil, err
+		}
+		if in {
+			return stamp, rec, nil
+		}
+	}
+	return store.FixtureProvenance{}, nil, nil
+}
+
+// stampInScope reports whether the stamp is in the caller's cleanup scope:
+// always for the all scope; otherwise only a stamp of the scope's issuer,
+// and for a delegation scope only one whose identity was issued through
+// that delegation (canManageTestIdentity on the identity's row, or its
+// issuance record when the row is gone).
+func (s *Server) stampInScope(ctx context.Context, caller UserIdentity, scope fixtureCleanupScope, stamp store.FixtureProvenance) (bool, error) {
+	if scope.name == fixtureCleanupScopeAll {
+		return true, nil
+	}
+	if stamp.IssuerID == "" || stamp.IssuerID != scope.issuerID {
+		return false, nil
+	}
+	if scope.name != fixtureCleanupScopeDelegation {
+		return true, nil
+	}
+	u, err := s.store.GetUser(ctx, stamp.RootID)
+	switch {
+	case err == nil:
+		return s.canManageTestIdentity(ctx, caller, u), nil
+	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
+		return s.fixtureIssuedThroughDelegation(ctx, stamp.RootID, stamp.IssuerID)
+	}
+	return false, err
 }
 
 // fixtureRootState returns live, expired or absent for the stamp root

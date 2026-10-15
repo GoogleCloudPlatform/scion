@@ -314,30 +314,53 @@ func TestListFixtureRoots_DistinctStampsByIssuer(t *testing.T) {
 		return out
 	}
 
-	all, truncated, err := cs.ListFixtureRoots(ctx, "", 0)
+	all, truncated, err := cs.ListFixtureRoots(ctx, "", "", 0)
 	require.NoError(t, err)
 	assert.False(t, truncated)
 	assert.Equal(t, sorted(rootA, rootB, rootC, rootD), all)
 
-	ofI, truncated, err := cs.ListFixtureRoots(ctx, issuerI, 0)
+	ofI, truncated, err := cs.ListFixtureRoots(ctx, issuerI, "", 0)
 	require.NoError(t, err)
 	assert.False(t, truncated)
 	assert.Equal(t, sorted(rootA, rootB, rootC), ofI)
 
-	ofJ, _, err := cs.ListFixtureRoots(ctx, issuerJ, 0)
+	ofJ, _, err := cs.ListFixtureRoots(ctx, issuerJ, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, []store.FixtureProvenance{rootD}, ofJ)
 
-	none, _, err := cs.ListFixtureRoots(ctx, uuid.NewString(), 0)
+	none, _, err := cs.ListFixtureRoots(ctx, uuid.NewString(), "", 0)
 	require.NoError(t, err)
 	assert.Empty(t, none)
 
-	limited, truncated, err := cs.ListFixtureRoots(ctx, issuerI, 2)
+	limited, truncated, err := cs.ListFixtureRoots(ctx, issuerI, "", 2)
 	require.NoError(t, err)
 	assert.True(t, truncated)
 	assert.Equal(t, sorted(rootA, rootB, rootC)[:2], limited)
 
-	_, _, err = cs.ListFixtureRoots(ctx, "not-a-uuid", 0)
+	// The cursor resumes strictly after a root: paging by 1 visits every
+	// root of the issuer once, in order, and the last page has no more.
+	var paged []store.FixtureProvenance
+	after := ""
+	for i := 0; i < 10; i++ {
+		page, more, err := cs.ListFixtureRoots(ctx, issuerI, after, 1)
+		require.NoError(t, err)
+		paged = append(paged, page...)
+		if !more {
+			break
+		}
+		require.Len(t, page, 1)
+		after = page[0].RootID
+	}
+	assert.Equal(t, sorted(rootA, rootB, rootC), paged)
+	all2 := sorted(rootA, rootB, rootC, rootD)
+	rest, more, err := cs.ListFixtureRoots(ctx, "", all2[1].RootID, 0)
+	require.NoError(t, err)
+	assert.False(t, more)
+	assert.Equal(t, all2[2:], rest)
+
+	_, _, err = cs.ListFixtureRoots(ctx, "not-a-uuid", "", 0)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, _, err = cs.ListFixtureRoots(ctx, "", "not-a-uuid", 0)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 

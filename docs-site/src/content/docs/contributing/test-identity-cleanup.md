@@ -67,7 +67,7 @@ project:0b2d...
 schedule:9e44...
 ```
 
-Then, after the run's identities have expired (or after you deleted them):
+Then, after the run's identities have expired (or after you deleted or purged them). It does not matter whether the hub's expiry reaper, which purges an identity five minutes after it expires, got there first:
 
 ```bash
 scion hub test-identity cleanup --expect-absent ./created-ids.txt
@@ -76,9 +76,10 @@ scion hub test-identity cleanup --expect-absent ./created-ids.txt
 Before the cleanup, the command asks the hub for each ID's provenance. After it, each ID is reported as one of:
 
 - `cleaned`: proven, and removed by this run.
+- `absent (proven by deletion record <id>)`: already gone, removed by the reaper, a purge or an earlier cleanup; the hub proves it by the delete audit record (its `provenance_basis`), and `<id>` is that record's correlation ID.
 - `absent`: proven before the run and gone after it.
 - `NOT cleaned`: proven but still present, with the reason (for example its identity is still live, or a project was kept).
-- `proven:false ... real-admin action required`: the hub has no record that a test identity created it. Cleanup never removes it and never reports it as cleaned.
+- `proven:false ... real-admin action required`: the hub has no record, in your issuer scope, that a test identity created or deleted it. Cleanup never removes it and never reports it as cleaned.
 
 The command exits non-zero when any ID is `NOT cleaned` or unproven. Treat an unproven ID as a finding for a human, not as something to retry.
 
@@ -88,7 +89,7 @@ The command exits non-zero when any ID is `NOT cleaned` or unproven. Treat an un
 scion hub test-identity provenance agent:6f1c...
 ```
 
-A proven resource shows the identity it is recorded under, the issuer and the identity's state (`live`, `expired` or `absent`). An unproven resource shows only `proven:false` and the reason `no fixture stamp`. The hub never returns the owner or creator of an unproven resource, and a resource that does not exist gets exactly the same answer.
+The answer covers your issuer scope: the identities you issued (with a profile, those of its delegation), or every issuer's for an admin sign-in. A proven resource shows the identity it is recorded under, the issuer and the identity's state (`live`, `expired` or `absent`). A resource that is already gone is shown as deleted, with the correlation ID of its deletion record. An unproven resource shows only `proven:false` and the reason `no fixture stamp`. The hub never returns the owner or creator of an unproven resource, and a resource that does not exist, or another issuer's, gets exactly the same answer.
 
 ## Audit
 

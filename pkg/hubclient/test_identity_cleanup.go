@@ -72,7 +72,11 @@ type TestIdentityProvenance struct {
 	FixtureIssuerID string `json:"fixtureIssuerId,omitempty"`
 	// FixtureState is live, expired or absent.
 	FixtureState string `json:"fixtureState,omitempty"`
-	Reason       string `json:"reason"`
+	// Deleted is true for a resource that is gone, proven by its deletion
+	// record (whose correlation ID is DeletionRecord).
+	Deleted        bool   `json:"deleted,omitempty"`
+	DeletionRecord string `json:"deletionRecord,omitempty"`
+	Reason         string `json:"reason"`
 }
 
 // Cleanup removes the resources of the caller's expired or deleted test

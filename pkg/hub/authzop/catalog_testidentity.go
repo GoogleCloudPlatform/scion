@@ -200,13 +200,15 @@ var testIdentityOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestFixtureCleanup_IssuerIsolation"},
 			{Package: "pkg/hub", Function: "TestFixtureCleanup_DelegationIsolation"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_AdminKindTargets"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "testidentity.provenance",
 		Domain:      "testidentity",
-		Description: "Explain whether the hub recorded one agent, project, schedule or group as created under a test identity: proven with the stamp and the identity's state, or unproven with only the reason (a missing resource gets the same answer, and no owner or creator data is returned)",
+		Description: "Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/provenance", Method: "GET"},
 		},
@@ -218,13 +220,14 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Unproven and missing resources are indistinguishable and carry no owner or creator fields; test identities of every kind are refused as callers",
+			Description: "Only stamps and deletion records in the caller's issuer scope are proven; unproven, missing and out-of-scope resources are indistinguishable and carry no owner or creator fields; test identities of every kind are refused as callers",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		DenialCodes:   []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestFixtureProvenance_Route"},
+			{Package: "pkg/hub", Function: "TestFixtureProvenance_ScopeAndDeletionRecords"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},

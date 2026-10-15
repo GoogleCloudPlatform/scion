@@ -291,10 +291,11 @@ type Store interface {
 	// ones included), schedules, groups and projects (ptone/scion#4240,
 	// Phase 3c), ordered by root ID. A non-empty issuerID keeps only the
 	// stamps whose fixture_issuer_id is issuerID; an empty one keeps every
-	// stamp. Only the stamp columns select: an unstamped row is never
-	// counted. At most limit stamps are returned (limit <= 0: no limit), and
-	// truncated reports whether more exist.
-	ListFixtureRoots(ctx context.Context, issuerID string, limit int) (roots []FixtureProvenance, truncated bool, err error)
+	// stamp. A non-empty afterRootID is a cursor: only roots ordered after
+	// it are returned. Only the stamp columns select: an unstamped row is
+	// never counted. At most limit stamps are returned (limit <= 0: no
+	// limit), and more reports whether further roots follow the page.
+	ListFixtureRoots(ctx context.Context, issuerID, afterRootID string, limit int) (roots []FixtureProvenance, more bool, err error)
 
 	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
 	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
