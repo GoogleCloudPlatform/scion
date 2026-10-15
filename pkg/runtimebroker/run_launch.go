@@ -547,10 +547,13 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 
 // cleanupAbortedLaunch deletes the launch's runtime resources and, for a
 // create launch whose marker still holds this launch's ID, its agent files
-// (design §3.8.4).
-func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) {
-	s.cleanupLaunchResources(mgr, rec)
-	s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug)
+// (design §3.8.4). It returns the failed steps (cleanupFailure, each also
+// recorded on rec), or nil; a skip is not a failure.
+func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) error {
+	return errors.Join(
+		s.cleanupLaunchResources(mgr, rec),
+		s.cleanupLaunchFiles(rec, lc.opts, lc.sharedWorkspace, lc.key.Slug),
+	)
 }
 
 // cleanupLaunchFiles deletes a create launch's agent files when its marker
@@ -558,9 +561,9 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 // §3.8.4). opts needs only Name, ProjectPath, HubProjectID,
 // SharedWorkspace and RunID, so boot recovery can rebuild it from the
 // launch journal.
-func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sharedWorkspace bool, slug string) {
+func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sharedWorkspace bool, slug string) error {
 	if rec.Kind != store.LaunchKindCreate || opts.ProjectPath == "" {
-		return
+		return nil
 	}
 	// The ownership checks and the removal run under the process-wide
 	// workspace lock on the agent's files.
@@ -570,13 +573,13 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 	if err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		return failCleanup(rec, cleanupFailFilesLock)
 	}
 	defer unlock()
 	if !launchMarkerMatches(opts.ProjectPath, sharedWorkspace, slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
-		return
+		return nil
 	}
 	target := agent.RunOwnerTargetFor(opts)
 	target.SharedWorkspace = target.SharedWorkspace || sharedWorkspace
@@ -584,36 +587,39 @@ func (s *Server) cleanupLaunchFiles(rec *launchRecord, opts api.StartOptions, sh
 		// The owner of the files is unknown (ptone/scion#4771): keep them.
 		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the owner of the agent's files is unknown",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "error", ownerErr)
-		return
+		return nil
 	} else if owner != "" {
 		// The files record a different run as their owner
 		// (ptone/scion#2675): they are not this launch's to delete.
 		s.agentLifecycleLog.Info("runLaunch: skipped agent file cleanup: the agent's files belong to another run",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", opts.RunID, "files_run_id", owner)
-		return
+		return nil
 	}
 	if _, err := agent.DeleteAgentFiles(opts.Name, opts.ProjectPath, true); err != nil && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return failCleanup(rec, cleanupFailFilesDelete)
 	}
+	return nil
 }
 
 // cleanupLaunchResources deletes the runtime resources the launch recorded
 // (design §3.8.4), on a fresh context: ctx' may already be done.
-func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
+func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), scionrt.AsyncLaunchCleanupBudget)
 	defer cancel()
 	handles := rec.HandlesSnapshot()
 	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		return
+		return failCleanup(rec, cleanupFailRuntimeResources)
 	}
 	// A flat instance finishes only this launch's run in its records.
 	rec.ownedRunMu.Lock()
 	key := rec.ownedRun
 	rec.ownedRunMu.Unlock()
 	s.finishCleanedRun(key, handles)
+	return nil
 }
 
 // launchFailureCause returns the cause code a failed launch report carries
@@ -674,9 +680,18 @@ func stepOr(step, def string) string {
 // 3 §1 C-a write 4). Once a shutdown drain's wait has ended, the record is
 // kept instead: its terminal may not have been delivered, or its cleanup
 // may have been cut short, and the next boot's recovery finishes both.
+//
+// A launch whose clean-up failed keeps its record too, as cleanup_pending,
+// so the next boot's recovery retries the clean-up (ptone/scion#5177).
 func (s *Server) endLaunchJournal(rec *launchRecord) {
 	s.untrackAsyncLaunch(rec)
 	if s.drainExpired() {
+		return
+	}
+	if class := rec.cleanupFailure.Load(); class != nil {
+		s.agentLifecycleLog.Warn("runLaunch: launch clean-up failed; its journal record is kept for a retry at the next broker start",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "run_id", rec.RunID, "error_class", string(*class))
+		rec.journal.cleanupPending(time.Now())
 		return
 	}
 	rec.journal.remove()

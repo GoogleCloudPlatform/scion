@@ -73,6 +73,10 @@ const (
 	journalNone journalState = iota
 	journalLaunching
 	journalTerminalPending
+	// journalCleanupPending: the hub has confirmed the launch is over and
+	// asked for clean-up, which failed; only the clean-up is left, for the
+	// next recovery to retry (ptone/scion#5177).
+	journalCleanupPending
 	journalRemoved
 )
 
@@ -83,6 +87,8 @@ func (s journalState) String() string {
 		return "launching"
 	case journalTerminalPending:
 		return "terminal_pending"
+	case journalCleanupPending:
+		return "cleanup_pending"
 	case journalRemoved:
 		return "removed"
 	default:
@@ -141,6 +147,11 @@ type journalRecord struct {
 	LastStep        string               `json:"lastStep,omitempty"`
 	State           string               `json:"state"`
 	Terminal        *journalTerminal     `json:"terminal,omitempty"`
+	// CleanupAttempts counts the failed clean-ups of a cleanup_pending
+	// record, and CleanupFirstFailedAt is when the first one failed; they
+	// bound the retries (ptone/scion#5177). Counters only: no error text.
+	CleanupAttempts      int       `json:"cleanupAttempts,omitempty"`
+	CleanupFirstFailedAt time.Time `json:"cleanupFirstFailedAt,omitzero"`
 }
 
 // key is the registry key the record's launch was registered under.
@@ -408,6 +419,20 @@ func (e *journalEntry) terminal(t journalTerminal) {
 	e.write(journalTerminalPending, &t)
 }
 
+// cleanupPending keeps the record, as cleanup_pending with one failed
+// attempt at failedAt, for the next recovery to retry the clean-up
+// (ptone/scion#5177). Only removal follows it.
+func (e *journalEntry) cleanupPending(failedAt time.Time) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.base.CleanupAttempts = 1
+	e.base.CleanupFirstFailedAt = failedAt.UTC()
+	e.mu.Unlock()
+	e.write(journalCleanupPending, nil)
+}
+
 // remove deletes the record. Nothing is written for this entry afterwards.
 func (e *journalEntry) remove() {
 	if e == nil {
@@ -424,8 +449,17 @@ func (e *journalEntry) remove() {
 func (e *journalEntry) write(state journalState, t *journalTerminal) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.written == journalTerminalPending && state != journalRemoved {
-		return false
+	switch e.written {
+	case journalTerminalPending:
+		// Only a failed clean-up's cleanup_pending, or removal, follows a
+		// terminal.
+		if state != journalCleanupPending && state != journalRemoved {
+			return false
+		}
+	case journalCleanupPending:
+		if state != journalRemoved {
+			return false
+		}
 	}
 	if state < e.written {
 		return false
