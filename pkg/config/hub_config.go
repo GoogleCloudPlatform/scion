@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1544,12 +1545,11 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		_ = k.Set("telemetryEnabled", *enabled)
 	}
 
-	// 4. Load environment variables (SCION_SERVER_ prefix)
-	// Maps: SCION_SERVER_HUB_PORT -> hub.port
-	//       SCION_SERVER_DATABASE_DRIVER -> database.driver
+	// 4. Load environment variables (SCION_SERVER_ prefix) through the env
+	// mapping table (envKeyToConfigKey):
+	//       SCION_SERVER_HUB_PORT -> hub.port
 	//       SCION_SERVER_LOGLEVEL -> logLevel
 	//       SCION_SERVER_OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
-	// Underscores become dots for nested keys, with camelCase handling.
 	_ = k.Load(nonEmptyEnvProvider("SCION_SERVER_", envKeyToConfigKey), nil)
 	splitKoanfListKeys(k, envListConfigKeys)
 
@@ -1583,6 +1583,10 @@ func loadGlobalConfigLegacy(configPath string, topLevel map[string]interface{}) 
 		telemetryEnabled := config.TelemetryEnabled
 		applyTopLevelSettingsSections(config, topLevel)
 		config.TelemetryEnabled = telemetryEnabled
+	}
+	// The env overrides the koanf:"-" settings too, above their file values.
+	if err := applyEnvToOutsideKoanfFields(config); err != nil {
+		return nil, err
 	}
 
 	// Apply defaults for database path if not set
@@ -1640,305 +1644,120 @@ func parseCommaSeparatedList(s string) []string {
 	return result
 }
 
-// snakeCaseFields maps flat-lowercased env segments to their snake_case
-// equivalents used by the opsettings registry and settings.yaml. This is
-// the counterpart to camelCaseFields: where camelCaseFields produces keys for
-// Go struct unmarshaling (adminEmails), snakeCaseFields produces keys that
-// match the opsettings keyspace (admin_emails).
-var snakeCaseFields = map[string]string{
-	// Layer-1 compound segments (from opsettings registry)
-	"adminemails":                "admin_emails",
-	"agentsecrets":               "agent_secrets",
-	"agentendpoint":              "agent_endpoint",
-	"agentrunscope":              "agent_run_scope",
-	"agentrunscopelegacyuntil":   "agent_run_scope_legacy_until",
-	"apibaseurl":                 "api_base_url",
-	"appid":                      "app_id",
-	"authorizeddomains":          "authorized_domains",
-	"autoexposeports":            "auto_expose_ports",
-	"autosuspendstalled":         "auto_suspend_stalled",
-	"cafile":                     "ca_file",
-	"certfile":                   "cert_file",
-	"keyfile":                    "key_file",
-	"defaultharnessconfig":       "default_harness_config",
-	"defaultmaxduration":         "default_max_duration",
-	"defaultuserrole":            "default_user_role",
-	"defaultmaxmodelcalls":       "default_max_model_calls",
-	"defaultmaxturns":            "default_max_turns",
-	"enforcebrokerquotas":        "enforce_broker_quotas",
-	"defaultscratchpad":          "default_scratchpad",
-	"defaultresources":           "default_resources",
-	"defaulttemplate":            "default_template",
-	"githubapp":                  "github_app",
-	"homestorage":                "home_storage",
-	"oidclogin":                  "oidc_login",
-	"shareddirstorage":           "shared_dir_storage",
-	"userscopeonly":              "user_scope_only",
-	"harnessconfigs":             "harness_configs",
-	"hubname":                    "hub_name",
-	"imageregistry":              "image_registry",
-	"insecureskipverify":         "insecure_skip_verify",
-	"installationurl":            "installation_url",
-	"maxsize":                    "max_size",
-	"missingagentgrace":          "missing_agent_grace",
-	"membershipsweepreportonly":  "membership_sweep_report_only",
-	"monitoringdashboardurl":     "monitoring_dashboard_url",
-	"metricsenabled":             "metrics_enabled",
-	"tracingenabled":             "tracing_enabled",
-	"grantkeyactivation":         "grant_key_activation",
-	"tcpallowedports":            "tcp_allowed_ports",
-	"internallisten":             "internal_listen",
-	"internaladvertise":          "internal_advertise",
-	"peerauth":                   "peer_auth",
-	"peerserviceaccounts":        "peer_service_accounts",
-	"peeraudience":               "peer_audience",
-	"reconnectwindow":            "reconnect_window",
-	"refreshinterval":            "refresh_interval",
-	"debounceinterval":           "debounce_interval",
-	"authzrecheckinterval":       "authz_recheck_interval",
-	"lifetimecap":                "lifetime_cap",
-	"shutdowngrace":              "shutdown_grace",
-	"proxysessionmaxage":         "proxy_session_max_age",
-	"streamauthzmax":             "stream_authz_max",
-	"portproxy":                  "port_proxy",
-	"responseheadertimeout":      "response_header_timeout",
-	"instanceid":                 "instance_id",
-	"notificationchannels":       "notification_channels",
-	"privatekeypath":             "private_key_path",
-	"projectdefaults":            "project_defaults",
-	"publicurl":                  "public_url",
-	"reportinterval":             "report_interval",
-	"respectdebugmode":           "respect_debug_mode",
-	"slowrequestthreshold":       "slow_request_threshold",
-	"softdeleteretainfiles":      "soft_delete_retain_files",
-	"softdeleteretention":        "soft_delete_retention",
-	"stalledthreshold":           "stalled_threshold",
-	"useraccessmode":             "user_access_mode",
-	"webhooksenabled":            "webhooks_enabled",
-	"startclaimleasettl":         "start_claim_lease_ttl",
-	"startmaxduration":           "start_max_duration",
-	"startunconfirmedhold":       "start_unconfirmed_hold",
-	"startcreateunconfirmedhold": "start_create_unconfirmed_hold",
-	// Layer-0 compound segments (from layer0Prefixes)
-	"adminmode":               "admin_mode",
-	"devmode":                 "dev_mode",
-	"devtoken":                "dev_token",
-	"devtokenfile":            "dev_token_file",
-	"gcpiamdenyunknownpolicy": "gcp_iam_deny_unknown_policy",
-	"gcpiamcheckmode":         "gcp_iam_check_mode",
-	"gcpprojectid":            "gcp_project_id",
-	"gcpreplicationlocations": "gcp_replication_locations",
-	"hubid":                   "hub_id",
-	"logformat":               "log_format",
-	"loglevel":                "log_level",
-	"messagebroker":           "message_broker",
-	"nativechat":              "native_chat",
-	"readtimeout":             "read_timeout",
-	"workspacestorage":        "workspace_storage",
-	"writetimeout":            "write_timeout",
-	// harness_configs.<name>.* leaves (HarnessConfigEntry koanf tags,
-	// ptone/scion#3836)
-	"imagepullpolicy":  "image_pull_policy",
-	"taskflag":         "task_flag",
-	"authselectedtype": "auth_selected_type",
-	"modelaliases":     "model_aliases",
-	"configdir":        "config_dir",
-	"skillsdir":        "skills_dir",
-	"interruptkey":     "interrupt_key",
-	"interruptsignal":  "interrupt_signal",
-	"instructionsfile": "instructions_file",
-	"systempromptfile": "system_prompt_file",
-	"systempromptmode": "system_prompt_mode",
-	"envtemplate":      "env_template",
-	"noauth":           "no_auth",
-	// Maintenance (runtime-only, no yaml, but env detection still needs it)
-	"maintenancemessage": "maintenance_message",
-}
-
-// camelCaseFields maps lowercased environment variable key segments to their
-// camelCase config equivalents. Package-level to avoid re-allocation per call.
-var camelCaseFields = map[string]string{
-	"adminemails":                   "adminEmails",
-	"adminmode":                     "adminMode",
-	"agentendpoint":                 "agentEndpoint",
-	"agentrunscope":                 "agentRunScope",
-	"agentrunscopelegacyuntil":      "agentRunScopeLegacyUntil",
-	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
-	"allowshadowedschema":           "allowShadowedSchema",
-	"apibaseurl":                    "apiBaseUrl",
-	"appid":                         "appId",
-	"perftrace":                     "perfTrace",
-	"membershipsweepreportonly":     "membershipSweepReportOnly",
-	"authorizeddomains":             "authorizedDomains",
-	"autosuspendstalled":            "autoSuspendStalled",
-	"brokerid":                      "brokerId",
-	"brokername":                    "brokerName",
-	"clientid":                      "clientId",
-	"clientsecret":                  "clientSecret",
-	"containerhubendpoint":          "containerHubEndpoint",
-	"corsallowedheaders":            "corsAllowedHeaders",
-	"corsallowedmethods":            "corsAllowedMethods",
-	"corsallowedorigins":            "corsAllowedOrigins",
-	"corsenabled":                   "corsEnabled",
-	"corsmaxage":                    "corsMaxAge",
-	"defaultuserrole":               "defaultUserRole",
-	"devmode":                       "devMode",
-	"devtoken":                      "devToken",
-	"devtokenfile":                  "devTokenFile",
-	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
-	"displayname":                   "displayName",
-	"driverprincipals":              "driverPrincipals",
-	"drivertokenaudience":           "driverTokenAudience",
-	"gcpcredentials":                "gcpCredentials",
-	"gcpiamdenyunknownpolicy":       "gcpIamDenyUnknownPolicy",
-	"gcpiamcheckmode":               "gcpIamCheckMode",
-	"gcpprojectid":                  "gcpProjectId",
-	"gcpreplicationlocations":       "gcpReplicationLocations",
-	"githubapp":                     "githubApp",
-	"hubendpoint":                   "hubEndpoint",
-	"hubid":                         "hubId",
-	"hubname":                       "hubName",
-	"installationurl":               "installationUrl",
-	"jwksurl":                       "jwksURL",
-	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
-	"launchtimeout":                 "launchTimeout",
-	"localpath":                     "localPath",
-	"monitoringdashboardurl":        "monitoringDashboardUrl",
-	"metricsenabled":                "metricsEnabled",
-	"tracingenabled":                "tracingEnabled",
-	"loglevel":                      "logLevel",
-	"maintenancemessage":            "maintenanceMessage",
-	"missingagentgrace":             "missingAgentGrace",
-	"grantkeyactivation":            "grantKeyActivation",
-	"tcpallowedports":               "tcpAllowedPorts",
-	"internallisten":                "internalListen",
-	"internaladvertise":             "internalAdvertise",
-	"peerauth":                      "peerAuth",
-	"peerserviceaccounts":           "peerServiceAccounts",
-	"peeraudience":                  "peerAudience",
-	"reconnectwindow":               "reconnectWindow",
-	"authzrecheckinterval":          "authzRecheckInterval",
-	"lifetimecap":                   "lifetimeCap",
-	"shutdowngrace":                 "shutdownGrace",
-	"proxysessionmaxage":            "proxySessionMaxAge",
-	"streamauthzmax":                "streamAuthzMax",
-	"portproxy":                     "portProxy",
-	"responseheadertimeout":         "responseHeaderTimeout",
-	"instanceid":                    "instanceId",
-	"startclaimleasettl":            "startClaimLeaseTtl",
-	"startmaxduration":              "startMaxDuration",
-	"startunconfirmedhold":          "startUnconfirmedHold",
-	"startcreateunconfirmedhold":    "startCreateUnconfirmedHold",
-	"oidcaudience":                  "oidcAudience",
-	"platformauthsa":                "platformAuthSA",
-	"privatekey":                    "privateKey",
-	"privatekeypath":                "privateKeyPath",
-	"readtimeout":                   "readTimeout",
-	"requiretrustedproxyip":         "requireTrustedProxyIP",
-	"runtimebroker":                 "runtimeBroker",
-	"slowrequestthreshold":          "slowRequestThreshold",
-	"softdeleteretainfiles":         "softDeleteRetainFiles",
-	"softdeleteretention":           "softDeleteRetention",
-	"telemetryenabled":              "telemetryEnabled",
-	"useraccessmode":                "userAccessMode",
-	"webhooksenabled":               "webhooksEnabled",
-	"webhooksecret":                 "webhookSecret",
-	"writetimeout":                  "writeTimeout",
-}
-
-// envKeyToConfigKey converts an environment variable key to a config key.
-// Handles camelCase conversion for known fields like clientId, clientSecret.
-// Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
+// envKeyToConfigKey maps a SCION_SERVER_* env name (after the prefix) to its
+// GlobalConfig koanf path through the env mapping table (server_env_table.go):
+// a canonical name or an alias lands on the entry's GlobalConfig path, and
+// "" (dropped) when GlobalConfig has no koanf field for the setting. A name
+// the table does not hold resolves against GlobalConfig's koanf tags
+// (serverEnvResidue), else to its lower-case segments joined with ".".
+// Example: HUB_ADMINEMAILS -> hub.adminEmails
 func envKeyToConfigKey(envKey string) string {
-	if a, ok := lookupServerEnvPathAlias(envKey); ok {
-		return a.GlobalConfig
+	name := serverEnvPrefix + envKey
+	if isServerEnvInert(name) {
+		return ""
 	}
-	// Split by underscore, convert each part
-	parts := strings.Split(strings.ToLower(envKey), "_")
-	for i, part := range parts {
-		if replacement, ok := camelCaseFields[part]; ok {
-			parts[i] = replacement
-		}
+	if e, _, ok := lookupServerEnv(name); ok {
+		return e.GlobalConfig
 	}
-
-	return strings.Join(parts, ".")
+	segs := strings.Split(strings.ToLower(envKey), "_")
+	if p, ok := serverEnvResidue(reflect.TypeOf(GlobalConfig{}), segs, ownsGlobalConfigEnvPath); ok {
+		return p
+	}
+	return strings.Join(segs, ".")
 }
 
-// envKeyToOpsettingsKey converts an env var key (after prefix stripping) to a
-// koanf key using snake_case segments that match the opsettings registry and
-// settings.yaml. This is the snake_case counterpart to envKeyToConfigKey.
-// Example: SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
-func envKeyToOpsettingsKey(envKey string) string {
-	parts := strings.Split(strings.ToLower(envKey), "_")
-	for i, part := range parts {
-		if replacement, ok := snakeCaseFields[part]; ok {
-			parts[i] = replacement
-		}
-	}
-	return strings.Join(parts, ".")
-}
-
-// serverSubKeys is the set of first-segment koanf keys (after snake_case
-// mapping) that belong under the "server." namespace in settings.yaml.
-// Derived from the V1ServerConfig koanf tags.
-var serverSubKeys = map[string]bool{
-	"hub": true, "broker": true, "database": true,
-	"auth": true, "oauth": true, "storage": true,
-	"workspace_storage": true, "secrets": true,
-	"log_level": true, "log_format": true,
-	"notification_channels": true, "message_broker": true,
-	"native_chat": true, "plugins": true, "github_app": true,
-	"mode": true, "env": true, "federation": true,
-	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
-	"scheduler": true, "oidc_login": true, "oidc": true,
-	"relay": true,
-}
-
-// serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
-// stripping) to the opsettings koanf keyspace. For keys whose first segment
-// belongs to V1ServerConfig (e.g. hub, auth, database), it prepends "server."
-// so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
-// Non-server keys (e.g. telemetry, default_template) pass through unchanged.
+// serverEnvToOpsettingsKey maps a SCION_SERVER_* env name (after the prefix)
+// to the opsettings koanf keyspace (settings paths) through the env mapping
+// table: HUB_ADMINEMAILS -> server.hub.admin_emails, DEFAULTMODEL ->
+// default_model. A name the table does not hold resolves against
+// V1ServerConfig (under server.) or a map-valued top-level setting
+// (profiles.<name>.*) by koanf tag, else to its lower-case segments joined
+// with "." (under server. when the first segment names a server section).
 func serverEnvToOpsettingsKey(envKey string) string {
-	if a, ok := lookupServerEnvPathAlias(envKey); ok {
-		return a.Path
+	name := serverEnvPrefix + envKey
+	if isServerEnvInert(name) {
+		return ""
 	}
-	key := envKeyToOpsettingsKey(envKey)
-	firstSeg := key
-	if dot := strings.Index(key, "."); dot >= 0 {
-		firstSeg = key[:dot]
+	if e, _, ok := lookupServerEnv(name); ok {
+		return e.Path
 	}
-	if serverSubKeys[firstSeg] {
-		return aliasOpsettingsEnvKey("server." + key)
-	}
-	return aliasOpsettingsEnvKey(key)
+	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), true, true)
 }
 
-// seedEnvToOpsettingsKey maps a SCION_SEED_* env var key (after prefix
-// stripping) to the opsettings koanf keyspace. Server keys carry an explicit
-// SERVER_ segment (SCION_SEED_SERVER_HUB_ADMINEMAILS).
+// seedEnvToOpsettingsKey maps a SCION_SEED_* env name (after the prefix) to
+// the opsettings koanf keyspace. A server setting carries an explicit
+// SERVER_ segment in front of its SCION_SERVER_* name
+// (SCION_SEED_SERVER_HUB_ADMINEMAILS); any other setting takes its
+// SCION_SERVER_* name with SCION_SERVER_ replaced by SCION_SEED_
+// (SCION_SEED_DEFAULTMODEL).
 func seedEnvToOpsettingsKey(envKey string) string {
-	return aliasOpsettingsEnvKey(envKeyToOpsettingsKey(envKey))
+	up := strings.ToUpper(envKey)
+	if rest, ok := strings.CutPrefix(up, "SERVER_"); ok {
+		name := serverEnvPrefix + rest
+		if isServerEnvInert(name) {
+			return ""
+		}
+		if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
+			return e.Path
+		}
+		return settingsEnvResidue(strings.Split(strings.ToLower(rest), "_"), true, false)
+	}
+	if e, _, ok := lookupServerEnv(serverEnvPrefix + up); ok && !strings.HasPrefix(e.Path, "server.") {
+		return e.Path
+	}
+	return settingsEnvResidue(strings.Split(strings.ToLower(envKey), "_"), false, true)
 }
 
-// opsettingsEnvKeyAliases maps an env-derived opsettings key to the key the
-// variable actually sets, for settings whose env variable name is not the
-// spelling derived from the koanf path. An empty target drops the variable.
-//
-// server.hub.public_url is set by SCION_SERVER_HUB_ENDPOINT, the variable
-// the hub's own endpoint resolution reads (GlobalConfig hub.endpoint), so the
-// opsettings layer and the admin UI see the same variable the hub uses. The
-// derived spelling SCION_SERVER_HUB_PUBLICURL is not read by the hub, so it
-// is dropped here and reported as unmatched at startup. The reverse mapping
-// for display lives in opsettings (koanfKeyToEnvSuffix).
-var opsettingsEnvKeyAliases = map[string]string{
-	"server.hub.endpoint":   PublicURLKey,
-	"server.hub.public_url": "",
-}
-
-func aliasOpsettingsEnvKey(key string) string {
-	if target, ok := opsettingsEnvKeyAliases[key]; ok {
-		return target
+// settingsEnvResidue maps the env segments of a name the table does not
+// hold to a settings path. With server true it tries V1ServerConfig (the
+// result goes under server.); with topLevel true it tries the map-valued
+// top-level settings (profiles, runtimes, harness_configs). A full match
+// (envSegmentsKoanfPath) wins; else the longest matched prefix plus the
+// rest of the segments (SHAREDDIRSTORAGE -> server.shared_dir_storage,
+// HARNESSCONFIGS_CLAUDE_ENV_X -> harness_configs.claude.env.x). With server
+// true and topLevel false the result is always under server. A result that
+// would be a table path or a whole list of objects falls back to the
+// segments joined with ".", so a misspelt name never reaches a table
+// setting.
+func settingsEnvResidue(segs []string, server, topLevel bool) string {
+	key := strings.Join(segs, ".")
+	serverType := reflect.TypeOf(V1ServerConfig{})
+	rootType := reflect.TypeOf(VersionedSettings{})
+	mapRoot := false
+	if f, _, ok := fieldByNormTag(rootType, normEnvKey(segs[0])); ok && derefType(f.Type).Kind() == reflect.Map {
+		mapRoot = topLevel
+	}
+	if server {
+		owned := func(p string) bool { return ownsServerEnvPath("server." + p) }
+		if p, ok := serverEnvResidue(serverType, segs, owned); ok {
+			return "server." + p
+		}
+	}
+	if mapRoot {
+		if p, ok := serverEnvResidue(rootType, segs, ownsServerEnvPath); ok {
+			return p
+		}
+	}
+	// unusable reports a prefix match that must not be used: none, a
+	// table path, or a whole list of objects.
+	unusable := func(tags, rest []string, end reflect.Type, path string) bool {
+		return len(tags) == 0 || ownsServerEnvPath(path) || (len(rest) == 0 && isObjectListType(end))
+	}
+	if server {
+		tags, rest, end := envSegmentsKoanfPrefix(serverType, segs)
+		if len(tags) > 0 || !topLevel {
+			p := strings.Join(append(tags, rest...), ".")
+			if unusable(tags, rest, end, "server."+p) {
+				p = key
+			}
+			return "server." + p
+		}
+	}
+	if mapRoot {
+		tags, rest, end := envSegmentsKoanfPrefix(rootType, segs)
+		if p := strings.Join(append(tags, rest...), "."); !unusable(tags, rest, end, p) {
+			return p
+		}
 	}
 	return key
 }
@@ -1997,7 +1816,7 @@ func LoadEnvKoanf() *koanf.Koanf {
 }
 
 // LoadSeedEnvKoanf returns a koanf instance loaded with only the SCION_SEED_*
-// environment variables (no file, no defaults). Uses envKeyToOpsettingsKey to
+// environment variables (no file, no defaults). Uses seedEnvToOpsettingsKey to
 // produce snake_case keys matching the opsettings registry and settings.yaml.
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
@@ -2065,7 +1884,7 @@ func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.K
 		loadBootstrapDefaults(k)
 	}
 
-	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
+	// 2. SCION_SEED_* environment variables (snake_case via seedEnvToOpsettingsKey).
 	if withSeed {
 		seedK := LoadSeedEnvKoanf()
 		_ = k.Merge(seedK)
@@ -2328,6 +2147,78 @@ func applyEnvOverrides(gc *GlobalConfig) error {
 	// D11-fix: normalize AdminEmails (same as primary config load path).
 	gc.Hub.AdminEmails = SanitizeEmailList(gc.Hub.AdminEmails)
 
+	return applyEnvToOutsideKoanfFields(gc)
+}
+
+// globalConfigEnvOverlay holds the GlobalConfig settings kept in koanf:"-"
+// fields (filled from settings.yaml by applyTopLevelSettingsSections and
+// ConvertV1ServerToGlobalConfig), keyed by their settings paths.
+type globalConfigEnvOverlay struct {
+	Telemetry       *V1TelemetryConfig `koanf:"telemetry"`
+	ProjectDefaults struct {
+		DefaultScratchpad *bool `koanf:"default_scratchpad"`
+	} `koanf:"project_defaults"`
+	Quotas struct {
+		EnforceBrokerQuotas *bool `koanf:"enforce_broker_quotas"`
+	} `koanf:"quotas"`
+	AgentSecrets struct {
+		UserScopeOnly *bool `koanf:"user_scope_only"`
+	} `koanf:"agent_secrets"`
+	DefaultHarnessConfig               *string `koanf:"default_harness_config"`
+	DefaultTimezone                    *string `koanf:"default_timezone"`
+	DefaultGCPIdentityMode             *string `koanf:"default_gcp_identity_mode"`
+	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
+	Server                             struct {
+		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
+	} `koanf:"server"`
+}
+
+// applyEnvToOutsideKoanfFields applies the SCION_SERVER_* variables of the
+// settings GlobalConfig holds in koanf:"-" fields (globalConfigEnvOverlay)
+// on top of their file values, so the env overrides those settings as it
+// does every koanf field. A variable leaves the rest of its section in
+// place. It runs after the file values are applied.
+func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
+	k := koanf.New(".")
+	_ = k.Load(nonEmptyEnvProvider(serverEnvPrefix, func(rest string) string {
+		if e, _, ok := lookupServerEnv(serverEnvPrefix + rest); ok {
+			return e.Path
+		}
+		return ""
+	}), nil)
+	if len(k.Keys()) == 0 {
+		return nil
+	}
+	var ov globalConfigEnvOverlay
+	ov.Telemetry = gc.TelemetryConfig
+	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.NativeChat = gc.NativeChat
+	if err := k.Unmarshal("", &ov); err != nil {
+		return err
+	}
+	gc.TelemetryConfig = ov.Telemetry
+	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.NativeChat = ov.Server.NativeChat
+	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
+		gc.DefaultScratchpad = v
+	}
+	if v := ov.Quotas.EnforceBrokerQuotas; v != nil {
+		gc.EnforceBrokerQuotas = v
+	}
+	if v := ov.AgentSecrets.UserScopeOnly; v != nil {
+		gc.AgentSecretsUserScopeOnly = v
+	}
+	for dst, src := range map[*string]*string{
+		&gc.DefaultHarnessConfig:               ov.DefaultHarnessConfig,
+		&gc.DefaultTimezone:                    ov.DefaultTimezone,
+		&gc.DefaultGCPIdentityMode:             ov.DefaultGCPIdentityMode,
+		&gc.DefaultGCPIdentityServiceAccountID: ov.DefaultGCPIdentityServiceAccountID,
+	} {
+		if src != nil {
+			*dst = *src
+		}
+	}
 	return nil
 }
 

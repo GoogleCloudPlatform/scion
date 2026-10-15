@@ -38,374 +38,44 @@ import (
 // from the koanf path: drop a leading "server.", remove the underscores
 // inside each segment, upper-case, join the segments with "_", and prefix
 // SCION_SERVER_ (server.hub.admin_emails -> SCION_SERVER_HUB_ADMINEMAILS).
-// TestSchemaEnvVarDerivation keeps the derivation and the schema aligned.
-// The seed spelling puts SCION_SEED_ in front of the server path
-// (SCION_SEED_SERVER_HUB_ADMINEMAILS).
+// TestSchemaEnvVarDerivation keeps the derivation, the schema and the env
+// mapping table (config.ServerEnvKey) aligned. The seed spelling puts
+// SCION_SEED_ in front of the server path (SCION_SEED_SERVER_HUB_ADMINEMAILS).
 //
 // The test sets that spelling and checks it reaches the key through every
 // env consumer that has a field for it, and that an exported but empty
 // value is treated as unset: for the struct consumers it seeds a YAML value
-// first and requires the empty variable to leave it in place. Current gaps
-// are listed in envContractGaps, and the versioned reason classes are
-// checked against the underscored spelling. A struct consumer without a
-// field for a key is listed in envContractNoField, never skipped silently;
-// a key GlobalConfig holds in a koanf:"-" field is checked and is a gap.
-// The single mapping table (ptone/scion#3911) drains these lists.
+// first and requires the empty variable to leave it in place. Every
+// (consumer, key) pair must reach: the single mapping table
+// (ptone/scion#3911) drained the former known-gap list, and a new gap
+// fails. TestServerEnvAliasesReach does the same for every legacy alias. A
+// struct consumer without a field for a key is listed in
+// envContractNoField, never skipped silently; a key GlobalConfig holds in a
+// koanf:"-" field is checked through that field.
 
 // Env consumers checked by the contract test.
 const (
-	// consumerOpsettings is LoadEnvKoanf (serverEnvToOpsettingsKey: the
-	// snakeCaseFields and serverSubKeys mapper). It feeds the opsettings
+	// consumerOpsettings is LoadEnvKoanf (serverEnvToOpsettingsKey, through
+	// the env mapping table). It feeds the opsettings
 	// env layer, the bootstrap merge and the admin UI env badges. Every key
 	// is checked.
 	consumerOpsettings = "opsettings"
-	// consumerSeed is LoadSeedEnvKoanf (envKeyToOpsettingsKey) with the
+	// consumerSeed is LoadSeedEnvKoanf (seedEnvToOpsettingsKey) with the
 	// SCION_SEED_ spelling. Seed values only seed Layer-1 keys, so only
 	// Layer-1 keys are checked.
 	consumerSeed = "seed"
-	// consumerGlobalConfig is LoadGlobalConfig (envKeyToConfigKey: the
-	// camelCaseFields mapper), on both the settings.yaml and the legacy
+	// consumerGlobalConfig is LoadGlobalConfig (envKeyToConfigKey, and
+	// applyEnvToOutsideKoanfFields for koanf:"-" fields), on both the
+	// settings.yaml and the legacy
 	// server.yaml load path. Checked for keys GlobalConfig has a field for.
 	consumerGlobalConfig = "globalconfig"
 	// consumerVersioned is LoadVersionedSettings (versionedEnvKeyMapper:
-	// the SCION_SERVER_* branch). Checked for server.* keys
+	// the SCION_SERVER_* branch, serverEnvToVersionedKey). Checked for server.* keys
 	// VersionedSettings has a field for.
 	consumerVersioned = "versioned"
 )
 
 var envContractConsumers = []string{consumerOpsettings, consumerSeed, consumerGlobalConfig, consumerVersioned}
-
-// Reasons used in envContractGaps.
-const (
-	gapSnakeCaseFields = "snakeCaseFields has no entry for a compound segment of the key, so the canonical " +
-		"spelling lands on an unsplit key and the key is never set (ptone/scion#3911)"
-	gapGlobalConfigBroker = "GlobalConfig names the section runtimeBroker, so only SCION_SERVER_RUNTIMEBROKER_* " +
-		"reaches it, not SCION_SERVER_BROKER_* (ptone/scion#3911)"
-	gapGlobalConfigCORS = "GlobalConfig flattens cors.* into corsEnabled, corsMaxAge, ...; only the flattened " +
-		"spelling (SCION_SERVER_HUB_CORSENABLED) reaches it (ptone/scion#3911)"
-	gapGlobalConfigCamel = "camelCaseFields has no entry for a compound segment of the key, so the canonical " +
-		"spelling lands on a lower-case key that matches no field (ptone/scion#3911)"
-	// gapVersionedUnderscored and gapVersionedNoSpelling are checked: the
-	// test sets the underscored spelling (underscoredServerEnv) and requires
-	// it to reach the key for the first and to miss it for the second.
-	gapVersionedUnderscored = "versionedEnvKeyMapper expects the underscored spelling of a compound field " +
-		"(SCION_SERVER_HUB_ADMIN_EMAILS), which reaches the key; the canonical spelling binds to no field " +
-		"(ptone/scion#3911)"
-	gapVersionedNoSpelling = "section or field not split: versionedEnvKeyMapper (knownCompoundFields, " +
-		"isSectionName) has no entry for a section or compound field of the key, so no SCION_SERVER_ " +
-		"spelling reaches it, neither the canonical nor the underscored one (ptone/scion#3911)"
-	gapGlobalConfigTelemetry = "GlobalConfig flattens telemetry.enabled into the top-level telemetryEnabled, " +
-		"so the canonical spelling lands on telemetry.enabled and binds to no field (ptone/scion#3911)"
-	gapGlobalConfigOutsideKoanf = "GlobalConfig holds the key in a koanf:\"-\" field filled from settings.yaml " +
-		"after the env merge, so no SCION_SERVER_ spelling sets it there. The file-tier reload builds the live " +
-		"snapshot from that field, while the admin GET reports the env override from the opsettings layer, so " +
-		"the page shows an env override the runtime ignores (ptone/scion#3911)"
-	gapGlobalConfigFederationCache = "GlobalConfig nests the federation cache intervals under federation.cache, " +
-		"so the canonical spelling lands on federation.<field> and binds to no field (ptone/scion#3911)"
-	gapRuntimeBrokerName = "the schema name is SCION_SERVER_RUNTIMEBROKER_*, which this consumer maps under a " +
-		"runtimebroker section it does not have; only GlobalConfig has runtimeBroker (ptone/scion#3911)"
-	gapUnderscoredName = "the schema name keeps the field's underscores (SCION_SERVER_BROKER_BROKER_ID), which " +
-		"this consumer splits into extra segments (ptone/scion#3911)"
-	gapHubEndpointName = "the schema name is SCION_SERVER_HUB_ENDPOINT, which this consumer maps to " +
-		"server.hub.endpoint, not server.hub.public_url (ptone/scion#3911)"
-)
-
-// envContractGaps lists the known (consumer, key) pairs where the canonical
-// spelling does not reach the key. Keyed "<consumer> <koanf path>". The list
-// may only shrink: a new gap fails the test, and so does an entry whose gap
-// has been fixed (remove it). ptone/scion#3911 drains it.
-var envContractGaps = map[string]string{
-	// opsettings
-	"opsettings default_agent_role":                                       gapSnakeCaseFields,
-	"opsettings default_gcp_identity_mode":                                gapSnakeCaseFields,
-	"opsettings default_gcp_identity_service_account_id":                  gapSnakeCaseFields,
-	"opsettings default_max_agent_role":                                   gapSnakeCaseFields,
-	"opsettings default_model":                                            gapSnakeCaseFields,
-	"opsettings default_runtime_broker":                                   gapSnakeCaseFields,
-	"opsettings default_thinking_level":                                   gapSnakeCaseFields,
-	"opsettings default_timezone":                                         gapSnakeCaseFields,
-	"opsettings server.auth.proxy.driver_principals":                      gapSnakeCaseFields,
-	"opsettings server.auth.proxy.driver_token_audience":                  gapSnakeCaseFields,
-	"opsettings server.auth.proxy.iap.jwks_url":                           gapSnakeCaseFields,
-	"opsettings server.auth.proxy.jwt.claims.display_name":                gapSnakeCaseFields,
-	"opsettings server.auth.proxy.jwt.jwks_file":                          gapSnakeCaseFields,
-	"opsettings server.auth.proxy.jwt.jwks_url":                           gapSnakeCaseFields,
-	"opsettings server.auth.proxy.jwt.public_key_file":                    gapSnakeCaseFields,
-	"opsettings server.auth.proxy.require_trusted_proxy_ip":               gapSnakeCaseFields,
-	"opsettings server.auth.transport.oidc_audience":                      gapSnakeCaseFields,
-	"opsettings server.auth.transport.platform_auth_sa":                   gapSnakeCaseFields,
-	"opsettings server.broker.allow_container_script_harnesses":           gapRuntimeBrokerName,
-	"opsettings server.broker.auto_provide":                               gapUnderscoredName,
-	"opsettings server.broker.broker_id":                                  gapUnderscoredName,
-	"opsettings server.broker.broker_name":                                gapUnderscoredName,
-	"opsettings server.broker.broker_nickname":                            gapUnderscoredName,
-	"opsettings server.broker.broker_token":                               gapUnderscoredName,
-	"opsettings server.broker.container_hub_endpoint":                     gapRuntimeBrokerName,
-	"opsettings server.broker.cors.allowed_headers":                       gapSnakeCaseFields,
-	"opsettings server.broker.cors.allowed_methods":                       gapSnakeCaseFields,
-	"opsettings server.broker.cors.allowed_origins":                       gapSnakeCaseFields,
-	"opsettings server.broker.cors.max_age":                               gapSnakeCaseFields,
-	"opsettings server.broker.enabled":                                    gapRuntimeBrokerName,
-	"opsettings server.broker.host":                                       gapRuntimeBrokerName,
-	"opsettings server.broker.hub_endpoint":                               gapRuntimeBrokerName,
-	"opsettings server.broker.port":                                       gapRuntimeBrokerName,
-	"opsettings server.broker.read_timeout":                               gapRuntimeBrokerName,
-	"opsettings server.broker.write_timeout":                              gapRuntimeBrokerName,
-	"opsettings server.database.allow_shadowed_schema":                    gapSnakeCaseFields,
-	"opsettings server.database.conn_max_idle_time":                       gapSnakeCaseFields,
-	"opsettings server.database.conn_max_lifetime":                        gapSnakeCaseFields,
-	"opsettings server.database.max_idle_conns":                           gapSnakeCaseFields,
-	"opsettings server.database.max_open_conns":                           gapSnakeCaseFields,
-	"opsettings server.home_storage.allow_incomplete_phases":              gapSnakeCaseFields,
-	"opsettings server.home_storage.skeleton_max_bytes":                   gapSnakeCaseFields,
-	"opsettings server.home_storage.stop_grace_seconds":                   gapSnakeCaseFields,
-	"opsettings server.home_storage.termination_wait_seconds":             gapSnakeCaseFields,
-	"opsettings server.hub.cors.allowed_headers":                          gapSnakeCaseFields,
-	"opsettings server.hub.cors.allowed_methods":                          gapSnakeCaseFields,
-	"opsettings server.hub.cors.allowed_origins":                          gapSnakeCaseFields,
-	"opsettings server.hub.cors.max_age":                                  gapSnakeCaseFields,
-	"opsettings server.hub.launch_keepalive_seconds":                      gapSnakeCaseFields,
-	"opsettings server.hub.launch_timeout":                                gapSnakeCaseFields,
-	"opsettings server.hub.perf_trace":                                    gapSnakeCaseFields,
-	"opsettings server.oauth.cli.github.client_id":                        gapSnakeCaseFields,
-	"opsettings server.oauth.cli.github.client_secret":                    gapSnakeCaseFields,
-	"opsettings server.oauth.cli.google.client_id":                        gapSnakeCaseFields,
-	"opsettings server.oauth.cli.google.client_secret":                    gapSnakeCaseFields,
-	"opsettings server.oauth.device.github.client_id":                     gapSnakeCaseFields,
-	"opsettings server.oauth.device.github.client_secret":                 gapSnakeCaseFields,
-	"opsettings server.oauth.device.google.client_id":                     gapSnakeCaseFields,
-	"opsettings server.oauth.device.google.client_secret":                 gapSnakeCaseFields,
-	"opsettings server.oauth.web.github.client_id":                        gapSnakeCaseFields,
-	"opsettings server.oauth.web.github.client_secret":                    gapSnakeCaseFields,
-	"opsettings server.oauth.web.google.client_id":                        gapSnakeCaseFields,
-	"opsettings server.oauth.web.google.client_secret":                    gapSnakeCaseFields,
-	"opsettings server.secrets.gcp_credentials":                           gapSnakeCaseFields,
-	"opsettings server.shared_dir_storage.nfs.mount_options":              gapSnakeCaseFields,
-	"opsettings server.shared_dir_storage.nfs.mount_root":                 gapSnakeCaseFields,
-	"opsettings server.shared_dir_storage.nfs.storage_class":              gapSnakeCaseFields,
-	"opsettings server.shared_dir_storage.nfs.subpath_root":               gapSnakeCaseFields,
-	"opsettings server.storage.local_path":                                gapSnakeCaseFields,
-	"opsettings server.workspace_storage.cloudrun_volume.subpath_root":    gapSnakeCaseFields,
-	"opsettings server.workspace_storage.cloudrun_volume.volume_name":     gapSnakeCaseFields,
-	"opsettings server.workspace_storage.gke_shared_volume.pv_claim_name": gapSnakeCaseFields,
-	"opsettings server.workspace_storage.gke_shared_volume.subpath_root":  gapSnakeCaseFields,
-	"opsettings server.workspace_storage.gke_shared_volume.volume_name":   gapSnakeCaseFields,
-	"opsettings server.workspace_storage.nfs.auto_mount":                  gapSnakeCaseFields,
-	"opsettings server.workspace_storage.nfs.mount_options":               gapSnakeCaseFields,
-	"opsettings server.workspace_storage.nfs.mount_root":                  gapSnakeCaseFields,
-	"opsettings server.workspace_storage.nfs.storage_class":               gapSnakeCaseFields,
-	"opsettings server.workspace_storage.nfs.subpath_root":                gapSnakeCaseFields,
-
-	// seed
-	"seed default_agent_role":                      gapSnakeCaseFields,
-	"seed default_gcp_identity_mode":               gapSnakeCaseFields,
-	"seed default_gcp_identity_service_account_id": gapSnakeCaseFields,
-	"seed default_max_agent_role":                  gapSnakeCaseFields,
-	"seed default_model":                           gapSnakeCaseFields,
-	"seed default_runtime_broker":                  gapSnakeCaseFields,
-	"seed default_thinking_level":                  gapSnakeCaseFields,
-	"seed default_timezone":                        gapSnakeCaseFields,
-
-	// globalconfig
-	"globalconfig agent_secrets.user_scope_only":                            gapGlobalConfigOutsideKoanf,
-	"globalconfig default_gcp_identity_mode":                                gapGlobalConfigOutsideKoanf,
-	"globalconfig default_gcp_identity_service_account_id":                  gapGlobalConfigOutsideKoanf,
-	"globalconfig default_harness_config":                                   gapGlobalConfigOutsideKoanf,
-	"globalconfig default_timezone":                                         gapGlobalConfigOutsideKoanf,
-	"globalconfig project_defaults.default_scratchpad":                      gapGlobalConfigOutsideKoanf,
-	"globalconfig quotas.enforce_broker_quotas":                             gapGlobalConfigOutsideKoanf,
-	"globalconfig server.broker.broker_id":                                  gapUnderscoredName,
-	"globalconfig server.broker.broker_name":                                gapUnderscoredName,
-	"globalconfig server.broker.cors.allowed_headers":                       gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_methods":                       gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.allowed_origins":                       gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.enabled":                               gapGlobalConfigBroker,
-	"globalconfig server.broker.cors.max_age":                               gapGlobalConfigBroker,
-	"globalconfig server.database.conn_max_idle_time":                       gapGlobalConfigCamel,
-	"globalconfig server.database.conn_max_lifetime":                        gapGlobalConfigCamel,
-	"globalconfig server.database.max_idle_conns":                           gapGlobalConfigCamel,
-	"globalconfig server.database.max_open_conns":                           gapGlobalConfigCamel,
-	"globalconfig server.federation.debounce_interval":                      gapGlobalConfigFederationCache,
-	"globalconfig server.federation.refresh_interval":                       gapGlobalConfigFederationCache,
-	"globalconfig server.hub.cors.allowed_headers":                          gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_methods":                          gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.allowed_origins":                          gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.enabled":                                  gapGlobalConfigCORS,
-	"globalconfig server.hub.cors.max_age":                                  gapGlobalConfigCORS,
-	"globalconfig server.native_chat.enabled":                               gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.backend":                         gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.cloudrun_volume.subpath_root":    gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.cloudrun_volume.volume_name":     gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.pv_claim_name": gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.subpath_root":  gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.gke_shared_volume.volume_name":   gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.auto_mount":                  gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.gid":                         gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.mount_options":               gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.mount_root":                  gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.storage_class":               gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.subpath_root":                gapGlobalConfigOutsideKoanf,
-	"globalconfig server.workspace_storage.nfs.uid":                         gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.batch.max_size":                           gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.batch.timeout":                            gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.enabled":                                  gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.endpoint":                                 gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.protocol":                                 gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.provider":                                 gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.ca_file":                              gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.cert_file":                            gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.enabled":                              gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.insecure_skip_verify":                 gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.cloud.tls.key_file":                             gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.enabled":                                        gapGlobalConfigTelemetry,
-	"globalconfig telemetry.filter.attributes.hash":                         gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.attributes.redact":                       gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.enabled":                                 gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.events.exclude":                          gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.events.include":                          gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.respect_debug_mode":                      gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.filter.sampling.default":                        gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.hub.enabled":                                    gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.hub.report_interval":                            gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.console":                                  gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.enabled":                                  gapGlobalConfigOutsideKoanf,
-	"globalconfig telemetry.local.file":                                     gapGlobalConfigOutsideKoanf,
-
-	// versioned
-	"versioned server.auth.authorized_domains":                           gapVersionedUnderscored,
-	"versioned server.auth.default_user_role":                            gapVersionedUnderscored,
-	"versioned server.auth.dev_mode":                                     gapVersionedUnderscored,
-	"versioned server.auth.dev_token":                                    gapVersionedUnderscored,
-	"versioned server.auth.dev_token_file":                               gapVersionedUnderscored,
-	"versioned server.auth.proxy.driver_principals":                      gapVersionedUnderscored,
-	"versioned server.auth.proxy.driver_token_audience":                  gapVersionedUnderscored,
-	"versioned server.auth.proxy.iap.jwks_url":                           gapVersionedUnderscored,
-	"versioned server.auth.proxy.jwt.claims.display_name":                gapVersionedUnderscored,
-	"versioned server.auth.proxy.jwt.jwks_file":                          gapVersionedUnderscored,
-	"versioned server.auth.proxy.jwt.jwks_url":                           gapVersionedUnderscored,
-	"versioned server.auth.proxy.jwt.public_key_file":                    gapVersionedUnderscored,
-	"versioned server.auth.proxy.require_trusted_proxy_ip":               gapVersionedUnderscored,
-	"versioned server.auth.transport.oidc_audience":                      gapVersionedUnderscored,
-	"versioned server.auth.transport.platform_auth_sa":                   gapVersionedUnderscored,
-	"versioned server.auth.user_access_mode":                             gapVersionedUnderscored,
-	"versioned server.broker.allow_container_script_harnesses":           gapRuntimeBrokerName,
-	"versioned server.broker.container_hub_endpoint":                     gapRuntimeBrokerName,
-	"versioned server.broker.cors.allowed_headers":                       gapVersionedUnderscored,
-	"versioned server.broker.cors.allowed_methods":                       gapVersionedUnderscored,
-	"versioned server.broker.cors.allowed_origins":                       gapVersionedUnderscored,
-	"versioned server.broker.cors.max_age":                               gapVersionedUnderscored,
-	"versioned server.broker.enabled":                                    gapRuntimeBrokerName,
-	"versioned server.broker.host":                                       gapRuntimeBrokerName,
-	"versioned server.broker.hub_endpoint":                               gapRuntimeBrokerName,
-	"versioned server.broker.port":                                       gapRuntimeBrokerName,
-	"versioned server.broker.read_timeout":                               gapRuntimeBrokerName,
-	"versioned server.broker.write_timeout":                              gapRuntimeBrokerName,
-	"versioned server.database.allow_shadowed_schema":                    gapVersionedUnderscored,
-	"versioned server.database.conn_max_idle_time":                       gapVersionedUnderscored,
-	"versioned server.database.conn_max_lifetime":                        gapVersionedUnderscored,
-	"versioned server.database.max_idle_conns":                           gapVersionedUnderscored,
-	"versioned server.database.max_open_conns":                           gapVersionedUnderscored,
-	"versioned server.federation.algorithms":                             gapVersionedNoSpelling,
-	"versioned server.federation.debounce_interval":                      gapVersionedNoSpelling,
-	"versioned server.federation.enabled":                                gapVersionedNoSpelling,
-	"versioned server.federation.refresh_interval":                       gapVersionedNoSpelling,
-	"versioned server.github_app.api_base_url":                           gapVersionedNoSpelling,
-	"versioned server.github_app.app_id":                                 gapVersionedNoSpelling,
-	"versioned server.github_app.installation_url":                       gapVersionedNoSpelling,
-	"versioned server.github_app.private_key_path":                       gapVersionedNoSpelling,
-	"versioned server.github_app.webhooks_enabled":                       gapVersionedNoSpelling,
-	"versioned server.home_storage.allow_incomplete_phases":              gapVersionedNoSpelling,
-	"versioned server.home_storage.backend":                              gapVersionedNoSpelling,
-	"versioned server.home_storage.leaf":                                 gapVersionedNoSpelling,
-	"versioned server.home_storage.skeleton_max_bytes":                   gapVersionedNoSpelling,
-	"versioned server.home_storage.stop_grace_seconds":                   gapVersionedNoSpelling,
-	"versioned server.home_storage.termination_wait_seconds":             gapVersionedNoSpelling,
-	"versioned server.hub.admin_emails":                                  gapVersionedUnderscored,
-	"versioned server.hub.auto_suspend_stalled":                          gapVersionedUnderscored,
-	"versioned server.hub.conduit.authz_recheck_interval":                gapVersionedUnderscored,
-	"versioned server.hub.conduit.grant_key_activation":                  gapVersionedUnderscored,
-	"versioned server.hub.conduit.instance_id":                           gapVersionedUnderscored,
-	"versioned server.hub.conduit.internal_advertise":                    gapVersionedUnderscored,
-	"versioned server.hub.conduit.internal_listen":                       gapVersionedUnderscored,
-	"versioned server.hub.conduit.lifetime_cap":                          gapVersionedUnderscored,
-	"versioned server.hub.conduit.peer_audience":                         gapVersionedUnderscored,
-	"versioned server.hub.conduit.peer_auth":                             gapVersionedUnderscored,
-	"versioned server.hub.conduit.peer_service_accounts":                 gapVersionedUnderscored,
-	"versioned server.hub.conduit.proxy_session_max_age":                 gapVersionedUnderscored,
-	"versioned server.hub.conduit.reconnect_window":                      gapVersionedUnderscored,
-	"versioned server.hub.conduit.shutdown_grace":                        gapVersionedUnderscored,
-	"versioned server.hub.conduit.stream_authz_max.agent":                gapVersionedUnderscored,
-	"versioned server.hub.conduit.stream_authz_max.broker":               gapVersionedUnderscored,
-	"versioned server.hub.conduit.stream_authz_max.user":                 gapVersionedUnderscored,
-	"versioned server.hub.conduit.tcp_allowed_ports":                     gapVersionedUnderscored,
-	"versioned server.hub.cors.allowed_headers":                          gapVersionedUnderscored,
-	"versioned server.hub.cors.allowed_methods":                          gapVersionedUnderscored,
-	"versioned server.hub.cors.allowed_origins":                          gapVersionedUnderscored,
-	"versioned server.hub.cors.max_age":                                  gapVersionedUnderscored,
-	"versioned server.hub.gcp_iam_check_mode":                            gapVersionedUnderscored,
-	"versioned server.hub.gcp_iam_deny_unknown_policy":                   gapVersionedUnderscored,
-	"versioned server.hub.hub_id":                                        gapVersionedNoSpelling,
-	"versioned server.hub.hub_name":                                      gapVersionedNoSpelling,
-	"versioned server.hub.launch_keepalive_seconds":                      gapVersionedUnderscored,
-	"versioned server.hub.launch_timeout":                                gapVersionedUnderscored,
-	"versioned server.hub.membership_sweep_report_only":                  gapVersionedUnderscored,
-	"versioned server.hub.missing_agent_grace":                           gapVersionedUnderscored,
-	"versioned server.hub.monitoring_dashboard_url":                      gapVersionedUnderscored,
-	"versioned server.hub.perf_trace":                                    gapVersionedUnderscored,
-	"versioned server.hub.port_proxy.response_header_timeout":            gapVersionedUnderscored,
-	"versioned server.hub.public_url":                                    gapHubEndpointName,
-	"versioned server.hub.read_timeout":                                  gapVersionedUnderscored,
-	"versioned server.hub.soft_delete_retain_files":                      gapVersionedUnderscored,
-	"versioned server.hub.soft_delete_retention":                         gapVersionedUnderscored,
-	"versioned server.hub.stalled_threshold":                             gapVersionedUnderscored,
-	"versioned server.hub.start_claim_lease_ttl":                         gapVersionedUnderscored,
-	"versioned server.hub.start_create_unconfirmed_hold":                 gapVersionedUnderscored,
-	"versioned server.hub.start_max_duration":                            gapVersionedUnderscored,
-	"versioned server.hub.start_unconfirmed_hold":                        gapVersionedUnderscored,
-	"versioned server.hub.write_timeout":                                 gapVersionedUnderscored,
-	"versioned server.log_format":                                        gapVersionedUnderscored,
-	"versioned server.log_level":                                         gapVersionedUnderscored,
-	"versioned server.message_broker.enabled":                            gapVersionedNoSpelling,
-	"versioned server.message_broker.type":                               gapVersionedNoSpelling,
-	"versioned server.message_broker.types":                              gapVersionedNoSpelling,
-	"versioned server.native_chat.enabled":                               gapVersionedNoSpelling,
-	"versioned server.oauth.cli.github.client_id":                        gapVersionedUnderscored,
-	"versioned server.oauth.cli.github.client_secret":                    gapVersionedUnderscored,
-	"versioned server.oauth.cli.google.client_id":                        gapVersionedUnderscored,
-	"versioned server.oauth.cli.google.client_secret":                    gapVersionedUnderscored,
-	"versioned server.oauth.device.github.client_id":                     gapVersionedUnderscored,
-	"versioned server.oauth.device.github.client_secret":                 gapVersionedUnderscored,
-	"versioned server.oauth.device.google.client_id":                     gapVersionedUnderscored,
-	"versioned server.oauth.device.google.client_secret":                 gapVersionedUnderscored,
-	"versioned server.oauth.web.github.client_id":                        gapVersionedUnderscored,
-	"versioned server.oauth.web.github.client_secret":                    gapVersionedUnderscored,
-	"versioned server.oauth.web.google.client_id":                        gapVersionedUnderscored,
-	"versioned server.oauth.web.google.client_secret":                    gapVersionedUnderscored,
-	"versioned server.secrets.gcp_credentials":                           gapVersionedUnderscored,
-	"versioned server.secrets.gcp_project_id":                            gapVersionedUnderscored,
-	"versioned server.secrets.gcp_replication_locations":                 gapVersionedUnderscored,
-	"versioned server.shared_dir_storage.backend":                        gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.gid":                        gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.mount_options":              gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.mount_root":                 gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.storage_class":              gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.subpath_root":               gapVersionedNoSpelling,
-	"versioned server.shared_dir_storage.nfs.uid":                        gapVersionedNoSpelling,
-	"versioned server.storage.local_path":                                gapVersionedUnderscored,
-	"versioned server.workspace_storage.backend":                         gapVersionedNoSpelling,
-	"versioned server.workspace_storage.cloudrun_volume.subpath_root":    gapVersionedNoSpelling,
-	"versioned server.workspace_storage.cloudrun_volume.volume_name":     gapVersionedNoSpelling,
-	"versioned server.workspace_storage.gke_shared_volume.pv_claim_name": gapVersionedNoSpelling,
-	"versioned server.workspace_storage.gke_shared_volume.subpath_root":  gapVersionedNoSpelling,
-	"versioned server.workspace_storage.gke_shared_volume.volume_name":   gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.auto_mount":                  gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.gid":                         gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.mount_options":               gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.mount_root":                  gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.storage_class":               gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.subpath_root":                gapVersionedNoSpelling,
-	"versioned server.workspace_storage.nfs.uid":                         gapVersionedNoSpelling,
-}
 
 // envContractStructuredKeys lists keys whose value is a map or a list of
 // objects. No single env string can set them, so they are outside the
@@ -608,68 +278,53 @@ func derivedServerEnv(path string) string {
 	return "SCION_SERVER_" + canonicalEnvSegments(strings.TrimPrefix(path, "server."))
 }
 
-// schemaEnvVarDerivationExceptions lists the settings-schema x-env-var names
-// that derivedServerEnv does not produce, keyed by settings path, with the
-// reason. TestSchemaEnvVarDerivation checks the list in both directions, so
-// the derivation and the schema cannot drift apart unnoticed.
+// schemaEnvVarDerivationExceptions lists the settings-schema SCION_SERVER_
+// x-env-var names that derivedServerEnv does not produce, keyed by settings
+// path, with the reason. They are exactly the keys the env mapping table's
+// canonical overrides cover (serverEnvCanonicalOverrides in
+// pkg/config/server_env_table.go). TestSchemaEnvVarDerivation checks the
+// list in both directions, so the derivation, the schema and the table
+// cannot drift apart unnoticed. x-env-var names outside SCION_SERVER_ (the
+// client settings overlay, e.g. SCION_IMAGE_REGISTRY) are not
+// SCION_SERVER_ spellings and are not checked here.
 var schemaEnvVarDerivationExceptions = map[string]string{
-	// SCION_SERVER_ names that differ from the derivation. These are the
-	// canonical spelling of their key (canonicalServerEnv).
 	"server.broker.allow_container_script_harnesses": envNameRuntimeBroker,
+	"server.broker.auto_provide":                     envNameRuntimeBroker,
+	"server.broker.broker_id":                        envNameRuntimeBroker,
+	"server.broker.broker_name":                      envNameRuntimeBroker,
+	"server.broker.broker_nickname":                  envNameRuntimeBroker,
+	"server.broker.broker_token":                     envNameRuntimeBroker,
 	"server.broker.container_hub_endpoint":           envNameRuntimeBroker,
+	"server.broker.cors.allowed_headers":             envNameRuntimeBroker,
+	"server.broker.cors.allowed_methods":             envNameRuntimeBroker,
+	"server.broker.cors.allowed_origins":             envNameRuntimeBroker,
+	"server.broker.cors.enabled":                     envNameRuntimeBroker,
+	"server.broker.cors.max_age":                     envNameRuntimeBroker,
 	"server.broker.enabled":                          envNameRuntimeBroker,
 	"server.broker.host":                             envNameRuntimeBroker,
 	"server.broker.hub_endpoint":                     envNameRuntimeBroker,
 	"server.broker.port":                             envNameRuntimeBroker,
 	"server.broker.read_timeout":                     envNameRuntimeBroker,
 	"server.broker.write_timeout":                    envNameRuntimeBroker,
-	"server.broker.auto_provide":                     envNameUnderscored,
-	"server.broker.broker_id":                        envNameUnderscored,
-	"server.broker.broker_name":                      envNameUnderscored,
-	"server.broker.broker_nickname":                  envNameUnderscored,
-	"server.broker.broker_token":                     envNameUnderscored,
-	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint",
-
-	// Names outside the SCION_SERVER_ namespace: the client settings
-	// overlay (LoadVersionedSettings / LoadSettingsKoanf). No SCION_SERVER_
-	// consumer reads them, so the contract keeps the derived SCION_SERVER_
-	// spelling for these keys.
-	"active_profile":                           envNameClient,
-	"cli.autohelp":                             envNameClient,
-	"cli.interactive_disabled":                 envNameClient,
-	"default_harness_auth":                     envNameClient,
-	"default_harness_config":                   envNameClient,
-	"default_template":                         envNameClient,
-	"hub.enabled":                              envNameClient,
-	"hub.endpoint":                             envNameClient,
-	"hub.local_only":                           envNameClient,
-	"hub.project_id":                           envNameClient,
-	"image_registry":                           envNameClient,
-	"telemetry.cloud.cloud_logging":            envNameClient,
-	"telemetry.cloud.enabled":                  envNameClient,
-	"telemetry.cloud.endpoint":                 envNameClient,
-	"telemetry.cloud.headers":                  envNameClient,
-	"telemetry.cloud.protocol":                 envNameClient,
-	"telemetry.cloud.tls.ca_file":              envNameClient,
-	"telemetry.cloud.tls.cert_file":            envNameClient,
-	"telemetry.cloud.tls.insecure_skip_verify": envNameClient,
-	"telemetry.cloud.tls.key_file":             envNameClient,
-	"telemetry.enabled":                        envNameClient,
-	"telemetry.hub.enabled":                    envNameClient,
+	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint (ptone/scion#3905)",
 }
 
-const (
-	envNameRuntimeBroker = "named after the GlobalConfig section runtimeBroker (SCION_SERVER_RUNTIMEBROKER_*)"
-	envNameUnderscored   = "keeps the field's underscores, the spelling versionedEnvKeyMapper reads"
-	envNameClient        = "client settings overlay name, outside SCION_SERVER_"
-)
+const envNameRuntimeBroker = "server.broker is documented under the GlobalConfig section name runtimeBroker " +
+	"(SCION_SERVER_RUNTIMEBROKER_*); the SCION_SERVER_BROKER_* spellings are aliases"
 
 // canonicalServerEnv is the canonical SCION_SERVER_ spelling of a key: the
-// schema's x-env-var name when it is a SCION_SERVER_ name, else the derived
-// spelling.
+// schema's x-env-var name when it is a SCION_SERVER_ name, else the table's
+// override for a key listed in schemaEnvVarDerivationExceptions (a key in a
+// shared schema definition, such as server.broker.cors.*, has no x-env-var
+// of its own), else the derived spelling.
 func canonicalServerEnv(key envContractKey) string {
 	if ev, _ := key.Node["x-env-var"].(string); strings.HasPrefix(ev, "SCION_SERVER_") {
 		return ev
+	}
+	if _, listed := schemaEnvVarDerivationExceptions[key.Path]; listed {
+		if name, ok := config.ServerEnvKey(key.Path); ok {
+			return name
+		}
 	}
 	return derivedServerEnv(key.Path)
 }
@@ -695,7 +350,7 @@ func TestSchemaEnvVarDerivation(t *testing.T) {
 	count := 0
 	for path, n := range nodes {
 		ev, _ := n["x-env-var"].(string)
-		if ev == "" {
+		if !strings.HasPrefix(ev, "SCION_SERVER_") {
 			continue
 		}
 		count++
@@ -708,10 +363,17 @@ func TestSchemaEnvVarDerivation(t *testing.T) {
 		case ev == derived && listed:
 			t.Errorf("%s: x-env-var now matches the derived spelling; remove it from schemaEnvVarDerivationExceptions", path)
 		}
+		if canonical, ok := config.ServerEnvKey(path); ok && canonical != ev {
+			t.Errorf("%s: x-env-var %s, env mapping table canonical name %s; they must agree", path, ev, canonical)
+		}
 	}
-	for path := range schemaEnvVarDerivationExceptions {
-		if ev, _ := nodes[path]["x-env-var"].(string); ev == "" {
-			t.Errorf("schemaEnvVarDerivationExceptions entry %q has no x-env-var in the schema; remove it", path)
+	// The exceptions are exactly the table's canonical overrides: every
+	// table entry whose canonical name is not the derived spelling.
+	for _, e := range config.ServerEnvEntries() {
+		_, listed := schemaEnvVarDerivationExceptions[e.Path]
+		if overridden := e.Canonical != derivedServerEnv(e.Path); overridden != listed {
+			t.Errorf("%s: table canonical name %s, derived %s, listed in schemaEnvVarDerivationExceptions: %v",
+				e.Path, e.Canonical, derivedServerEnv(e.Path), listed)
 		}
 	}
 	if count < 50 {
@@ -873,12 +535,12 @@ const (
 
 // envContractNoField lists the (consumer, key) pairs a struct consumer
 // (globalconfig, versioned) does not check because its struct has no field
-// for the key at all. Keyed like envContractGaps. Every struct consumer skip
+// for the key at all. Keyed "<consumer> <koanf path>". Every struct consumer skip
 // must be listed: a key the struct has no field for fails unless listed,
 // and so does a listed pair whose field exists. When the struct models the
 // key under another path, map it in globalConfigContractRenames; when it
 // holds the key in a koanf:"-" field, list the field in
-// globalConfigOutsideKoanf (the pair is then checked, and is a gap).
+// globalConfigOutsideKoanf (the pair is then checked through that field).
 var envContractNoField = map[string]string{
 	"globalconfig auto_expose_ports.enabled":                    noFieldGlobalConfigNotModeled,
 	"globalconfig default_agent_role":                           noFieldGlobalConfigNotModeled,
@@ -949,13 +611,6 @@ func consumerHasField(consumer string, key envContractKey) bool {
 // consumerApplies reports whether the contract checks key through consumer.
 func consumerApplies(consumer string, key envContractKey) bool {
 	return consumerInScope(consumer, key) && consumerHasField(consumer, key)
-}
-
-// underscoredServerEnv is the SCION_SERVER_ spelling that keeps each
-// field's underscores (server.hub.admin_emails ->
-// SCION_SERVER_HUB_ADMIN_EMAILS).
-func underscoredServerEnv(path string) string {
-	return "SCION_SERVER_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(path, "server."), ".", "_"))
 }
 
 // clearSettingsEnv unsets every SCION_SERVER_* and SCION_SEED_* variable
@@ -1167,6 +822,23 @@ var envContractSeedContext = map[string]map[string]interface{}{
 	"server.database.max_open_conns": {"server.database.driver": "postgres"},
 }
 
+// envContractEnvContext lists other variables a GlobalConfig reach check
+// sets next to the key's variable, keyed by koanf path, for loaders that
+// would otherwise overwrite the value (the sqlite driver pins
+// max_open_conns to 1).
+var envContractEnvContext = map[string]map[string]string{
+	"server.database.max_open_conns": {"SCION_SERVER_DATABASE_DRIVER": "postgres"},
+}
+
+// setEnvContext sets key's envContractEnvContext variables for the rest of
+// the (sub)test.
+func setEnvContext(t *testing.T, key envContractKey) {
+	t.Helper()
+	for name, v := range envContractEnvContext[key.Path] {
+		t.Setenv(name, v)
+	}
+}
+
 // noSeedLegacyServerOutsideKoanf: the legacy load path reads koanf fields
 // from server.yaml and fills koanf:"-" fields from top-level settings.yaml
 // sections only. A server key in settings.yaml would switch to the
@@ -1285,7 +957,11 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 			v := pickValue(key, base)
 			t.Setenv("HOME", m.home)
 			t.Setenv(name, v)
+			setEnvContext(t, key)
 			gc, err := config.LoadGlobalConfig(h.configDir)
+			for ctx := range envContractEnvContext[key.Path] {
+				_ = os.Unsetenv(ctx)
+			}
 			if err != nil {
 				r.reached = false
 				r.detail += fmt.Sprintf("[%s] LoadGlobalConfig with %s=%q: %v; ", m.name, name, v, err)
@@ -1357,31 +1033,11 @@ func (h *envContractHarness) check(t *testing.T, consumer string, key envContrac
 	return r
 }
 
-// checkGapReason checks the reason of a versioned gap entry where the
-// reason makes a claim about the underscored spelling: it must reach the
-// key for gapVersionedUnderscored and must not for gapVersionedNoSpelling.
-func (h *envContractHarness) checkGapReason(t *testing.T, entry, reason string, key envContractKey) {
-	t.Helper()
-	name := underscoredServerEnv(key.Path)
-	switch reason {
-	case gapVersionedUnderscored:
-		if reached, detail := h.versionedReach(t, key, name); !reached {
-			t.Errorf("%s: the reason says the underscored spelling reaches the key, but %s; "+
-				"reclassify %q as gapVersionedNoSpelling", key.Path, detail, entry)
-		}
-	case gapVersionedNoSpelling:
-		if reached, _ := h.versionedReach(t, key, name); reached {
-			t.Errorf("%s: the reason says no spelling reaches the key, but %s reaches it; "+
-				"reclassify %q as gapVersionedUnderscored", key.Path, name, entry)
-		}
-	}
-}
-
 // TestServerEnvContract checks, for every registry KoanfPath and Layer-0
 // key, that the canonical SCION_SERVER_ (and, for Layer-1 keys, SCION_SEED_)
 // spelling reaches the key through every env consumer, and that an empty
-// value is treated as unset (ptone/scion#3910). Known gaps are in
-// envContractGaps; struct consumers without a field for a key are in
+// value is treated as unset (ptone/scion#3910). Every pair must reach
+// (ptone/scion#3911); struct consumers without a field for a key are in
 // envContractNoField.
 func TestServerEnvContract(t *testing.T) {
 	clearSettingsEnv(t)
@@ -1409,37 +1065,9 @@ func TestServerEnvContract(t *testing.T) {
 		}
 	}
 
-	// Every gap entry must name a consumer that applies to a known key, and
-	// the versioned reason classes only apply to the versioned consumer.
 	byPath := map[string]envContractKey{}
 	for _, k := range keys {
 		byPath[k.Path] = k
-	}
-	for entry, reason := range envContractGaps {
-		consumer, path, _ := strings.Cut(entry, " ")
-		k, ok := byPath[path]
-		if !ok || envContractStructuredKeys[path] || !consumerApplies(consumer, k) {
-			t.Errorf("envContractGaps entry %q names no checked (consumer, key) pair; remove it", entry)
-		}
-		if !strings.Contains(reason, "ptone/scion#3911") {
-			t.Errorf("envContractGaps entry %q: the reason must cite ptone/scion#3911", entry)
-		}
-		if (reason == gapVersionedUnderscored || reason == gapVersionedNoSpelling) && consumer != consumerVersioned {
-			t.Errorf("envContractGaps entry %q: that reason only applies to the versioned consumer", entry)
-		}
-		if reason == gapGlobalConfigOutsideKoanf {
-			field, _, listed := globalConfigOutsideKoanfField(path)
-			switch {
-			case consumer != consumerGlobalConfig:
-				t.Errorf("envContractGaps entry %q: that reason only applies to the globalconfig consumer", entry)
-			case !listed || structTypeHas(reflect.TypeOf(config.GlobalConfig{}), globalConfigContractPath(path)):
-				t.Errorf("envContractGaps entry %q: GlobalConfig does not hold the key outside koanf; reclassify it", entry)
-			default:
-				if problem := outsideKoanfTagProblem(field); problem != "" {
-					t.Errorf("envContractGaps entry %q: %s; reclassify it", entry, problem)
-				}
-			}
-		}
 	}
 
 	// Every globalConfigOutsideKoanf entry must name a koanf:"-" field and
@@ -1512,18 +1140,11 @@ func TestServerEnvContract(t *testing.T) {
 				if !consumerApplies(consumer, k) {
 					continue
 				}
-				entry := consumer + " " + k.Path
 				r := h.check(t, consumer, k)
-				reason, known := envContractGaps[entry]
-				switch {
-				case !r.reached && !known:
+				if !r.reached {
 					t.Errorf("%s: canonical spelling does not reach the key through %s: %s; "+
-						"map it, or add %q to envContractGaps", k.Path, consumer, r.detail, entry)
-				case r.reached && known:
-					t.Errorf("%s: the gap through %s is fixed; remove %q from envContractGaps",
-						k.Path, consumer, entry)
-				case known:
-					h.checkGapReason(t, entry, reason, k)
+						"add the key to the env mapping table (pkg/config/server_env_table.go)",
+						k.Path, consumer, r.detail)
 				}
 				for _, e := range r.empty {
 					t.Errorf("%s (%s): %s", k.Path, consumer, e)

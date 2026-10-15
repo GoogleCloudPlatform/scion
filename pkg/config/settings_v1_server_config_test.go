@@ -511,7 +511,8 @@ func TestVersionedEnvKeyMapper_DeepServerNesting(t *testing.T) {
 		// Hub server keys
 		{"SCION_SERVER_HUB_PORT", "server.hub.port"},
 		{"SCION_SERVER_HUB_HOST", "server.hub.host"},
-		{"SCION_SERVER_HUB_PUBLIC_URL", "server.hub.public_url"},
+		{"SCION_SERVER_HUB_ENDPOINT", "server.hub.public_url"},
+		{"SCION_SERVER_HUB_PUBLIC_URL", ""}, // inert (ptone/scion#3905)
 		{"SCION_SERVER_HUB_READ_TIMEOUT", "server.hub.read_timeout"},
 		{"SCION_SERVER_HUB_WRITE_TIMEOUT", "server.hub.write_timeout"},
 		// Broker keys
