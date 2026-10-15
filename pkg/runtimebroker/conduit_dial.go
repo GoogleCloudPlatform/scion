@@ -389,8 +389,9 @@ func (hc *HubConnection) startConduit(ctx context.Context, server *Server) {
 		ExecScope:       execScope,
 		// The session serves the hub's broker RPCs through the same
 		// handler tree as the control channel.
-		RPCHandler: newConduitRPCHandler(server.Handler(), hc.Name, 0, logging.Subsystem("broker.conduit.rpc").With("name", hc.Name)),
-		Log:        logging.Subsystem("broker.conduit").With("name", hc.Name),
+		RPCHandler: newGuardedConduitRPCHandler(server.Handler(), hc.Name, 0, logging.Subsystem("broker.conduit.rpc").With("name", hc.Name),
+			newConduitRPCGuard(hc.BrokerID, func() []byte { return hc.snapshot().SecretKey })),
+		Log: logging.Subsystem("broker.conduit").With("name", hc.Name),
 	})
 	if err != nil {
 		slog.Warn("Conduit dialer not started; using the control channel only", "name", hc.Name, "error", err)

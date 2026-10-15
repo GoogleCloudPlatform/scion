@@ -28,6 +28,12 @@ const (
 	RPCProjectCleanup = "project_cleanup"
 )
 
+// BrokerRPCSessionHeader names the conduit session a hub-signed broker
+// RPC is issued for. The hub sets it to the receiving session's id and
+// covers it with its signature; the broker serves the request only on that
+// session.
+const BrokerRPCSessionHeader = "X-Scion-Conduit-Session"
+
 // BrokerRPCs returns every broker RPC capability name, in contract order.
 func BrokerRPCs() []string {
 	return []string{RPCAgentLogs, RPCAgentExec, RPCImageStatus, RPCImagePull, RPCImageDelete, RPCProjectCleanup}
