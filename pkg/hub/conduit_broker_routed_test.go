@@ -139,7 +139,8 @@ type routedBrokerOpts struct {
 	noHandler   bool // the session serves no RPCs (501 unsupported)
 	interceptor conduit.Interceptor
 	answer      func(ctx context.Context, op string, env *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope
-	clk         clock.Clock // the broker session's clock (default real)
+	clk         clock.Clock        // the broker session's clock (default real)
+	handler     conduit.RPCHandler // replaces the scripted handler (answer)
 }
 
 // dialRoutedBroker opens a broker conduit session as the fixture's broker
@@ -161,7 +162,9 @@ func (f *routedBrokerFixture) dialRoutedBroker(t *testing.T, o routedBrokerOpts)
 		clk = clock.Real()
 	}
 	cfg := conduit.Config{Clock: clk, Interceptor: o.interceptor}
-	if !o.noHandler {
+	if o.handler != nil {
+		cfg.RPCHandler = o.handler
+	} else if !o.noHandler {
 		cfg.RPCHandler = conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
 			env := envelope.RPCToRequest(req)
 			op := brokerOpOf(env)
