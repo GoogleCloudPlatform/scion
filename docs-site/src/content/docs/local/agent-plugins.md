@@ -284,8 +284,8 @@ agent_plugins: harness-config "codex" predates Agent Plugins support; plugins st
 To fix this:
 
 - For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts (with a backup) and adds the capability, but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
-- For a harness-config you installed from a source, reinstall it from an updated source with `scion harness-config install --force <source>`.
-- Harness-configs stored on a Hub, and copies bundled inside templates, must be updated and uploaded again (for example with `scion harness-config sync <name>`).
+- Harness-configs stored on a Hub must be updated there: install an updated source over it with `scion harness-config install --force <source>`, or upload a fixed local copy with `scion harness-config sync <name>`.
+- Copies of a harness-config bundled inside templates must be updated too.
 
 ### Claude recovery
 
