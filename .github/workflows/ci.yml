@@ -329,6 +329,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check Store Delete Callers
+        run: |
+          set +e
+          ./hack/check-store-delete-callers.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-store-delete-callers.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check Harness Coverage in Cloud Build Configs
         run: |
           # Invoked directly rather than via a Makefile target, for the same

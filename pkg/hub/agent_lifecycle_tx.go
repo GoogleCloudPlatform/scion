@@ -189,7 +189,9 @@ func lifecycleAudit(mutationType, agentID string, actor AuditActor, now time.Tim
 // that ID (cause agent_soft_delete), run the soft-delete hooks, and write the
 // agent_soft_delete audit record. a is the post-write row. The agent's
 // service-account assignment is deactivated under the same operation ID and
-// cause, so a restore returns exactly it.
+// cause, so a restore returns exactly it. As in agentHardDeleteWork, only the
+// edges where the agent is the delegate are deactivated; its doc comment
+// gives the reason.
 func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor) error {
 	if a == nil {
 		return fmt.Errorf("%w: nil agent in softDeleteAgentTx", store.ErrInvalidInput)
@@ -240,6 +242,16 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // (compensateAgentCreate) run it, so a hook registered for hard delete also
 // runs when a create is rolled back. label prefixes store errors; a hook
 // error is returned as is.
+//
+// Only the edges where the agent is the delegate are deactivated. Edges where
+// it is the delegator are left as they are: the standing check of each
+// delegate (resolveChainRoot with checkChain, which loads each delegator
+// agent through standingChainAgent) refuses an agent whose project-scoped
+// edge chain reaches a missing or soft-deleted agent, and a restore
+// reactivates an edge only when its delegator is live
+// (checkRestoreDelegatorsLive). A project delete, which removes every agent
+// of the project in one transaction, deactivates both sides
+// (deactivateProjectAgentEdges).
 func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {

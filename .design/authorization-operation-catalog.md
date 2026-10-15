@@ -2301,7 +2301,20 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `update-resource`
+**Effects:** `update-resource`, `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Only the dispatch_agent event type grants authority. A resume, and an update that changes the event type, payload, cron expression or enablement, records the caller's initiator attribution and frozen effect ceiling (revisionAuthorityCeiling) in place of the stored ones; an update that changes none of those fields records neither. An update can switch a schedule to dispatch_agent. A dispatch_agent schedule then creates an agent at fire time, with a delegation edge from the recorded principal, after CanDelegate for that principal. A message schedule grants no authority. Effects are listed per operation, not per event type, so grant-authority is listed for the whole operation
+
+### Audit
+
+- **Event Type:** `agent_delegation`
+- **Context Fields:** actor_id
+- **After Fields:** agent_id, can_delegate_result
+- **Atomic:** No
+- **Non-Atomic Justification:** The update or resume write records no mutation audit record: it stores the initiator attribution and the frozen effect ceiling on the schedule row in the same conditional update that bumps its authorization revision. The agent_delegation record is written when a dispatch_agent schedule fires, in the agent-create transaction with the agent row and its delegation edge. A message schedule writes none
 
 **Denial Codes:** `forbidden`
 
