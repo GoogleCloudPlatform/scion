@@ -180,6 +180,10 @@ func TestDeleteAgentsViaHub_NoLocalCheckout(t *testing.T) {
 
 	missing := filepath.Join(tmpHome, "no-checkout", ".scion")
 	projectPath = missing
+	// As with --global, the hub context's project is the global directory,
+	// which exists; only the agent's local project is missing.
+	globalDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
 
 	client, err := hubclient.New(server.URL)
 	require.NoError(t, err)
@@ -187,7 +191,7 @@ func TestDeleteAgentsViaHub_NoLocalCheckout(t *testing.T) {
 		Client:      client,
 		Endpoint:    server.URL,
 		ProjectID:   projectID,
-		ProjectPath: missing,
+		ProjectPath: globalDir,
 	}
 
 	stdout, stderr := captureStdIO(t, func() { err = deleteAgentsViaHub(hubCtx, []string{"remote-agent"}) })

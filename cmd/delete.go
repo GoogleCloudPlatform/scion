@@ -272,10 +272,10 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 // agent directory; the git branch too if removeBranch), removes its
 // synced-agent entry and advances the sync watermark. Used by scion delete
 // and scion stop --rm. The error is from removing the files; the sync state
-// is updated either way, since the Hub record is gone, unless the project
-// has no local directory here (ErrAgentProjectUnresolved, returned as is;
-// see cleanupAfterConfirmedHubDelete). An agent with no
-// local files is not an error. Calls must not overlap: they run git
+// is updated either way, since the Hub record is gone. A project with no
+// local directory here returns ErrAgentProjectUnresolved as is (see
+// cleanupAfterConfirmedHubDelete). An agent with no local files is not an
+// error. Calls must not overlap: they run git
 // worktree operations.
 func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (branchDeleted bool, err error) {
 	// A target-hub profile has no local agent files or sync state.
@@ -288,7 +288,7 @@ func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bo
 
 	// Keep sync watermark current after a successful Hub delete. If hub server
 	// time is unavailable in this flow, UpdateLastSyncedAt falls back to local UTC.
-	if hubCtx != nil && hubCtx.ProjectPath != "" && !errors.Is(err, agent.ErrAgentProjectUnresolved) {
+	if hubCtx != nil && hubCtx.ProjectPath != "" {
 		hubsync.UpdateLastSyncedAt(hubCtx.ProjectPath, time.Time{})
 		hubsync.RemoveSyncedAgent(hubCtx.ProjectPath, agentName)
 	}
