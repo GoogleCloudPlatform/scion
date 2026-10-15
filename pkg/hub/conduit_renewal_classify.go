@@ -55,7 +55,8 @@ func (o ConduitRenewalOutcome) String() string {
 // binding mismatch (target session, epoch or incarnation; open_jti or
 // stream_id), a grant past its acceptance window (now after authz_until
 // plus 30s) or not yet valid (nbf more than 30s ahead), and a kid unknown
-// after a successful key reload. A kid revoked for compromise leaves the
+// after one ring reload (renewConduitStream reloads once on an unknown kid;
+// a failed reload is unavailable). A kid revoked for compromise leaves the
 // re-check key set, so it is unknown here too: compromise and explicit
 // revocation go through the deny paths, not through via or route removal.
 var conduitRenewalDenyGrantErrors = []error{

@@ -64,6 +64,9 @@ const (
 	// conduitRenewalRetryFloor is the shortest wait before retrying a
 	// renewal that was unavailable.
 	conduitRenewalRetryFloor = 30 * time.Second
+	// conduitRenewalLastAttempt is how long before authz_until the last
+	// retry comes at the latest.
+	conduitRenewalLastAttempt = time.Second
 )
 
 // errConduitNoRenewalSender marks a stream with no sender for renewals.
@@ -214,16 +217,22 @@ func (a *conduitStreamAuthz) renewStream(ctx context.Context, st *conduitUserStr
 
 // retryRenewal schedules the next attempt after an unavailable or
 // undelivered renewal: half the time left to authz_until, never sooner
-// than conduitRenewalRetryFloor, and never after authz_until. st.mu is
-// held.
+// than conduitRenewalRetryFloor, and strictly before authz_until: at the
+// latest conduitRenewalLastAttempt before it, and none once that moment
+// has passed. st.mu is held.
 func (a *conduitStreamAuthz) retryRenewal(st *conduitUserStream, now time.Time) {
 	delay := st.AuthzUntil.Sub(now) / 2
 	if delay < conduitRenewalRetryFloor {
 		delay = conduitRenewalRetryFloor
 	}
 	at := now.Add(delay)
-	if at.After(st.AuthzUntil) {
-		return
+	if last := st.AuthzUntil.Add(-conduitRenewalLastAttempt); !at.Before(st.AuthzUntil) {
+		// The last attempt comes strictly before authz_until, so it never
+		// races the close at the deadline; none when that moment has passed.
+		if !last.After(now) {
+			return
+		}
+		at = last
 	}
 	st.dmu.Lock()
 	a.armRenewalLocked(st, at)

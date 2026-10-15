@@ -637,10 +637,37 @@ func (k *conduitGrantKeys) invalidate() {
 // A cached ring older than conduitGrantKeyRecheckFresh is read again first,
 // so a revocation stored by another node applies here within that time.
 func (k *conduitGrantKeys) recheckKeys(ctx context.Context) (grant.KeySet, error) {
+	keys, _, err := k.recheckKeysGen(ctx)
+	return keys, err
+}
+
+// recheckKeysGen is recheckKeys, also returning the cache generation the
+// keys came from (for reloadRecheckKeys).
+func (k *conduitGrantKeys) recheckKeysGen(ctx context.Context) (grant.KeySet, uint64, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.ring != nil && k.now().Sub(k.loadedAt) >= conduitGrantKeyRecheckFresh {
 		k.ring = nil
+	}
+	ring, err := k.currentLocked(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ring.RecheckKeys(k.now(), k.retention()), k.gen, nil
+}
+
+// reloadRecheckKeys returns the re-check key set after one reload of the
+// ring from storage, for a grant whose kid was unknown in the keys of
+// generation seen (design v2.21.36 §3.5). If the cache changed since seen
+// (another renewal already reloaded it, or a key change was applied), that
+// newer ring is used without another read, so many streams meeting the same
+// new kid share one reload. A failed reload returns its error.
+func (k *conduitGrantKeys) reloadRecheckKeys(ctx context.Context, seen uint64) (grant.KeySet, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.gen == seen {
+		k.ring = nil
+		k.gen++
 	}
 	ring, err := k.currentLocked(ctx)
 	if err != nil {

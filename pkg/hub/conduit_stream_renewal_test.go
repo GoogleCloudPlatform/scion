@@ -20,9 +20,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net"
+	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +71,8 @@ func TestClassifyConduitRenewal(t *testing.T) {
 		{"binding: open_jti, stream_id", wrapped(grant.ErrStreamBinding), ConduitRenewalDeny},
 		{"window passed", wrapped(grant.ErrRecheckWindow), ConduitRenewalDeny},
 		{"nbf too far ahead", wrapped(grant.ErrNotYetValid), ConduitRenewalDeny},
-		{"unknown kid after a successful reload (incl. revoked for compromise)", wrapped(grant.ErrUnknownKey), ConduitRenewalDeny},
+		{"unknown kid after one ring reload (incl. revoked for compromise)", wrapped(grant.ErrUnknownKey), ConduitRenewalDeny},
+		{"ring reload failed", fmt.Errorf("%w: grant keys reload: boom", errConduitAuthzUnavailable), ConduitRenewalUnavailable},
 		{"expired key plus bad signature", wrapped(grant.ErrSignature), ConduitRenewalDeny},
 		{"expired key plus window passed", wrapped(grant.ErrRecheckWindow), ConduitRenewalDeny},
 		{"expired key alone", wrapped(grant.ErrKeyExpired), ConduitRenewalUnavailable},
@@ -222,8 +229,9 @@ func TestRenewalDriver_UnavailableClosesAtDeadline(t *testing.T) {
 				assert.True(t, calls[i].Equal(w), "attempt %d at %v, want %v", i, calls[i], w)
 			}
 			for _, at := range calls {
-				assert.False(t, at.After(until), "no attempt after authz_until")
+				assert.True(t, at.Before(until), "every attempt strictly before authz_until")
 			}
+			assert.True(t, calls[len(calls)-1].Equal(until.Add(-conduitRenewalLastAttempt)), "the last attempt is 1s before authz_until")
 		})
 	}
 }
@@ -593,4 +601,241 @@ func TestDeadlineE2E_ProxyRenewalMovesTargetDeadline(t *testing.T) {
 			assert.Zero(t, e.f.srv.conduitAuthz.Load().Len(), "untracked")
 		})
 	}
+}
+
+// TestRenewalDriver_LastRetryStrictlyBeforeDeadline (boundary): a retry
+// that would land at or after authz_until is moved to 1s before it, and
+// none is scheduled once less than 1s remains.
+func TestRenewalDriver_LastRetryStrictlyBeforeDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		left time.Duration // time to authz_until at the failed attempt
+		want time.Duration // when the retry comes; 0 means none
+	}{
+		{"room for the floor", 40 * time.Second, 30 * time.Second},
+		{"capped to 1s before authz_until", 20 * time.Second, 19 * time.Second},
+		{"just over 1s left", 1500 * time.Millisecond, 500 * time.Millisecond},
+		{"exactly 1s left", time.Second, 0},
+		{"under 1s left", 500 * time.Millisecond, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRenewalDriverFixture(t, false)
+			f.setResult(func(int) (*conduitRenewal, error) { return nil, fmt.Errorf("%w: store", errConduitAuthzUnavailable) })
+			now := f.clk.Now()
+			st := &conduitUserStream{
+				Kind: grant.StreamKindPTY, UserID: "u1", SessionID: "sess-1", StreamID: 7,
+				Close: (&closeRecorder{}).close, Renew: (&renewRecorder{}).renew,
+				Grant: []byte("open"), OpenJTI: "open-jti", AuthzUntil: now.Add(tc.left), AuthzInterval: driverInterval,
+			}
+			f.a.retryRenewal(st, now)
+			if tc.want == 0 {
+				st.dmu.Lock()
+				defer st.dmu.Unlock()
+				assert.Nil(t, st.rtimer, "no retry once less than 1s remains")
+				return
+			}
+			f.clk.Advance(tc.want - time.Millisecond)
+			assert.Empty(t, f.callTimes(), "no retry before its time")
+			f.clk.Advance(time.Millisecond)
+			calls := f.callTimes()
+			require.NotEmpty(t, calls)
+			assert.True(t, calls[0].Equal(now.Add(tc.want)), "retry at %v, want %v", calls[0], now.Add(tc.want))
+			assert.True(t, calls[0].Before(st.AuthzUntil))
+		})
+	}
+}
+
+// TestConduitTestSeamsNeverSetInProduction: no non-test file of pkg/hub or
+// cmd sets a conduit test seam, as a composite-literal key or by
+// assignment: ConduitRelayOptions.AuthzClock, and the Server fields
+// conduitScopeOfTest, conduitAuthorizeActionTestHook and
+// conduitRouteCanRenewTest.
+func TestConduitTestSeamsNeverSetInProduction(t *testing.T) {
+	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true}
+	for _, dir := range []string{".", filepath.Join("..", "..", "cmd")} {
+		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		require.NoError(t, err)
+		require.NotEmpty(t, files, dir)
+		for _, name := range files {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+			require.NoError(t, err)
+			ast.Inspect(file, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.KeyValueExpr:
+					if k, ok := x.Key.(*ast.Ident); ok && seams[k.Name] {
+						t.Errorf("%s sets %s in a composite literal", name, k.Name)
+					}
+				case *ast.AssignStmt:
+					for _, lhs := range x.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && seams[sel.Sel.Name] {
+							t.Errorf("%s assigns %s", name, sel.Sel.Name)
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// faultyGrantKeyStore counts ring reads and fails them while fail is set.
+type faultyGrantKeyStore struct {
+	inner conduitGrantKeyStore
+	reads atomic.Int64
+	fail  atomic.Bool
+}
+
+func (s *faultyGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	s.reads.Add(1)
+	if s.fail.Load() {
+		return nil, 0, errors.New("injected ring read failure")
+	}
+	return s.inner.Load(ctx)
+}
+
+func (s *faultyGrantKeyStore) Create(ctx context.Context, ring *grant.KeyRing) error {
+	return s.inner.Create(ctx, ring)
+}
+
+func (s *faultyGrantKeyStore) CompareAndSwap(ctx context.Context, ring *grant.KeyRing, rev int) (bool, error) {
+	return s.inner.CompareAndSwap(ctx, ring, rev)
+}
+
+// reloadFixture is a renewal fixture whose node has cached its ring, with
+// the ring's store wrapped in faultyGrantKeyStore.
+func newReloadFixture(t *testing.T) (*renewalFixture, *faultyGrantKeyStore) {
+	t.Helper()
+	f := newRenewalFixture(t)
+	keys := f.srv.conduitGrants
+	keys.mu.Lock()
+	st := &faultyGrantKeyStore{inner: keys.store}
+	keys.store = st
+	keys.mu.Unlock()
+	_, err := keys.recheckKeys(context.Background())
+	require.NoError(t, err, "the node caches its ring")
+	return f, st
+}
+
+// addStoredKey adds a new key, active from now, to the stored ring behind
+// the node's back (as another hub node's rotation would), and returns a
+// signer for it.
+func (f *renewalFixture) addStoredKey(t *testing.T, st *faultyGrantKeyStore) *grant.Signer {
+	t.Helper()
+	ctx := context.Background()
+	// One second later, so the new key activates after the node's key and
+	// succeeds it; the node's cached ring is still fresh.
+	f.clock.Advance(time.Second)
+	now := f.clock.Now()
+	ring, rev, err := st.inner.Load(ctx)
+	require.NoError(t, err)
+	k, err := grant.NewRingKey(now, now)
+	require.NoError(t, err)
+	next := cloneKeyRing(ring)
+	next.Keys = append(next.Keys, k)
+	applied, err := st.inner.CompareAndSwap(ctx, next, rev)
+	require.NoError(t, err)
+	require.True(t, applied)
+	return keyOnlySigner(t, k, now)
+}
+
+// keyOnlySigner is a signer for k alone.
+func keyOnlySigner(t *testing.T, k grant.RingKey, now time.Time) *grant.Signer {
+	t.Helper()
+	s, err := (&grant.KeyRing{Keys: []grant.RingKey{k}}).Signer(now)
+	require.NoError(t, err)
+	return s
+}
+
+// openGrantSignedBy is openGrant signed by signer, with jti.
+func (f *renewalFixture) openGrantSignedBy(t *testing.T, signer *grant.Signer, jti string) ([]byte, grant.Claims) {
+	t.Helper()
+	now := f.clock.Now().Truncate(time.Second)
+	interval := f.srv.conduitUserStreamAuthzInterval()
+	c := grant.Claims{
+		Issuer: conduitGrantIssuer, Subject: grant.SubjectUserPrefix + f.user.ID(), ProjectID: f.agent.ProjectID,
+		Target: f.regTarget, Stream: tcpHeader("3000"), Via: grant.ViaProxy, JTI: jti,
+		NotBefore: now, Expiry: now.Add(conduitGrantTTL), AuthzUntil: now.Add(interval), AuthzInterval: interval,
+	}
+	tok, err := grant.Mint(signer, c)
+	require.NoError(t, err)
+	return tok, c
+}
+
+// TestConduitRenewStream_UnknownKidReloadsOnce (design v2.21.36 §3.5, PR-B
+// R1 F1): an unknown kid gets one ring reload before it is a deny.
+func TestConduitRenewStream_UnknownKidReloadsOnce(t *testing.T) {
+	t.Run("kid added after the node cached its ring", func(t *testing.T) {
+		f, st := newReloadFixture(t)
+		signer := f.addStoredKey(t, st)
+		tok, open := f.openGrantSignedBy(t, signer, "open-new-kid")
+		st.reads.Store(0)
+		r, err := f.renew(tok, open, 7)
+		require.NoError(t, err, "the reload finds the new kid")
+		assert.NotEmpty(t, r.Token)
+		assert.Equal(t, int64(1), st.reads.Load(), "exactly one reload")
+	})
+	t.Run("reload fails", func(t *testing.T) {
+		f, st := newReloadFixture(t)
+		k, err := grant.NewRingKey(f.clock.Now().Add(-time.Minute), f.clock.Now().Add(-time.Second))
+		require.NoError(t, err)
+		tok, open := f.openGrantSignedBy(t, keyOnlySigner(t, k, f.clock.Now()), "open-reload-fails")
+		st.fail.Store(true)
+		_, err = f.renew(tok, open, 7)
+		assert.ErrorIs(t, err, errConduitAuthzUnavailable)
+		assert.Equal(t, ConduitRenewalUnavailable, ClassifyConduitRenewal(err), "a failed reload is unavailable, never a deny")
+	})
+	t.Run("still unknown after the reload", func(t *testing.T) {
+		f, st := newReloadFixture(t)
+		k, err := grant.NewRingKey(f.clock.Now().Add(-time.Minute), f.clock.Now().Add(-time.Second))
+		require.NoError(t, err)
+		tok, open := f.openGrantSignedBy(t, keyOnlySigner(t, k, f.clock.Now()), "open-never-stored")
+		st.reads.Store(0)
+		_, err = f.renew(tok, open, 7)
+		assert.ErrorIs(t, err, grant.ErrUnknownKey)
+		assert.ErrorIs(t, err, errConduitRenewalUnavailable, "wrapped as the renewal error")
+		assert.Equal(t, ConduitRenewalDeny, ClassifyConduitRenewal(err), "the outer wrapper does not turn it into unavailable")
+		assert.Equal(t, int64(1), st.reads.Load(), "exactly one reload")
+	})
+	t.Run("kid revoked for compromise", func(t *testing.T) {
+		f, st := newReloadFixture(t)
+		nodeSigner, err := f.srv.conduitGrants.signer(context.Background())
+		require.NoError(t, err)
+		tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil) // signed by the node's key
+		f.addStoredKey(t, st)                                               // a successor, so the old key can be revoked
+		require.NoError(t, f.srv.conduitGrants.revoke(context.Background(), nodeSigner.KeyID))
+		_, err = f.renew(tok, open, 7)
+		assert.ErrorIs(t, err, grant.ErrUnknownKey)
+		assert.Equal(t, ConduitRenewalDeny, ClassifyConduitRenewal(err))
+	})
+}
+
+// TestConduitRenewStream_ConcurrentUnknownKidShareReload: many renewals
+// meeting the same new kid at once share one ring reload.
+func TestConduitRenewStream_ConcurrentUnknownKidShareReload(t *testing.T) {
+	f, st := newReloadFixture(t)
+	signer := f.addStoredKey(t, st)
+	const n = 16
+	toks := make([][]byte, n)
+	opens := make([]grant.Claims, n)
+	for i := range n {
+		toks[i], opens[i] = f.openGrantSignedBy(t, signer, fmt.Sprintf("open-herd-%d", i))
+	}
+	st.reads.Store(0)
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = f.renew(toks[i], opens[i], uint32(10+i))
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		assert.NoError(t, err, "renewal %d", i)
+	}
+	assert.LessOrEqual(t, st.reads.Load(), int64(2), "the renewals share one reload")
 }
