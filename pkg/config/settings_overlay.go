@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 )
@@ -51,6 +50,15 @@ type SettingsOverlay struct {
 	// only for reading.
 	fallbackLogMu  sync.Mutex
 	fallbackLogged map[string]struct{}
+
+	// Built-in retention (ptone/scion#5113; settings_overlay_retain.go).
+	// retain, conservative and refs are guarded by mu; retained has its own
+	// mutex because Apply holds mu only for reading.
+	retain           bool
+	conservative     bool
+	refs             ProfileReferences
+	retained         retainState
+	builtinsOverride *builtinCatalog // tests only; nil uses the embedded defaults
 }
 
 // maxFallbackLogKeys caps the set of logged single-stored-profile fallback
@@ -81,9 +89,11 @@ func NewSettingsOverlay() *SettingsOverlay {
 	return &SettingsOverlay{}
 }
 
-// Update sets the overlay's fields. Nil maps are treated as "no change" —
-// pass an empty (non-nil) map to clear a section. imageRegistry is always
-// applied (empty string clears it).
+// Update sets the overlay's fields. Nil maps are treated as "no change".
+// An empty (non-nil) map clears the section: a stored catalog with no
+// entries means the section is not managed in the hub, the same as unset,
+// so Apply keeps the settings file's map for it (ptone/scion#5007).
+// imageRegistry is always applied (empty string clears it).
 func (o *SettingsOverlay) Update(
 	runtimes map[string]V1RuntimeConfig,
 	profiles map[string]V1ProfileConfig,
@@ -94,20 +104,36 @@ func (o *SettingsOverlay) Update(
 	defer o.mu.Unlock()
 
 	if runtimes != nil {
-		o.runtimes = cloneRuntimes(runtimes)
+		o.runtimes = nonEmptyOrNil(cloneRuntimes(runtimes))
 	}
 	if profiles != nil {
-		o.profiles = cloneProfiles(profiles)
+		o.profiles = nonEmptyOrNil(cloneProfiles(profiles))
 	}
 	if harnessConfigs != nil {
-		o.harnessConfigs = cloneHarnessConfigs(harnessConfigs)
+		o.harnessConfigs = nonEmptyOrNil(cloneHarnessConfigs(harnessConfigs))
 	}
 	o.imageRegistry = imageRegistry
 	o.active = true
 }
 
-// Apply merges overlay values into a VersionedSettings. DB values
-// replace file values for each field that has been set in the overlay.
+// nonEmptyOrNil returns m, or nil when m has no entries.
+func nonEmptyOrNil[V any](m map[string]V) map[string]V {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// Apply merges overlay values into a VersionedSettings.
+// When built-in retention is enabled (SetProfileReferences), referenced
+// built-in profiles and the built-in runtimes effective profiles need are
+// kept alongside the stored ones (see settings_overlay_retain.go). DB values
+// replace file values for each field that has been set in the overlay
+// with at least one entry; an empty stored map leaves the file's map in
+// place (see Update). Runtimes and profiles are handled independently, so
+// stored profiles resolve against the file's runtimes when no runtimes are
+// stored, and the active_profile resolution against stored profiles (and
+// its errors) applies only when stored profiles exist.
 // Called by LoadEffectiveSettings after loading from disk.
 func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	if o == nil || vs == nil {
@@ -120,18 +146,27 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 		return
 	}
 
-	if o.runtimes != nil {
+	if len(o.runtimes) > 0 {
 		vs.Runtimes = cloneRuntimes(o.runtimes)
 	}
-	if o.profiles != nil {
+	if len(o.profiles) > 0 {
 		vs.Profiles = cloneProfiles(o.profiles)
-		if configured, chosen := resolveOverlaidActiveProfile(vs); chosen != "" {
+		stored := sortedNames(o.profiles)
+		var retained []string
+		if o.retain {
+			retained = o.retainProfiles(vs, vs.ActiveProfile)
+		}
+		if configured, chosen := resolveOverlaidActiveProfile(vs, stored, retained); chosen != "" {
 			o.logSingleProfileFallback(configured, chosen)
 		} else {
 			o.resetSingleProfileFallbackLog()
 		}
 	}
-	if o.harnessConfigs != nil {
+	if o.retain {
+		vs.retainedRuntimeNames = o.retainRuntimes(vs)
+		o.logRetention()
+	}
+	if len(o.harnessConfigs) > 0 {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
 	}
 	if o.imageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
@@ -151,12 +186,15 @@ type ActiveProfileError struct {
 	// Configured is the active_profile value from the settings file; empty
 	// when none is set.
 	Configured string
-	// Available is the sorted list of profile names in the overlaid map.
+	// Available is the sorted list of the hub's stored profile names.
 	Available []string
+	// Retained is the sorted list of built-in profiles retained beside
+	// them (ptone/scion#5113); they resolve by name too.
+	Retained []string
 }
 
 func (e *ActiveProfileError) Error() string {
-	available := joinAvailableProfiles(e.Available)
+	available := joinAvailableProfiles(e.Available, e.Retained)
 	configured := fmt.Sprintf("%q", e.Configured)
 	if e.Configured == "" {
 		configured = `"" (unset)`
@@ -172,58 +210,70 @@ func (e *ActiveProfileError) Error() string {
 type StoredProfileNotFoundError struct {
 	// Requested is the profile name that was asked for.
 	Requested string
-	// Available is the sorted list of profile names in the overlaid map.
+	// Available is the sorted list of the hub's stored profile names.
 	Available []string
+	// Retained is the sorted list of built-in profiles retained beside
+	// them (ptone/scion#5113); they resolve by name too.
+	Retained []string
 }
 
 func (e *StoredProfileNotFoundError) Error() string {
 	return fmt.Sprintf("profile %q not found in the hub's stored profiles (available profiles: %s)",
-		e.Requested, joinAvailableProfiles(e.Available))
+		e.Requested, joinAvailableProfiles(e.Available, e.Retained))
 }
 
-func joinAvailableProfiles(names []string) string {
-	if len(names) == 0 {
-		return "none"
+// joinAvailableProfiles lists the stored profile names, then the retained
+// built-in ones, as "a, b; retained built-in: c".
+func joinAvailableProfiles(names, retained []string) string {
+	out := "none"
+	if len(names) > 0 {
+		out = strings.Join(names, ", ")
 	}
-	return strings.Join(names, ", ")
+	if len(retained) > 0 {
+		out += "; retained built-in: " + strings.Join(retained, ", ")
+	}
+	return out
 }
 
 // resolveOverlaidActiveProfile decides the default profile once the overlay
-// has replaced vs.Profiles, and records the stored profile names so that
-// ResolveRuntime can name them when a requested profile is missing. The
-// order is:
+// has replaced vs.Profiles with the stored profiles (plus any retained
+// built-in profiles), and records the stored and retained names so that
+// ResolveRuntime can name them when a requested profile is missing. stored
+// and retained are sorted and disjoint. The order is
+// (ptone/scion#5113):
 //
-//  1. the file's active_profile, when that profile exists in the overlaid
-//     map;
-//  2. otherwise, when the overlaid map holds exactly one profile, that
-//     profile: vs.ActiveProfile is set to it, and its name is returned as
-//     chosen (with the file value as configured) so the caller can log the
-//     choice;
-//  3. otherwise (zero or several stored profiles), vs records an
-//     ActiveProfileError, which ResolveRuntime returns when the default
-//     profile is needed; vs.ActiveProfile is left unchanged.
+//  1. the file's active_profile, when it is a stored profile;
+//  2. otherwise, when exactly one profile is stored, that profile:
+//     vs.ActiveProfile is set to it, and its name is returned as chosen
+//     (with the file value as configured) so the caller can log the choice.
+//     Retained profiles are not counted, so with one stored profile the
+//     default stays on it;
+//  3. otherwise, the file's active_profile, when it is a retained built-in
+//     profile;
+//  4. otherwise, vs records an ActiveProfileError, which ResolveRuntime
+//     returns when the default profile is needed; vs.ActiveProfile is left
+//     unchanged.
 //
 // active_profile has no hub (DB) setting today. If one is ever added, its
 // value would take precedence over the file's value here.
-func resolveOverlaidActiveProfile(vs *VersionedSettings) (configured, chosen string) {
-	available := make([]string, 0, len(vs.Profiles))
-	for name := range vs.Profiles {
-		available = append(available, name)
-	}
-	sort.Strings(available)
-	vs.storedProfileNames = available
+func resolveOverlaidActiveProfile(vs *VersionedSettings, stored, retained []string) (configured, chosen string) {
+	vs.storedProfileNames = stored
+	vs.retainedProfileNames = retained
 	vs.activeProfileErr = nil
 	vs.activeProfileFallbackFrom = nil
-	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
+	if containsString(stored, vs.ActiveProfile) {
 		return "", ""
 	}
-	if len(available) == 1 {
+	if len(stored) == 1 {
 		configured = vs.ActiveProfile
 		vs.activeProfileFallbackFrom = &configured
-		vs.ActiveProfile = available[0]
-		return configured, available[0]
+		vs.ActiveProfile = stored[0]
+		return configured, stored[0]
 	}
-	vs.activeProfileErr = &ActiveProfileError{Configured: vs.ActiveProfile, Available: available}
+	if containsString(retained, vs.ActiveProfile) {
+		return "", ""
+	}
+	vs.activeProfileErr = &ActiveProfileError{Configured: vs.ActiveProfile, Available: stored, Retained: retained}
 	return "", ""
 }
 
@@ -277,7 +327,8 @@ func (o *SettingsOverlay) resetSingleProfileFallbackLog() {
 }
 
 // Profiles returns a deep copy of the overlay's profiles map. Returns nil if
-// the overlay has not been activated or no profiles have been set.
+// the overlay has not been activated or no profiles have been stored (an
+// empty stored map counts as none; see Update).
 func (o *SettingsOverlay) Profiles() map[string]V1ProfileConfig {
 	if o == nil {
 		return nil

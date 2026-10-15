@@ -429,17 +429,17 @@ func TestGitHubDownloadToken(t *testing.T) {
 	withLookup := ContextWithGitHubCredentialLookup(base, lookup)
 
 	marked := ResolvedSkill{githubCredentialRef: "gh://acme/private/s?token=NAMED"}
-	if got := gitHubDownloadToken(withLookup, marked); got != "named-value" {
+	if got := gitHubDownloadToken(withLookup, marked).token; got != "named-value" {
 		t.Errorf("marked skill with lookup: got %q, want named-value", got)
 	}
-	if got := gitHubDownloadToken(base, marked); got != "default-value" {
+	if got := gitHubDownloadToken(base, marked).token; got != "default-value" {
 		t.Errorf("marked skill without lookup: got %q, want default-value", got)
 	}
-	if got := gitHubDownloadToken(withLookup, ResolvedSkill{}); got != "default-value" {
+	if got := gitHubDownloadToken(withLookup, ResolvedSkill{}).token; got != "default-value" {
 		t.Errorf("unmarked skill: got %q, want default-value", got)
 	}
 	unknown := ResolvedSkill{githubCredentialRef: "gh://acme/other/s"}
-	if got := gitHubDownloadToken(withLookup, unknown); got != "default-value" {
+	if got := gitHubDownloadToken(withLookup, unknown).token; got != "default-value" {
 		t.Errorf("lookup with no credential: got %q, want default-value", got)
 	}
 }

@@ -47,14 +47,14 @@ func MigrateGroveToProjectData(ctx context.Context, entDSN string, projectStore 
 // migrateGroveToProjectDataWithDSN is the internal implementation that accepts
 // a fully-formed SQLite DSN. This enables testing with in-memory databases.
 func migrateGroveToProjectDataWithDSN(ctx context.Context, sqliteDSN string, projectStore ProjectSlugResolver) error {
-	db, err := sql.Open("sqlite", sqliteDSN)
+	// Enable foreign keys on every connection, as OpenSQLite does.
+	db, err := sql.Open("sqlite", sqliteDSNPragmas(sqliteDSN, "foreign_keys(1)"))
 	if err != nil {
 		return fmt.Errorf("opening ent database for data migration: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	// Enable foreign keys to match Ent's connection settings.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "foreign_keys"); err != nil {
 		return fmt.Errorf("enabling foreign keys: %w", err)
 	}
 

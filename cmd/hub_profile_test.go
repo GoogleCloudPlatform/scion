@@ -49,11 +49,11 @@ func profileGateEnv(t *testing.T, name string) {
 	if name != "" {
 		t.Setenv(hubprofile.EnvHubProfile, name)
 	}
-	origFlag, origAs, origRun, origHub, origNoHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub
+	origFlag, origAs, origRun, origHub := hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint
 	t.Cleanup(func() {
-		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = origFlag, origAs, origRun, origHub, origNoHub
+		hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = origFlag, origAs, origRun, origHub
 	})
-	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint, noHub = "", "", "", "", false
+	hubProfileFlag, hubProfileAs, hubProfileRun, hubEndpoint = "", "", "", ""
 }
 
 func realCommand(t *testing.T, path string) *cobra.Command {
@@ -107,6 +107,8 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 // too: root checks it before the hub-profile gate.
 func TestHubProfileGate_NoHubGetsRemovalError(t *testing.T) {
 	profileGateEnv(t, "t1")
+	// Parsing --no-hub sets the flag variable; clear it for later tests.
+	t.Cleanup(func() { noHub = false })
 	_, err := runProfileRoot(t, "hub", "status", "--no-hub")
 	require.ErrorIs(t, err, errNoHubRemoved)
 }
@@ -522,7 +524,7 @@ func TestRequireArtifactProfileClient(t *testing.T) {
 
 	// Without --as: refused (the issuer credential is for test identity
 	// routes only).
-	_, _, err := requireArtifactHubClient()
+	_, _, _, err := requireArtifactHubClient()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--as <alias>")
 
@@ -533,9 +535,9 @@ func TestRequireArtifactProfileClient(t *testing.T) {
 	_, err = hubprofile.IssueToCache(t.Context(), s, hubprofile.IssueRequest{Alias: "owner"})
 	require.NoError(t, err)
 	hubProfileAs = "owner"
-	settings, client, err := requireArtifactHubClient()
+	settings, client, endpoint, err := requireArtifactHubClient()
 	require.NoError(t, err)
-	assert.Equal(t, target.Srv.URL, settings.GetHubEndpoint(), "artifact refs name the target hub")
+	assert.Equal(t, target.Srv.URL, endpoint, "artifact refs name the target hub")
 	assert.Empty(t, settings.GetHubProjectID())
 	err = checkArtifactPublishScope(settings)
 	require.Error(t, err)

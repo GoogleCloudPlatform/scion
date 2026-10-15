@@ -220,7 +220,7 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		"server.hub.start_claim_lease_ttl":         {section: "lifecycle", doc: `{"start_claim_lease_ttl":"2m"}`, observe: observeStartClaim},
 		"server.hub.start_max_duration":            {section: "lifecycle", doc: `{"start_max_duration":"41m"}`, observe: observeStartClaim},
 		"server.hub.start_unconfirmed_hold":        {section: "lifecycle", doc: `{"start_unconfirmed_hold":"20m"}`, observe: observeStartClaim},
-		"server.hub.start_create_unconfirmed_hold": {section: "lifecycle", doc: `{"start_create_unconfirmed_hold":"3m"}`, observe: observeStartClaim},
+		"server.hub.start_create_unconfirmed_hold": {section: "lifecycle", doc: `{"start_create_unconfirmed_hold":"16m30s"}`, observe: observeStartClaim},
 
 		// auto_expose_ports, quotas, agent_secrets, project_defaults
 		"auto_expose_ports.enabled": {section: "auto_expose_ports", doc: `{"enabled":true}`,

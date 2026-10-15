@@ -27,7 +27,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -86,7 +85,8 @@ func TestRequireHub(t *testing.T) {
 	const projectID = "require-hub-project"
 	tests := []struct {
 		name string
-		// endpoint returns the hub.endpoint to write ("" for none).
+		// endpoint returns the hub selected for the invocation ("" for
+		// none), as resolveInvocationTarget leaves it in hubEndpoint.
 		endpoint func(t *testing.T) (string, *atomic.Int32)
 		devToken string // SCION_DEV_TOKEN: makes a loopback endpoint the local workstation hub
 		hubToken string // SCION_HUB_TOKEN: a non-dev credential (a remote-style hub)
@@ -180,15 +180,10 @@ func TestRequireHub(t *testing.T) {
 			projectPath, globalMode, autoConfirm, nonInteractive, hubEndpoint = "global", true, tc.yes, false, ""
 
 			endpoint, registers := tc.endpoint(t)
+			hubEndpoint = endpoint
 			settings := fmt.Sprintf("project_id: %s\n", projectID)
-			if endpoint != "" || tc.linked != "" {
-				settings += "hub:\n"
-				if endpoint != "" {
-					settings += "  endpoint: " + endpoint + "\n"
-				}
-				if tc.linked != "" {
-					settings += "  linked: " + tc.linked + "\n"
-				}
+			if tc.linked != "" {
+				settings += "hub:\n  linked: " + tc.linked + "\n"
 			}
 			require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(settings), 0o644))
@@ -211,6 +206,7 @@ func TestRequireHub(t *testing.T) {
 func TestNoHubFlagRemoved(t *testing.T) {
 	setupNoProjectPreRun(t)
 	noHub = true
+	t.Cleanup(func() { noHub = false })
 	err := rootCmd.PersistentPreRunE(versionCmd, []string{})
 	require.ErrorIs(t, err, errNoHubRemoved)
 	assert.Contains(t, err.Error(), "--no-hub was removed together with local-only mode; scion always uses a hub")
@@ -229,7 +225,8 @@ func TestHubEnableDisableRemoved(t *testing.T) {
 
 	err := hubEnableCmd.RunE(hubEnableCmd, nil)
 	require.ErrorIs(t, err, errHubEnableRemoved)
-	assert.Contains(t, err.Error(), "scion config set hub.endpoint <url>")
+	assert.Contains(t, err.Error(), "scion hub add <name> <url>")
+	assert.NotContains(t, err.Error(), "hub.endpoint")
 
 	err = hubDisableCmd.RunE(hubDisableCmd, nil)
 	require.ErrorIs(t, err, errHubDisableRemoved)
@@ -241,21 +238,21 @@ func TestHubEnableDisableRemoved(t *testing.T) {
 // (the caller prints it as "Note: ..."), and the project links on first use.
 func TestPromptHubRegistration_NoHubIsANote(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		settings func(t *testing.T) string
+		name string
+		// hub returns the hub selected for the invocation ("" for none).
+		hub      func(t *testing.T) string
 		devToken string
 		want     string
 	}{
 		{
-			name:     "no endpoint",
-			settings: func(t *testing.T) string { return "project_id: init-p\n" },
-			want:     "no hub is configured yet; this project links on first use. Start the local hub with 'scion server start'",
+			name: "no hub",
+			hub:  func(t *testing.T) string { return "" },
+			want: "no hub is selected yet; this project links on first use. Start the local hub with 'scion server start' (first run opens setup), " +
+				"or add a remote one with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>'",
 		},
 		{
-			name: "local server not running",
-			settings: func(t *testing.T) string {
-				return "project_id: init-p\nhub:\n  endpoint: " + closedLoopbackEndpoint(t) + "\n"
-			},
+			name:     "local server not running",
+			hub:      closedLoopbackEndpoint,
 			devToken: "scion_dev_test",
 			want:     "the local scion server is not running; this project links on first use. Start it with 'scion server start'",
 		},
@@ -266,10 +263,10 @@ func TestPromptHubRegistration_NoHubIsANote(t *testing.T) {
 			home := os.Getenv("HOME")
 			t.Chdir(home)
 			require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte(tc.settings(t)), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"), []byte("project_id: init-p\n"), 0o644))
 			origEP := hubEndpoint
 			t.Cleanup(func() { hubEndpoint = origEP })
-			hubEndpoint = ""
+			hubEndpoint = tc.hub(t)
 
 			err := promptHubRegistration(true)
 			require.Error(t, err)
@@ -278,27 +275,30 @@ func TestPromptHubRegistration_NoHubIsANote(t *testing.T) {
 	}
 }
 
-// TestHubConfigured checks the single "is a hub configured?" check: an
-// endpoint from --hub, the settings or the environment counts; the
-// deprecated hub.enabled does not.
+// TestHubConfigured checks the single "is a hub configured?" check: a hub
+// selected with --hub, the hub list or the environment counts; hub.endpoint
+// and hub.enabled in settings do not.
 func TestHubConfigured(t *testing.T) {
 	hermeticCLIEnv(t)
-	origEP := hubEndpoint
-	t.Cleanup(func() { hubEndpoint = origEP })
-	hubEndpoint = ""
-
-	disabled := false
-	assert.False(t, hubConfigured(&config.Settings{}), "nothing configured")
-	assert.False(t, hubConfigured(&config.Settings{Hub: &config.HubClientConfig{Enabled: boolPtrForTest(true)}}), "hub.enabled alone is not a hub")
-	assert.True(t, hubConfigured(&config.Settings{Hub: &config.HubClientConfig{Endpoint: "https://hub.example.com", Enabled: &disabled}}),
-		"an endpoint counts even with a stale hub.enabled=false")
+	origEP, origSrc := hubEndpoint, hubSource
+	t.Cleanup(func() { hubEndpoint, hubSource = origEP, origSrc })
+	hubEndpoint, hubSource = "", ""
+	home := os.Getenv("HOME")
+	t.Chdir(home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".scion", "settings.yaml"),
+		[]byte("hub:\n  enabled: true\n  endpoint: https://hub.example.com\n"), 0o644))
+	assert.False(t, hubConfigured(), "settings select no hub")
 
 	t.Setenv("SCION_HUB_ENDPOINT", "https://env-hub.example.com")
-	assert.True(t, hubConfigured(&config.Settings{}), "endpoint from the environment")
+	assert.True(t, hubConfigured(), "endpoint from the environment")
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 
 	hubEndpoint = "https://flag-hub.example.com"
-	assert.True(t, hubConfigured(&config.Settings{}), "endpoint from --hub")
+	assert.True(t, hubConfigured(), "endpoint from --hub")
+
+	hubEndpoint, hubSource = ctxTestHub, targetSourceContext
+	assert.True(t, hubConfigured(), "the current hub")
 }
 
 func boolPtrForTest(b bool) *bool { return &b }

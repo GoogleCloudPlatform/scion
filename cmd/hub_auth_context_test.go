@@ -49,55 +49,102 @@ func readFileT(t *testing.T, path string) string {
 	return string(data)
 }
 
-// TestRecordLoginEndpoint_ContextHubLeavesSettings: a login on the hub the
-// current context selected stores no hub.endpoint (and no hub.enabled) in
-// any settings file and says so.
-func TestRecordLoginEndpoint_ContextHubLeavesSettings(t *testing.T) {
+// loginRecord runs recordLoginHub for hubURL and returns what it printed
+// on its two writers, checking that nothing went to the process stdout.
+func loginRecord(t *testing.T, hubURL string) (out, errOut string) {
+	t.Helper()
+	var o, e strings.Builder
+	stdout := captureStdout(t, func() { recordLoginHub(&o, &e, hubURL) })
+	assert.Empty(t, stdout, "output goes to the given writers")
+	return o.String(), e.String()
+}
+
+// TestRecordLoginHub_ContextHubLeavesSettings: a login on the hub the
+// current context selected stores nothing in any settings file and says
+// which hub it was.
+func TestRecordLoginHub_ContextHubLeavesSettings(t *testing.T) {
 	globalFile, projectFile := setupLoginContextTest(t)
 	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	require.Equal(t, targetSourceContext, hubSource)
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
 	require.Equal(t, ctxTestHub, hubURL)
 
-	out := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
-	assert.Equal(t, "Logged in to "+ctxTestHub+" (current hub, selected with 'scion use'); settings unchanged.\n", out)
+	out, errOut := loginRecord(t, hubURL)
+	assert.Equal(t, "Logged in to "+ctxTestHub+" (current hub, selected with 'scion use').\n", out)
+	assert.Empty(t, errOut)
 	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
 	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
 }
 
-// TestRecordLoginEndpoint_HubURLStillPersists: with an explicit --hub-url
-// the endpoint is saved as before, even when a context hub exists.
-func TestRecordLoginEndpoint_HubURLStillPersists(t *testing.T) {
-	globalFile, _ := setupLoginContextTest(t)
+// TestRecordLoginHub_HubURLAddedNotSaved: with an explicit --hub-url, the
+// hub is added to the hub list, nothing is saved in settings, the current
+// hub stays, and a hint says how to select the new hub.
+func TestRecordLoginHub_HubURLAddedNotSaved(t *testing.T) {
+	globalFile, projectFile := setupLoginContextTest(t)
+	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
 	hubAuthHubURL = "https://other.example.com"
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
 	require.Equal(t, "https://other.example.com", hubURL)
 
-	out := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
-	assert.Contains(t, out, "Saved hub endpoint https://other.example.com to global settings")
-	s, err := config.LoadSettingsFromDir(filepath.Dir(globalFile))
-	require.NoError(t, err)
-	require.NotNil(t, s.Hub)
-	assert.Equal(t, "https://other.example.com", s.Hub.Endpoint)
+	out, _ := loginRecord(t, hubURL)
+	assert.Contains(t, out, "To make it the current hub, run 'scion use --hub other'.\n")
+	assert.Equal(t, "Registered hub 'other' (https://other.example.com); rename with 'scion hub rename'.\n"+
+		"To make it the current hub, run 'scion use --hub other'.\n", out)
+	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
+	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
+	c := readTestContext(t)
+	assert.NotNil(t, c.Hubs["other"])
+	assert.Equal(t, "prod", c.CurrentHub, "a login never makes a hub current")
 }
 
-// TestRecordLoginEndpoint_WritesToCommandOut: the context-hub login line goes
-// to the command's stdout.
-func TestRecordLoginEndpoint_WritesToCommandOut(t *testing.T) {
-	setupLoginContextTest(t)
-	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
-	require.Equal(t, targetSourceContext, hubSource)
-	var out strings.Builder
-	hubAuthLoginCmd.SetOut(&out)
-	t.Cleanup(func() { hubAuthLoginCmd.SetOut(nil) })
-
-	stdout := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, ctxTestHub) })
-	assert.Equal(t, "Logged in to "+ctxTestHub+" (current hub, selected with 'scion use'); settings unchanged.\n", out.String())
-	assert.Empty(t, stdout)
+// TestRecordLoginHub_FlagHubs: --hub with a nickname of a hub that is not
+// current gets the hint only; --hub naming the current hub gets nothing;
+// a hub from the environment gets nothing and is not added.
+func TestRecordLoginHub_FlagHubs(t *testing.T) {
+	t.Run("nickname, not current", func(t *testing.T) {
+		setupLoginContextTest(t)
+		require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+			return c.AddHub("staging", "https://staging.example.com")
+		}))
+		hubEndpoint = "staging"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+		out, _ := loginRecord(t, hubEndpoint)
+		assert.Equal(t, "To make it the current hub, run 'scion use --hub staging'.\n", out)
+	})
+	t.Run("the current hub by URL", func(t *testing.T) {
+		setupLoginContextTest(t)
+		hubEndpoint = ctxTestHub + "/"
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+		out, _ := loginRecord(t, hubEndpoint)
+		assert.Empty(t, out)
+	})
+	t.Run("environment", func(t *testing.T) {
+		setupLoginContextTest(t)
+		t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.com")
+		require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+		hubURL, err := hubAuthURL("")
+		require.NoError(t, err)
+		require.Equal(t, "https://env.example.com", hubURL)
+		out, _ := loginRecord(t, hubURL)
+		assert.Empty(t, out)
+		_, h := readTestContext(t).HubByEndpoint(hubURL)
+		assert.Nil(t, h, "a hub from the environment is not added")
+	})
+	t.Run("inside an agent", func(t *testing.T) {
+		setupLoginContextTest(t)
+		hubAuthHubURL = "https://other.example.com"
+		t.Setenv("SCION_HOST_UID", "1000")
+		out, _ := loginRecord(t, "https://other.example.com")
+		assert.Empty(t, out)
+		_, h := readTestContext(t).HubByEndpoint("https://other.example.com")
+		assert.Nil(t, h)
+	})
 }
 
 // setupLoginLinkTest prepares a login whose hub comes from the link entry
@@ -117,38 +164,41 @@ func setupLoginLinkTest(t *testing.T) (globalFile, projectFile string) {
 	return filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"), filepath.Join(dotScion, "settings.yaml")
 }
 
-// TestRecordLoginEndpoint_LinkEntryHubLeavesSettings: a login on the hub a
-// linked directory resolves to through its link entry stores no
-// hub.endpoint in any settings file and says so.
-func TestRecordLoginEndpoint_LinkEntryHubLeavesSettings(t *testing.T) {
+// TestRecordLoginHub_LinkEntryHubLeavesSettings: a login on the hub a
+// linked directory resolves to through its link entry stores nothing in
+// any settings file and says which hub it was.
+func TestRecordLoginHub_LinkEntryHubLeavesSettings(t *testing.T) {
 	globalFile, projectFile := setupLoginLinkTest(t)
 	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
 	require.Equal(t, targetSourceDirectory, hubSource)
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
 	require.Equal(t, linkEntryTestHub, hubURL)
 
-	out := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
-	assert.Equal(t, "Logged in to "+linkEntryTestHub+" (the hub this directory is linked to); settings unchanged.\n", out)
+	out, _ := loginRecord(t, hubURL)
+	assert.Equal(t, "Logged in to "+linkEntryTestHub+" (the hub this directory is linked to).\n", out)
 	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
 	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
-	assert.Empty(t, settingsEndpoint(t, filepath.Dir(globalFile)))
-	assert.Empty(t, settingsEndpoint(t, filepath.Dir(projectFile)))
 }
 
-// TestRecordLoginEndpoint_LinkEntryHubURLStillPersists: in a linked
-// directory, an explicit --hub-url is still saved as before; only the hub
-// from the link entry is kept out of settings.
-func TestRecordLoginEndpoint_LinkEntryHubURLStillPersists(t *testing.T) {
+// TestRecordLoginHub_LinkEntryHubURLNotSaved: in a linked directory, an
+// explicit --hub-url is added to the hub list and saved in no settings
+// file.
+func TestRecordLoginHub_LinkEntryHubURLNotSaved(t *testing.T) {
 	globalFile, projectFile := setupLoginLinkTest(t)
+	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
 	hubAuthHubURL = "https://other.example.com"
 
 	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
-	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	hubURL, err := hubAuthURL(hubAuthHubURL)
+	require.NoError(t, err)
 	require.Equal(t, "https://other.example.com", hubURL)
 
-	_ = captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
-	saved := settingsEndpoint(t, filepath.Dir(globalFile)) + settingsEndpoint(t, filepath.Dir(projectFile))
-	assert.Equal(t, "https://other.example.com", saved, "the --hub-url endpoint is saved in one settings file")
+	_, _ = loginRecord(t, hubURL)
+	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
+	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
+	_, h := readTestContext(t).HubByEndpoint(hubURL)
+	assert.NotNil(t, h, "the --hub-url hub is added to the hub list")
 }

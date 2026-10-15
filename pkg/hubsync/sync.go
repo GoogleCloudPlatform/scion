@@ -21,11 +21,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -36,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"gopkg.in/yaml.v3"
@@ -58,7 +61,9 @@ func warnf(format string, args ...interface{}) {
 	if out == nil {
 		out = os.Stderr
 	}
-	_, _ = fmt.Fprintf(out, "Warning: "+format+"\n", args...)
+	// The message can quote an error carrying a hub URL; it is shown
+	// without the URL's user info.
+	_, _ = fmt.Fprintf(out, "Warning: %s\n", config.RedactURLsIn(fmt.Sprintf(format, args...)))
 }
 
 // AgentRef holds both name and ID for an agent.
@@ -205,8 +210,9 @@ type EnsureHubReadyOptions struct {
 	// deterministic answer, such as several matching Hub projects, return
 	// an error instead of picking one.
 	NonInteractive bool
-	// EndpointOverride is the explicit Hub endpoint supplied by the caller.
-	// It takes precedence over project/global settings for this invocation.
+	// EndpointOverride is the Hub endpoint the caller resolved. It takes
+	// precedence over SCION_HUB_ENDPOINT and SCION_HUB_URL; settings are
+	// never read for the endpoint.
 	EndpointOverride string
 	// ExplicitProject reports that projectPath came from the --project / -g
 	// or --global flag. Only flag handling sets it: a caller passing a
@@ -234,7 +240,7 @@ type EnsureHubReadyOptions struct {
 var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run 'scion hub link' to re-link it, or manage its agents on the hub with --project <hub-slug>")
 
 // HubNotConfiguredError is returned when a command needs a hub and no hub
-// endpoint is configured (flag, environment or settings). It is a type
+// endpoint is configured (flag, environment or the hub list). It is a type
 // rather than errors.New so the user-facing sentence can keep its capital
 // letter and full stop. Migration is set for a project that still has
 // agents from local-only mode and has never been linked: the message then
@@ -365,7 +371,7 @@ func errProjectMustBeLinked() error {
 // goes through a hub. It will:
 //  1. Resolve a hub project reference (slug, name, UUID, git URL) on the hub
 //  2. Refuse a project the user unlinked (ErrProjectUnlinked)
-//  3. Resolve the endpoint (override, then settings and environment); with
+//  3. Resolve the endpoint (override, then environment); with
 //     none, return a HubNotConfiguredError
 //  4. Ensure project_id exists (generate if missing)
 //  5. Check Hub connectivity; a local workstation endpoint that does not
@@ -432,20 +438,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// From here on, any failure is an error (no silent fallback).
-	endpoint := opts.EndpointOverride
-	if endpoint == "" {
-		endpoint = getEndpoint(settings)
-	}
-	// Settings loading may not pick up the env var (e.g. in a hub context
-	// where the project path resolves to a synthetic or tmpfs directory
-	// without a settings file, or the legacy SCION_HUB_URL). Fall back to
-	// the env vars, as the CLI's GetHubEndpoint does.
-	if endpoint == "" {
-		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
-		if endpoint == "" {
-			endpoint = os.Getenv("SCION_HUB_URL")
-		}
-	}
+	endpoint := resolveEndpoint(opts)
 	if endpoint == "" {
 		return nil, notConfiguredError(resolvedPath, isGlobal)
 	}
@@ -643,7 +636,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				// every hub: a silent pick could attach this directory to
 				// another clone's project.
 				if IsLocalWorkstationEndpoint(endpoint) {
-					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, config.RedactURL(endpoint))
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
 					return nil, errProjectMustBeLinked()
 				}
@@ -706,7 +699,7 @@ func hubUnreachableError(endpoint string, err error) error {
 	if IsLocalWorkstationEndpoint(endpoint) && !config.IsHubManagedAgent() {
 		return &LocalServerNotRunningError{Endpoint: endpoint, Err: err}
 	}
-	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", config.RedactURL(endpoint), hubclient.HintProxyError(err)))
 }
 
 // LegacyModeIgnoredNotice is printed once, when the link is recorded, to a
@@ -1853,25 +1846,62 @@ func getProjectName(projectPath string, isGlobal bool) string {
 	return config.GetProjectName(projectPath)
 }
 
-// getEndpoint returns the Hub endpoint from settings.
-func getEndpoint(settings *config.Settings) string {
-	if settings.Hub != nil {
-		return settings.Hub.Endpoint
+// resolveEndpoint returns the hub endpoint for EnsureHubReady and hub
+// project references: the caller's EndpointOverride (the CLI's resolved
+// hub: --hub, a link entry or the current context), else
+// SCION_HUB_ENDPOINT, else SCION_HUB_URL (inside an agent container the
+// broker sets these). Settings are not read: hub.endpoint is not hub
+// configuration for the CLI.
+func resolveEndpoint(opts EnsureHubReadyOptions) string {
+	if opts.EndpointOverride != "" {
+		return opts.EndpointOverride
 	}
-	return ""
+	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return os.Getenv("SCION_HUB_URL")
 }
 
-// readAgentTokenFile reads the canonical agent token from ~/.scion/scion-token.
-func readAgentTokenFile() string {
+// agentTokenFileRel is the agent token file's path relative to $HOME.
+var agentTokenFileRel = filepath.Join(".scion", sciontoolhub.TokenFile)
+
+// ReadAgentTokenFile reads the canonical agent token from
+// $HOME/.scion/scion-token through the shared agent token file reader, the
+// same implementation the agent-side hub client uses. The home directory
+// itself is trusted (it may be reached through a linked prefix); below it,
+// a symbolic link, special file, multi-link file or oversized file is
+// refused. It returns "" when HOME is unset, the file is absent, or the
+// file is refused. A refusal prints a warning (warnf) only when something
+// exists at the token path, so a credential file that is present but
+// unusable is not silently ignored, while a host with no token file (even
+// one whose ~/.scion is a link) stays silent.
+func ReadAgentTokenFile() string {
 	home := os.Getenv("HOME")
 	if home == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".scion", "scion-token"))
+	// Trusts HOME as set by the launching environment (the user on a host,
+	// the launcher in an agent). The directories above HOME must not be
+	// writable by this user or any less-trusted user, so HOME itself cannot be
+	// replaced; HOME may be writable. Entries below HOME are opened without
+	// following links.
+	token, err := sciontoolhub.ReadTokenFileUnder(home, agentTokenFileRel)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ""
+		}
+		// A refusal on the way to the file (for example ~/.scion being a
+		// link) reports ELOOP or ENOTDIR rather than ErrNotExist. Only warn
+		// when something actually exists at the token path; Lstat reads
+		// metadata only and cannot block on a special file. ENOTDIR from
+		// Lstat means ~/.scion is not a directory, so no token can exist.
+		if _, serr := os.Lstat(filepath.Join(home, agentTokenFileRel)); errors.Is(serr, fs.ErrNotExist) || errors.Is(serr, syscall.ENOTDIR) {
+			return ""
+		}
+		warnf("ignoring agent token file: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return token
 }
 
 // createHubClient creates a new Hub client with proper authentication, and
@@ -1915,7 +1945,7 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 	}
 
 	// 2. Check for agent token from canonical token file, then bootstrap env var
-	if token := readAgentTokenFile(); token != "" {
+	if token := ReadAgentTokenFile(); token != "" {
 		if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken := apiclient.ResolveDevToken(); devToken != "" {
 				return hubclient.WithBearerToken(devToken), CredentialKindDevAuto
@@ -2187,12 +2217,12 @@ const hubGlobalProjectSlug = "global"
 func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
 	if err != nil {
-		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", config.RedactURL(endpoint), err))
 	}
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
 			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
-			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, config.RedactURL(endpoint))
 	}
 	return resp.Projects[0].ID, nil
 }

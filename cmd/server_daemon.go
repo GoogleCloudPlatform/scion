@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -87,8 +86,9 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// --test-mode (string value): forwarded verbatim when given, so the
 	// child resolves the same level and runs the same gate.
 	// validateTestModeFlagsEarly already refused the removed flags,
-	// super-admin and --production with a level (which the re-exec would
-	// otherwise turn into --hosted) in this parent.
+	// super-admin without a complete test-admin policy, and --production
+	// with a level (which the re-exec would otherwise turn into --hosted)
+	// in this parent.
 	if cmd.Flags().Changed(testModeFlag) {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
 	}
@@ -1120,7 +1120,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 	if serverCfg == nil {
 		serverCfg = &config.GlobalConfig{}
 	}
-	tokenFile := daemonDevTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
+	tokenFile := devTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
 
 	if webEnabled {
 		displayHost := host
@@ -1187,30 +1187,6 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		fmt.Printf("  %s\n", hint)
 	}
 	fmt.Println()
-}
-
-// daemonDevTokenFilePath returns the dev token file the daemon child uses
-// (see devTokenFilePath). The child opens a relative configured path from
-// its working directory (see daemonChildDir), so the path is resolved
-// against that directory here, not against the directory 'server start'
-// was run in.
-func daemonDevTokenFilePath(configured, globalDir string) string {
-	if configured != "" && !filepath.IsAbs(configured) {
-		return filepath.Join(daemonChildDir(globalDir), configured)
-	}
-	return devTokenFilePath(configured, globalDir)
-}
-
-// daemonChildDir returns the working directory of the daemon child:
-// daemon.StartComponent starts it in globalDir, and with --global it
-// changes to the home directory (runServerStart).
-func daemonChildDir(globalDir string) string {
-	if globalMode {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return home
-		}
-	}
-	return globalDir
 }
 
 // readDevTokenFile returns the dev token stored in the file at path, or ""

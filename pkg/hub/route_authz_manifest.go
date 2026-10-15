@@ -27,6 +27,7 @@ package hub
 //	authenticated  — Requires valid user/agent session (via UnifiedAuthMiddleware).
 //	admin          — Requires admin role (inline admin-role guard in handler).
 //	workstation    — Requires workstation mode (requireWorkstation middleware).
+//	workstation-admin — Workstation mode and a hub admin permission check.
 //	broker-hmac    — Authenticated via runtime broker HMAC signature.
 //	webhook        — Authenticated via webhook signature (e.g. GitHub X-Hub-Signature-256).
 //	agent-token    — Authenticated via agent JWT token.
@@ -123,7 +124,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/secrets/": "authenticated", // Secret by key
 
 	// ── Usage ──────────────────────────────────────────────────────────
-	"/api/v1/usage/me": "authenticated", // User usage — requires session
+	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
 
 	// ── Session metrics ────────────────────────────────────────────────
 	"/api/v1/metrics/session/": "authenticated", // Session metrics (DB-backed)
@@ -302,6 +303,7 @@ var routeAuthzManifest = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity
 	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
 	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
 	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)
@@ -326,16 +328,16 @@ var routeAuthzManifest = map[string]string{
 	"/github-app/setup":       "public",  // GitHub App post-install callback — browser redirect
 
 	// ── Workstation-only system endpoints ──────────────────────────────
-	"/api/v1/system/identity":             "workstation", // System identity
-	"/api/v1/system/status":               "workstation", // System status
-	"/api/v1/system/check":                "workstation", // System check
-	"/api/v1/system/runtime":              "workstation", // System runtime
-	"/api/v1/system/init":                 "workstation", // System init
-	"/api/v1/system/images/pull":          "workstation", // Image pull
-	"/api/v1/system/images/build":         "workstation", // Image build
-	"/api/v1/system/apple-dns":            "workstation", // Apple DNS helper
-	"/api/v1/system/registry":             "workstation", // System registry
-	"/api/v1/system/workstation-settings": "workstation", // Workstation settings
+	"/api/v1/system/identity":             "workstation-admin", // System identity
+	"/api/v1/system/status":               "workstation",       // System status
+	"/api/v1/system/check":                "workstation",       // System check
+	"/api/v1/system/runtime":              "workstation",       // System runtime
+	"/api/v1/system/init":                 "workstation",       // System init
+	"/api/v1/system/images/pull":          "workstation",       // Image pull
+	"/api/v1/system/images/build":         "workstation",       // Image build
+	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
+	"/api/v1/system/registry":             "workstation",       // System registry
+	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing

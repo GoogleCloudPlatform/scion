@@ -1,0 +1,14 @@
+schema_version: "1"
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    list_all_namespaces: true
+  scoped:
+    type: kubernetes
+    namespace: team
+profiles:
+  wide:
+    runtime: cluster
+  narrow:
+    runtime: scoped

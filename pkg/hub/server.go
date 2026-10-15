@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -58,6 +59,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -161,6 +163,15 @@ type ServerConfig struct {
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
 	ProxyAuth ProxyAuthenticator
+	// ProxyDriverPrincipals is auth.proxy.driverPrincipals (ptone/scion#4240,
+	// phase WS2): the exact emails of the browser drivers that may carry
+	// test identity web sessions through the proxy. A verified proxy
+	// assertion for one of them never provisions or authenticates a user
+	// (403). New validates the list (config.ValidateProxyDriverConfig): a
+	// non-empty list when AuthMode is not "proxy" refuses startup. An empty
+	// list in proxy mode leaves test identity web sessions unavailable.
+	// Startup config only; never API-writable.
+	ProxyDriverPrincipals []string
 	// TrustedProxies is a list of trusted proxy IPs/CIDRs for forwarded headers.
 	TrustedProxies []string
 	// Debug enables verbose debug logging.
@@ -225,10 +236,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -387,8 +394,8 @@ type ServerConfig struct {
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.
-	// It is accepted only while EnableTestIdentities is true; it is never
-	// writable through the API.
+	// It is accepted only while EnableTestIdentities is true
+	// (--test-mode=member or above); it is never writable through the API.
 	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
@@ -962,6 +969,10 @@ type DeleteAgentOptions struct {
 	// its files on the NFS export or its branch (runtimebroker deleteAgent,
 	// ?localOnly). Send it only to a broker advertising AgentMove.
 	LocalOnly bool
+	// PurgeRetained sends the delete as a removal of a soft-deleted agent's
+	// retained files after the retention window (api.PurgeRetainedQueryParam,
+	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
+	PurgeRetained bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -985,6 +996,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.LocalOnly {
 		query += "&localOnly=true"
+	}
+	if opts.PurgeRetained {
+		query += "&" + api.PurgeRetainedQueryParam + "=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1607,6 +1621,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1643,6 +1660,26 @@ type Server struct {
 	// conduit is the in-process conduit relay (conduit_relay.go); nil
 	// unless hub.conduit was on at startup.
 	conduit atomic.Pointer[conduitRuntime]
+	// conduitStartFailure is set when the in-process relay failed to start
+	// (SetConduitRelayStartFailure): the setting key that caused it, or ""
+	// when the cause was not one setting. nil: no failure recorded.
+	conduitStartFailure atomic.Pointer[string]
+	// conduitExternal is the hub's conduit runtime in external relay mode
+	// (conduit_external.go): routing to separate relays, no relay of its
+	// own. At most one of conduit and conduitExternal is set.
+	conduitExternal atomic.Pointer[conduitExternalRuntime]
+	// conduitEligibleRelays is the number of eligible separate relays at
+	// the last check (-1: not checked yet), read by the readiness gauge.
+	conduitEligibleRelays atomic.Int64
+	// conduitAdmissionAEADv is the admission token cipher
+	// (conduit_admission.go), derived once; conduitAdmissionKeyErr is why
+	// it could not be.
+	conduitAdmissionKeyOnce sync.Once
+	conduitAdmissionAEADv   cipher.AEAD
+	conduitAdmissionKeyErr  error
+	// conduitRenewal verifies latest grants and mints renewal grants for
+	// relay stream re-checks (conduit_renewal.go); nil until set.
+	conduitRenewal atomic.Pointer[conduitRenewalGrants]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
@@ -1673,6 +1710,7 @@ type Server struct {
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
+	haltedDispatches       sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
 
 	// delegationAdoptionCommitHook, when set, runs after authorization and
 	// before the delegation-adoption commit transaction. Tests use it to
@@ -1696,6 +1734,9 @@ type Server struct {
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
 	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
+	// profileRefs counts built-in profile references for the co-located
+	// broker's settings overlay (ptone/scion#5113; profile_references.go).
+	profileRefs profileReferences
 	// embeddedBrokerPending is non-nil while a co-located broker is expected
 	// (ExpectEmbeddedBroker) but has not yet registered; it is closed when
 	// registration succeeds or fails. embeddedBrokerRegErr records a failed
@@ -1795,6 +1836,9 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
+	// artifactAttachmentRetirer keeps the attachment retirement's position
+	// between passes of the artifact maintenance loop (its only user).
+	artifactAttachmentRetirer artifacts.AttachmentRetirer
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
@@ -1865,6 +1909,9 @@ type Server struct {
 	// testIdentityWeb is the test identity web session state (WS1): the
 	// marker cookie codec built from the hub-local key, fixed in New.
 	testIdentityWeb testIdentityWebState
+	// proxyDrivers is the normalized auth.proxy.driverPrincipals set (WS2),
+	// fixed in New. Empty unless the hub is in proxy auth mode.
+	proxyDrivers driverPrincipalSet
 	// workloadIssuer is the workload-bound issuer delegation state
 	// (test_identity_workload_issuer.go), fixed at startup. Nil when no
 	// workload issuer is configured.
@@ -1919,6 +1966,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -2254,6 +2305,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
+	// Proxy driver principals (WS2): exact emails only, and only in proxy
+	// auth mode. The normalized list is what the server keeps.
+	drivers, err := config.ValidateProxyDriverConfig(cfg.AuthMode, cfg.ProxyDriverPrincipals)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ProxyDriverPrincipals = drivers
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -2537,6 +2595,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.platformAuthSA = cfg.PlatformAuthSA
 	srv.testIdentities = newTestIdentityState(cfg.EnableTestIdentities)
 	srv.testIdentityWeb = newTestIdentityWebState(cfg.TestIdentityWebSessionKey)
+	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
 	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
@@ -2688,6 +2747,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	setAuthzTestAdminTier(srv.authzService,
 		func(kind string) bool { return srv.testAdminTierEnabled(testAdminKind(kind)) },
 		func() time.Time { return srv.testIdentities.clock() })
+	// The test-admin policy refusals decide makes are written to the test
+	// admin audit sink.
+	setAuthzTestAdminPolicyDenied(srv.authzService, func(ctx context.Context, userID, class, subject string) {
+		srv.recordTestAdminPolicyDenial(ctx, userID, class, subject)
+	})
 	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 	srv.authzService.saIAMCheckMode = srv.saAssignCheckModeValue
 	srv.wireAgentDelegation()
@@ -2961,6 +3025,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
+
+		// Proxy driver principals (test identities phase WS2): a
+		// verified assertion for one of them is refused at Step 3a.
+		DriverPrincipals: srv.proxyDrivers,
 	}
 	if rs := srv.authConfig.AgentRunScope; rs != nil {
 		rs.route = func(r *http.Request) string {
@@ -3037,6 +3105,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// See platformAuthSA above: shared by the GE exchange endpoint and the
 	// external-bearer path, both of which resolve through this instance.
 	googleResolver.SetPlatformAuthSA(cfg.PlatformAuthSA)
+	googleResolver.SetDriverPrincipals(srv.proxyDrivers)
 	// Same policy as isUserAuthorized above, in its code-returning form,
 	// so a refusal's audit entry records the code the decision returned.
 	googleResolver.SetSignInDenial(srv.signInDenial)
@@ -3990,6 +4059,10 @@ func (s *Server) IsPostgres() bool {
 // server. This is called during hub startup (any DB driver) after seeding and
 // initial refresh (settings-db §3.5/§3.9). Safe for concurrent use.
 func (s *Server) SetOperationalSettings(ops *OperationalSettings) {
+	if ops != nil {
+		// Every section write and delete asks the test-admin policy first.
+		ops.setWriteGuard(s.testAdminSettingsWriteGuard)
+	}
 	s.operationalSettings.Store(ops)
 }
 
@@ -4691,8 +4764,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -4986,9 +5060,14 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		// and agents soft-deleted earlier stay until a retention is set
 		// again. That is what a hub started with retention 0 does, and a
 		// save never deletes those agents at once.
+		//
+		// Each expired agent's broker is first asked to remove the files a
+		// soft delete retained there (retained_files_purge.go,
+		// ptone/scion#4744); a record whose broker cannot be reached yet
+		// is kept for a later run.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
-			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			purged, err := s.purgeExpiredAgents(ctx, cutoff)
 			if err != nil {
 				slog.Error("Scheduler: agent purge failed", "error", err)
 			} else if purged > 0 {
@@ -5338,7 +5417,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.
-	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, agent.RuntimeBrokerID, project); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
@@ -5762,8 +5841,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records
@@ -6154,7 +6233,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// process runs a relay (hub.conduit on at startup). One replica per tick
 	// under Postgres; the registry requires the three reaps to run together
 	// under one lock.
-	if s.conduit.Load() != nil {
+	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		s.scheduler.RegisterRecurringSingleton("conduit-registry-reap", conduitRegistryReapInterval, store.LockConduitRegistryReap, s.conduitRegistryReapHandler())
 	}
 
@@ -6945,21 +7024,23 @@ func (s *Server) registerRoutes() {
 	// leaving a live API behind a hidden UI. This is a startup-time gate:
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
+		// chatRoute refuses every credential the chat routes do not accept
+		// (chatCredentialAllowed) before the handler runs.
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.chatRoute(s.handleChatPrefs)))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
-		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
-		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
-		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
-		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.chatRoute(s.handleChatSpaces)))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.chatRoute(s.handleChatSpaceRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.chatRoute(s.handleChatConversationRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.chatRoute(s.handleChatTopicRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.chatRoute(s.handleChatDMs)))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.chatRoute(s.handleChatUnreadCount)))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
@@ -7009,6 +7090,7 @@ func (s *Server) registerRoutes() {
 	// unless the test admin gate is on; the gate runs before the guard.
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
@@ -7098,6 +7180,16 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Grant shaping (ptone/scion#4240, admin tier A3): records the
+	// request's grant actor and, for a test identity with an admin role,
+	// the shaping the store applies to every grant it writes.
+	h = s.grantShapingMiddleware(h)
+
+	// Test admin audit (ptone/scion#4240): runs right after authentication,
+	// so every request an admin-kind test identity makes is written to the
+	// test admin audit sink before anything else handles it.
+	h = s.testAdminRequestAuditMiddleware(h)
 
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens

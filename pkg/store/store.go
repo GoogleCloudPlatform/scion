@@ -34,6 +34,14 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrActiveReservationExists is returned by CreateUsageReservation when
+	// the resource already holds an active (released_at IS NULL)
+	// reservation for the same limit definition: the unique active
+	// (limit_definition_id, resource_id) index refused the insert. It wraps
+	// ErrAlreadyExists. A caller that loses this race reads the winner with
+	// GetActiveReservation to tell a retry from a conflict.
+	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -70,6 +78,13 @@ var (
 	// files since the caller read it (ptone/scion#4221). It wraps
 	// ErrVersionConflict.
 	ErrTemplateConflict = fmt.Errorf("template content changed: %w", ErrVersionConflict)
+
+	// ErrHarnessConfigConflict is returned by UpdateHarnessConfigContent when
+	// the stored harness-config no longer matches the caller's
+	// HarnessConfigContentPrecondition: another commit changed its files
+	// since the caller read it (ptone/scion#4219). It wraps
+	// ErrVersionConflict.
+	ErrHarnessConfigConflict = fmt.Errorf("harness config content changed: %w", ErrVersionConflict)
 
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
@@ -181,10 +196,24 @@ type Store interface {
 
 	// PurgeDeletedAgents permanently removes soft-deleted agents older than
 	// cutoff, together with the rows that reference them (group memberships,
-	// identity keys), in one transaction. Returns the number of agents
-	// purged. It is a Store method rather than an AgentStore one because the
-	// cascade spans several sub-stores.
+	// identity keys), in one transaction. In the same transaction it
+	// deactivates, with cause agent_hard_delete under one operation ID, the
+	// active delegation edges whose delegate is a removed agent and the
+	// removed agents' active service-account assignments. Returns the
+	// number of agents purged. It is a Store method rather than an
+	// AgentStore one because the cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
+
+	// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents
+	// in ids: only those still soft-deleted before cutoff when the purge
+	// runs are removed (a restore in between wins), with the same cascade.
+	// Unknown or malformed IDs are skipped. Returns the number purged.
+	PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error)
+
+	// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents
+	// with deleted_at before cutoff and an ID after afterID ("" for the
+	// first page), in ascending ID order.
+	ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*Agent, error)
 
 	// CreateTestAdminUser creates an admin-kind test identity and its one
 	// system role binding, in one transaction (the caller's, when called
@@ -235,6 +264,19 @@ type Store interface {
 	// is not linked, or when the linked row is not UserKindFederated.
 	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
 
+	// LinkPendingFederatedUser is first contact for a pending federated
+	// account: in one transaction it links (issuer, subject) to the
+	// account userID, as LinkFederatedIdentity does, and sets the
+	// account's status to UserStatusActive. The account must be
+	// UserKindFederated, in UserStatusPending, not linked yet, with
+	// HomeIssuer equal to the normalized issuer and FederatedEmail equal
+	// to the normalized email (ErrInvalidInput otherwise). A pair already
+	// linked to any account returns ErrAlreadyExists, as does the later
+	// of two concurrent first contacts for one account, so a caller can
+	// re-read with GetFederatedUserBySubject. It returns the updated
+	// account. It is safe to call on the store passed to WithTx.
+	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -243,6 +285,22 @@ type Store interface {
 	// limit rows of each kind are returned (limit <= 0: no limit), and
 	// Truncated reports whether any kind had more.
 	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
+
+	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
+	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
+	// bindings, group memberships, role definitions, invite codes and
+	// broker join tokens, in that order, each kind by ID. Only the stamp
+	// selects. At most limit rows of each kind are returned (limit <= 0:
+	// no limit); truncated reports whether any kind had more. An empty
+	// issuanceID returns ErrInvalidInput.
+	ListIssuanceStampedGrants(ctx context.Context, issuanceID string, limit int) (grants []IssuanceStampedGrant, truncated bool, err error)
+
+	// DeleteIssuanceStampedGrant deletes the row g names when it still
+	// carries issuanceID, and reports whether it deleted it (false: gone,
+	// or no longer that issuance's row, for example a join token minted
+	// again since). A role definition still referenced by any role
+	// binding is not deleted: ErrStampedRoleInUse.
+	DeleteIssuanceStampedGrant(ctx context.Context, g IssuanceStampedGrant, issuanceID string) (bool, error)
 
 	// Agent operations
 	AgentStore
@@ -633,7 +691,15 @@ type AgentStore interface {
 	// (nil, nil), so a concurrent start,
 	// restart, stop or heartbeat always wins. On success it returns the
 	// updated record for event publishing.
-	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
+	//
+	// haltRuntime is the runtime of the complete inventory target that no
+	// longer lists the container. When it is one RuntimeHaltEligible trusts,
+	// and the agent's run intent is running with no start claim held, the
+	// agent is moved to phase halted instead of error (same exit reason and
+	// message rules): the platform ended a run that should still be running
+	// (ptone/scion#4853). A returned record in phase halted means this call
+	// halted it, and it is the only caller that sees that.
+	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string) (*Agent, error)
 
 	// MarkAgentContainerMissingIfUnchanged is MarkAgentContainerMissing for a
 	// caller that read the agent before a broker call and learned from that
@@ -642,7 +708,8 @@ type AgentStore interface {
 	// phase running (not stopping), that the row's state_version and run_id
 	// still equal pre's (so a start, restart or other versioned write since
 	// the read wins) and that no start claim of any kind (start, restart,
-	// stop) is held. Returns (nil, nil) when any check fails.
+	// stop) is held. Returns (nil, nil) when any check fails. It never
+	// halts: the phase written is always error.
 	MarkAgentContainerMissingIfUnchanged(ctx context.Context, id, brokerID string, cutoff time.Time, pre ContainerMissingPrecondition, message string) (*Agent, error)
 
 	// ClearAgentRuntimeTarget removes the runtime target and any runtime
@@ -714,17 +781,31 @@ type AgentStore interface {
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
 
-	// BeginLaunch starts a new launch for agentID. A create start claim on the
+	// BeginLaunch starts a new create launch for agentID. A create start claim on the
 	// row is linked to the new launch (see SettleEndedLaunchClaim). The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
 	// previous active launch on the row becomes implicitly superseded (its ID
-	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
-	// any other value returns an error wrapping ErrInvalidInput (start and
-	// restart are P6, design §3.13). Returns ErrInvalidPhase when the
-	// agent's current phase is not eligible for kind (P1a: phase must be
-	// created or provisioning). Returns ErrNotFound if the agent doesn't
+	// no longer matches launch_id). kind must be LaunchKindCreate; any
+	// other value returns an error wrapping ErrInvalidInput (start and
+	// restart use BeginStartLaunch). It resets launch_prior_phase and
+	// launch_revoke_on_fail, so an earlier start launch's values never
+	// carry over. Returns ErrInvalidPhase when the agent's current phase is
+	// not created or provisioning. Returns ErrNotFound if the agent doesn't
 	// exist.
 	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
+
+	// BeginStartLaunch starts a new start or restart launch for agentID
+	// (ptone/scion#4669), with BeginLaunch's other rules. kind must be
+	// LaunchKindStart or LaunchKindRestart; any other value returns an error
+	// wrapping ErrInvalidInput. A start is accepted only on phase starting
+	// (the phase the start dispatch wrote); a restart on starting, running
+	// or stopped, and it moves the phase to starting, bumping state_version
+	// when that changes the phase. Any other phase returns ErrInvalidPhase.
+	// It writes opts into launch_prior_phase and launch_revoke_on_fail and
+	// leaves the resume memory (launch_resume_phase) untouched. A user
+	// start claim (for a start) or a restart claim (for a restart) on the
+	// row is linked to the new launch, so its end settles that claim.
+	BeginStartLaunch(ctx context.Context, agentID, kind string, timeout time.Duration, opts BeginLaunchOptions) (launchID string, err error)
 
 	// MarkLaunchAccepted records that a broker (owner) has claimed launchID:
 	// if owner is currently empty on the row, sets it, and if phase is
@@ -874,12 +955,14 @@ type AgentStore interface {
 	// agent has no active launch.
 	ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (released bool, err error)
 
-	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a create
+	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a start
 	// claim (claimID) linked to the agent's launch (the launch the claim was
-	// linked to at BeginLaunch), when that launch has ended without settling
-	// it. No-op when the launch is active, the claim changed, the claim is
-	// not linked to the agent's current launch, or the end reason settles
-	// nothing. A claim taken after a launch ended is never linked to it.
+	// linked to at BeginLaunch or BeginStartLaunch: a create claim to a create
+	// launch, a user claim to a start, a restart claim to a restart), when
+	// that launch has ended without settling it. No-op when the launch is
+	// active, the claim changed, the claim is not linked to the agent's
+	// current launch, or the end reason settles nothing. A claim taken after
+	// a launch ended is never linked to it.
 	SettleEndedLaunchClaim(ctx context.Context, agentID, claimID string) (changed bool, err error)
 
 	// ListAgentsWithStartClaim returns every non-deleted agent that holds a
@@ -1131,8 +1214,8 @@ type AgentHealthAggregate struct {
 	Total   int            // Total number of non-deleted agents
 	ByPhase map[string]int // Count per lifecycle phase
 
-	// Errored is the number of agents in phase error or with activity
-	// crashed, each agent counted once. Stopped agents are excluded (a
+	// Errored is the number of agents in phase error or halted, or with
+	// activity crashed, each agent counted once. Stopped agents are excluded (a
 	// crash survives the move to stopped), so Errored never exceeds
 	// Considered.
 	Errored int
@@ -1142,7 +1225,7 @@ type AgentHealthAggregate struct {
 	// Problem groups. Each has a true count and at most AgentHealthRefCap
 	// references, most recently updated first. Groups may overlap: an agent
 	// in phase error with activity offline is in both ErrorPhase and Offline.
-	ErrorPhase AgentProblemGroup // phase error
+	ErrorPhase AgentProblemGroup // phase error or halted
 	Crashed    AgentProblemGroup // activity crashed, phase not stopped
 	Offline    AgentProblemGroup // activity offline (heartbeat timed out), phase not stopped
 
@@ -1169,8 +1252,9 @@ type AgentHealthRef struct {
 type AgentBrokerCounts struct {
 	// Running is the number of agents in phase running.
 	Running int
-	// Attention is the number of agents needing attention: phase error, or
-	// activity crashed or offline outside phase stopped. Each agent once.
+	// Attention is the number of agents needing attention: phase error or
+	// halted, or activity crashed or offline outside phase stopped. Each
+	// agent once.
 	Attention int
 }
 
@@ -1279,6 +1363,30 @@ type AgentStatusUpdate struct {
 	// because hub-internal writers, including the reincarnation worker,
 	// must keep writing the phase. Internal to the hub — json:"-".
 	GuardReincarnation bool `json:"-"`
+	// ReportSource says which hub handler built this update from a report
+	// about the agent's run: the broker heartbeat handler (runtime) or the
+	// agent's own status endpoint (agent). Hub-internal writes leave it
+	// empty. Only the handlers set it, never a request body (json:"-"):
+	// the run check, halted's stickiness and the halt rule read it, and
+	// only a runtime report can halt an agent.
+	ReportSource StatusReportSource `json:"-"`
+	// ReportRunID is the run a status report came from: the run of the
+	// broker heartbeat's agent entry, or the run of the agent token that
+	// sent a self-report. When it is non-empty and differs from the stored
+	// run_id, the report describes an older (or unknown) run, and only the
+	// last-seen and updated timestamps are written. Internal to the hub —
+	// json:"-".
+	ReportRunID string `json:"-"`
+	// Restore marks a hub write that puts back a phase saved before a
+	// failed start (the start dispatch's rollback). It is the only write
+	// that may store phase halted directly; any other update carrying
+	// Phase "halted" has its phase dropped, and the halt rule does not
+	// apply to it. Internal to the hub — json:"-".
+	Restore bool `json:"-"`
+	// Result, when non-nil, is filled by a successful UpdateAgentStatus
+	// with what the write did (see AgentStatusResult). The caller owns it;
+	// it is left as it was on error. Internal to the hub — json:"-".
+	Result *AgentStatusResult `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -1690,6 +1798,27 @@ type TemplateContentPrecondition struct {
 	Layout      string
 }
 
+// HarnessConfigContentPrecondition is the state a harness-config commit
+// expects the stored row to be in (UpdateHarnessConfigContent).
+//
+// ContentHash is the content hash the caller read before computing its new
+// manifest. An empty ContentHash matches a row that has never been
+// committed (no content hash yet).
+//
+// Layout and StoragePath are the storage layout and storage path the caller
+// read (ptone/scion#4219). A row can change either without changing its
+// content hash: a commit migrates a legacy row to the blob layout and a new
+// row-unique path, and the storage migration moves a legacy row to a
+// hub-namespaced path (and may then delete the old tree). A commit that read
+// the old location must not write it back, so both are part of the
+// predicate. An empty Layout matches a legacy row, and an empty StoragePath
+// matches a row without one.
+type HarnessConfigContentPrecondition struct {
+	ContentHash string
+	Layout      string
+	StoragePath string
+}
+
 // TemplateFilter defines criteria for filtering templates.
 type TemplateFilter struct {
 	Name      string // Exact match on template name
@@ -1723,9 +1852,30 @@ type HarnessConfigStore interface {
 	// Returns ErrNotFound if the harness config doesn't exist.
 	GetHarnessConfigBySlug(ctx context.Context, slug, scope, scopeID string) (*HarnessConfig, error)
 
-	// UpdateHarnessConfig updates an existing harness config.
+	// UpdateHarnessConfig updates an existing harness config's metadata
+	// (name, slug, display name, description, scope, owner, source URL,
+	// image status and the audit fields). It does not write the content
+	// columns (Files, ContentHash, Harness, Config, Status, Layout,
+	// StorageURI, StorageBucket, StoragePath) nor BuiltImage (ptone/scion#4219): those
+	// change only through UpdateHarnessConfigContent and
+	// UpdateHarnessConfigBuiltImage, so a metadata write from a stale read
+	// cannot revert a commit.
 	// Returns ErrNotFound if the harness config doesn't exist.
 	UpdateHarnessConfig(ctx context.Context, hc *HarnessConfig) error
+
+	// UpdateHarnessConfigContent writes the content columns of hc (Files,
+	// ContentHash, Harness, Config, Status, Layout, StorageURI, StorageBucket,
+	// StoragePath, SourceURL, UpdatedBy) in one conditional update, only if
+	// the stored row still matches expected. It never writes the metadata
+	// columns or BuiltImage. Returns ErrHarnessConfigConflict when the row
+	// exists but no longer matches, and ErrNotFound when it does not exist.
+	UpdateHarnessConfigContent(ctx context.Context, hc *HarnessConfig, expected HarnessConfigContentPrecondition) error
+
+	// UpdateHarnessConfigBuiltImage writes only the built_image column of
+	// harness-config id (the image-build executor's narrow writer). It
+	// keeps Updated at its stored value.
+	// Returns ErrNotFound if the harness config doesn't exist.
+	UpdateHarnessConfigBuiltImage(ctx context.Context, id, image string) error
 
 	// DeleteHarnessConfig removes a harness config by ID.
 	// Returns ErrNotFound if the harness config doesn't exist.
@@ -1754,6 +1904,13 @@ type HarnessConfigFilter struct {
 	Status      string
 	ImageStatus string
 	Search      string // Full-text search on name/description
+	// StoragePath, when set, matches harness-configs whose storage path is
+	// exactly this value (used to find rows sharing a legacy path).
+	StoragePath string
+	// StoragePathPrefix, when set, matches harness-configs whose storage
+	// path starts with this value (used to find legacy rows nested under a
+	// legacy path, such as pre-blob clones at <slug path>/<clone id>).
+	StoragePathPrefix string
 }
 
 // UserStore defines user persistence operations.
@@ -2449,8 +2606,35 @@ type NotificationStore interface {
 
 	// UnmarkNotificationDispatched reverts a claimed notification back to
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
-	// proceed (no dispatcher, no broker) after an optimistic claim.
-	UnmarkNotificationDispatched(ctx context.Context, id string) error
+	// proceed (no dispatcher, no broker) after an optimistic claim. It reverts
+	// only a row with no recorded DispatchOutcome: once another caller (for
+	// example a primary dispatch racing a broker-connect drain) has recorded
+	// an outcome, the row stays dispatched, so an empty outcome keeps meaning
+	// pending or in flight and the notification is not delivered again.
+	// reverted reports whether the row was released; (false, nil) means it
+	// has an outcome or does not exist.
+	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
+
+	// RecordNotificationDispatchAttempt atomically increments a
+	// notification's DispatchAttempts by one. Callers record an attempt just
+	// before each delivery attempt to a subscriber agent; one attempt is one
+	// dispatchWithBrokerRetry call in pkg/hub, whose internal deferred-retry
+	// loop is not counted separately.
+	// Returns ErrNotFound if the notification doesn't exist.
+	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
+
+	// SetNotificationDispatchOutcome records a notification's terminal
+	// dispatch outcome (NotificationOutcomeDelivered or
+	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
+	// not pick it up again. Concurrent writers keep the most informative
+	// outcome: a delivered write applies unless the outcome is already
+	// delivered (it replaces failed, since the message did reach the
+	// subscriber), and a failed write applies only while no outcome is
+	// recorded. applied reports whether this call recorded it; (false, nil)
+	// means the write was refused and the recorded outcome is kept.
+	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	// notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
@@ -2879,7 +3063,7 @@ type LifecycleHookStore interface {
 type LifecycleHookFilter struct {
 	ScopeType string // Filter by scope type (hub, project)
 	ScopeID   string // Filter by scope ID
-	Trigger   string // Filter by trigger (running, suspended, stopped, error)
+	Trigger   string // Filter by trigger (running, suspended, stopped, error, halted)
 	Enabled   *bool  // Filter by enabled status (nil = no filter)
 }
 
@@ -3335,6 +3519,18 @@ type RoleStore interface {
 	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
 	// on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// ListVisitorRoleBindings returns the project-visitor bindings at the
+	// scope of projectID (the bindings CreateVisitorRoleBinding wrote),
+	// oldest first. Bindings of any other role are not returned.
+	ListVisitorRoleBindings(ctx context.Context, projectID string) ([]*RoleBinding, error)
+
+	// UpdateVisitorRoleBindingWindow replaces the NotBefore and ExpiresAt
+	// of the project-visitor binding id (nil clears a bound) and returns
+	// the updated binding. A binding of any other role returns
+	// ErrVisitorBindingRefused; a missing binding returns ErrNotFound. It
+	// is safe to call on the store passed to WithTx.
+	UpdateVisitorRoleBindingWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
@@ -3880,7 +4076,9 @@ type QuotaStore interface {
 	DeleteEntitlementBinding(ctx context.Context, id string) error
 
 	// Usage reservations
-	// CreateUsageReservation creates a new usage reservation.
+	// CreateUsageReservation creates a new usage reservation. When the
+	// resource already holds an active reservation for the same limit
+	// definition, it returns ErrActiveReservationExists and writes nothing.
 	CreateUsageReservation(ctx context.Context, reservation *UsageReservation) (*UsageReservation, error)
 
 	// CountActiveReservations counts non-released reservations for a specific
@@ -3890,6 +4088,13 @@ type QuotaStore interface {
 	// ReleaseReservation releases a reservation by setting released_at.
 	// The record is retained for auditing. Matches on limit_definition_id and resource_id.
 	ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error
+
+	// ReleaseReservationByID releases one reservation by its ID, in a
+	// single conditional write: only while that row is still active. It
+	// returns ErrNotFound when the row is missing or already released, so a
+	// caller acting on an earlier read never releases a newer reservation
+	// of the same resource.
+	ReleaseReservationByID(ctx context.Context, reservationID string) error
 
 	// ReleaseReservationsByResource releases all reservations for a given resource ID.
 	ReleaseReservationsByResource(ctx context.Context, resourceID string) error
@@ -3916,6 +4121,12 @@ type QuotaStore interface {
 	// re-reserving on agent start/resume must not create a second active
 	// reservation for an agent that already holds one.
 	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
+
+	// GetActiveReservation returns resourceID's non-released reservation
+	// for the given limit, whatever its scope, or ErrNotFound when there is
+	// none. At most one exists (the unique active (limit_definition_id,
+	// resource_id) index). Released reservations are never returned.
+	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
 }
 
 // =============================================================================

@@ -135,6 +135,12 @@ type Layer1Snapshot struct {
 	// Quotas
 	EnforceBrokerQuotas *bool
 
+	// Hub observability export switches (hub_observability section); nil
+	// when unset. Read once at startup: the exporters are created then,
+	// so ApplySnapshot does not apply them (restart_required).
+	HubMetricsEnabled *bool
+	HubTracingEnabled *bool
+
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
@@ -244,6 +250,17 @@ type OperationalSettings struct {
 	// (SetUnseededBootstrap). Guarded by mu.
 	unseededPublicURL    string
 	hasUnseededPublicURL bool
+	// unseededKoanf is the bootstrap merge without the SCION_SEED_* layer
+	// (SetUnseededBootstrap), nil when unset. computeSupersededKeys uses it
+	// to tell whether the seed layer gave a key its bootstrap value.
+	// Guarded by mu.
+	unseededKoanf *koanf.Koanf
+	// aboveSeedKoanf is the bootstrap merge with only the layers above
+	// SCION_SEED_* (settings files and SCION_SERVER_*), without the coded
+	// defaults (SetAboveSeedBootstrap), nil when unset. computeSupersededKeys
+	// uses it to tell a coded default from a value set in those layers.
+	// Guarded by mu.
+	aboveSeedKoanf *koanf.Koanf
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -264,6 +281,33 @@ type OperationalSettings struct {
 	// stopPropagation cancels the propagation goroutines (subscriber + poll ticker).
 	stopPropagation context.CancelFunc
 	propagationWg   sync.WaitGroup
+
+	// writeGuard, when set, is asked before every section write or delete
+	// (Update, DeleteSection); a non-nil error refuses the write. The
+	// server installs the test-admin policy guard here
+	// (Server.testAdminSettingsWriteGuard), so every settings write path
+	// refuses test identities with admin roles.
+	writeGuard atomic.Pointer[settingsWriteGuard]
+}
+
+// settingsWriteGuard decides whether the caller in ctx may write section.
+type settingsWriteGuard func(ctx context.Context, section string) error
+
+// setWriteGuard installs the write guard (nil removes it).
+func (o *OperationalSettings) setWriteGuard(g settingsWriteGuard) {
+	if g == nil {
+		o.writeGuard.Store(nil)
+		return
+	}
+	o.writeGuard.Store(&g)
+}
+
+// checkWriteGuard runs the write guard for section, if one is installed.
+func (o *OperationalSettings) checkWriteGuard(ctx context.Context, section string) error {
+	if g := o.writeGuard.Load(); g != nil && *g != nil {
+		return (*g)(ctx, section)
+	}
+	return nil
 }
 
 // NewOperationalSettings creates a new OperationalSettings service.
@@ -295,6 +339,8 @@ func NewOperationalSettings(
 // endpoint resolution at startup ignores seed values, so with no saved
 // public URL, Snapshot takes the public URL the admin view shows from this
 // merge rather than from the full bootstrap merge (ptone/scion#4826).
+// The admin view also uses it to attribute a superseded key to the seed
+// layer only when that layer gave the key its value (ptone/scion#4904).
 // Without it (tests, embedded servers) the full bootstrap merge is used.
 func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	if k == nil {
@@ -302,8 +348,25 @@ func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.unseededKoanf = k
 	o.unseededPublicURL = k.String(config.PublicURLKey)
 	o.hasUnseededPublicURL = true
+}
+
+// SetAboveSeedBootstrap records the bootstrap merge with only the layers
+// above SCION_SEED_*, without the coded defaults
+// (config.LoadAboveSeedBootstrapKoanfWithConfigPath). With it and the
+// unseeded bootstrap set, the admin view attributes a superseded key that
+// none of those layers sets to the seed layer when a seed value exists,
+// else to the coded defaults (ptone/scion#4983). Without it (tests,
+// embedded servers) such a key is attributed to settings.yaml.
+func (o *OperationalSettings) SetAboveSeedBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.aboveSeedKoanf = k
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
@@ -513,120 +576,27 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 }
 
 // populateMapSections fills the Runtimes, Profiles, and HarnessConfigs
-// snapshot fields. When a DB row exists for the section, the doc is
-// deserialized directly (preserving empty maps). When no DB row exists,
-// the bootstrap koanf is used as the file-based fallback.
+// snapshot fields with config.OverlayMapSections: when a DB row exists for
+// the section, the doc is deserialized directly (preserving empty maps);
+// when no DB row exists, the bootstrap koanf is used as the file-based
+// fallback. A DB doc that does not decode is logged and leaves that field
+// unchanged.
 func (o *OperationalSettings) populateMapSections(snap *Layer1Snapshot, dbSections map[string]json.RawMessage) {
-	// Runtimes
-	if doc, ok := dbSections["runtimes"]; ok {
-		var v map[string]config.V1RuntimeConfig
-		if err := json.Unmarshal(doc, &v); err != nil {
-			slog.Warn("runtimes: failed to unmarshal DB doc for snapshot", "error", err)
-		} else {
-			if v == nil {
-				v = map[string]config.V1RuntimeConfig{}
-			}
-			snap.Runtimes = v
-		}
-	} else {
-		snap.Runtimes = extractRuntimesFromKoanf(o.bootstrapKoanf)
+	sections, decodeErrs := config.OverlayMapSections(dbSections, o.bootstrapKoanf)
+	failed := map[string]bool{}
+	for _, e := range decodeErrs {
+		failed[e.Section] = true
+		slog.Warn(e.Section+": failed to unmarshal DB doc for snapshot", "error", e.Err)
 	}
-
-	// Profiles
-	if doc, ok := dbSections["profiles"]; ok {
-		var v map[string]config.V1ProfileConfig
-		if err := json.Unmarshal(doc, &v); err != nil {
-			slog.Warn("profiles: failed to unmarshal DB doc for snapshot", "error", err)
-		} else {
-			if v == nil {
-				v = map[string]config.V1ProfileConfig{}
-			}
-			snap.Profiles = v
-		}
-	} else {
-		snap.Profiles = extractProfilesFromKoanf(o.bootstrapKoanf)
+	if !failed["runtimes"] {
+		snap.Runtimes = sections.Runtimes
 	}
-
-	// HarnessConfigs
-	if doc, ok := dbSections["harness_configs"]; ok {
-		var v map[string]config.HarnessConfigEntry
-		if err := json.Unmarshal(doc, &v); err != nil {
-			slog.Warn("harness_configs: failed to unmarshal DB doc for snapshot", "error", err)
-		} else {
-			if v == nil {
-				v = map[string]config.HarnessConfigEntry{}
-			}
-			snap.HarnessConfigs = v
-		}
-	} else {
-		snap.HarnessConfigs = extractHarnessConfigsFromKoanf(o.bootstrapKoanf)
+	if !failed["profiles"] {
+		snap.Profiles = sections.Profiles
 	}
-}
-
-// extractRuntimesFromKoanf extracts runtimes from a koanf instance (file fallback).
-func extractRuntimesFromKoanf(k *koanf.Koanf) map[string]config.V1RuntimeConfig {
-	if k == nil || !k.Exists("runtimes") {
-		return nil
+	if !failed["harness_configs"] {
+		snap.HarnessConfigs = sections.HarnessConfigs
 	}
-	sub := k.Cut("runtimes")
-	if sub == nil || len(sub.Keys()) == 0 {
-		return nil
-	}
-	data, err := json.Marshal(sub.Raw())
-	if err != nil {
-		slog.Warn("runtimes: failed to marshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	var v map[string]config.V1RuntimeConfig
-	if err := json.Unmarshal(data, &v); err != nil {
-		slog.Warn("runtimes: failed to unmarshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	return v
-}
-
-// extractProfilesFromKoanf extracts profiles from a koanf instance (file fallback).
-func extractProfilesFromKoanf(k *koanf.Koanf) map[string]config.V1ProfileConfig {
-	if k == nil || !k.Exists("profiles") {
-		return nil
-	}
-	sub := k.Cut("profiles")
-	if sub == nil || len(sub.Keys()) == 0 {
-		return nil
-	}
-	data, err := json.Marshal(sub.Raw())
-	if err != nil {
-		slog.Warn("profiles: failed to marshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	var v map[string]config.V1ProfileConfig
-	if err := json.Unmarshal(data, &v); err != nil {
-		slog.Warn("profiles: failed to unmarshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	return v
-}
-
-// extractHarnessConfigsFromKoanf extracts harness_configs from a koanf instance (file fallback).
-func extractHarnessConfigsFromKoanf(k *koanf.Koanf) map[string]config.HarnessConfigEntry {
-	if k == nil || !k.Exists("harness_configs") {
-		return nil
-	}
-	sub := k.Cut("harness_configs")
-	if sub == nil || len(sub.Keys()) == 0 {
-		return nil
-	}
-	data, err := json.Marshal(sub.Raw())
-	if err != nil {
-		slog.Warn("harness_configs: failed to marshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	var v map[string]config.HarnessConfigEntry
-	if err := json.Unmarshal(data, &v); err != nil {
-		slog.Warn("harness_configs: failed to unmarshal from bootstrap koanf", "error", err)
-		return nil
-	}
-	return v
 }
 
 // maintenanceFromCache extracts maintenance settings from the DB section
@@ -657,6 +627,9 @@ func (o *OperationalSettings) Update(
 	expectedRevision int64,
 	origin string,
 ) (int64, error) {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return 0, err
+	}
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
@@ -726,6 +699,9 @@ func (o *OperationalSettings) Update(
 // cache, publishes an event so peers refresh, and self-applies. The section
 // falls back to bootstrap material immediately (design §3.2.4).
 func (o *OperationalSettings) DeleteSection(ctx context.Context, section string) error {
+	if err := o.checkWriteGuard(ctx, section); err != nil {
+		return err
+	}
 	if err := o.store.DeleteHubSetting(ctx, section); err != nil {
 		return err
 	}
@@ -815,6 +791,18 @@ func (o *OperationalSettings) StartPropagation(ctx context.Context, server *Serv
 		o.runPollBackstop(propCtx, server)
 	}()
 
+	// --- Built-in profile reference counts (ptone/scion#5113) ---
+	o.propagationWg.Add(1)
+	go func() {
+		defer o.propagationWg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("Built-in profile reference worker panicked — reference counts stopped on this replica", "panic", r)
+			}
+		}()
+		server.runProfileReferenceWorker(propCtx)
+	}()
+
 	// --- Reconnect refresh callback (§3.6 reconnect) ---
 	// Use propCtx (not the parent ctx) so reconnect refreshes respect the
 	// propagation lifecycle and stop when StopPropagation cancels propCtx.
@@ -886,6 +874,9 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 			return
 		case <-ticker.C:
 			o.refreshAndApply(ctx, server)
+			// Recount built-in profile references every tick, changed
+			// sections or not (ptone/scion#5113).
+			server.triggerProfileReferences()
 		}
 	}
 }
@@ -960,6 +951,16 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("quotas.enforce_broker_quotas") {
 		v := k.Bool("quotas.enforce_broker_quotas")
 		snap.EnforceBrokerQuotas = &v
+	}
+
+	// Hub observability export switches
+	if k.Exists(config.HubMetricsEnabledKey) {
+		v := k.Bool(config.HubMetricsEnabledKey)
+		snap.HubMetricsEnabled = &v
+	}
+	if k.Exists(config.HubTracingEnabledKey) {
+		v := k.Bool(config.HubTracingEnabledKey)
+		snap.HubTracingEnabled = &v
 	}
 
 	// Agent secrets
@@ -1155,6 +1156,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Agent secrets — read from settings.yaml top-level agent_secrets
 	// section, so a file-mode admin save takes effect without a restart.
 	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
+	// Hub observability export switches — read at startup only.
+	snap.HubMetricsEnabled = gc.Hub.Observability.MetricsEnabled
+	snap.HubTracingEnabled = gc.Hub.Observability.TracingEnabled
 
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
@@ -1543,6 +1548,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	if snap.Runtimes != nil || snap.Profiles != nil || snap.HarnessConfigs != nil {
 		if overlay := config.GetGlobalSettingsOverlay(); overlay != nil {
 			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+			// Recount the built-in profile references the overlay retains
+			// (ptone/scion#5113); never blocks.
+			s.triggerProfileReferences()
 			if snap.Runtimes != nil {
 				applied = append(applied, "runtimes")
 			}
@@ -1577,9 +1585,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		// installed, whatever the stored settings say. Startup refuses such
 		// a snapshot (cmd); this keeps a later reload from installing one.
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason(federationSkipTestAdminTier)
 		logTestAdminFederationSkipped()
 	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason("")
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
 		}
@@ -1588,6 +1598,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
 			slog.Error("Federation config validation failed during apply, keeping old config",
 				"errors", fmt.Sprintf("%v", errs))
+			s.setFederationSkipReason(federationSkipInvalid)
 		} else {
 			// Derive federation mode using the same pattern as New().
 			federationMode := s.config.Mode
@@ -1613,8 +1624,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			if err != nil {
 				slog.Error("Federation authenticator rebuild failed, keeping old config",
 					"error", err)
+				s.setFederationSkipReason(federationSkipBuildFailed)
 			} else {
 				s.federationAuth.Store(newAuth)
+				s.setFederationSkipReason("")
 				slog.Info("Federation authenticator hot-reloaded",
 					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
 					"enabled", snap.FederationConfig.Enabled)

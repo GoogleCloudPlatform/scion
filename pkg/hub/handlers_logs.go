@@ -94,6 +94,11 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 	logs, err := dispatcher.DispatchAgentLogs(ctx, agent, tail)
 	if err != nil {
 		slog.Error("agent log relay failed", "agent_id", agentID, "project_id", agent.ProjectID, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		// The broker declined outright (e.g. the substrate runtime's
 		// ErrLogsNotSupported) rather than failing to reach the runtime.
 		// Pass its status and code straight through instead of re-wrapping

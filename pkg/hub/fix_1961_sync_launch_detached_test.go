@@ -117,7 +117,10 @@ func TestSyncLaunch_Create_RealDispatchFailure_StillCleansUp(t *testing.T) {
 
 // The detached dispatch still honours its own deadline: the dispatch ctx is
 // done once syncDispatchTimeout passes (on the control channel that sends
-// the broker a cancel frame), and the create is rolled back as a failure.
+// the broker a cancel frame). The outcome is then unknown (the broker may
+// still be starting the agent), so the create is kept for the start-claim
+// reaper and answered 504 start_outcome_unknown, not rolled back
+// (ptone/scion#4817).
 func TestSyncLaunch_Create_DispatchHonoursOwnTimeout(t *testing.T) {
 	shortenSyncDispatchTimeout(t, 50*time.Millisecond)
 	disp := &launchProbeDispatcher{mode: probeBlock}
@@ -130,11 +133,12 @@ func TestSyncLaunch_Create_DispatchHonoursOwnTimeout(t *testing.T) {
 	require.NotNil(t, disp.capturedAgent)
 	require.Len(t, disp.ctxErrs, 1)
 	require.ErrorIs(t, disp.ctxErrs[0], context.DeadlineExceeded, "the dispatch ctx must be done at its deadline")
-	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	assert.True(t, disp.deleteCalled, "the timed-out create deletes its runtime")
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeStartOutcomeUnknown)
+	assert.False(t, disp.deleteCalled, "the timed-out create keeps its runtime: the broker may still be starting it")
 	_, err := s.GetAgent(context.Background(), disp.capturedAgent.ID)
-	assert.ErrorIs(t, err, store.ErrNotFound)
-	assert.Equal(t, 1, countCreateCompensations(t, s))
+	assert.NoError(t, err, "the timed-out create keeps the agent")
+	assert.Equal(t, 0, countCreateCompensations(t, s), "the create is not rolled back")
 }
 
 func TestSyncLaunch_LifecycleStart_ClientCancelDuringDispatch(t *testing.T) {

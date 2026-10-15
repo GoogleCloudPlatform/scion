@@ -94,3 +94,107 @@ func TestInstallColocatedSettingsOverlay_NotInstalled(t *testing.T) {
 		require.Nil(t, config.GetGlobalSettingsOverlay())
 	})
 }
+
+// newStoredCatalogTestHub returns a hub with no catalog in its bootstrap
+// material and the given profiles and runtimes rows stored with origin.
+func newStoredCatalogTestHub(t *testing.T, profiles, runtimes, origin string) *hub.Server {
+	t.Helper()
+	s := newTestStore(t)
+	srv, err := hub.New(hub.ServerConfig{}, s)
+	require.NoError(t, err)
+	hs := s.(store.HubSettingStore)
+	ctx := context.Background()
+	_, err = hs.UpsertHubSetting(ctx, "profiles", []byte(profiles), "seed", -1, origin)
+	require.NoError(t, err)
+	_, err = hs.UpsertHubSetting(ctx, "runtimes", []byte(runtimes), "seed", -1, origin)
+	require.NoError(t, err)
+	ops := hub.NewOperationalSettings(hs, koanf.New("."), koanf.New("."))
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	return srv
+}
+
+// overlayFileFixture is a settings file whose active_profile "local" runs
+// on docker.
+func overlayFileFixture() *config.VersionedSettings {
+	return &config.VersionedSettings{
+		ActiveProfile: "local",
+		Runtimes:      map[string]config.V1RuntimeConfig{"docker": {Type: "docker"}},
+		Profiles:      map[string]config.V1ProfileConfig{"local": {Runtime: "docker"}},
+	}
+}
+
+// Seeded empty profiles and runtimes rows (as startup wrote them before
+// ptone/scion#5007) leave the settings file's catalog in place: the
+// default profile resolves to the file's default runtime on every DB
+// driver. A managed non-empty catalog still replaces the file's.
+func TestInstallColocatedSettingsOverlay_StoredCatalogRows(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver+"/seeded empty rows", func(t *testing.T) {
+			resetGlobalSettingsOverlay(t)
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = driver
+			require.True(t, installColocatedSettingsOverlay(cfg, newStoredCatalogTestHub(t, `{}`, `{}`, "seeded")))
+
+			vs := overlayFileFixture()
+			config.GetGlobalSettingsOverlay().Apply(vs)
+			_, rtType, err := vs.ResolveRuntime("")
+			require.NoError(t, err)
+			require.Equal(t, "docker", rtType)
+			require.Equal(t, "local", vs.ActiveProfile)
+		})
+		t.Run(driver+"/managed catalog", func(t *testing.T) {
+			resetGlobalSettingsOverlay(t)
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = driver
+			require.True(t, installColocatedSettingsOverlay(cfg, newStoredCatalogTestHub(t,
+				`{"local-docker":{"runtime":"stored-docker"}}`,
+				`{"stored-docker":{"type":"docker"}}`, "managed")))
+
+			vs := overlayFileFixture()
+			config.GetGlobalSettingsOverlay().Apply(vs)
+			require.NotContains(t, vs.Profiles, "local")
+			require.NotContains(t, vs.Runtimes, "docker")
+			// The single stored profile is the default (unchanged rule).
+			_, rtType, err := vs.ResolveRuntime("")
+			require.NoError(t, err)
+			require.Equal(t, "docker", rtType)
+			require.Equal(t, "local-docker", vs.ActiveProfile)
+		})
+	}
+}
+
+// Built-in profile retention (ptone/scion#5113) is enabled only for a
+// legacy co-located broker: without one (a flat host, or a failed
+// registration) the installed overlay behaves as before; with one, it is
+// enabled.
+func TestEnableColocatedProfileReferences(t *testing.T) {
+	t.Run("no legacy co-located broker", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite"
+		srv := newOverlayTestHub(t)
+		require.True(t, installColocatedSettingsOverlay(cfg, srv))
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.False(t, config.GetGlobalSettingsOverlay().RetentionEnabled())
+	})
+	t.Run("legacy co-located broker", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		t.Setenv("HOME", t.TempDir())
+		cfg := &config.GlobalConfig{}
+		cfg.Database.Driver = "sqlite"
+		srv := newOverlayTestHub(t)
+		srv.SetEmbeddedBrokerID("legacy-broker")
+		require.True(t, installColocatedSettingsOverlay(cfg, srv))
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.True(t, config.GetGlobalSettingsOverlay().RetentionEnabled())
+	})
+	t.Run("no overlay", func(t *testing.T) {
+		resetGlobalSettingsOverlay(t)
+		srv := newOverlayTestHub(t)
+		srv.SetEmbeddedBrokerID("legacy-broker")
+		enableColocatedProfileReferences(context.Background(), srv)
+		require.Nil(t, config.GetGlobalSettingsOverlay())
+	})
+}

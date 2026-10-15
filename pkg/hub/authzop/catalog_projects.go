@@ -44,7 +44,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.add",
+			EventType:     "project_member_add",
 			ContextFields: []string{"actor_id", "project_id"},
 			AfterFields:   []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -77,7 +77,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot demote the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.update",
+			EventType:     "project_member_role_change",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "old_role"},
 			AfterFields:   []string{"new_role"},
@@ -109,7 +109,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot remove the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.remove",
+			EventType:     "project_member_remove",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -161,7 +161,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project; atomic replacement for both actor and target", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.transfer",
+			EventType:     "project_ownership_transfer",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"old_owner_id"},
 			AfterFields:   []string{"new_owner_id", "old_owner_role", "new_owner_role"},
@@ -170,6 +170,131 @@ var projectOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden, DenialRoleAssignmentForbidden, DenialPrincipalIneligible, DenialLastOwner},
 		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 		Bearer:      SessionOnly(ReasonGovernancePending),
+	},
+
+	// =====================================================================
+	// Domain: project.visitors — visitor grants for federated accounts
+	// (ptone/scion#4603). Every entry point answers 404 while the
+	// federation.project_visitors experiment is off.
+	// =====================================================================
+	{
+		ID:          "project.visitors.list",
+		Domain:      "project.visitors",
+		Description: "List a project's visitor grants (federated accounts holding the project-visitor role)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialCredentialInsufficient},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.add",
+		Domain:      "project.visitors",
+		Description: "Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors", Method: "POST"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectGrantAuthority},
+		DelegationKind:        DelegationNonAmplification,
+		DelegationDescription: "The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; granting also needs every permission of the project-visitor role on the project. A visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		Invariants: []Invariant{
+			{ID: "visitor-role-only", Description: "The grant binds only the project-visitor role, at project scope, to a federated account (CreateVisitorRoleBinding)", Kind: InvariantSecurity, FailClosed: true},
+		},
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_grant",
+			ContextFields: []string{"actor_id", "project_id"},
+			AfterFields:   []string{"visitor_id", "issuer", "email", "not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialPrincipalIneligible, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AuditFailureLeavesNoChange"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.update",
+		Domain:      "project.visitors",
+		Description: "Replace the window (not before, expires at) of a project visitor grant",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "PATCH"},
+		},
+		Principals:            []PrincipalKind{PrincipalUser},
+		Credentials:           []CredentialKind{CredentialSessionJWT},
+		ResourceResolver:      "project-from-url",
+		BasePermission:        "project.manage_visitors",
+		Effects:               []SecurityEffect{EffectChangeAuthority},
+		DelegationKind:        DelegationConditionalIncrease,
+		DelegationDescription: "Only a window change that extends the grant (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project, as for a grant; shortening never does",
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor grant of the project; extending one also needs every permission of the project-visitor role on the project.",
+		},
+		AuthorityEval: AuthorityEvalBeforeAndAfter,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_update",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "not_before", "expires_at"},
+			AfterFields:   []string{"not_before", "expires_at"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WindowHonoured"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WhoMayGrant"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "project.visitors.remove",
+		Domain:      "project.visitors",
+		Description: "Revoke a project visitor grant; the visitor's next request is refused",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/visitors/{visitorId}", Method: "DELETE"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.manage_visitors",
+		Effects:          []SecurityEffect{EffectRevokeAuthority},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernancePeerSuperior,
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "project_visitor_revoke",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"visitor_id", "issuer", "email", "subject"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_RevokeRefusesNextRequest"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WhoMayGrant"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 
 	// =====================================================================
@@ -656,7 +781,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.grant.put",
 		Domain:      "artifact",
-		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; a caller with that authority asking for a well-formed review grant is refused with 403 review_subject_cannot_read when the user cannot read the artifact and 403 review_replaces_access when the user holds a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
 		},
@@ -668,7 +793,7 @@ var projectOperations = []OperationSpec{
 		DelegationKind:        DelegationNonAmplification,
 		DelegationDescription: "A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds",
 		AuthorityEval:         AuthorityEvalNone,
-		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled"},
+		DenialCodes:           []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled", "review_subject_cannot_read", "review_replaces_access"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
 			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},

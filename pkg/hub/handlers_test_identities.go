@@ -766,7 +766,12 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 // test_identity.issue route guard, sees and re-issues every test identity
 // rather than only its own: an unscoped platform admin session. It widens
 // the result scope only; it grants no access on its own.
-func testIdentityCallerSeesAll(caller UserIdentity) bool {
+func (s *Server) testIdentityCallerSeesAll(ctx context.Context, caller UserIdentity) bool {
+	// Test identities with admin roles never see every test identity
+	// (test-admin policy; the routes are deny for them as well).
+	if s.testAdminPolicyRefusesUser(ctx, caller.ID(), "handlers_test_identities.go:testIdentityCallerSeesAll") {
+		return false
+	}
 	return IsUnscopedLocalPlatformAdmin(caller)
 }
 
@@ -777,7 +782,7 @@ func testIdentityCallerSeesAll(caller UserIdentity) bool {
 // manages the identities it issued (including those issued through its
 // delegations: the grantor's own session), and an unscoped platform admin
 // session manages all.
-func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+func (s *Server) canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
 	if st := workloadDelegationCaller(ctx); st != nil {
 		return u.IssuerDelegationID != nil && *u.IssuerDelegationID == st.delegation.ID &&
 			u.IssuedBy != nil && *u.IssuedBy == st.delegation.GrantorID
@@ -786,7 +791,7 @@ func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.Us
 		// A workload credential without its state: fail closed.
 		return false
 	}
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(ctx, caller) {
 		return true
 	}
 	return u.IssuedBy != nil && *u.IssuedBy == caller.ID()
@@ -833,14 +838,14 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	u, err := s.store.GetUser(ctx, id)
 	// An admin-kind identity gets exactly one token, at issuance: no
 	// re-issue (409), for its issuer or an unscoped platform admin.
-	if err == nil && u.IsTestAdmin() && canManageTestIdentity(ctx, caller, u) {
+	if err == nil && u.IsTestAdmin() && s.canManageTestIdentity(ctx, caller, u) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
 			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
 		return
 	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(ctx, caller, u))) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canManageTestIdentity(ctx, caller, u))) {
 		NotFound(w, "test identity")
 		return
 	}
@@ -929,7 +934,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 		return
 	}
 	issuedBy := caller.ID()
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(r.Context(), caller) {
 		issuedBy = ""
 	}
 	// A workload delegation request lists only its own delegation's
@@ -991,7 +996,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 // besides test_identity.issue (checked by testIdentityCaller), holds
 // user.delete on u.
 func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
-	if canManageTestIdentity(ctx, caller, u) {
+	if s.canManageTestIdentity(ctx, caller, u) {
 		return true
 	}
 	// A workload delegation deletes only its own delegation's identities;
@@ -1165,20 +1170,62 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 	u, err := s.store.GetUser(ctx, id)
 	switch {
 	case err == nil:
-		if !u.IsTestFixture() || !s.canDeleteTestIdentity(ctx, caller, u) {
+		if u.IssuedBy != nil {
+			run.issuerID = *u.IssuedBy
+		}
+		switch {
+		case u.IsTestFixture():
+			if !s.canDeleteTestIdentity(ctx, caller, u) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+		case store.IsTestAdminKind(u.Kind) && u.IssuanceID != nil && *u.IssuanceID != "":
+			// An admin-kind identity (admin tier A3): its issuer or a
+			// super-admin purges it, with every grant stamped with its
+			// issuance.
+			if !s.canPurgeTestAdminIdentity(ctx, caller, run.issuerID) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+			run.issuanceID = *u.IssuanceID
+		default:
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}
 		run.user = u
-		if u.IssuedBy != nil {
-			run.issuerID = *u.IssuedBy
-		}
 	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 		issuer, ok, lerr := s.fixtureLeftoverIssuer(ctx, id)
 		if lerr != nil {
 			slog.ErrorContext(ctx, "test identity purge: reading leftovers failed", "test_identity_id", id, "error", lerr)
 			InternalError(w)
 			return
+		}
+		// An admin-kind identity whose row is gone (revoke-all, or an
+		// earlier purge that did not finish): its issuance comes from its
+		// issuance audit record, and its stamped grants are leftovers too.
+		issuanceID, auditIssuer, isAdmin, aerr := s.testAdminIssuanceFromAudit(ctx, id)
+		if aerr != nil {
+			slog.ErrorContext(ctx, "test identity purge: reading the issuance record failed", "test_identity_id", id, "error", aerr)
+			InternalError(w)
+			return
+		}
+		if isAdmin {
+			if !ok {
+				grants, _, gerr := s.store.ListIssuanceStampedGrants(ctx, issuanceID, 1)
+				if gerr != nil {
+					slog.ErrorContext(ctx, "test identity purge: reading leftover grants failed", "test_identity_id", id, "error", gerr)
+					InternalError(w)
+					return
+				}
+				ok = len(grants) > 0
+			}
+			if !ok || !s.canPurgeTestAdminIdentity(ctx, caller, auditIssuer) {
+				writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
+				return
+			}
+			run.issuerID = auditIssuer
+			run.issuanceID = issuanceID
+			break
 		}
 		// A workload delegation manages only identities stamped with its own
 		// delegation (canManageTestIdentity). The leftovers of a deleted
@@ -1187,7 +1234,7 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 		// the same empty report; the grantor's session or an admin session
 		// purges them.
 		if !ok || GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation ||
-			(!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+			(!s.testIdentityCallerSeesAll(ctx, caller) && issuer != caller.ID()) {
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}

@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
@@ -80,7 +81,6 @@ var layer0Prefixes = []string{
 	"server.native_chat",
 	// Async agent create (design §3.7) — the reaper's dedicated scheduler
 	// ticker and the clamp on LaunchTimeout are both established at startup.
-	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
 	// Request performance tracing — the middleware and the authorization
@@ -97,6 +97,9 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Separate relay process settings (scion server --role relay) — read
+	// at startup.
+	"server.relay",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -154,6 +157,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
 		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
 	},
+	"hub_observability": {
+		config.HubMetricsEnabledKey: "metrics_enabled",
+		config.HubTracingEnabledKey: "tracing_enabled",
+	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
 	},
@@ -210,6 +217,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"gcp_iam": {
 		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
 		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
+	},
+	"hub_observability": {
+		"metrics_enabled": config.HubMetricsEnabledKey,
+		"tracing_enabled": config.HubTracingEnabledKey,
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",

@@ -216,6 +216,32 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
 	assert.False(t, notifs[0].Dispatched, "a failed delivery must not be marked dispatched")
+	assert.Equal(t, 1, notifs[0].DispatchAttempts, "the failed attempt must be counted (ptone/scion#4800)")
+	assert.Empty(t, notifs[0].DispatchOutcome, "a failed attempt that will be retried has no outcome yet")
+}
+
+// A delivered primary dispatch stores the delivered outcome and its one
+// attempt (ptone/scion#4800).
+func TestNotificationDispatcher_DeliveredRecordsOutcomeAndAttempt(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	env.publishStatus("completed")
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 50*time.Millisecond)
+	// Stop waits for the dispatcher goroutine, so the stored state is
+	// settled afterwards (the deferred Stop is a no-op).
+	env.nd.Stop()
+
+	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.True(t, notifs[0].Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, notifs[0].DispatchOutcome)
+	assert.Equal(t, 1, notifs[0].DispatchAttempts)
 }
 
 func TestNotificationDispatcher_UserSubscriber(t *testing.T) {

@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -585,6 +586,30 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}
 		} else {
 			log.Info("RunInit embedded: skipping environ-purge re-exec")
+		}
+	}
+
+	// Open the startup listener when the runtime asked for one (only the
+	// cloudrun Instances runtime does, for its TCP startup probe). This runs
+	// after the re-exec above so it opens once, and before the slower setup
+	// below so the probe sees the port early. A bind failure is logged and
+	// init carries on: the probe then fails and the platform restart makes
+	// the problem visible.
+	//
+	// Declaring the listener port as the container port makes the platform
+	// pass it in PORT. The listener holds that port for the life of init,
+	// so PORT is dropped from what the harness, hooks and services inherit;
+	// a workload that honours PORT then falls back to its own default
+	// instead of failing to bind.
+	if ln, err := startuplistener.Start(os.Getenv); err != nil {
+		log.Error("%v", err)
+	} else if ln != nil {
+		port := os.Getenv(startuplistener.EnvPort)
+		log.Info("Startup listener open on port %s", port)
+		defer func() { _ = ln.Close() }()
+		if os.Getenv("PORT") == port {
+			_ = os.Unsetenv("PORT")
+			log.Info("Dropped PORT=%s from the child environment (the startup listener holds it)", port)
 		}
 	}
 
@@ -3217,21 +3242,13 @@ func ensureWorkspaceOwnership(workspacePath string, uid, gid, currentEUID int, c
 // resolveIsSharedGitWorkspace returns true when the agent is in a shared-plain
 // git workspace and should configure git credentials accordingly.
 //
-// Prefers the new canonical workspace mode env vars (SCION_WORKSPACE_MODE +
-// SCION_WORKSPACE_GIT) emitted by brokers >= workspace-mode-env release.
-// Falls back to the legacy SCION_SHARED_WORKSPACE var for older broker versions
-// that don't yet emit the new vars.
-//
-// Deprecated: SCION_SHARED_WORKSPACE — use SCION_WORKSPACE_MODE + SCION_WORKSPACE_GIT.
-// Removal is tracked in https://github.com/ptone/scion/issues/575.
+// SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT are the only inputs. When
+// SCION_WORKSPACE_MODE is absent (for example, a broker that predates it), the
+// workspace is not treated as a shared git workspace. The legacy
+// SCION_SHARED_WORKSPACE var was removed (ptone/scion#575) and is ignored.
 func resolveIsSharedGitWorkspace() bool {
-	if workspaceMode := os.Getenv("SCION_WORKSPACE_MODE"); workspaceMode != "" {
-		// New path: broker emits canonical workspace mode vars.
-		// A shared-plain workspace is git-backed when SCION_WORKSPACE_GIT=true.
-		return workspaceMode == "shared-plain" && util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
-	}
-	// Fallback: older broker that only emits SCION_SHARED_WORKSPACE.
-	return util.ParseBoolEnv("SCION_SHARED_WORKSPACE", false)
+	return os.Getenv("SCION_WORKSPACE_MODE") == "shared-plain" &&
+		util.ParseBoolEnv("SCION_WORKSPACE_GIT", false)
 }
 
 // errSharedWorkspaceGitPrivilegeDropRequired is returned when

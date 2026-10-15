@@ -28,7 +28,8 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 ### 0. Prerequisites
 
 - Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
-- Configure the Hub endpoint in your global settings **before** starting the broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. A broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- Configure the Hub endpoint in your global settings **before** starting the Runtime Broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. The `scion runtime-broker` commands take their Hub from `--hub` (a URL, or a nickname from the hub list), `SCION_HUB_ENDPOINT` or `hub.endpoint`; they do not use the current Hub selected with `scion use`. A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset. While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
 - Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - `scion runtime-broker start`, `register` and `join` work outside a project directory; no `--global` is needed.
 
@@ -156,7 +157,7 @@ Configure it with a runtime entry of `type: substrate` and a `substrate:` block 
 ## Security & Isolation
 
 When you register your machine as a broker:
-*   **Isolation**: Every agent runs in its own isolated container. In local mode each agent gets a dedicated git worktree (`.scion_worktrees/`); in hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
+*   **Isolation**: Every agent runs in its own isolated container. In worktree-per-agent projects each agent gets a dedicated git worktree; in other hub-hosted git projects agents share a single workspace checkout, but each agent's per-agent state (task prompt, resolved config) lives outside that shared mount so sibling agents cannot read it.
 *   **No Source Code Sharing**: The Hub does not store your source code. The broker simply creates local branches and commits.
 *   **Safe Secrets**: Sensitive API keys and environment variables managed in the Hub are injected directly into the agent container's memory at runtime. They are not saved to your local disk.
 *   **Mutual Authentication**: All communication over the Control Channel uses HMAC-SHA256 signatures, ensuring that only the authorized Hub can send commands to your machine.
@@ -235,6 +236,27 @@ Related rules:
 - **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
 - **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted. A withdrawn standalone Runtime Broker keeps its project directory when the project is later deleted (see [What remains after a project delete](/scion/hosted/ha/kubernetes/#what-remains-after-a-project-delete)).
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
+
+## Scaling a Broker Host: inotify Limits
+
+On a Linux host whose Runtime Broker runs agents with Docker or Podman, every agent runs as the broker's own host user, so the file watchers of all agents' harness processes count against that one user's inotify limits. Scion itself creates no inotify watchers. The kernel default of `fs.inotify.max_user_instances=128` can run out at around 150 agents; after that, watchers fail with "Too many open files", and the first errors often come from the host's own per-user services rather than from Scion.
+
+At startup, a Runtime Broker in hosted mode with a Docker or Podman runtime (or a flat Runtime Broker host in hosted mode with a `docker` instance) reads `/proc/sys/fs/inotify/max_user_instances` and `max_user_watches`. If either is below what about 100 agents need, it logs one `WARNING` line with the values and the fix. 100 agents is the Hub's default `max_agents_per_broker`; the broker does not see a different per-broker limit at startup, so the warning assumes the default. The thresholds are 1 instance and 1024 watches per agent, plus 128 instances and 8192 watches for the user's other processes: at least 228 instances and 110592 watches. They are estimates, based on one running Claude Code agent that held 1 instance and about 1000 watches, roughly one watch per directory of its workspace; agents on workspaces with many more directories need more watches. A workstation server does not log the warning. The check only reads the limits; it never changes them, and it never stops the broker.
+
+`scion doctor` shows the same limits on any Linux host as the `inotify-limits` check, together with the approximate number of inotify instances and watches held by processes running as your user. It judges them (pass or warn) only on a host configured as a server whose Runtime Broker runs agents with Docker or Podman; elsewhere the line is shown as skipped. On other operating systems, or when `/proc/sys/fs/inotify` cannot be read, the check is reported as not applicable.
+
+To raise the limits, as root:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288
+```
+
+To keep them across reboots, put them in a file under `/etc/sysctl.d/`, for example `/etc/sysctl.d/99-scion-inotify.conf`:
+
+```text
+fs.inotify.max_user_instances=8192
+fs.inotify.max_user_watches=524288
+```
 
 ## Broker Health Monitoring
 

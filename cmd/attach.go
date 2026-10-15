@@ -20,14 +20,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
@@ -92,97 +89,13 @@ Disconnects:
 			return err
 		}
 
-		// Check if Hub is enabled
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return attachViaHub(hubCtx, agentName)
-		}
-
-		// Try to resolve project info for better error messages
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		projectName := config.GetProjectName(projectDir)
-		targetProjectPath := projectPath
-
-		// Verify agent exists
-		found := false
-		if projectDir != "" {
-			agentDir := filepath.Join(projectDir, "agents", agentName)
-			if _, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err == nil {
-				found = true
-			}
-		}
-
-		if !found {
-			// If user didn't specify a project, try global fallback
-			if projectPath == "" {
-				globalDir, _ := config.GetGlobalDir()
-				if globalDir != "" && globalDir != projectDir {
-					globalAgentDir := filepath.Join(globalDir, "agents", agentName)
-					if _, err := os.Stat(filepath.Join(globalAgentDir, "scion-agent.json")); err == nil {
-						found = true
-						targetProjectPath = globalDir
-						projectName = "global"
-						fmt.Printf("Agent '%s' not found in local project, using global agent.\n", agentName)
-					}
-				}
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("agent '%s' not found in project '%s'", agentName, projectName)
-		}
-
-		rt := runtime.GetRuntime(targetProjectPath, profile)
-
-		// Use project-scoped lookup to find the exact container,
-		// preventing cross-project collision when agents share a name.
-		filter := map[string]string{"scion.name": agentName, "scion.project": projectName}
-		agents, listErr := rt.List(context.Background(), filter)
-		attachID := agentName
-		if listErr == nil && len(agents) > 0 {
-			attachID = agents[0].ContainerID
-		}
-
-		fmt.Printf("Attaching to agent '%s' (project: %s)...\n", agentName, projectName)
-		err = rt.Attach(context.Background(), attachID)
-		if err != nil {
-			return localAttachError(err, attachID, agentName, projectName)
-		}
-		return nil
+		return attachViaHub(hubCtx, agentName)
 	},
-}
-
-// localAttachNotFoundFormats are the "not found" errors the local runtimes
-// return from Attach (pkg/runtime docker.go, podman.go, apple_container.go
-// and k8s_runtime.go), with %s standing for the ID passed to Attach.
-// TestLocalAttachError_RealRuntimeErrors drives the real docker, podman and
-// Apple container Attach against an empty container list and checks that
-// their errors match, so a runtime rewording fails that test. The k8s pod
-// wording is checked only by hand-written strings (its Attach needs a
-// cluster client).
-var localAttachNotFoundFormats = []string{
-	"agent '%s' not found",
-	"agent '%s' container not found, it may have exited and been removed",
-	"agent '%s' pod not found, it may have been deleted",
-}
-
-// localAttachError rewrites a runtime "not found" error from a local attach
-// into a message that names the agent and project instead of the container
-// ID. Other errors are returned unchanged.
-func localAttachError(err error, attachID, agentName, projectName string) error {
-	if err == nil {
-		return nil
-	}
-	for _, format := range localAttachNotFoundFormats {
-		if err.Error() == fmt.Sprintf(format, attachID) {
-			return fmt.Errorf("agent '%s' not found in project '%s': its container may have exited and been removed\n\nCheck with: scion list", agentName, projectName)
-		}
-	}
-	return err
 }
 
 // attachTerminalCheck reports whether stdin and stdout are both interactive
@@ -295,7 +208,7 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 // with scion resume (scion start would create a new agent run instead).
 func notRunningAttachHint(phase, agentName string) string {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseSuspended:
 		return fmt.Sprintf("Resume it and attach with: scion resume %s --attach", agentName)
 	case state.PhaseStopping:
 		return fmt.Sprintf("Wait for it to stop, then resume it with: scion resume %s --attach", agentName)
@@ -621,19 +534,8 @@ func attachErrorWithUATHint(err error, token string) error {
 }
 
 // resolveAttachTransport resolves transport auth for the attach WebSocket path.
-// It checks env vars first, then the hub list entry of the hub in use, then
-// settings.yaml. Returns (nil, _, nil) when
-// transport auth is not configured.
+// It checks env vars first, then the hub list entry of the hub in use.
+// Returns (nil, _, nil) when transport auth is not configured.
 func resolveAttachTransport() (transportauth.TokenSource, transportauth.HeaderMode, error) {
-	// Load settings for transport config.
-	resolvedPath, _, _ := config.ResolveProjectPath(projectPath)
-	settings, _ := config.LoadSettings(resolvedPath)
-
-	var endpoint string
-	if settings != nil {
-		endpoint = GetHubEndpoint(settings)
-	} else {
-		endpoint = GetHubEndpoint(nil)
-	}
-	return transportauth.FromSettings(hubTransportSettings(settings, endpoint), adcsource.New)
+	return transportauth.FromSettings(hubTransportSettings(invocationHubEndpoint()), adcsource.New)
 }

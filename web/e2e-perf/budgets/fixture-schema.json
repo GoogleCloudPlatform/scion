@@ -35,11 +35,11 @@
       "status": 200,
       "fields": [
         "experiments.hub.artifacts:boolean",
+        "experiments.hub.attachment_artifacts:boolean",
         "experiments.hub.chat_thread_groups:boolean",
         "experiments.web.agent_edit:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.gcs_links:boolean",
-        "experiments.web.terminal_workspace:boolean",
         "experiments:object"
       ]
     },
@@ -274,6 +274,7 @@
         "testHubAdmin:boolean",
         "testIdentities:boolean",
         "testIdentityWebSessions:boolean",
+        "testIdentityWebSessionsUnavailableReason:string",
         "testIssuerAudience:string",
         "testSuperAdmin:boolean"
       ]
