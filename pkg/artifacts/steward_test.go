@@ -236,7 +236,7 @@ func TestStewardBoundedTable(t *testing.T) {
 					}
 				}
 				if want == stewardRefuse {
-					if !strings.Contains(rec.Body.String(), "transfer ownership") {
+					if !strings.Contains(rec.Body.String(), "publish your own copy") {
 						t.Errorf("refusal text: %s", rec.Body.String())
 					}
 				}

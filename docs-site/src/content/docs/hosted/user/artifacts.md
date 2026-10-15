@@ -240,7 +240,7 @@ A steward can:
 - create, list and revoke share links;
 - change the artifact's expiry, and delete it.
 
-A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. For full control, ask a Hub super-admin to transfer the artifact to you.
+A steward cannot give *Can manage* or move the artifact to another project. The Hub refuses both with `steward_action_not_allowed`. A user with *Can manage* on the artifact can do both. For full control of your own copy, fetch it and publish it as your own artifact (see [What agents cannot do](#what-agents-cannot-do)).
 
 Steward rights follow the artifact as it is now. They end when you lose your role in the home project, when the delegation to the agent is revoked, or when the artifact moves to a project where you no longer qualify: as a project owner, one you do not own; as the delegating user, one where you hold no role. Grants and links you created stay until someone removes them. Every grant, change and link you create is recorded with the reason you were allowed.
 
@@ -304,7 +304,7 @@ Agents use the same `scion artifact` command, but in agent mode:
 - **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents. In an agent, `share` and `delete` do not exist at all: running one fails with `unknown command "share" for "scion artifact"` (or `"delete"`). That is expected, not a typo or an old CLI.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
-An artifact an agent owns has no user owner, but it does have [stewards](#share-an-agents-artifact): the user who delegated to the agent and the owners of its home project can share it with readers and reviewers outside the project. Republishing is still possible when someone needs full ownership without a super-admin: fetch it (`scion artifact get <ref> --out <folder>`) and publish it as your own artifact. The copy is a new artifact with its own reference and without the original's history or reviews.
+An artifact an agent owns has no user owner, but it does have [stewards](#share-an-agents-artifact): the user who delegated to the agent and the owners of its home project can share it with readers and reviewers outside the project. When someone needs full ownership, they can republish it: fetch it (`scion artifact get <ref> --out <folder>`) and publish it as your own artifact. The copy is a new artifact with its own reference and without the original's history or reviews.
 
 ## Troubleshooting
 
