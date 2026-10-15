@@ -232,6 +232,11 @@ Examples:
 		if err != nil {
 			return err
 		}
+		// ptone/scion#5132: rewrite "@agent:<slug>" mentions to "@<slug>"
+		// before sending, so the body renders by convention and the
+		// mention extraction below (which reads this same body) resolves
+		// the slug. Code spans and quoted lines are left unchanged.
+		message = messages.RewriteAgentMentions(message)
 
 		// Ensure we have a message body
 		if message == "" && len(msgArtifacts) == 0 {

@@ -57,7 +57,7 @@ var useConfirm = hubsync.ConfirmAction
 // of its own hub list entry (see fanOutTransport). It is a variable so
 // tests can substitute it.
 var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", endpoint)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", config.RedactURL(endpoint))
 	opts, err := useLoginClientOptions(endpoint)
 	if err != nil {
 		return err
@@ -660,7 +660,7 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 
 	if isJSONOutput() {
 		return outputJSON(useSelectJSON{
-			Hub:     useHubJSON{Name: hubName, Endpoint: endpoint, Source: useSourceContext},
+			Hub:     useHubJSON{Name: hubName, Endpoint: config.RedactURL(endpoint), Source: useSourceContext},
 			Project: useProjectJSON{ID: m.ID, Slug: m.Slug, Name: m.Name, Source: useSourceContext},
 		})
 	}
@@ -671,7 +671,7 @@ func saveUseSelection(out, stderr io.Writer, l *useLookup, m useMatch, checkNote
 		printRegisteredHub(out, hubName, endpoint)
 	}
 	shown := m.shown()
-	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, hubName, endpoint)
+	_, _ = fmt.Fprintf(out, "Now using project '%s' on hub '%s' (%s).\n", shown, hubName, config.RedactURL(endpoint))
 	switch {
 	case strings.HasPrefix(checkNote, "Warning: "):
 		_, _ = fmt.Fprintln(stderr, checkNote)

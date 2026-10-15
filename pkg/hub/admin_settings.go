@@ -99,6 +99,16 @@ type ServerConfigResponse struct {
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
+	// RetainedBuiltinProfiles and RetainedBuiltinRuntimes list, read-only,
+	// the built-in default profiles and runtimes the co-located broker's
+	// settings overlay retains beside the stored ones because they are still
+	// referenced (ptone/scion#5113). They are never part of Profiles or
+	// Runtimes, which stay the stored sets, and there is no request field
+	// for them, so a settings save cannot store a built-in by accident. Set
+	// only in the DB-tier response.
+	RetainedBuiltinProfiles []config.RetainedProfile `json:"retained_builtin_profiles,omitempty"`
+	RetainedBuiltinRuntimes []config.RetainedRuntime `json:"retained_builtin_runtimes,omitempty"`
+
 	// EnvOverrides lists koanf keys overridden by SCION_SERVER_* env vars
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
@@ -461,6 +471,10 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if resp.Server != nil && resp.Server.Hub != nil {
 		resp.Server.Hub.HubClass = ""
 		resp.Server.Hub.TestIdentities = nil
+		// Nor is the relay-peer secret, which is never returned.
+		if c := resp.Server.Hub.Conduit; c != nil {
+			c.PeerSecret = ""
+		}
 	}
 	// Likewise the proxy driver settings (WS2).
 	hideNeverAPIWritableProxyKeys(resp.Server)
@@ -509,6 +523,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
+	// An empty relay-peer secret is ignored; any other value is refused.
+	rawBody = dropEmptyPeerSecret(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
