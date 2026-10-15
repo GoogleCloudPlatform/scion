@@ -250,6 +250,15 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 
 	identity := GetIdentityFromContext(ctx)
 
+	// A user access token lists skills only when its ceiling carries
+	// skill.list and skill.list is eligible for its boundary kind. Without
+	// it the list is empty: no row query runs.
+	token, isToken := identity.(*ScopedUserIdentity)
+	if isToken && !uatListPermitted(token, "skill.list") {
+		writeJSON(w, http.StatusOK, ListSkillsResponse{Skills: []SkillWithCapabilities{}, TotalCount: 0})
+		return
+	}
+
 	// ptone/scion#1901 (pagination follow-up): resolve the caller's project
 	// memberships and push the whole read boundary (hub scope, own user
 	// scope, member projects) into the store query, ahead of COUNT and
@@ -261,7 +270,9 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 	// in pkg/store/entadapter/skill_store.go. Visibility no longer widens
 	// this boundary (ptone/scion#1903): an anonymous caller gets an
 	// AccessScope with no matching terms, which authorizes nothing.
-	scopeResult, err := s.authzService.ResolveListScopes(ctx, identity, "project.list")
+	// A token's project set is further reduced by its boundary, and it must
+	// carry skill.list (checked above and again here).
+	scopeResult, err := s.authzService.resolveListScopesWithCeiling(ctx, identity, "project.list", "skill.list")
 	resolutionFailed := err != nil
 	if resolutionFailed {
 		// ptone/scion#1954: a principal-resolution error here (e.g. a
@@ -318,6 +329,14 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A token's page, TotalCount and cursor come from the per-row skill
+	// read gate, so they count only rows the token may read. Its cursor is
+	// sealed and bound to the credential.
+	if isToken {
+		s.listSkillsForToken(w, r, token, filter, scopeResult.Scopes)
+		return
+	}
+
 	result, err := s.store.ListSkills(ctx, filter, listOptionsFromQuery(query))
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -354,6 +373,58 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		NextCursor:   result.NextCursor,
 		TotalCount:   result.TotalCount,
 		Capabilities: scopeCap,
+	})
+}
+
+// listSkillsForToken writes the skill list for a user access token. The
+// store query keeps the token's read boundary (filter.AccessScope), and
+// every candidate row then passes the token's own skill read decision.
+// The page, TotalCount and next cursor are computed over the rows that pass,
+// so a row the token may not read is neither returned nor counted. The
+// cursor is sealed and bound to the endpoint, the filter and the
+// credential, so it opens only for this token.
+func (s *Server) listSkillsForToken(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, filter store.SkillFilter, projects ScopeSet) {
+	ctx, query := r.Context(), r.URL.Query()
+	limit := listOptionsFromQuery(query).Limit
+	if limit > authorizedListMaxPageSize {
+		limit = authorizedListMaxPageSize
+	}
+	cursorBinding := scopedCursorBinding("skills", filter, token)
+	readable := func(ctx context.Context, identity Identity, resources []Resource) ([]bool, error) {
+		caps := s.authzService.ComputeCapabilitiesForActions(ctx, identity, resources, []Action{ActionRead})
+		allowed := make([]bool, len(caps))
+		for i := range caps {
+			allowed[i] = capabilityAllows(caps[i], ActionRead)
+		}
+		return allowed, nil
+	}
+	result, err := listAuthorizedOrAll(
+		ctx, token, query.Get("cursor"), limit, cursorBinding, s.listCursorSealer, true,
+		func(ctx context.Context, opts store.ListOptions) (*store.ListResult[store.Skill], error) {
+			return s.store.ListSkills(ctx, filter, opts)
+		},
+		skillResource,
+		func(sk *store.Skill) string { return authorizedListCursor(sk.Created, sk.ID, cursorBinding) },
+		readable,
+	)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	resources := make([]Resource, len(result.Items))
+	for i := range result.Items {
+		resources[i] = skillResource(&result.Items[i])
+	}
+	caps := s.authzService.ComputeCapabilitiesBatch(ctx, token, resources, "skill")
+	skills := make([]SkillWithCapabilities, 0, len(result.Items))
+	for i := range result.Items {
+		skills = append(skills, SkillWithCapabilities{Skill: result.Items[i], Cap: caps[i]})
+	}
+	writeJSON(w, http.StatusOK, ListSkillsResponse{
+		Skills:       skills,
+		NextCursor:   result.NextCursor,
+		TotalCount:   result.TotalCount,
+		Capabilities: s.skillListCapabilities(ctx, filter.Scope, filter.ScopeID, projects),
 	})
 }
 

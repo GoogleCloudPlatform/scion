@@ -49,7 +49,8 @@ type ListScopeResult struct {
 // ResolveListScopes resolves the set of projects the caller is authorized to
 // see for a given list permission (e.g. "project.list" or "agent.list").
 //
-// Currently wired into the project and agent list handlers. Group and catalog
+// Wired into the project and agent list handlers, and (through
+// resolveListScopesWithCeiling) the skill list handler. Group and catalog
 // resources have different parentless-resource semantics and still use
 // per-resource authorization scans when the caller lacks wide list access.
 //
@@ -69,7 +70,18 @@ type ListScopeResult struct {
 // status code. ScopeSetNone with a nil error is a legitimate authorization
 // result meaning "no authority".
 func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity, permissionID string) (ListScopeResult, error) {
+	return a.resolveListScopesWithCeiling(ctx, identity, permissionID, permissionID)
+}
+
+// resolveListScopesWithCeiling is ResolveListScopes for a list whose
+// project set comes from the grants of scopePermissionID while a user
+// access token must carry ceilingPermissionID, the list's own permission.
+// The skill list uses it: its project set is the caller's project.list
+// grants, and a token needs skill.list. Access constraints are applied to
+// scopePermissionID.
+func (a *AuthzService) resolveListScopesWithCeiling(ctx context.Context, identity Identity, scopePermissionID, ceilingPermissionID string) (ListScopeResult, error) {
 	none := ListScopeResult{Scopes: ScopeSetNone()}
+	permissionID := scopePermissionID
 
 	if identity == nil {
 		return none, nil
@@ -135,10 +147,10 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	scopes := ResolveAuthorizedScopes(principalClosure, permissionID, candidates, roleDefinitions, time.Now())
 
 	// Step 6: Apply credential caveats. A UAT-backed user's scope set is
-	// reduced by its token boundary (and, for a hub boundary, its permission
-	// ceiling), and a project-scoped agent's by its token project, since
-	// credential restrictions can only reduce authority.
-	scopes = applyCredentialCaveats(identity, permissionID, scopes)
+	// reduced by its token boundary and its permission ceiling, and a
+	// project-scoped agent's by its token project, since credential
+	// restrictions can only reduce authority.
+	scopes = applyCredentialCaveats(identity, ceilingPermissionID, scopes)
 
 	// Step 7: Apply AccessConstraints (C-2 fix).
 	// Load applicable constraints for the principal closure and check whether
@@ -157,11 +169,14 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 // scopes, suspension, and delegation ceilings run after the union [of grants]
 // and can only reduce it."
 //
-// For a UAT-backed identity the reduction is chosen by its token boundary:
+// For a UAT-backed identity, on either boundary kind, the set is empty
+// unless the token's permission ceiling contains permissionID, the list's
+// own permission, and permissionID is eligible for the token's boundary
+// kind (the bearer gate's stage 3b rule). The token boundary then chooses
+// the reduction:
 //   - a valid project boundary intersects the set with that one project;
 //   - a valid hub boundary applies no project intersection (the grant-derived
-//     set is already the user's live authority), but the set is empty unless
-//     the token's permission ceiling contains permissionID;
+//     set is already the user's live authority);
 //   - an invalid boundary yields the empty set.
 func applyCredentialCaveats(identity Identity, permissionID string, scopes ScopeSet) ScopeSet {
 	switch id := identity.(type) {
@@ -173,13 +188,13 @@ func applyCredentialCaveats(identity Identity, permissionID string, scopes Scope
 		if !boundary.Valid() {
 			return ScopeSetNone()
 		}
+		if !uatListPermitted(id, permissionID) {
+			return ScopeSetNone()
+		}
 		switch boundary.Kind {
 		case BoundaryKindProject:
 			return scopes.Intersection(ScopeSetExplicit(boundary.ProjectID))
 		case BoundaryKindHub:
-			if !id.Ceiling().Allows(permissionID) {
-				return ScopeSetNone()
-			}
 			return scopes
 		default:
 			return ScopeSetNone()
@@ -191,6 +206,18 @@ func applyCredentialCaveats(identity Identity, permissionID string, scopes Scope
 		}
 	}
 	return scopes
+}
+
+// uatListPermitted reports whether a UAT-backed identity may run the list
+// whose permission is permissionID at all: its boundary is valid, its
+// ceiling contains permissionID, and permissionID is eligible for its
+// boundary kind. The rule is the same on a project and a hub boundary.
+func uatListPermitted(id *ScopedUserIdentity, permissionID string) bool {
+	if id == nil {
+		return false
+	}
+	boundary := id.Boundary()
+	return boundary.Valid() && id.Ceiling().Allows(permissionID) && permissionEligibleForBoundary(permissionID, boundary.Kind)
 }
 
 // applyListScopeConstraints loads active access constraints and applies them
