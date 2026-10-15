@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -40,7 +41,9 @@ type HubSettingRow struct {
 
 // ReadOnlyQueries is the database reader the preflight command implements
 // with column-restricted reads in one read-only snapshot. Rows carry only
-// the columns the checks need.
+// the columns the checks need. The check never quotes a read error in a
+// finding: it reports a fixed class and the table (readError), and the
+// error text goes to the local log only.
 type ReadOnlyQueries interface {
 	// HubSettings returns the hub_settings rows of sections that exist.
 	HubSettings(ctx context.Context, sections []string) ([]HubSettingRow, error)
@@ -88,7 +91,7 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	// information, never a block (blocking would make force routine there).
 	notApplicable := func(why string) []Finding {
 		return []Finding{{Code: code("not_applicable"), Severity: SeverityInfo,
-			Message: "no legacy co-located broker; profile check skipped: " + why}}
+			Message: "the profile check does not apply: " + why}}
 	}
 	if env.ColocatedBrokerID == "" {
 		return notApplicable("this hub has no legacy co-located Runtime Broker"), nil
@@ -98,7 +101,7 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	}
 	found, flat, err := env.DB.Broker(ctx, env.ColocatedBrokerID)
 	if err != nil {
-		return nil, fmt.Errorf("read the co-located broker row: %w", err)
+		return nil, readError("runtime_brokers", err)
 	}
 	if !found {
 		return nil, fmt.Errorf("co-located broker %s has no broker row", env.ColocatedBrokerID)
@@ -108,7 +111,7 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	}
 	rows, err := env.DB.HubSettings(ctx, catalogSections)
 	if err != nil {
-		return nil, fmt.Errorf("read hub_settings: %w", err)
+		return nil, readError("hub_settings", err)
 	}
 	bySection := map[string]*HubSettingRow{}
 	for i := range rows {
@@ -158,15 +161,15 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 
 	agents, unparseable, err := env.DB.Agents(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read agents: %w", err)
+		return nil, readError("agents", err)
 	}
 	projects, err := env.DB.Projects(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read projects: %w", err)
+		return nil, readError("projects", err)
 	}
 	providers, err := env.DB.Providers(ctx, env.ColocatedBrokerID)
 	if err != nil {
-		return nil, fmt.Errorf("read the co-located broker's providers: %w", err)
+		return nil, readError("project_contributors", err)
 	}
 	refs, counted, _ := agent.BuildProfileReferencesDetailed(env.GlobalDir, env.ColocatedBrokerID,
 		agent.ProfileRefInputs{Providers: providers, Projects: projects, Agents: agents})
@@ -218,10 +221,20 @@ func runProfilesCheck(ctx context.Context, env Env) ([]Finding, error) {
 	return out, nil
 }
 
-// keyPathRE finds the key paths a decode error names: mapstructure's
-// "* 'profiles.a.runtime' expected type ..." and koanf's "'profiles.a'
-// ..." forms. Only a quoted dotted name of key characters counts.
-var keyPathRE = regexp.MustCompile(`(?m)(?:^|\* )'([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)' `)
+// readError is how a database read failure is reported: a fixed class and
+// the table, never the error text, which can carry a stored value or a
+// connection string; the text goes to the local log.
+func readError(table string, err error) error {
+	slog.Warn("preflight: a database read failed", "table", table, "error", err)
+	return fmt.Errorf("the %s rows could not be read", table)
+}
+
+// keyPathRE finds the catalog key paths a decode error names, at the start
+// of a line or after a "* " bullet: mapstructure v2's "'profiles.a.runtime'
+// expected type ..." and v1's "* 'profiles.a.runtime' ..." forms. Only a
+// quoted dotted name under profiles or runtimes counts, so a quoted token
+// inside a multi-line value is never taken for a key path.
+var keyPathRE = regexp.MustCompile(`(?m)(?:^|\* )'((?:profiles|runtimes)(?:\.[A-Za-z0-9_-]+)*)' `)
 
 // loaderErrorClass is how a settings loader's error is reported in a
 // finding: the fixed class, plus the key paths the error names. The error
@@ -240,15 +253,7 @@ func loaderErrorClass(class string, err error) string {
 		return class
 	}
 	sort.Strings(paths)
-	return fmt.Sprintf("%s (at %s)", class, joinPaths(paths))
-}
-
-func joinPaths(paths []string) string {
-	out := paths[0]
-	for _, p := range paths[1:] {
-		out += ", " + p
-	}
-	return out
+	return fmt.Sprintf("%s (at %s)", class, strings.Join(paths, ", "))
 }
 
 // subjectIndex lists the counted agents by profile, and the projects whose

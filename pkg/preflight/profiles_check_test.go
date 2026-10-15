@@ -40,27 +40,32 @@ type fakeDB struct {
 	providers   []agent.ProfileRefProvider
 	noBroker    bool
 	flatBroker  bool
+	// errs fails the named read ("broker", "hub_settings", "agents",
+	// "projects", "providers") with its error.
+	errs map[string]error
 }
 
 func (d *fakeDB) HubSettings(context.Context, []string) ([]HubSettingRow, error) {
-	return d.settings, nil
+	return d.settings, d.errs["hub_settings"]
 }
 
 func (d *fakeDB) Agents(context.Context) ([]agent.ProfileRefAgentRow, int, error) {
-	return d.agents, d.unparseable, nil
+	return d.agents, d.unparseable, d.errs["agents"]
 }
 
-func (d *fakeDB) Projects(context.Context) ([]agent.ProfileRefProject, error) { return d.projects, nil }
+func (d *fakeDB) Projects(context.Context) ([]agent.ProfileRefProject, error) {
+	return d.projects, d.errs["projects"]
+}
 
 func (d *fakeDB) Providers(_ context.Context, brokerID string) ([]agent.ProfileRefProvider, error) {
 	if brokerID != testBroker {
-		return nil, nil
+		return nil, d.errs["providers"]
 	}
-	return d.providers, nil
+	return d.providers, d.errs["providers"]
 }
 
 func (d *fakeDB) Broker(_ context.Context, id string) (bool, bool, error) {
-	return !d.noBroker && id == testBroker, d.flatBroker, nil
+	return !d.noBroker && id == testBroker, d.flatBroker, d.errs["broker"]
 }
 
 // profilesHome isolates HOME, the working directory, the global settings
@@ -481,6 +486,78 @@ func TestProfilesCheck_LoaderErrorsNeverQuoteValues(t *testing.T) {
 			}
 			if got := strings.Contains(f.Message, "(at profiles.a.runtime)"); got != c.wantPath {
 				t.Fatalf("finding message %q: key path shown = %v, want %v", f.Message, got, c.wantPath)
+			}
+		})
+	}
+}
+
+// loaderErrorClass names only catalog key paths: mapstructure v2's bare
+// line-start form and v1's bullet form count; a quoted token at the start
+// of a line inside a multi-line value does not.
+func TestLoaderErrorClass_KeyPaths(t *testing.T) {
+	for _, c := range []struct {
+		name, err, want string
+	}{
+		{"v2 line-start form", "decoding failed due to the following error(s):\n\n'profiles.a.runtime' expected type 'string', got unconvertible type 'map[string]interface {}', value: 'map[k:v]'", "C (at profiles.a.runtime)"},
+		{"v1 bullet form", "1 error(s) decoding:\n\n* 'runtimes.k8s.type' expected type 'string'", "C (at runtimes.k8s.type)"},
+		{"quoted token inside a multi-line value", "decoding failed:\n\n'profiles.a.env' expected a map, got 'string', value: 'line one\n'tok-9' rest'", "C (at profiles.a.env)"},
+		{"no catalog path", "yaml: unmarshal errors:\n  line 3: cannot unmarshal !!str `x` into int", "C"},
+		{"a non-catalog quoted name", "decoding failed:\n\n'server.hub.port' expected type 'int'", "C"},
+	} {
+		if got := loaderErrorClass("C", errors.New(c.err)); got != c.want {
+			t.Errorf("%s: loaderErrorClass = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A real settings file whose profile holds a secret-like value where a
+// string belongs: whatever stage refuses it, the report never quotes the
+// value, and the check blocks.
+func TestProfilesCheck_RealBadSettingsFileNeverQuotesValue(t *testing.T) {
+	const secret = "s3cr3t-tok-77"
+	globalDir := profilesHome(t, "a")
+	bad := "schema_version: \"1\"\nactive_profile: a\nprofiles:\n  a:\n    runtime:\n      token: " + secret + "\n"
+	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rep := runProfiles(t, globalDir, &fakeDB{}, testBroker)
+	doc, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(doc), secret) {
+		t.Fatalf("the report quotes the settings value: %s", doc)
+	}
+	if rep.Blocking == 0 {
+		t.Fatalf("report %s, want a block: the settings do not decode", doc)
+	}
+}
+
+// A database read error can carry a stored value or a connection string:
+// the could_not_run finding names the table, never the error text.
+func TestProfilesCheck_ReadErrorsNeverQuoted(t *testing.T) {
+	const secret = "postgres://admin:s3cr3t-pw@db/hub value='tok-55'"
+	for _, c := range []struct{ read, table string }{
+		{"broker", "runtime_brokers"},
+		{"hub_settings", "hub_settings"},
+		{"agents", "agents"},
+		{"projects", "projects"},
+		{"providers", "project_contributors"},
+	} {
+		t.Run(c.read, func(t *testing.T) {
+			globalDir := profilesHome(t, "a", "a")
+			db := &fakeDB{settings: []HubSettingRow{profilesRow("managed", strPtr("admin"), "a")}, errs: map[string]error{c.read: errors.New(secret)}}
+			rep := runProfiles(t, globalDir, db, testBroker)
+			doc, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(doc), "s3cr3t-pw") || strings.Contains(string(doc), "tok-55") {
+				t.Fatalf("the report quotes the read error: %s", doc)
+			}
+			wantCodes(t, rep, "settings.profiles.could_not_run")
+			if !strings.Contains(rep.Findings[0].Message, "the "+c.table+" rows could not be read") {
+				t.Fatalf("message %q, want it to name the %s table", rep.Findings[0].Message, c.table)
 			}
 		})
 	}
