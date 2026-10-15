@@ -596,7 +596,7 @@ func ptyAgentOpenError(err error) error {
 		return &StreamClosedError{Code: wsprotocol.ClosePTYForbidden, Reason: ptyCloseReasonForbidden}
 	case errors.Is(err, errConduitStreamRenewalUnavailable):
 		// The mint's backstop for a re-resolution after the pre-upgrade
-		// check: a temporary failure (design §3.3.1, 4504), so the client
+		// check: a temporary failure (design v2.21.36 §3.3.1, 4504), so the client
 		// retries with backoff and may land on a route that can renew.
 		return &StreamClosedError{Code: wsprotocol.ClosePTYUpstreamTimeout, Reason: conduitReasonStreamRenewalUnavailable}
 	case errors.Is(err, errConduitLeafNotRelayHeld), errors.Is(err, errConduitGrantInternal):

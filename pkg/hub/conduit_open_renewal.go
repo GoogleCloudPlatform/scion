@@ -29,7 +29,8 @@ import (
 )
 
 // Target-side deadlines at stream open (design §3.5 "Target-side
-// deadlines", Open grant and Gating; contracts "Renewal path
+// deadlines", Open grant, Gating and Principals without a renewal path,
+// v2.21.36; contracts "Renewal path
 // unavailable"). A user stream to a target that advertises
 // stream_renewal.v2 gets an open grant carrying its origin (via), its
 // scoped-token context (scope) and its authorization deadline
@@ -126,58 +127,107 @@ func (s *Server) conduitTargetStreamDeadlines() string {
 	return config.ConduitTargetStreamDeadlinesOff
 }
 
+// Causes of a stream_renewal_unavailable refusal: log and metric labels
+// only, never sent to the caller (contracts v2.21.36).
+const (
+	// conduitCauseRenewalRouteUnavailable: this node cannot deliver
+	// renewals on the stream's route.
+	conduitCauseRenewalRouteUnavailable = "renewal_route_unavailable"
+	// conduitCauseRenewalPrincipalUnsupported: the user principal has no
+	// renewal path (conduitRenewalUnsupportedPrincipal).
+	conduitCauseRenewalPrincipalUnsupported = "renewal_principal_unsupported"
+)
+
 // conduitRenewalPathUnavailable is the one decision behind
-// stream_renewal_unavailable (contracts, Renewal path unavailable):
-// target-side deadlines are enforced, the stream's open grant would carry
-// authz_until (conduitStampsDeadline), and canRenew is false. Tunnel,
-// relay-held tunnel, port proxy and PTY path selection (preflight and open,
-// before any upgrade) call it at resolution, and mintConduitGrant calls it
-// again as the backstop for a re-resolution onto another row. A refusal is
-// logged with the route and counted by reason.
+// stream_renewal_unavailable (contracts v2.21.36, Renewal path
+// unavailable): target-side deadlines are enforced, the stream's open grant
+// would carry authz_until (conduitStampsDeadline), and either the user
+// principal is renewal-unsupported (design v2.21.36 §3.5, Principals
+// without a renewal path) or canRenew is false. Tunnel, relay-held tunnel,
+// port proxy and PTY path selection (preflight and open, before any
+// upgrade) call it at resolution, and mintConduitGrant calls it again as
+// the backstop for a re-resolution onto another row. A refusal is logged
+// with the route and cause and counted by route, reason and cause.
 func (s *Server) conduitRenewalPathUnavailable(ctx context.Context, identity Identity, targetRenews, canRenew bool, route, agentID string) bool {
-	if canRenew || !conduitStampsDeadline(identity, targetRenews) ||
+	if !conduitStampsDeadline(identity, targetRenews) ||
 		s.conduitTargetStreamDeadlines() != config.ConduitTargetStreamDeadlinesEnforce {
 		return false
 	}
-	slog.WarnContext(ctx, "Conduit stream open refused: renewals cannot be delivered on this route",
-		"route", route, "agent_id", agentID, "reason", conduitReasonStreamRenewalUnavailable)
+	attrs := []any{"route", route, "agent_id", agentID, "reason", conduitReasonStreamRenewalUnavailable}
+	var cause string
+	if kind, unsupported := conduitRenewalUnsupportedPrincipal(identity); unsupported {
+		cause = conduitCauseRenewalPrincipalUnsupported
+		attrs = append(attrs, "principal_kind", kind)
+	} else if !canRenew {
+		cause = conduitCauseRenewalRouteUnavailable
+	} else {
+		return false
+	}
+	attrs = append(attrs, "cause", cause)
+	slog.WarnContext(ctx, "Conduit stream open refused: the hub cannot keep this stream authorized", attrs...)
 	if r := s.conduitOpenRefusedMetrics.Load(); r != nil {
-		(*r).RecordConduitOpenRefused(route, conduitReasonStreamRenewalUnavailable)
+		(*r).RecordConduitOpenRefused(route, conduitReasonStreamRenewalUnavailable, cause)
 	}
 	return true
 }
 
+// recordConduitOpenUnstamped counts an open grant minted unstamped for a
+// renewal-unsupported principal under off.
+func (s *Server) recordConduitOpenUnstamped(route, principalKind string) {
+	if r := s.conduitOpenRefusedMetrics.Load(); r != nil {
+		(*r).RecordConduitOpenUnstamped(route, principalKind)
+	}
+}
+
 // conduitOpenRefusedMetrics counts user stream opens refused before any
-// grant is minted.
+// grant is minted, and open grants minted unstamped for principals without
+// a renewal path.
 type conduitOpenRefusedMetrics interface {
-	RecordConduitOpenRefused(route, reason string)
+	RecordConduitOpenRefused(route, reason, cause string)
+	RecordConduitOpenUnstamped(route, principalKind string)
 }
 
 // OTelConduitOpenRefusedMetrics counts user stream opens refused before
 // any grant is minted as scion.hub.conduit.stream_open_refused (attributes
-// route, reason).
+// route, reason, cause), and open grants minted unstamped for principals
+// without a renewal path as scion.hub.conduit.stream_open_unstamped
+// (attributes route, principal_kind).
 type OTelConduitOpenRefusedMetrics struct {
-	total metric.Int64Counter
+	refused   metric.Int64Counter
+	unstamped metric.Int64Counter
 }
 
-// NewOTelConduitOpenRefusedMetrics creates the counter.
+// NewOTelConduitOpenRefusedMetrics creates the counters.
 func NewOTelConduitOpenRefusedMetrics(mp metric.MeterProvider) (*OTelConduitOpenRefusedMetrics, error) {
 	if mp == nil {
 		return nil, errors.New("otel conduit open refused metrics: nil MeterProvider")
 	}
-	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.conduit.stream_open_refused",
-		metric.WithUnit("{open}"))
+	meter := mp.Meter(instrumentationScope)
+	refused, err := meter.Int64Counter("scion.hub.conduit.stream_open_refused", metric.WithUnit("{open}"))
 	if err != nil {
 		return nil, err
 	}
-	return &OTelConduitOpenRefusedMetrics{total: c}, nil
+	unstamped, err := meter.Int64Counter("scion.hub.conduit.stream_open_unstamped", metric.WithUnit("{open}"))
+	if err != nil {
+		return nil, err
+	}
+	return &OTelConduitOpenRefusedMetrics{refused: refused, unstamped: unstamped}, nil
 }
 
 // RecordConduitOpenRefused implements conduitOpenRefusedMetrics.
-func (m *OTelConduitOpenRefusedMetrics) RecordConduitOpenRefused(route, reason string) {
-	m.total.Add(context.Background(), 1, metric.WithAttributes(
+func (m *OTelConduitOpenRefusedMetrics) RecordConduitOpenRefused(route, reason, cause string) {
+	m.refused.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("route", route),
 		attribute.String("reason", reason),
+		attribute.String("cause", cause),
+	))
+}
+
+// RecordConduitOpenUnstamped implements conduitOpenRefusedMetrics.
+func (m *OTelConduitOpenRefusedMetrics) RecordConduitOpenUnstamped(route, principalKind string) {
+	m.unstamped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("route", route),
+		attribute.String("principal_kind", principalKind),
 	))
 }
 

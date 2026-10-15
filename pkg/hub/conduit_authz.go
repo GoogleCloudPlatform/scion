@@ -338,8 +338,12 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 
 	// Permission first, so a caller without it learns nothing about the
 	// target (for example which ports are exposed).
+	authorize := s.authorizeConduitAction
+	if hook := s.conduitAuthorizeActionTestHook; hook != nil {
+		authorize = hook
+	}
 	for _, a := range actions {
-		if err := s.authorizeConduitAction(ctx, req.Identity, agent, a); err != nil {
+		if err := authorize(ctx, req.Identity, agent, a); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -347,12 +351,23 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	if stamp && req.Via == "" {
 		return nil, nil, fmt.Errorf("%w: a stream to a renewal target needs an origin", errConduitInvalid)
 	}
-	// Renewal path (contracts, Renewal path unavailable): after
+	// Renewal path (contracts v2.21.36, Renewal path unavailable): after
 	// authorization, before the placement guard and the mint. The route
 	// decides this at resolution; this is the backstop for a re-resolution
-	// onto another row after that check.
+	// onto another row after that check. With enforce it also refuses a
+	// renewal-unsupported principal.
 	if s.conduitRenewalPathUnavailable(ctx, req.Identity, req.TargetRenews, req.CanRenew, conduitRouteOf(req.Via), agent.ID) {
 		return nil, nil, errConduitStreamRenewalUnavailable
+	}
+	// Design v2.21.36 §3.5, Principals without a renewal path: with off, a
+	// renewal-unsupported principal's grant is minted unstamped, as for a
+	// target without stream_renewal.v2, and the leaf-holding hub node
+	// re-checks the stream in-process. The mint is logged and counted.
+	unstampedKind := ""
+	if stamp {
+		if kind, unsupported := conduitRenewalUnsupportedPrincipal(req.Identity); unsupported {
+			stamp, unstampedKind = false, kind
+		}
 	}
 	// Flat placement guard (requirePinnedPlacement), after the permission
 	// checks so a caller without permission learns nothing about the
@@ -407,7 +422,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		// without it.
 		sc, err := s.conduitScopeOf(req.Identity)
 		if err != nil {
-			slog.Error("Conduit open grant not minted: stream scope cannot be determined",
+			slog.ErrorContext(ctx, "Conduit open grant not minted: stream scope cannot be determined",
 				"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via)
 			return nil, nil, fmt.Errorf("%w: %w", errConduitGrantInternal, err)
 		}
@@ -444,7 +459,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	tok, err := grant.Mint(signer, claims)
 	if err != nil {
 		if errors.Is(err, grant.ErrTooLarge) {
-			slog.Error("Conduit open grant exceeds the grant size limit; not minted",
+			slog.ErrorContext(ctx, "Conduit open grant exceeds the grant size limit; not minted",
 				"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via)
 			return nil, nil, fmt.Errorf("%w: %w", errConduitGrantInternal, err)
 		}
@@ -452,6 +467,11 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	}
 	claims.KeyID = signer.KeyID
 	claims.Audience = grant.Audience
+	if unstampedKind != "" {
+		slog.InfoContext(ctx, "Conduit open grant minted without a deadline: the principal has no renewal path",
+			"agent_id", agent.ID, "kind", req.Stream.Kind, "via", req.Via, "principal_kind", unstampedKind)
+		s.recordConduitOpenUnstamped(conduitRouteOf(req.Via), unstampedKind)
+	}
 	return tok, &claims, nil
 }
 
@@ -741,6 +761,45 @@ func conduitScopeFor(identity Identity) (*grant.Scope, error) {
 		return nil, nil
 	}
 	return nil, fmt.Errorf("%w: no scope rule for %T", errConduitScope, identity)
+}
+
+// conduitRenewalUnsupportedPrincipal decides, by principal class, whether
+// identity is a renewal-unsupported principal (design v2.21.36 §3.5,
+// Principals without a renewal path): a user principal the authz layer may
+// admit for a stream action, but that the stateless renewal re-check
+// cannot rebuild from a grant's signed claims, which name a local user id
+// and the scope. The re-check rebuilds a local user (GetUser plus
+// NewAuthenticatedUser) and, from scope, a scoped identity over it with
+// the scoped-identity constructor (conduitScopedIdentity). So:
+//   - a federated user (PrincipalKindFederatedUser): its id is
+//     issuer:subject, with no local user row;
+//   - a visitor (PrincipalKindVisitor): it would be rebuilt as an
+//     interactive local user, not a visitor;
+//   - a scoped identity over either of them.
+//
+// A local user (PrincipalKindUser, PrincipalKindDev) and a scoped identity
+// over one are supported: every production scoped identity wraps
+// NewAuthenticatedUser built from the local user row (ValidateToken,
+// scheduled authority, relay admission), which the scoped constructor
+// rebuilds faithfully. Any other class is not a member; conduitScopeFor's
+// fail-closed path decides it. kind is the principal kind for logs and
+// metrics ("scoped_" prefixed for a scoped identity).
+func conduitRenewalUnsupportedPrincipal(identity Identity) (kind string, unsupported bool) {
+	if isNilIdentity(identity) {
+		return "", false
+	}
+	inner, prefix := identity, ""
+	if s, ok := identity.(*ScopedUserIdentity); ok {
+		if s == nil || s.UserIdentity == nil {
+			return "", false
+		}
+		inner, prefix = s.UserIdentity, "scoped_"
+	}
+	switch k := principalContextForIdentity(inner).Kind; k {
+	case PrincipalKindFederatedUser, PrincipalKindVisitor:
+		return prefix + string(k), true
+	}
+	return "", false
 }
 
 // conduitScopedIdentity rebuilds the scoped identity of user from a

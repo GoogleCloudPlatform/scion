@@ -60,12 +60,19 @@ const tunnelSweep = 30 * time.Second
 
 func newTunnelFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *tunnelFixture {
 	t.Helper()
+	return newTunnelFixtureServer(t, nil, mods...)
+}
+
+// newTunnelFixtureServer is newTunnelFixture with srvMod applied to the
+// server before it starts serving (newRelayFixtureServer).
+func newTunnelFixtureServer(t *testing.T, srvMod func(*Server), mods ...func(*ConduitRelayOptions)) *tunnelFixture {
+	t.Helper()
 	tf := &tunnelFixture{relayClock: clock.NewFake(time.Now()), dials: make(chan net.Conn, 16)}
 	all := append([]func(*ConduitRelayOptions){func(o *ConduitRelayOptions) {
 		o.Clock = tf.relayClock
 		o.AuthzRecheckInterval = tunnelSweep
 	}}, mods...)
-	tf.ptyConduitFixture = newPTYConduitFixture(t, all...)
+	tf.ptyConduitFixture = newPTYConduitFixtureServer(t, srvMod, all...)
 	tf.launched = tf.exposePort(t, tf.launched, 3000)
 	return tf
 }
