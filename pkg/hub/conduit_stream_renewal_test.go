@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -512,6 +515,82 @@ func TestDeadlineE2E_RenewalMovesTargetDeadline(t *testing.T) {
 			ce := readUntilClose(t, c)
 			assert.Equal(t, 4401, ce.Code)
 			assert.Equal(t, conduitReasonAuthzExpired, ce.Text)
+		})
+	}
+}
+
+// startTCPEcho starts a TCP echo server on 127.0.0.1 standing in for an
+// app inside the agent, and returns its port.
+func startTCPEcho(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(c, c); _ = c.Close() }()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// openPort opens a port proxy stream (openConduitPort, the proxy route)
+// to an echo app exposed on the agent, and returns it and the tracked
+// stream.
+func (e *deadlineE2E) openPort(t *testing.T) (conduit.Stream, *conduitUserStream) {
+	t.Helper()
+	ctx := context.Background()
+	port := startTCPEcho(t)
+	require.NoError(t, e.f.store.UpdateAgentExposedPorts(ctx, e.f.launched.ID,
+		[]store.ExposedPort{{Port: port, Host: conduitProxyHost, Mode: "rw"}}))
+	agent, err := e.f.store.GetAgent(ctx, e.f.launched.ID)
+	require.NoError(t, err)
+	conn, err := e.f.srv.openConduitPort(ctx, e.f.owner, agent, port)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	st, ok := conn.(conduit.Stream)
+	require.True(t, ok, "the proxy connection is a conduit stream")
+	roundTrip(t, st, "opened")
+	tracked := soleTrackedStream(t, e.f.srv.conduitAuthz.Load())
+	require.True(t, tracked.isEnforced())
+	require.False(t, tracked.AuthzUntil.IsZero())
+	return st, tracked
+}
+
+// TestDeadlineE2E_ProxyRenewalMovesTargetDeadline (criterion 29, hub-held
+// port proxy): under enforce, a port proxy stream to a real sciontool
+// agent, renewed by the driver, survives past its first authz_until + 30s
+// on the agent's clock, on a local and on a cross-node session. With the
+// driver's sender disabled, the same stream ends at its deadline.
+func TestDeadlineE2E_ProxyRenewalMovesTargetDeadline(t *testing.T) {
+	for name, crossNode := range map[string]bool{"local session": false, "cross-node session": true} {
+		t.Run(name, func(t *testing.T) {
+			e := newDeadlineE2E(t, crossNode)
+			conn, st := e.openPort(t)
+			first := st.AuthzUntil
+
+			e.advance(e2eInterval*4/5 + e2eInterval/20 + time.Second)
+			renewedUntil := e.f.clock.Now().Truncate(time.Second).Add(e2eInterval)
+			require.True(t, e.f.agentClock.WaitForTimer(10*time.Second, renewedUntil.Add(30*time.Second)),
+				"the target moved its deadline to the renewal's authz_until")
+			assert.True(t, st.Deadline().Equal(renewedUntil), "the hub deadline moved with it")
+
+			e.advance(first.Add(30*time.Second).Sub(e.f.clock.Now()) + 10*time.Second)
+			roundTrip(t, conn, "still open")
+		})
+	}
+	for name, crossNode := range map[string]bool{"local session, no sender": false, "cross-node session, no sender": true} {
+		t.Run(name, func(t *testing.T) {
+			e := newDeadlineE2E(t, crossNode)
+			conn, st := e.openPort(t)
+			st.Renew = nil // the driver mints, but nothing is delivered
+			e.advance(st.AuthzUntil.Sub(e.f.clock.Now()) + time.Second)
+			assert.Error(t, streamEnd(t, conn), "the stream ended at its deadline")
+			assert.Zero(t, e.f.srv.conduitAuthz.Load().Len(), "untracked")
 		})
 	}
 }
