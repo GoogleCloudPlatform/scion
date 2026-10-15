@@ -255,8 +255,10 @@ if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     SEEDED="$HOME/.scion/settings.yaml"
     [ -f "$SEEDED" ] || fail "init --machine did not seed $SEEDED"
-    sed -i 's/^    runtime: podman  # Auto-detected$/    runtime: docker  # set by the smoke test/' "$SEEDED"
-    got_rt="$("$SCION" config get profiles.local.runtime 2>"$WORK/runtime.err")" || {
+    sed -i.bak 's/^    runtime: podman  # Auto-detected$/    runtime: docker  # set by the smoke test/' "$SEEDED" &&
+      rm -f "$SEEDED.bak"
+    # --global: no project exists yet, and the global settings are the ones edited.
+    got_rt="$("$SCION" --global config get profiles.local.runtime 2>"$WORK/runtime.err")" || {
       cat "$WORK/runtime.err" >&2; fail "scion config get profiles.local.runtime"; }
     [ "$got_rt" = docker ] || fail "local profile runtime is '$got_rt', want docker"
     log "local profile runtime: docker"
