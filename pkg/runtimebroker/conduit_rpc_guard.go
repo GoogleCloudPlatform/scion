@@ -39,21 +39,23 @@ import (
 // handler runs.
 
 // conduitRPCRoute is one served broker RPC: its method and its path, split
-// into segments, where "*" stands for exactly one non-empty segment.
+// into segments, where "*" stands for exactly one non-empty segment, and
+// the broker RPC capability name (conduit.BrokerRPCs) it serves.
 type conduitRPCRoute struct {
 	method   string
 	segments []string
+	name     string
 }
 
 // conduitRPCRoutes are the broker RPCs of conduit.BrokerRPCs, by method
 // and path.
 var conduitRPCRoutes = []conduitRPCRoute{
-	{http.MethodGet, []string{"api", "v1", "agents", "*", "logs"}},  // agent_logs
-	{http.MethodPost, []string{"api", "v1", "agents", "*", "exec"}}, // agent_exec
-	{http.MethodGet, []string{"api", "v1", "images", "status"}},     // image_status
-	{http.MethodPost, []string{"api", "v1", "images", "pull"}},      // image_pull
-	{http.MethodDelete, []string{"api", "v1", "images", "local"}},   // image_delete
-	{http.MethodDelete, []string{"api", "v1", "projects", "*"}},     // project_cleanup
+	{http.MethodGet, []string{"api", "v1", "agents", "*", "logs"}, conduit.RPCAgentLogs},
+	{http.MethodPost, []string{"api", "v1", "agents", "*", "exec"}, conduit.RPCAgentExec},
+	{http.MethodGet, []string{"api", "v1", "images", "status"}, conduit.RPCImageStatus},
+	{http.MethodPost, []string{"api", "v1", "images", "pull"}, conduit.RPCImagePull},
+	{http.MethodDelete, []string{"api", "v1", "images", "local"}, conduit.RPCImageDelete},
+	{http.MethodDelete, []string{"api", "v1", "projects", "*"}, conduit.RPCProjectCleanup},
 }
 
 // conduitRPCAllowed reports whether method and the decoded path p are one
