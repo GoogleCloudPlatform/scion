@@ -116,7 +116,7 @@ func (s *Server) finishRecoveredCleanup(ctx context.Context, path string, jr *jo
 	if cleanupRetryExhausted(attempts, first, now) {
 		s.agentLifecycleLog.Error("Launch recovery: launch clean-up given up; leftover resources are removed by `scion delete`",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "instance_id", jr.InstanceID,
-			"attempts", attempts, "first_failed_at", first.Format(time.RFC3339), "error_class", string(class))
+			"attempts", attempts, "first_failed_at", first.UTC().Format(time.RFC3339), "error_class", string(class))
 		removeLaunchMarkerIfMatches(jr.ProjectPath, jr.SharedWorkspace, jr.Slug, jr.LaunchID)
 		_ = os.Remove(path)
 		return
