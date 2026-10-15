@@ -199,8 +199,9 @@ func (g *conduitRPCGuard) check(ctx context.Context, req *wsprotocol.RequestEnve
 	if err != nil {
 		return unauth("invalid signature encoding")
 	}
-	sessionID := conduit.WelcomeFromContext(ctx).GetSessionId()
-	if sessionID == "" || h.Get(conduit.BrokerRPCSessionHeader) != sessionID ||
+	welcome := conduit.WelcomeFromContext(ctx)
+	sessionID := welcome.GetSessionId()
+	if welcome == nil || sessionID == "" || h.Get(conduit.BrokerRPCSessionHeader) != sessionID ||
 		!signedHeaderListed(h.Get(apiclient.HeaderSignedHeaders), conduit.BrokerRPCSessionHeader) {
 		return unauth("request not issued for this session")
 	}

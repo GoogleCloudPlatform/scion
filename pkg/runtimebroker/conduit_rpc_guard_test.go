@@ -372,3 +372,31 @@ func TestConduitRPCGuard_RepeatAtWindowEdgeRefused(t *testing.T) {
 	assert.Equal(t, int32(http.StatusUnauthorized), g.call(t, http.MethodGet, path, "", headers, nil).GetStatus(), "repeat at the edge")
 	assert.Len(t, g.served(), 1)
 }
+
+// TestConduitRPCGuard_NoWelcomeRefused: a request checked on a context
+// that carries no session Welcome is refused exactly as a request signed
+// for another session, even when it is correctly signed and names an
+// empty session id (which no session has).
+func TestConduitRPCGuard_NoWelcomeRefused(t *testing.T) {
+	guard := newConduitRPCGuard(guardBrokerID, func() []byte { return []byte(guardKey) })
+	sign := func(sessionID string) map[string]string {
+		req, err := http.NewRequest(http.MethodGet, "http://runtime-broker/api/v1/images/status", nil)
+		require.NoError(t, err)
+		req.Header.Set(conduit.BrokerRPCSessionHeader, sessionID)
+		req.Header.Set(apiclient.HeaderSignedHeaders, conduit.BrokerRPCSessionHeader)
+		require.NoError(t, (&apiclient.HMACAuth{BrokerID: guardBrokerID, SecretKey: []byte(guardKey)}).ApplyAuth(req))
+		out := map[string]string{}
+		for k := range req.Header {
+			out[k] = req.Header.Get(k)
+		}
+		return out
+	}
+	for _, sid := range []string{"s-1", ""} {
+		ref := guard.check(context.Background(), &wsprotocol.RequestEnvelope{
+			RequestID: "r-" + sid, Method: http.MethodGet, Path: "/api/v1/images/status", Headers: sign(sid),
+		})
+		require.NotNil(t, ref, "session id %q: a request without a Welcome must be refused", sid)
+		assert.Equal(t, http.StatusUnauthorized, ref.status, "session id %q", sid)
+		assert.Equal(t, "request not issued for this session", ref.message, "session id %q: the session-mismatch refusal", sid)
+	}
+}

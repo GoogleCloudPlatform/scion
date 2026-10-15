@@ -37,19 +37,18 @@ func (r *Registry) BrokerIncarnation(ctx context.Context, brokerID string, now t
 		return "", false, err
 	}
 	now = now.UTC()
-	var newest *SessionRecord
+	newest := -1 // index in ps.Sessions
 	for i := range ps.Sessions {
 		v := ps.Sessions[i]
 		if v.Session.PrincipalKind != PrincipalBroker || r.liveness(v, now) != ReasonOK {
 			continue
 		}
-		if newest == nil || v.Session.ConnectionEpoch > newest.ConnectionEpoch {
-			s := v.Session
-			newest = &s
+		if newest < 0 || v.Session.ConnectionEpoch > ps.Sessions[newest].Session.ConnectionEpoch {
+			newest = i
 		}
 	}
-	if newest == nil || newest.EndpointIncarnation == "" {
+	if newest < 0 || ps.Sessions[newest].Session.EndpointIncarnation == "" {
 		return "", false, nil
 	}
-	return newest.EndpointIncarnation, true, nil
+	return ps.Sessions[newest].Session.EndpointIncarnation, true, nil
 }

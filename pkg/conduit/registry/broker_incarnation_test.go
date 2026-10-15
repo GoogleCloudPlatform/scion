@@ -24,8 +24,8 @@ import (
 
 // TestBrokerIncarnationReferenceIsNewestSession: the reference is the
 // incarnation of the broker's live session with the highest epoch; dead
-// sessions do not count, and a newest session without an incarnation
-// leaves no reference at all.
+// sessions and sessions of another principal kind do not count, and a
+// newest session without an incarnation leaves no reference at all.
 func TestBrokerIncarnationReferenceIsNewestSession(t *testing.T) {
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	live := &RelayInstance{InstanceID: "r1", Generation: 1, LastSeen: now}
@@ -59,6 +59,22 @@ func TestBrokerIncarnationReferenceIsNewestSession(t *testing.T) {
 			view("s1", live, 4, "inc-1", false), view("s2", live2, 5, "", false),
 		}},
 		{name: "only dead sessions", sessions: []SessionView{view("s1", stale, 2, "inc-1", false)}},
+		{name: "a non-broker session with a newer epoch does not count", sessions: []SessionView{
+			view("s1", live, 4, "inc-1", false),
+			{Relay: live2, Session: SessionRecord{
+				SessionID: "a9", PrincipalKind: PrincipalAgent, PrincipalID: "b1",
+				RelayInstanceID: live2.InstanceID, RelayGeneration: 1,
+				EndpointIncarnation: "agent-inc", ConnectionEpoch: 9, LastSeen: now,
+			}},
+		}, want: "inc-1", wantOK: true},
+		{name: "the newest live broker session wins over a newer dead one and a non-broker one", sessions: []SessionView{
+			view("s1", live, 3, "inc-1", false), view("s2", stale, 8, "inc-dead", false), view("s3", live2, 5, "inc-2", false),
+			{Relay: live, Session: SessionRecord{
+				SessionID: "a9", PrincipalKind: PrincipalAgent, PrincipalID: "b1",
+				RelayInstanceID: live.InstanceID, RelayGeneration: 1,
+				EndpointIncarnation: "agent-inc", ConnectionEpoch: 9, LastSeen: now,
+			}},
+		}, want: "inc-2", wantOK: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
