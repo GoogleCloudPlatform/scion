@@ -132,7 +132,7 @@ def _write_settings(home: str, settings: dict[str, Any]) -> None:
 #     not under ~/.config, so a re-provision of the harness home/ tree does
 #     not reset it; is_present still reads installed.json, never just a dir.
 #   * Agent Plugins MCP servers are reported "not supported in this release;
-#     it stays visible and inactive": skills load, MCP does not (≤ 1.4.7).
+#     it stays visible and inactive": skills load, MCP does not (≤ 1.4.9).
 
 MUSE_PLUGINS_MIN_VERSION = (1, 4, 6)  # earliest version observed with support
 _APPROVAL_KEYS = ("needs_approval", "approval_required", "requires_approval", "pending_approval")
