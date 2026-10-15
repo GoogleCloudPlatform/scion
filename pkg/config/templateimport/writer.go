@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -31,6 +32,12 @@ import (
 // model from the import.
 // Returns the path to the created template directory.
 func WriteTemplate(agent *ImportedAgent, templatesDir string, force bool) (string, error) {
+	// Names come from imported metadata or --name. Validate before any writes
+	// or removals, including the scion-format copy path.
+	if !filepath.IsLocal(agent.Name) || agent.Name == "." || strings.ContainsAny(agent.Name, "/\\\x00") {
+		return "", fmt.Errorf("invalid template name %q: must be a single directory name", agent.Name)
+	}
+
 	templateDir := filepath.Join(templatesDir, agent.Name)
 
 	// Scion-format templates are copied directly

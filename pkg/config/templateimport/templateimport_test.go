@@ -415,6 +415,76 @@ func TestGeminiImporter_Detect(t *testing.T) {
 
 // --- Writer Tests ---
 
+func TestWriteTemplate_InvalidName(t *testing.T) {
+	tests := []struct{ label, name string }{
+		{"empty", ""},
+		{"current directory", "."},
+		{"parent directory", ".."},
+		{"existing sibling", "../outside"},
+		{"new sibling", "../new-outside"},
+		{"cleaned traversal", "child/../../outside"},
+		{"nested path", "nested/agent"},
+		{"current directory prefix", "./agent"},
+		{"trailing separator", "agent/"},
+		{"backslash traversal", `..\outside`},
+		{"backslash path", `nested\agent`},
+		{"NUL", "agent\x00suffix"},
+		{"absolute", ""},
+	}
+	for _, tt := range tests {
+		for _, scionFormat := range []bool{false, true} {
+			for _, force := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/scion=%t/force=%t", tt.label, scionFormat, force), func(t *testing.T) {
+					root := t.TempDir()
+					templatesDir := filepath.Join(root, "templates")
+					outside := filepath.Join(root, "outside")
+					for _, dir := range []string{root, templatesDir, outside} {
+						require.NoError(t, os.MkdirAll(dir, 0755))
+						require.NoError(t, os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("keep"), 0644))
+					}
+					name := tt.name
+					if tt.label == "absolute" {
+						name = outside
+					}
+					agent := &ImportedAgent{Name: name, Harness: "claude", ScionFormat: scionFormat}
+					if scionFormat {
+						agent.SourcePath = t.TempDir()
+						require.NoError(t, os.WriteFile(filepath.Join(agent.SourcePath, scionConfigFile), []byte("schema_version: \"1\"\n"), 0644))
+					}
+
+					path, err := WriteTemplate(agent, templatesDir, force)
+					assert.ErrorContains(t, err, "invalid template name")
+					assert.Empty(t, path)
+					for _, dir := range []string{root, templatesDir, outside} {
+						content, err := os.ReadFile(filepath.Join(dir, "keep.txt"))
+						assert.NoError(t, err, "must preserve files in %s", dir)
+						assert.Equal(t, "keep", string(content))
+						entries, err := os.ReadDir(dir)
+						assert.NoError(t, err)
+						wantEntries := 1
+						if dir == root {
+							wantEntries = 3
+						}
+						assert.Len(t, entries, wantEntries, "must not create files in %s", dir)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestWriteTemplate_PreservesName(t *testing.T) {
+	for _, name := range []string{"reviewer.v2", "reviewer_name", "My Reviewer", "reviewer..v2"} {
+		t.Run(name, func(t *testing.T) {
+			templatesDir := t.TempDir()
+			path, err := WriteTemplate(&ImportedAgent{Name: name, Harness: "claude"}, templatesDir, false)
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Join(templatesDir, name), path)
+			assert.FileExists(t, filepath.Join(path, scionConfigFile))
+		})
+	}
+}
+
 func TestWriteTemplate_Claude(t *testing.T) {
 	templatesDir := t.TempDir()
 
