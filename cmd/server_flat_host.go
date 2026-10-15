@@ -315,6 +315,10 @@ type flatHostParams struct {
 	messageLogger  *slog.Logger
 	wg             *sync.WaitGroup
 	errCh          chan error
+	// shutdownContext bounds the host's shutdown by the broker phase of
+	// the process's graceful shutdown (ptone/scion#5054); nil: unbounded
+	// beyond the host's own ShutdownTimeout.
+	shutdownContext func() (context.Context, context.CancelFunc)
 }
 
 // startFlatRuntimeBrokerHost hosts the configured flat instances. A
@@ -441,6 +445,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 			ReadTimeout:  cfg.RuntimeBroker.ReadTimeout,
 			WriteTimeout: cfg.RuntimeBroker.WriteTimeout,
 		},
+		ShutdownContext: p.shutdownContext,
 	})
 	if err != nil {
 		return err

@@ -22,7 +22,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"syscall"
@@ -277,13 +276,14 @@ func TestStartConduit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		// No relay runs on any of these paths, so SIGTERM is never trapped.
-		trapped := false
-		prev := conduitSignalNotify
-		conduitSignalNotify = func(chan<- os.Signal, ...os.Signal) { trapped = true }
-		t.Cleanup(func() { conduitSignalNotify = prev })
-		err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
-		assert.False(t, trapped, "SIGTERM trapped without a running relay")
+		// No relay runs on any of these paths, so no drain step is
+		// registered.
+		q := newTestShutdown(cancel)
+		err := startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+		q.mu.Lock()
+		steps := len(q.steps)
+		q.mu.Unlock()
+		assert.Zero(t, steps, "a shutdown step registered without a running relay")
 		return err
 	}
 
@@ -291,10 +291,11 @@ func TestStartConduit(t *testing.T) {
 		assert.NoError(t, run(t, nil, &config.GlobalConfig{}))
 	})
 
-	// With the relay started, startConduit traps SIGTERM (and only SIGTERM);
-	// the trap runs the hub drain with the configured grace (10s and a cap
-	// when set, 0 and no cap when unset) and cancels only after it.
-	t.Run("relay started traps SIGTERM and drains before cancel", func(t *testing.T) {
+	// With the relay started, startConduit registers the drain as a
+	// pre-cancel step of the graceful shutdown (ptone/scion#5054); the
+	// step runs the hub drain with the configured grace (10s and a cap
+	// when set, 0 and no cap when unset) and cancel comes only after it.
+	t.Run("relay started registers the drain before cancel", func(t *testing.T) {
 		for _, tc := range []struct {
 			name, grace string
 			wantGrace   time.Duration
@@ -307,9 +308,17 @@ func TestStartConduit(t *testing.T) {
 				resetServerFlags()
 				enableHub = true
 				t.Setenv("K_SERVICE", "")
-				sigs := installFakeConduitSignals(t)
-				prevStart, prevDrain := startConduitRelayFn, conduitShutdownDrain
-				t.Cleanup(func() { startConduitRelayFn, conduitShutdownDrain = prevStart, prevDrain })
+				captureStdLog(t)
+				prevStart, prevDrain, prevSetGrace := startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace
+				t.Cleanup(func() {
+					startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace = prevStart, prevDrain, prevSetGrace
+				})
+				var recordedGrace []time.Duration
+				var recordedSrv *hub.Server
+				conduitSetShutdownGrace = func(s *hub.Server, grace time.Duration) {
+					recordedSrv = s
+					recordedGrace = append(recordedGrace, grace)
+				}
 				startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
 					return nil
 				}
@@ -337,15 +346,10 @@ func TestStartConduit(t *testing.T) {
 				cfg := &config.GlobalConfig{}
 				cfg.Hub.Conduit.ShutdownGrace = tc.grace
 				var wg sync.WaitGroup
-				require.NoError(t, startConduit(ctx, recordCancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+				q := newTestShutdown(recordCancel)
+				require.NoError(t, startConduit(ctx, q, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
 
-				sigs.mu.Lock()
-				ch, trapped := sigs.ch, append([]os.Signal(nil), sigs.signals...)
-				sigs.mu.Unlock()
-				require.NotNil(t, ch, "SIGTERM not trapped with the relay running")
-				assert.Equal(t, []os.Signal{syscall.SIGTERM}, trapped, "only SIGTERM is trapped")
-
-				ch <- syscall.SIGTERM
+				q.begin(syscall.SIGTERM)
 				wg.Wait()
 				mu.Lock()
 				defer mu.Unlock()
@@ -353,6 +357,15 @@ func TestStartConduit(t *testing.T) {
 				assert.Same(t, srv, gotSrv)
 				assert.Equal(t, tc.wantGrace, gotGrace)
 				assert.Equal(t, tc.wantCap, gotCap)
+				// conduit review F1: a set grace is recorded on the hub (the
+				// teardown's relay shutdown then caps the drain too); unset,
+				// nothing is recorded.
+				if tc.wantCap {
+					assert.Equal(t, []time.Duration{tc.wantGrace}, recordedGrace, "startConduit must record the set shutdown_grace on the hub")
+					assert.Same(t, srv, recordedSrv)
+				} else {
+					assert.Empty(t, recordedGrace, "no grace recorded when shutdown_grace is unset")
+				}
 				assert.Error(t, ctx.Err())
 			})
 		}

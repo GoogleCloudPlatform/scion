@@ -121,6 +121,7 @@ var requestPathSites = []requestPathSite{
 	{"server.go", "extractAction", "URL.Path", 1, "routing: extracts id and action"},
 	{"server.go", "extractID", "URL.Path", 1, "routing: extracts an id"},
 	{"server.go", "traceableRequest", "URL(bare)", 1, "redaction: passes r.URL to IsCredentialURL"},
+	{"shutdown_state.go", "shutdownState.refuseDuringShutdown", "URL.Path", 1, "comparison: lets the health endpoints through during shutdown"},
 	{"skill_dispatch_resolve.go", "rewriteLocalDownloadURLsRelative", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"skill_file_handlers.go", "withSkillVersionDownloadQuery", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
 	{"skill_file_handlers.go", "withSkillVersionUploadQuery", "URL(bare)", 2, "not a request URL: a signed storage URL field"},
