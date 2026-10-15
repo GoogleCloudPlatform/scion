@@ -32,6 +32,10 @@ import (
 
 // session is the multiplexer behind every LocalSession.
 type session struct {
+	// onCallQueued, when set (tests), runs after Call queued its request,
+	// before it waits for the answer.
+	onCallQueued func(requestID string)
+
 	cfg      Config
 	clk      clock.Clock
 	conn     transport.Conn
@@ -1429,6 +1433,9 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 			err = s.notSentErr()
 		}
 		return nil, err
+	}
+	if s.onCallQueued != nil {
+		s.onCallQueued(id)
 	}
 	select {
 	case resp := <-ch:

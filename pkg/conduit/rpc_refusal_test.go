@@ -164,6 +164,8 @@ func TestCallNotWrittenIsNotSent(t *testing.T) {
 	}
 	p := newPair(t, Config{Interceptor: icpt}, Config{RPCHandler: echoRPC()})
 	defer close(release)
+	queued := make(chan string, 4)
+	p.dialer.onCallQueued = func(id string) { queued <- id }
 
 	type result struct{ err error }
 	callA := make(chan result, 1)
@@ -176,16 +178,13 @@ func TestCallNotWrittenIsNotSent(t *testing.T) {
 	case <-time.After(waitTimeout):
 		t.Fatal("first request not taken by the writer")
 	}
+	<-queued // the first request
 	callB := make(chan result, 1)
 	go func() {
-		_, err := p.dialer.Call(context.Background(), &conduitv1.RpcRequest{Path: "/b"})
+		_, err := p.dialer.Call(context.Background(), &conduitv1.RpcRequest{RequestId: "b", Path: "/b"})
 		callB <- result{err}
 	}()
-	eventually(t, "second request queued", func() bool {
-		p.dialer.sched.mu.Lock()
-		defer p.dialer.sched.mu.Unlock()
-		return len(p.dialer.sched.control) > 0
-	})
+	waitQueued(t, queued, "b")
 	p.dialer.fail(errors.New("conduit test: transport lost"))
 
 	rb := <-callB
@@ -265,6 +264,8 @@ func TestCallCancelledBeforeWriteIsNeverWritten(t *testing.T) {
 		return []*conduitv1.Frame{f}
 	}
 	p := newPair(t, Config{Interceptor: icpt}, Config{RPCHandler: echoRPC()})
+	queued := make(chan string, 4)
+	p.dialer.onCallQueued = func(id string) { queued <- id }
 	released := false
 	defer func() {
 		if !released {
@@ -288,11 +289,7 @@ func TestCallCancelledBeforeWriteIsNeverWritten(t *testing.T) {
 		_, err := p.dialer.Call(ctxB, &conduitv1.RpcRequest{RequestId: "b", Path: "/b"})
 		callB <- err
 	}()
-	eventually(t, "second request queued", func() bool {
-		p.dialer.sched.mu.Lock()
-		defer p.dialer.sched.mu.Unlock()
-		return len(p.dialer.sched.control) > 0
-	})
+	waitQueued(t, queued, "b")
 	cancelB()
 	if err := <-callB; !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled call err = %v, want context.Canceled", err)
@@ -313,6 +310,22 @@ func TestCallCancelledBeforeWriteIsNeverWritten(t *testing.T) {
 	for _, w := range written {
 		if w == "request b" || w == "cancel b" {
 			t.Fatalf("frames written = %v: the cancelled request or its cancel was written", written)
+		}
+	}
+}
+
+// waitQueued waits until Call has queued the request with id want,
+// skipping the ids of earlier calls.
+func waitQueued(t *testing.T, queued <-chan string, want string) {
+	t.Helper()
+	for {
+		select {
+		case id := <-queued:
+			if id == want {
+				return
+			}
+		case <-time.After(waitTimeout):
+			t.Fatalf("request %s was never queued", want)
 		}
 	}
 }
