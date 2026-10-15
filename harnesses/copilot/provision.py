@@ -625,12 +625,14 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         """The direct-install entry for name in config.json installedPlugins,
         or None. Read-only.
 
-        Lenient by default: a config.json that exists but cannot be parsed
-        here (invalid UTF-8, an over-long integer, NaN, too deep) counts as
-        not registered, so install and is_present reinstall. With strict, an
-        unparseable file raises PluginInstallError instead: copilot's own
-        parser may still list the plugin, so uninstall must not take it as
-        removed. A missing file is "not registered" either way."""
+        Lenient by default (is_present): a config.json that exists but
+        cannot be parsed here (invalid UTF-8, an over-long integer, NaN, too
+        deep) counts as not registered, so the plugin is reinstalled. With
+        strict (install, uninstall), an unparseable file raises
+        PluginInstallError instead: uninstall must not take it as removed
+        (copilot's own parser may still list the plugin), and install
+        reports the real cause. A missing file is "not registered" either
+        way."""
         path = os.path.join(self.copilot_home, "config.json")
         try:
             with open(path, "rb") as f:
@@ -699,7 +701,12 @@ class CopilotPluginInstaller(scion_harness.PluginInstaller):
         proc = self._run("plugin", "install", os.path.abspath(bundle_dir))
         if proc.returncode != 0:
             raise scion_harness.cli_failure("copilot plugin install", proc)
-        entry = self.registration(plugin.name)
+        try:
+            entry = self.registration(plugin.name, strict=True)
+        except scion_harness.PluginInstallError as exc:
+            # Same outcome as "not registered" (not recorded, retried next
+            # start), with the real cause in the warning.
+            raise scion_harness.PluginInstallError(f"copilot plugin install exit 0, but {exc}") from None
         if not self.enabled(entry):
             raise scion_harness.PluginInstallError(
                 f"copilot plugin install exit 0 but {plugin.name} is not registered "

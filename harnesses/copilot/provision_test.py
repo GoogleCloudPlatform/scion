@@ -879,6 +879,8 @@ class _FakeCopilotCLI:
         self.omit_cache_path = False
         self.omit_enabled = False
         self.no_cache_dir = False
+        # Leave config.json unparseable by the strict loader after install.
+        self.corrupt_after_install = False
         # A user's same-named plugin from a local marketplace ("live", not
         # in installedPlugins); a bare-name uninstall disables it instead
         # of touching the direct install (copilot 1.0.97).
@@ -940,6 +942,9 @@ class _FakeCopilotCLI:
                 plugins.append(entry)
                 data["installedPlugins"] = plugins
                 self._save(home, data)
+            if self.corrupt_after_install:
+                with open(self._config_path(home), "w", encoding="utf-8") as f:
+                    f.write('{"n": ' + "9" * 5000 + "}")
             return subprocess.CompletedProcess(
                 argv, 0, f'Plugin "{name}" installed successfully. Installed 1 skill.\n',
                 "\nWarning: Direct plugin installs (repos, URLs, local paths) are deprecated. "
@@ -1266,6 +1271,21 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         self.assertEqual(len(warnings), 1)
         self.assertIn("is not registered as enabled", warnings[0])
         self.assertEqual(self.state(), {})
+
+    def test_install_with_unreadable_config_names_the_cause(self) -> None:
+        # Upstream review (gemini, GoogleCloudPlatform/scion#3735): install
+        # reads the registration strictly, so an unparseable config.json is
+        # reported as such rather than as "not registered as enabled". The
+        # outcome is unchanged: not recorded, retried next start.
+        self.cli.corrupt_after_install = True
+        self.stage({"a": "d1"})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            "agent plugin a: install failed (copilot plugin install exit 0, but cannot read "
+            "~/.copilot/config.json to confirm the result (ValueError)); will retry next start"])
+        self.assertEqual(self.state(), {})
+        self.assertEqual(self.status()["installed"], [])
 
     def test_install_without_install_dir_fails_loudly(self) -> None:
         self.cli.omit_cache_path = True
