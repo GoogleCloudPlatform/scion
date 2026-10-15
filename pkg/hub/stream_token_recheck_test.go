@@ -117,21 +117,44 @@ func (f *tokenStreamFixture) superAdmin(t *testing.T, name string) string {
 	return id
 }
 
+// openedRecorder is an httptest.ResponseRecorder that closes opened on
+// its first Flush: a stream handler flushes its headers once the request
+// is authorized and the stream is set up.
+type openedRecorder struct {
+	*httptest.ResponseRecorder
+	once   sync.Once
+	opened chan struct{}
+}
+
+func (r *openedRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	r.once.Do(func() { close(r.opened) })
+}
+
 // openStream starts the stream at path with the given Authorization value
-// and returns a channel closed when the handler returns, the recorder
-// (read it only after the channel is closed), and a cancel for the
-// request.
-func openStream(srv *Server, path, auth string) (chan struct{}, *httptest.ResponseRecorder, context.CancelFunc) {
+// and waits until the handler has flushed its headers (the stream is open)
+// or returned. It returns a channel closed when the handler returns, the
+// recorder (read it only after the channel is closed), and a cancel for
+// the request.
+func openStream(t *testing.T, srv *Server, path, auth string) (chan struct{}, *httptest.ResponseRecorder, context.CancelFunc) {
+	t.Helper()
 	reqCtx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, path, nil).WithContext(reqCtx)
 	req.Header.Set("Authorization", auth)
-	rec := httptest.NewRecorder()
+	rec := &openedRecorder{ResponseRecorder: httptest.NewRecorder(), opened: make(chan struct{})}
 	done := make(chan struct{})
 	go func() {
 		srv.Handler().ServeHTTP(rec, req)
 		close(done)
 	}()
-	return done, rec, cancel
+	select {
+	case <-rec.opened:
+	case <-done:
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("stream did not open")
+	}
+	return done, rec.ResponseRecorder, cancel
 }
 
 // shortenStreamRecheck sets the stream re-check interval to 20ms for the
@@ -184,7 +207,7 @@ func runTokenStreamEnds(t *testing.T, cause string, expiry time.Duration, change
 			key, token, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(userID), params)
 			require.NoError(t, err)
 
-			done, rec, cancel := openStream(f.srv, st.path, "Bearer "+key)
+			done, rec, cancel := openStream(t, f.srv, st.path, "Bearer "+key)
 			defer cancel()
 			if expiry == 0 {
 				requireStreamStaysOpen(t, done)
@@ -267,7 +290,7 @@ func TestTokenStream_ValidCredentialKeepsStream(t *testing.T) {
 				{"dev", "Bearer " + testDevToken},
 			} {
 				t.Run(c.name, func(t *testing.T) {
-					done, rec, cancel := openStream(f.srv, st.path, c.auth)
+					done, rec, cancel := openStream(t, f.srv, st.path, c.auth)
 					requireStreamStaysOpen(t, done)
 					cancel()
 					requireStreamEnds(t, done)
@@ -277,7 +300,7 @@ func TestTokenStream_ValidCredentialKeepsStream(t *testing.T) {
 			}
 
 			t.Run("session after the role is removed", func(t *testing.T) {
-				done, rec, cancel := openStream(f.srv, st.path, "Bearer "+session)
+				done, rec, cancel := openStream(t, f.srv, st.path, "Bearer "+session)
 				defer cancel()
 				ctx := context.Background()
 				rd, err := f.store.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
