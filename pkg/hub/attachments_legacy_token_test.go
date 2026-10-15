@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -172,24 +173,58 @@ func TestLegacyAttachmentDownloadToken_SentUploadFollowsMessageForUploader(t *te
 	assert.Equal(t, http.StatusOK, f.download(t, f.ua, file).status, "the uploader's session reads it")
 }
 
-// legacyGetAgentFault fails GetAgent while fail is set.
-type legacyGetAgentFault struct {
+// legacyStoreFault fails selected store calls of the server: GetAgent while
+// failGetAgent is set, and every GetConversation after the first
+// conversationCallsOK calls once armConversation is set. Counting lets the
+// lookup canReadNativeMessage makes succeed while the token check's own
+// lookup of the same record fails.
+type legacyStoreFault struct {
 	store.Store
-	fail bool
+	failGetAgent        bool
+	armConversation     bool
+	conversationCallsOK int
+	conversationCalls   int
 }
 
-func (s *legacyGetAgentFault) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.fail {
+func (s *legacyStoreFault) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.failGetAgent {
 		return nil, errRefStoreFault
 	}
 	return s.Store.GetAgent(ctx, id)
 }
 
+func (s *legacyStoreFault) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	if s.armConversation {
+		s.conversationCalls++
+		if s.conversationCalls > s.conversationCallsOK {
+			return nil, errRefStoreFault
+		}
+	}
+	return s.Store.GetConversation(ctx, id)
+}
+
+// legacyTopicFault fails every GetTopic after the first topicCallsOK calls.
+type legacyTopicFault struct {
+	WebChatStore
+	topicCallsOK int
+	topicCalls   int
+}
+
+func (w *legacyTopicFault) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
+	w.topicCalls++
+	if w.topicCalls > w.topicCallsOK {
+		return nil, errRefStoreFault
+	}
+	return w.WebChatStore.GetTopic(ctx, id)
+}
+
 // A lookup the token check makes that fails refuses the download with the
-// answer of an unknown id.
+// answer of an unknown id. Each fault lets the lookups made before the
+// token check through, so the token check's own failure branch is the one
+// that answers.
 func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T) {
 	reader := func(t *testing.T, f *refFixture) *ScopedUserIdentity {
-		return selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read")
+		return selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read", "project:read")
 	}
 
 	t.Run("peer agent lookup", func(t *testing.T) {
@@ -200,9 +235,9 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
 
 		missing := f.downloadAs(t, tok, uuid.NewString())
-		faulty := &legacyGetAgentFault{Store: f.srv.store}
+		faulty := &legacyStoreFault{Store: f.srv.store}
 		f.srv.store = faulty
-		faulty.fail = true
+		faulty.failGetAgent = true
 		assert.Equal(t, missing, f.downloadAs(t, tok, file))
 	})
 
@@ -215,9 +250,29 @@ func TestLegacyAttachmentDownloadToken_LookupErrorAnswersAsUnknown(t *testing.T)
 		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
 
 		missing := f.downloadAs(t, tok, uuid.NewString())
-		f.faults.failGetConversation = true
-		f.fault.Arm()
+		faulty := &legacyStoreFault{Store: f.srv.store}
+		f.srv.store = faulty
+		// The first lookup is canReadNativeMessage's; the second is the
+		// token check's.
+		faulty.armConversation = true
+		faulty.conversationCallsOK = 1
 		assert.Equal(t, missing, f.downloadAs(t, tok, file))
+		assert.Equal(t, 2, faulty.conversationCalls, "the token check must make the failing lookup")
+	})
+
+	t.Run("topic lookup", func(t *testing.T) {
+		f := newRefFixture(t)
+		file, _ := f.legacyLinkedFile(t, f.uc.ID, f.projA.ID, f.topicA, "", "topic.txt")
+		tok := reader(t, f)
+		require.Equal(t, http.StatusOK, f.downloadAs(t, tok, file).status, "readable while the store works")
+
+		missing := f.downloadAs(t, tok, uuid.NewString())
+		// The first lookup is canReadNativeMessage's; the second is the
+		// token check's.
+		faulty := &legacyTopicFault{WebChatStore: f.wcs, topicCallsOK: 1}
+		f.srv.SetWebChatStore(faulty)
+		assert.Equal(t, missing, f.downloadAs(t, tok, file))
+		assert.Equal(t, 2, faulty.topicCalls, "the token check must make the failing lookup")
 	})
 
 	t.Run("linked message list", func(t *testing.T) {
@@ -307,4 +362,42 @@ func TestLegacyAttachmentDownloadToken_MatchesMessageRead(t *testing.T) {
 		assert.Positive(t, granted, "%s: some token must read the message", c.name)
 		assert.Positive(t, refused, "%s: some token must be refused", c.name)
 	}
+}
+
+// The token rule holds end to end: a real minted token, classified by the
+// server's authentication middleware and the chat route wrapper, reads a
+// file with no project in its holder's DM with an agent only with
+// inbox:read and agent:read, and is otherwise answered as for an unknown id.
+func TestLegacyAttachmentDownloadToken_MintedTokenThroughServer(t *testing.T) {
+	f := newChatFixture(t)
+	dm := f.dm(t, f.admin, "agent", f.agentA.ID)
+	msg := f.chatMessage(t, "agent:"+f.agentA.Slug, f.agentA.ID, dm, f.projA, "a file for you")
+
+	rec := f.chatUpload(t, f.mint(t, f.admin, hubBoundary(), "inbox:write"), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp struct {
+		Attachments []attachmentUploadResult `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Attachments, 1)
+	require.NoError(t, f.wcs.LinkAttachmentToMessage(context.Background(), msg, resp.Attachments[0].ID))
+	path := "/api/v1/chat/attachments/" + resp.Attachments[0].ID
+	unknown := "/api/v1/chat/attachments/" + uuid.NewString()
+
+	reader := f.mint(t, f.admin, hubBoundary(), "inbox:read", "agent:read")
+	got := f.call(t, reader, http.MethodGet, path, nil)
+	assert.Equal(t, http.StatusOK, got.Code, got.Body.String())
+
+	for name, key := range map[string]string{
+		"token without agent:read": f.mint(t, f.admin, hubBoundary(), "inbox:read"),
+		"token without inbox:read": f.mint(t, f.admin, hubBoundary(), "agent:read", "project:read"),
+		"project B token":          f.mint(t, f.admin, projectBoundary(f.projB), "inbox:read", "agent:read"),
+	} {
+		missing := f.call(t, key, http.MethodGet, unknown, nil)
+		require.Equal(t, http.StatusNotFound, missing.Code, missing.Body.String())
+		refused := f.call(t, key, http.MethodGet, path, nil)
+		assert.Equal(t, missing.Code, refused.Code, name)
+		assert.Equal(t, missing.Body.String(), refused.Body.String(), name)
+	}
+	assert.Equal(t, http.StatusOK, f.session(t, f.admin, http.MethodGet, path, nil).Code, "the session is unchanged")
 }

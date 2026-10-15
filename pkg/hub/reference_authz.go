@@ -268,8 +268,11 @@ func (s *Server) tokenMayReadNativeMessage(ctx context.Context, wcs WebChatStore
 		conv = chatConversationRecord(msg.ThreadID, "")
 	case msg.ThreadID != "":
 		topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-		if err != nil || topic == nil {
+		if err != nil {
 			slog.WarnContext(ctx, "tokenMayReadNativeMessage: topic lookup failed", "message", msg.ID, "error", err)
+			return false
+		}
+		if topic == nil {
 			return false
 		}
 		conv = chatConversationRecord(msg.ThreadID, topic.ProjectID)
