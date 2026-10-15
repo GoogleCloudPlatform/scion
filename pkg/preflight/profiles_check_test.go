@@ -348,3 +348,26 @@ func TestProfilesCheck_RetainedActiveProfile(t *testing.T) {
 		t.Fatalf("finding %+v, want 2 agents and the active_profile wording", f)
 	}
 }
+
+// With exactly one profile stored, the default stays on it even when the
+// after view retains the built-in active_profile for an agent that uses
+// it: the INFO fallback (no Previous: the default does not change), and
+// the retained profile's count holds only its own agent.
+func TestProfilesCheck_OneStoredDefaultStaysWithRetainedBuiltin(t *testing.T) {
+	globalDir := profilesHome(t, "local", "gke")
+	db := &fakeDB{
+		settings: []HubSettingRow{profilesRow("managed", strPtr("admin"), "gke")},
+		agents: []agent.ProfileRefAgentRow{
+			{Slug: "w", ProjectID: "p1", AppliedProfile: "local"},
+			{Slug: "nop", ProjectID: "p1"},
+		},
+	}
+	rep := runProfiles(t, globalDir, db, testBroker)
+	wantCodes(t, rep, "settings.profiles.active_profile_fallback", "settings.profiles.retained_builtin_profile")
+	if f := rep.Findings[0]; f.Data["profile"] != "local" || f.Data["agents"] != 1 || f.Data["previous"] != nil {
+		t.Fatalf("fallback finding %+v, want local, 1 agent without a profile, no previous", f)
+	}
+	if f := rep.Findings[1]; f.Data["profile"] != "local" || f.Data["agents"] != 1 {
+		t.Fatalf("retained finding %+v, want local with 1 agent", f)
+	}
+}
