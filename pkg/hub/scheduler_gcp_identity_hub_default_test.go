@@ -690,6 +690,12 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			assignments, err := f.store.GetActiveAgentServiceAccountAssignments(ctx, got.ID)
 			require.NoError(t, err)
 
+			// The profile the mode was decided on is recorded, whichever way
+			// the mode went, so later starts and reincarnations use it.
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.Profile)
+			require.NotNil(t, got.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.brokerDefault, got.AppliedConfig.CreateInputs.Profile)
+
 			if !tc.wantTranslated {
 				assert.Equal(t, store.GCPMetadataModePassthrough, gcp.MetadataMode)
 				assert.False(t, gcp.RequireLocalRuntime,

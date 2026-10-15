@@ -39,14 +39,15 @@ import (
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Unit: passthroughProfileIsCloudRunSandbox
+// Unit: resolvePassthroughProfile
 // ---------------------------------------------------------------------------
 
-// TestPassthroughProfileIsCloudRunSandbox checks that the passthrough-to-assign
-// switch follows the type of the one profile the agent resolves to: the named
-// profile, else the broker's default profile, else a sole profile. A profile
-// that cannot be resolved is not a cloudrun-sandbox profile.
-func TestPassthroughProfileIsCloudRunSandbox(t *testing.T) {
+// TestResolvePassthroughProfile checks that the passthrough-to-assign switch
+// follows the type of the one profile the agent resolves to: the named
+// profile, else the broker's default profile, else a sole profile. It also
+// checks the resolved name, which is recorded on the agent. A profile that
+// cannot be resolved has no name and is not a cloudrun-sandbox profile.
+func TestResolvePassthroughProfile(t *testing.T) {
 	localAndSandbox := []store.BrokerProfile{
 		{Name: "local", Type: "docker", Available: true},
 		{Name: "sandbox", Type: "cloudrun-sandbox", Available: true},
@@ -57,6 +58,7 @@ func TestPassthroughProfileIsCloudRunSandbox(t *testing.T) {
 		defaultProfile string
 		runtimeTarget  *api.RuntimeTargetDescriptor
 		profileName    string
+		wantProfile    string
 		want           bool
 	}{
 		{
@@ -69,37 +71,43 @@ func TestPassthroughProfileIsCloudRunSandbox(t *testing.T) {
 			profiles: []store.BrokerProfile{
 				{Name: "default", Type: "docker", Available: true},
 			},
-			want: false,
+			wantProfile: "default",
+			want:        false,
 		},
 		{
 			name: "sole cloudrun-sandbox profile",
 			profiles: []store.BrokerProfile{
 				{Name: "default", Type: "cloudrun-sandbox", Available: true},
 			},
-			want: true,
+			wantProfile: "default",
+			want:        true,
 		},
 		{
 			name:        "named docker profile on a broker that also has a sandbox profile",
 			profiles:    localAndSandbox,
 			profileName: "local",
+			wantProfile: "local",
 			want:        false,
 		},
 		{
 			name:        "named cloudrun-sandbox profile",
 			profiles:    localAndSandbox,
 			profileName: "sandbox",
+			wantProfile: "sandbox",
 			want:        true,
 		},
 		{
 			name:           "broker default docker profile",
 			profiles:       localAndSandbox,
 			defaultProfile: "local",
+			wantProfile:    "local",
 			want:           false,
 		},
 		{
 			name:           "broker default cloudrun-sandbox profile",
 			profiles:       localAndSandbox,
 			defaultProfile: "sandbox",
+			wantProfile:    "sandbox",
 			want:           true,
 		},
 		{
@@ -107,6 +115,7 @@ func TestPassthroughProfileIsCloudRunSandbox(t *testing.T) {
 			profiles:       localAndSandbox,
 			defaultProfile: "sandbox",
 			profileName:    "local",
+			wantProfile:    "local",
 			want:           false,
 		},
 		{
@@ -133,7 +142,9 @@ func TestPassthroughProfileIsCloudRunSandbox(t *testing.T) {
 				DefaultProfile: tc.defaultProfile,
 				RuntimeTarget:  tc.runtimeTarget,
 			}
-			assert.Equal(t, tc.want, passthroughProfileIsCloudRunSandbox(broker, tc.profileName))
+			gotProfile, got := resolvePassthroughProfile(broker, tc.profileName)
+			assert.Equal(t, tc.wantProfile, gotProfile)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -146,7 +157,7 @@ func TestPassthrough_CloudRunSandbox_TranslatesToAssign(t *testing.T) {
 	hostSAEmail := "broker-host@sandbox-project.iam.gserviceaccount.com"
 	hostProjectID := "sandbox-project"
 	owner := ptUser(tid("user-sandbox-pt-1"), "sandbox-owner1@test.com", store.UserRoleMember)
-	srv, _, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, hostProjectID)
+	srv, s, project, _ := setupPassthroughSandboxServer(t, owner, hostSAEmail, hostProjectID)
 
 	checker := store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail)
 	enforceSAAssign(srv, checker)
@@ -183,6 +194,13 @@ func TestPassthrough_CloudRunSandbox_TranslatesToAssign(t *testing.T) {
 
 	// The annotation should indicate translation.
 	assert.Equal(t, "passthrough", resp.Agent.Annotations["scion.dev/gcp-identity-translated-from"])
+
+	// The broker's sole profile, which the mode was decided on, is recorded.
+	assert.Equal(t, "default", resp.Agent.AppliedConfig.Profile)
+	stored, err := s.GetAgent(context.Background(), resp.Agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.AppliedConfig.CreateInputs)
+	assert.Equal(t, "default", stored.AppliedConfig.CreateInputs.Profile)
 }
 
 // TestPassthrough_CloudRunSandbox_SARecordCreated verifies that the translation
@@ -388,7 +406,9 @@ func setProjectActiveProfile(t *testing.T, s store.Store, projectID, profile str
 // create on a broker with both a docker and a cloudrun-sandbox profile is
 // translated to assign only when the profile the agent resolves to (request
 // profile, else the project's active profile, else the broker default) is
-// the cloudrun-sandbox one.
+// the cloudrun-sandbox one. That profile is recorded on the agent and in its
+// create inputs whichever way the mode goes; an unresolvable profile is not
+// recorded.
 func TestPassthrough_CreateFollowsResolvedProfileType(t *testing.T) {
 	tests := []struct {
 		name                 string
@@ -396,32 +416,51 @@ func TestPassthrough_CreateFollowsResolvedProfileType(t *testing.T) {
 		projectActiveProfile string
 		brokerDefault        string
 		wantTranslated       bool
+		wantProfile          string
 	}{
 		{
 			name:           "request names the docker profile",
 			requestProfile: "local",
 			brokerDefault:  "sandbox",
+			wantProfile:    "local",
 		},
 		{
 			name:           "request names the cloudrun-sandbox profile",
 			requestProfile: "sandbox",
 			brokerDefault:  "local",
 			wantTranslated: true,
+			wantProfile:    "sandbox",
+		},
+		{
+			name:                 "request profile wins over the project active profile",
+			requestProfile:       "local",
+			projectActiveProfile: "sandbox",
+			brokerDefault:        "sandbox",
+			wantProfile:          "local",
 		},
 		{
 			name:                 "project active profile is the cloudrun-sandbox profile",
 			projectActiveProfile: "sandbox",
 			brokerDefault:        "local",
 			wantTranslated:       true,
+			wantProfile:          "sandbox",
 		},
 		{
 			name:                 "project active profile is the docker profile",
 			projectActiveProfile: "local",
 			brokerDefault:        "sandbox",
+			wantProfile:          "local",
 		},
 		{
 			name:          "broker default is the docker profile",
 			brokerDefault: "local",
+			wantProfile:   "local",
+		},
+		{
+			name:           "broker default is the cloudrun-sandbox profile",
+			brokerDefault:  "sandbox",
+			wantTranslated: true,
+			wantProfile:    "sandbox",
 		},
 		{
 			name: "no profile resolvable",
@@ -454,6 +493,13 @@ func TestPassthrough_CreateFollowsResolvedProfileType(t *testing.T) {
 			require.NotNil(t, resp.Agent.AppliedConfig)
 			gcpID := resp.Agent.AppliedConfig.GCPIdentity
 			require.NotNil(t, gcpID)
+
+			stored, err := s.GetAgent(context.Background(), resp.Agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, stored.AppliedConfig)
+			require.NotNil(t, stored.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.wantProfile, stored.AppliedConfig.Profile)
+			assert.Equal(t, tc.wantProfile, stored.AppliedConfig.CreateInputs.Profile)
 
 			if !tc.wantTranslated {
 				assert.Equal(t, store.GCPMetadataModePassthrough, gcpID.MetadataMode)
@@ -613,4 +659,185 @@ func TestPassthrough_PatchProjectLookupFailureFailsRequest(t *testing.T) {
 	assert.Equal(t, store.GCPMetadataModeBlock, stored.AppliedConfig.GCPIdentity.MetadataMode,
 		"a failed PATCH leaves the identity unchanged")
 	assert.Empty(t, stored.Annotations["scion.dev/gcp-identity-translated-from"])
+}
+
+// TestPassthrough_PatchUsesProjectActiveProfile: PATCH to passthrough for an
+// agent that names no profile resolves the project's active profile before
+// the broker default, and records the profile it resolved.
+func TestPassthrough_PatchUsesProjectActiveProfile(t *testing.T) {
+	tests := []struct {
+		name                 string
+		projectActiveProfile string
+		brokerDefault        string
+		wantTranslated       bool
+	}{
+		{name: "docker project active profile stays passthrough", projectActiveProfile: "local", brokerDefault: "sandbox"},
+		{name: "cloudrun-sandbox project active profile is translated", projectActiveProfile: "sandbox", brokerDefault: "local", wantTranslated: true},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			hostSAEmail := "broker-host@project-patch.iam.gserviceaccount.com"
+			owner := ptUser(tid(fmt.Sprintf("user-project-patch-%d", i)), fmt.Sprintf("project-patch-%d@test.com", i), store.UserRoleMember)
+			srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, "project-patch")
+			// The broker default is the other profile, so only the project's
+			// active profile can produce the expected result.
+			useLocalAndSandboxProfiles(t, s, broker.ID, tc.brokerDefault)
+			setProjectActiveProfile(t, s, project.ID, tc.projectActiveProfile)
+			enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
+
+			agent := &store.Agent{
+				ID:              tid(fmt.Sprintf("agent-project-patch-%d", i)),
+				Slug:            "pt-project-patch",
+				Name:            "pt-project-patch",
+				ProjectID:       project.ID,
+				Phase:           string(state.PhaseCreated),
+				RuntimeBrokerID: broker.ID,
+				AppliedConfig: &store.AgentAppliedConfig{
+					GCPIdentity: &store.GCPIdentityConfig{
+						MetadataMode: store.GCPMetadataModeBlock,
+					},
+					CreateInputs: &store.AgentCreateInputs{},
+				},
+				OwnerID:   owner.ID,
+				CreatedBy: owner.ID,
+				Created:   time.Now(),
+				Updated:   time.Now(),
+			}
+			require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+			rec := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+				"gcp_identity": map[string]string{
+					"metadata_mode": "passthrough",
+				},
+			})
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			stored, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, stored.AppliedConfig)
+			assert.Equal(t, tc.projectActiveProfile, stored.AppliedConfig.Profile)
+			require.NotNil(t, stored.AppliedConfig.CreateInputs)
+			assert.Equal(t, tc.projectActiveProfile, stored.AppliedConfig.CreateInputs.Profile)
+			gcpID := stored.AppliedConfig.GCPIdentity
+			require.NotNil(t, gcpID)
+			if !tc.wantTranslated {
+				assert.Equal(t, store.GCPMetadataModePassthrough, gcpID.MetadataMode)
+				assert.Empty(t, gcpID.ServiceAccountID)
+				assert.Empty(t, gcpID.ServiceAccountEmail)
+				return
+			}
+			assert.Equal(t, store.GCPMetadataModeAssign, gcpID.MetadataMode)
+			assert.Equal(t, hostSAEmail, gcpID.ServiceAccountEmail)
+			assert.NotEmpty(t, gcpID.ServiceAccountID)
+		})
+	}
+}
+
+// profileRecordingDispatcher is a createAgentDispatcher that records the
+// profile and GCP settings each start is dispatched with.
+type profileRecordingDispatcher struct {
+	createAgentDispatcher
+	startedProfile string
+	startedGCP     *store.GCPIdentityConfig
+}
+
+func (d *profileRecordingDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
+	d.startCalled = true
+	if agent.AppliedConfig != nil {
+		d.startedProfile = agent.AppliedConfig.Profile
+		if agent.AppliedConfig.GCPIdentity != nil {
+			g := *agent.AppliedConfig.GCPIdentity
+			d.startedGCP = &g
+		}
+	}
+	agent.Phase = string(state.PhaseRunning)
+	return nil
+}
+
+// TestPassthrough_RecordedProfileSurvivesProjectActiveProfileChange: the
+// profile a passthrough create resolved from the project's active profile is
+// recorded, so after the project's active profile changes, a later start and
+// a reincarnation both use that profile and the GCP settings decided for it.
+func TestPassthrough_RecordedProfileSurvivesProjectActiveProfileChange(t *testing.T) {
+	tests := []struct {
+		name           string
+		atCreate       string
+		later          string
+		wantTranslated bool
+	}{
+		{name: "cloudrun-sandbox profile at create", atCreate: "sandbox", later: "local", wantTranslated: true},
+		{name: "docker profile at create", atCreate: "local", later: "sandbox"},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			hostSAEmail := "broker-host@recorded-profile.iam.gserviceaccount.com"
+			owner := ptUser(tid(fmt.Sprintf("user-recorded-profile-%d", i)), fmt.Sprintf("recorded-profile-%d@test.com", i), store.UserRoleMember)
+			srv, s, project, broker := setupPassthroughSandboxServer(t, owner, hostSAEmail, "recorded-profile")
+			// The broker default is the later profile, so falling back to it
+			// would also give the wrong answer.
+			useLocalAndSandboxProfiles(t, s, broker.ID, tc.later)
+			setProjectActiveProfile(t, s, project.ID, tc.atCreate)
+			enforceSAAssign(srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
+			disp := &profileRecordingDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}}
+			srv.SetDispatcher(disp)
+
+			assertGCP := func(t *testing.T, gcpID *store.GCPIdentityConfig) {
+				t.Helper()
+				require.NotNil(t, gcpID)
+				if !tc.wantTranslated {
+					assert.Equal(t, store.GCPMetadataModePassthrough, gcpID.MetadataMode)
+					assert.Empty(t, gcpID.ServiceAccountEmail)
+					return
+				}
+				assert.Equal(t, store.GCPMetadataModeAssign, gcpID.MetadataMode)
+				assert.Equal(t, hostSAEmail, gcpID.ServiceAccountEmail)
+			}
+
+			rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name:      "pt-recorded-profile",
+				ProjectID: project.ID,
+				Task:      "passthrough with the project active profile",
+				GCPIdentity: &GCPIdentityAssignment{
+					MetadataMode: "passthrough",
+				},
+			})
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+			var resp CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+			// The create dispatch names the profile, which the broker keeps
+			// for the agent's later starts.
+			require.NotNil(t, disp.capturedAgent)
+			require.NotNil(t, disp.capturedAgent.AppliedConfig)
+			assert.Equal(t, tc.atCreate, disp.capturedAgent.AppliedConfig.Profile)
+			assertGCP(t, disp.capturedAgent.AppliedConfig.GCPIdentity)
+
+			setProjectActiveProfile(t, s, project.ID, tc.later)
+
+			// Start: stop the agent in the store, then start it.
+			stopped, err := s.GetAgent(ctx, resp.Agent.ID)
+			require.NoError(t, err)
+			stopped.Phase = string(state.PhaseStopped)
+			require.NoError(t, s.UpdateAgent(ctx, stopped))
+			rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+resp.Agent.ID+"/start", nil)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			require.True(t, disp.startCalled)
+			assert.Equal(t, tc.atCreate, disp.startedProfile)
+			assertGCP(t, disp.startedGCP)
+
+			// Reincarnate: the next generation's config.
+			stored, err := s.GetAgent(ctx, resp.Agent.ID)
+			require.NoError(t, err)
+			proj, err := s.GetProject(ctx, project.ID)
+			require.NoError(t, err)
+			fresh, _, err := srv.buildFreshAppliedConfig(ctx, stored, proj, "")
+			require.NoError(t, err)
+			require.NotNil(t, fresh)
+			assert.Equal(t, tc.atCreate, fresh.Profile)
+			require.NotNil(t, fresh.CreateInputs)
+			assert.Equal(t, tc.atCreate, fresh.CreateInputs.Profile)
+			assertGCP(t, fresh.GCPIdentity)
+		})
+	}
 }
