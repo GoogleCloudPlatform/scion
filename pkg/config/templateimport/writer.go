@@ -32,6 +32,10 @@ import (
 // model from the import.
 // Returns the path to the created template directory.
 func WriteTemplate(agent *ImportedAgent, templatesDir string, force bool) (string, error) {
+	if agent == nil {
+		return "", fmt.Errorf("imported agent cannot be nil")
+	}
+
 	// Names come from imported metadata or --name. Validate before any writes
 	// or removals, including the scion-format copy path.
 	if !filepath.IsLocal(agent.Name) || agent.Name == "." || strings.ContainsAny(agent.Name, "/\\\x00") {

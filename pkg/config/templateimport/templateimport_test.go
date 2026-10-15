@@ -415,6 +415,31 @@ func TestGeminiImporter_Detect(t *testing.T) {
 
 // --- Writer Tests ---
 
+func TestWriteTemplate_NilAgent(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%t", force), func(t *testing.T) {
+			templatesDir := t.TempDir()
+			keepPath := filepath.Join(templatesDir, "keep.txt")
+			require.NoError(t, os.WriteFile(keepPath, []byte("keep"), 0644))
+
+			var path string
+			var err error
+			require.NotPanics(t, func() {
+				path, err = WriteTemplate(nil, templatesDir, force)
+			})
+			assert.ErrorContains(t, err, "agent cannot be nil")
+			assert.Empty(t, path)
+
+			content, err := os.ReadFile(keepPath)
+			require.NoError(t, err)
+			assert.Equal(t, "keep", string(content))
+			entries, err := os.ReadDir(templatesDir)
+			require.NoError(t, err)
+			assert.Len(t, entries, 1)
+		})
+	}
+}
+
 func TestWriteTemplate_InvalidName(t *testing.T) {
 	tests := []struct{ label, name string }{
 		{"empty", ""},
