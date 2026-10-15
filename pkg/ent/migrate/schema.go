@@ -1889,6 +1889,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
 			},
+			{
+				Name:    "message_project_id_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[21], MessagesColumns[0]},
+			},
 		},
 	}
 	// MessageAddresseesColumns holds the columns for the "message_addressees" table.
