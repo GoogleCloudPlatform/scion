@@ -411,7 +411,11 @@ func TestHubInstanceRegistry_TickWritesAsyncStartFeature(t *testing.T) {
 // Retry-After, releases its claim and records the agent stopped.
 func TestAsyncStartBrokerDraining_LifecycleRestartReleasesClaim(t *testing.T) {
 	f, d, _ := newClaimFixture(t)
-	a := f.addAgent("drain-restart", "running", "", func(a *store.Agent) { a.RunID = "run-1" })
+	a := f.addAgent("drain-restart", "running", "")
+	// The restart records stopped only for the run it stopped (CreateAgent
+	// stores no run ID).
+	_, err := f.s.SetAgentRunID(context.Background(), a.ID, "run-1", nil)
+	require.NoError(t, err)
 	d.start = func(context.Context, *store.Agent) error { return drainingErr("9") }
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
