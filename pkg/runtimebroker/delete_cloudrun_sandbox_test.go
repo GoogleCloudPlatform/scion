@@ -25,12 +25,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
+// sandboxStateEntryJSON is one cloudrun-sandbox state file entry for agent
+// "dev" of project slug/projectID, keyed by its project-prefixed sandbox name.
+func sandboxStateEntryJSON(slug, projectID string) string {
+	name := slug + "--dev"
+	return `"` + name + `":{"sandbox_name":"` + name + `","agent_id":"` + name + `",` +
+		`"project_id":"` + projectID + `","project":"` + slug + `",` +
+		`"labels":{"scion.agent":"true","scion.name":"dev","scion.project_id":"` + projectID + `"}}`
+}
+
 // TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox: a hub delete names
 // the agent ("dev"), while the cloudrun-sandbox runtime records the sandbox
 // under the project-prefixed container name ("proj-b--dev"). The broker's
 // delete resolution must still find the sandbox, run `sandbox delete` on it
 // and remove its state entry, rather than deleting only the agent's files
-// and leaving the sandbox behind (ptone/scion#5156).
+// and leaving the sandbox behind (ptone/scion#5156). A same-named agent of
+// another project ("proj-a--dev") reports the same Name, so the delete must
+// leave its sandbox, state entry and files untouched.
 func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -51,9 +62,8 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	statePath := filepath.Join(dir, "state.json")
-	state := `{"proj-b--dev":{"sandbox_name":"proj-b--dev","agent_id":"proj-b--dev",` +
-		`"project_id":"` + scopeProjB + `","project":"proj-b",` +
-		`"labels":{"scion.agent":"true","scion.name":"dev","scion.project_id":"` + scopeProjB + `"}}}`
+	state := "{" + sandboxStateEntryJSON("proj-a", scopeProjA) + "," +
+		sandboxStateEntryJSON("proj-b", scopeProjB) + "}"
 	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -63,8 +73,9 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, agent.NewManager(rt), rt)
-	// The agent's files exist, so a resolution that misses the sandbox
+	// The agents' files exist, so a resolution that misses the sandbox
 	// still answers 204 (a files-only delete).
+	scionA, infoA := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
 	makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 
 	rec := doDelete(t, srv, "dev", "projectId="+scopeProjB+"&deleteFiles=true")
@@ -75,6 +86,9 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	if !strings.Contains(string(got), "delete --force proj-b--dev\n") {
 		t.Errorf("sandbox CLI calls = %q, want a delete --force of proj-b--dev", got)
 	}
+	if strings.Contains(string(got), "proj-a--dev") {
+		t.Errorf("sandbox CLI calls = %q, want none for the other project's proj-a--dev", got)
+	}
 	after, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatalf("read state file: %v", err)
@@ -82,4 +96,8 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	if strings.Contains(string(after), "proj-b--dev") {
 		t.Errorf("state entry still present after the delete: %s", after)
 	}
+	if !strings.Contains(string(after), `"proj-a--dev"`) {
+		t.Errorf("the other project's state entry was removed: %s", after)
+	}
+	assertUntouched(t, scionA, "dev", infoA)
 }
