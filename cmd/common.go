@@ -398,8 +398,8 @@ func requireHub(projectPath string) (*HubContext, error) {
 	}, nil
 }
 
-// errHubNotConfigured is returned by requireHub when no hub endpoint is
-// configured (flag, environment, settings or the hub list). It matches every
+// errHubNotConfigured is returned by requireHub when no hub is selected
+// (flag, environment or the hub list). It matches every
 // hubsync.HubNotConfiguredError through errors.Is.
 var errHubNotConfigured = hubsync.ErrHubNotConfigured
 
@@ -479,19 +479,10 @@ func hubCheckHint(endpoint string) string {
 }
 
 // hintHubEndpoint returns the hub endpoint hubCheckHint describes: the
-// endpoint of the current invocation (the --hub flag, the active project's
-// settings, or the environment). It is only called on an error path, and
-// returns what it can without failing. Tests replace it.
+// endpoint of the current invocation (see invocationHub). It is only called
+// on an error path. Tests replace it.
 var hintHubEndpoint = func() string {
-	resolved, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	settings, err := config.LoadSettings(resolved)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	return GetHubEndpoint(settings)
+	return invocationHubEndpoint()
 }
 
 // emptyResponseNote replaces the hub-check hint when the hub answered a call
@@ -732,7 +723,7 @@ func localResumeDecision(savedPhase string, resume, force bool, agentName string
 		return true, !resume, false, nil
 	case resume && force && savedPhase == string(state.PhaseError):
 		return true, false, true, nil
-	case resume && savedPhase == string(state.PhaseStopped):
+	case resume && (savedPhase == string(state.PhaseStopped) || savedPhase == string(state.PhaseHalted)):
 		return false, false, false, nil
 	}
 	return resume, false, false, nil
@@ -944,12 +935,13 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	opts.Env = localAgentStartEnv()
 
 	// Thread CLI-resolved hub endpoint so locally-started agents get
-	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
-	// var are resolved here; the agent's scion-agent.yaml can override
-	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
+	// hub connectivity. The hub selected for this invocation (--hub, the
+	// environment, a link entry or the current context) is resolved here;
+	// the agent's scion-agent.yaml can override inside Start() via
+	// hub.endpoint or env.SCION_HUB_ENDPOINT.
 	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
 		if !cliSettings.IsHubExplicitlyDisabled() {
-			if ep := GetHubEndpoint(cliSettings); ep != "" {
+			if ep := invocationHubEndpoint(); ep != "" {
 				if opts.Env == nil {
 					opts.Env = make(map[string]string)
 				}
@@ -1194,7 +1186,7 @@ func hubCloneTransportNote(cloneURL string) string {
 // included: the hub only restarts them in place with --force
 // (resumeInPlaceDecision), so `start` on them still reports a conflict.
 func hubStartImpliesResume(phase string) bool {
-	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped)
+	return phase == string(state.PhaseSuspended) || phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)
 }
 
 // hubCreateReusesExistingAgent mirrors the hub's handleExistingAgent decision
@@ -1207,7 +1199,7 @@ func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
 	switch phase {
 	case string(state.PhaseSuspended), string(state.PhaseCreated):
 		return true
-	case string(state.PhaseStopped):
+	case string(state.PhaseStopped), string(state.PhaseHalted):
 		return resume
 	case string(state.PhaseError):
 		return resume && force
@@ -1222,8 +1214,9 @@ func hubCreateReusesExistingAgent(phase string, resume, force bool) bool {
 // reflects what the hub will actually do with an agent in the given phase.
 func hubStartActionWord(phase string, resume, force bool) string {
 	switch {
-	case phase == string(state.PhaseStopped) && resume:
-		// The hub restarts a stopped agent with a fresh harness session.
+	case (phase == string(state.PhaseStopped) || phase == string(state.PhaseHalted)) && resume:
+		// The hub restarts a stopped or halted agent with a fresh harness
+		// session.
 		return "Restarting"
 	case resume && force:
 		return "Force-resuming"

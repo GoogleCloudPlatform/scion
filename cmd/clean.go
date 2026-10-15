@@ -109,7 +109,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 	hubReachable := false
 
 	if shouldCheckHub && settings != nil {
-		endpoint := GetHubEndpoint(settings)
+		endpoint := invocationHubEndpoint()
 		if endpoint != "" {
 			// Try to create Hub client and check connectivity
 			client, clientErr := getHubClient(settings)

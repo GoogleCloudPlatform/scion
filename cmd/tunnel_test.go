@@ -268,18 +268,6 @@ func TestTunnelCredentialLookupIsNormalised(t *testing.T) {
 	}
 }
 
-// A settings load that fails must not reach GetHubEndpoint as a typed nil.
-func TestTunnelEndpointNilSettings(t *testing.T) {
-	isolateRootHook(t)
-	tunnelResetFlags(t)
-	t.Cleanup(func() { tunnelResetFlags(t) })
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-	t.Setenv("SCION_HUB_URL", "")
-	assert.NotPanics(t, func() { assert.Equal(t, "", tunnelEndpoint(nil)) })
-	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.example.com")
-	assert.Equal(t, "https://hub.example.com", tunnelEndpoint(nil))
-}
-
 func TestTunnelCLIUnreadableSettingsNoHubExits2(t *testing.T) {
 	code, stderr := tunnelRunCLIWith(t, nil, func() {
 		dir := filepath.Join(os.Getenv("HOME"), ".scion")

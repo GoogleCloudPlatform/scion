@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1032,8 +1033,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
 		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome) }); err != nil {
+			// hub.agent_plugins is re-checked at every start: while it is off
+			// no plugins are restored, so the provisioner removes the ones
+			// Scion installed earlier.
+			includePlugins := agentPluginsEnabled(ctx, settings)
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome, includePlugins) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
+			if msg := startAgentPluginsWarning(recordHasAgentPlugins(agentDir), includePlugins, harnessConfigName, h); msg != "" {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
 			}
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
@@ -1601,11 +1612,11 @@ authDone:
 	// through the template fill (demoted on a per-start copy; scion-agent.json
 	// is not rewritten).
 	//
-	// The harness-config's auth-candidate keys are suppressed for the
-	// template env fallback (RunConfig.SuppressedFallbackKeys), so a
-	// template never takes part in auth; a demoted key among them is
-	// reported, never dropped silently.
-	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
+	// Every env key the harness-config's auth metadata lists, for any auth
+	// type, is suppressed for the template env fallback
+	// (RunConfig.SuppressedFallbackKeys), so a template never takes part in
+	// auth; a demoted key among them is reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(templateFallbackSuppressedKeys(authMeta))
 	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
 	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
 	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
@@ -2570,11 +2581,12 @@ authDone:
 	// Record the running phase, runtime and profile before the container
 	// starts rather than after it: some runtimes do not let the host write
 	// files in the container (ptone/scion#4766). Once up, the container
-	// reports its own phase (sciontool init writes "running"). This covers
-	// only the running-phase write: the "error" write on a failed launch
-	// below still writes agent-info.json after Run. (The run ID record
-	// after the create, when the pre-start List failed, goes to the
-	// host-owned host state file, ptone/scion#4771.)
+	// reports its own phase (sciontool init writes "running"). A failed
+	// launch is recorded in the host-owned host state file
+	// (ptone/scion#4815, see setStartFailedRunID); the record is cleared
+	// here, before Run, and set below when Run fails. (The run ID record
+	// after the create, when the pre-start List failed, goes to the same
+	// file, ptone/scion#4771.)
 	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
@@ -2586,14 +2598,25 @@ authDone:
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
+	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
+		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
+			"agent", opts.Name, "run_id", runID, "error", err)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// agent-info.json was set to "running" above, before the runtime
 		// launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom agent forever. This write comes after Run, so on a
-		// runtime whose Run fails after creating the container it may run
-		// while the container exists; tracked in ptone/scion#4815.
+		// workspace but record the error so list/status do not report a
+		// phantom agent forever. Some runtimes do not let the host write
+		// files in the container, so the failed start is also recorded in
+		// the host-owned host state file, which list reads and which does
+		// not depend on the agent home being writable (ptone/scion#4815).
+		// The agent-info.json write is kept, best effort, for readers of
+		// that file; it may fail on such runtimes.
+		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+			slog.Warn("Start: failed to record the failed start in the host state file",
+				"agent", opts.Name, "run_id", runID, "error", recErr)
+		}
 		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
@@ -2624,7 +2647,7 @@ authDone:
 			}
 			if matched {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
@@ -3346,6 +3369,9 @@ func autoDetectAuthSelectedType(auth *api.AuthConfig, authMeta *config.HarnessAu
 	// AutoDetectAuthType runs the file -> env -> identity precedence as a
 	// single call so a present default-type credential (e.g. antigravity's
 	// AGY_TOKEN, claude's ANTHROPIC_API_KEY) always wins over the identity leg.
+	// One exception to file-first: for an api-key default harness, an API key
+	// beats a gcloud-adc (vertex-ai) file credential (ptone/scion#4559). The
+	// runtimebroker preflight calls the same function, so both agree.
 	if detected := harness.AutoDetectAuthType(authMeta, fileSecretNames, envKeys, gcpSAAssigned); detected != "" {
 		auth.SelectedType = detected
 	}
@@ -3453,6 +3479,38 @@ func configAuthEnvKeySet(authMeta *config.HarnessAuthMetadata) map[string]struct
 				keys[k] = struct{}{}
 			}
 		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
+// templateFallbackSuppressedKeys returns every env key a harness-config's
+// auth metadata lists, for any auth type: required_env any_of keys,
+// required_files alternative_env_keys and autodetect env keys. None of them
+// is ever filled from template env (RunConfig.SuppressedFallbackKeys), so a
+// template never supplies or selects a credential (ptone/scion#4968).
+//
+// It is deliberately wider than configAuthEnvKeySet, which drives Start's
+// auth-env filtering and must not change with it.
+func templateFallbackSuppressedKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
+	if authMeta == nil {
+		return nil
+	}
+	keys := make(map[string]struct{})
+	for k := range configAuthEnvKeySet(authMeta) {
+		keys[k] = struct{}{}
+	}
+	for _, authType := range authMeta.Types {
+		for _, req := range authType.RequiredFiles {
+			for _, k := range req.AlternativeEnvKeys {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range authMeta.Autodetect.Env {
+		keys[k] = struct{}{}
 	}
 	if len(keys) == 0 {
 		return nil

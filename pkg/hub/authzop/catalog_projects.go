@@ -44,7 +44,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.add",
+			EventType:     "project_member_add",
 			ContextFields: []string{"actor_id", "project_id"},
 			AfterFields:   []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -77,7 +77,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot demote the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.update",
+			EventType:     "project_member_role_change",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "old_role"},
 			AfterFields:   []string{"new_role"},
@@ -109,7 +109,7 @@ var projectOperations = []OperationSpec{
 			{ID: "last-owner-guard", Description: "Cannot remove the last active direct owner", Kind: InvariantSecurity, FailClosed: true},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.remove",
+			EventType:     "project_member_remove",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"target_principal_id", "target_role"},
 			Atomic:        true,
@@ -161,7 +161,7 @@ var projectOperations = []OperationSpec{
 			{ID: "single-binding-per-principal", Description: "CT1 D4: one direct binding per principal per project; atomic replacement for both actor and target", Kind: InvariantBusiness, FailClosed: false},
 		},
 		AuditObligation: &AuditObligation{
-			EventType:     "project.membership.transfer",
+			EventType:     "project_ownership_transfer",
 			ContextFields: []string{"actor_id", "project_id"},
 			BeforeFields:  []string{"old_owner_id"},
 			AfterFields:   []string{"new_owner_id", "old_owner_role", "new_owner_role"},

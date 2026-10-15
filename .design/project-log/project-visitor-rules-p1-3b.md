@@ -143,3 +143,5 @@ after review.
 2026-10-14: TestProjectVisitorRules_RevokeWhenRuleGone installed its missing-rule store wrapper on the server store only, but since the merge above the revoke reads and writes through the membership service's own store, so the wrapper was never used and the test failed on the exclusion it expected to be absent. The test now installs the same wrapper on the membership service's store too, as installVisitorAuditFault does. Test-only; the real store already answers a missing rule with ErrNotFound. No other test that wraps the server store reaches the revoke without also wrapping the membership service's store.
 
 2026-10-14: merged upstream main (with item 3A as one commit) in. Item 3A's files now carry upstream's text with only this item's changes on top; the operation catalog report counts upstream's operations plus this item's four visitor rule operations (297).
+
+2026-10-15: merged upstream main in again. The visitor binding source-rule check in createRoleBinding now sits before upstream's test admin system binding check, which takes the role name; the API reference keeps upstream's grant route text and this item's rule route text.

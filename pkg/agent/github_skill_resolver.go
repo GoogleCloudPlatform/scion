@@ -353,6 +353,32 @@ func (r *GitHubSkillResolver) CredentialForURI(uri string) string {
 	return token
 }
 
+// CredentialSourceForURI returns a label naming where CredentialForURI's
+// credential for uri comes from: the secret named by ?token=, the GH_*
+// convention key that matched (names only, never values), or the default
+// GITHUB_TOKEN. It returns "" when CredentialForURI would return "".
+func (r *GitHubSkillResolver) CredentialSourceForURI(uri string) string {
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		return ""
+	}
+	_, source, err := r.lookupToken(ghRef)
+	if err != nil {
+		return ""
+	}
+	switch source {
+	case tokenSourceSecretParam:
+		return fmt.Sprintf("the credential %s named by ?token=", ghRef.TokenSecretName)
+	case tokenSourceRepoKey:
+		return "the credential " + ghauth.RepoKey(ghRef.Owner, ghRef.Repo)
+	case tokenSourceOwnerKey:
+		return "the credential " + ghauth.OwnerKey(ghRef.Owner)
+	case tokenSourceDefault:
+		return gitHubCredSourceDefault
+	}
+	return ""
+}
+
 // WithInstallCredentials returns ctx with what the install step needs to
 // download files of gh:// skills: this resolver's CredentialForURI as the
 // GitHub credential lookup, and defaultToken (when non-empty) as the default
@@ -363,6 +389,7 @@ func (r *GitHubSkillResolver) WithInstallCredentials(ctx context.Context, defaul
 	if defaultToken != "" {
 		ctx = ContextWithGitHubToken(ctx, defaultToken)
 	}
+	ctx = contextWithGitHubCredentialSourceLookup(ctx, r.CredentialSourceForURI)
 	return ContextWithGitHubCredentialLookup(ctx, r.CredentialForURI)
 }
 
@@ -449,7 +476,7 @@ func (r *GitHubSkillResolver) resolveAll(ctx context.Context, refs []api.SkillRe
 		ghRef, err := ParseGitHubSkillURI(ref.URI)
 		if err != nil {
 			outcomes[i].rerr = &ResolveError{
-				URI: ref.URI, Code: "invalid_uri", Message: err.Error(),
+				URI: ref.URI, Code: SkillErrCodeInvalidURI, Message: err.Error(),
 			}
 			continue
 		}
@@ -538,6 +565,7 @@ func (r *GitHubSkillResolver) resolveRef(ctx context.Context, ghRef *GitHubSkill
 	}
 	return refOutcome{rerr: &ResolveError{
 		URI: ref.URI, Code: code, Message: err.Error(), RetryAfter: retryAfter,
+		Status: upstreamStatus(err),
 	}}
 }
 
@@ -929,8 +957,9 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 
 	if resp.StatusCode == http.StatusNotFound {
 		return "", &githubResolveError{
-			code: SkillErrCodeNotFound,
-			msg:  fmt.Sprintf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo),
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
+			msg:    fmt.Sprintf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo),
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -968,7 +997,8 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, &githubResolveError{
-			code: SkillErrCodeNotFound,
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
 			msg: fmt.Sprintf("skill %q not found in repo %s/%s at ref %s (expected directory at %s)",
 				ghRef.SkillName, ghRef.Owner, ghRef.Repo, commitSHA[:12], ghRef.SkillPath),
 		}
@@ -1002,8 +1032,9 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, &githubResolveError{
-			code: SkillErrCodeNotFound,
-			msg:  fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
+			msg:    fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
 			// The listing at this commit named the file, so a 404 here is an
 			// upstream inconsistency (for example raw content lagging a
 			// push), not a missing ref; it is not remembered.
@@ -1071,9 +1102,14 @@ type githubResolveError struct {
 	// directory listing at the same commit named. cacheableFailure does not
 	// remember these.
 	fileMissingAfterListing bool
+	// status is the HTTP status of the GitHub response that failed the
+	// resolution, when one is known, else 0.
+	status int
 }
 
 func (e *githubResolveError) Error() string { return e.msg }
+
+func (e *githubResolveError) upstreamHTTPStatus() int { return e.status }
 
 func (e *githubResolveError) Unwrap() error { return e.err }
 
@@ -1402,15 +1438,20 @@ func (r *GitHubSkillResolver) apiError(resp *http.Response, action string) error
 		return &githubResolveError{
 			code:       SkillErrCodeRateLimited,
 			retryAfter: resp.Header.Get("Retry-After"),
+			status:     resp.StatusCode,
 			msg: fmt.Sprintf("GitHub API rate limited while %s (retry-after=%s, resets at %s); set GITHUB_TOKEN for higher limits",
 				action, resp.Header.Get("Retry-After"), resp.Header.Get("X-RateLimit-Reset")),
 		}
 	}
 	if resp.StatusCode >= http.StatusInternalServerError {
 		return &githubResolveError{
-			code: SkillErrCodeUpstreamUnavailable,
-			msg:  fmt.Sprintf("GitHub API error (%d) while %s, retries exhausted: %s", resp.StatusCode, action, string(body)),
+			code:   SkillErrCodeUpstreamUnavailable,
+			msg:    fmt.Sprintf("GitHub API error (%d) while %s, retries exhausted: %s", resp.StatusCode, action, string(body)),
+			status: resp.StatusCode,
 		}
 	}
-	return fmt.Errorf("GitHub API error (%d) while %s: %s", resp.StatusCode, action, string(body))
+	return &upstreamStatusError{
+		status: resp.StatusCode,
+		msg:    fmt.Sprintf("GitHub API error (%d) while %s: %s", resp.StatusCode, action, string(body)),
+	}
 }

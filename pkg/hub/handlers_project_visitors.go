@@ -281,6 +281,15 @@ func (s *Server) handleAddProjectVisitor(w http.ResponseWriter, r *http.Request,
 	if !s.visitorGrantNonAmplification(w, ctx, actor, project.ID) {
 		return
 	}
+	// A transport identity (the platform service account or a proxy driver
+	// principal, ptone/scion#4240 WS2) never becomes a hub account, so it
+	// gets no pending visitor account either. Same answer as allow-list add
+	// and invite: the message does not name drivers.
+	if s.isTransportIdentity(email) {
+		logProxyDriverCreateRefusal("project visitor grant", actor.ID(), email)
+		ValidationError(w, proxyDriverPrincipalUserMessage, map[string]interface{}{"field": "email"})
+		return
+	}
 
 	var (
 		visitor ProjectVisitor

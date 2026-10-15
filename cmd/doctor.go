@@ -263,7 +263,7 @@ func runDoctor() error {
 		settings = &config.Settings{}
 	}
 
-	hubEP := GetHubEndpoint(settings)
+	hubEP := invocationHubEndpoint()
 
 	// Create the authenticated client for the Hub checks if a Hub endpoint
 	// is configured.
@@ -915,15 +915,20 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		}
 	}
 
-	// The same policy as the Hub's health summary: agents in phase stopped
-	// are not considered, and stalled agents are not a health signal. The
-	// counts here are exclusive: an agent counts once, as errored (phase
-	// error) before crashed before offline (activity). The summary's
-	// problem groups can overlap instead (an agent in phase error with
-	// activity crashed is in both groups).
+	// Mostly the same policy as the Hub's health summary: agents in phase
+	// stopped are not considered, and stalled agents are not a health
+	// signal. One difference: this local check also leaves out halted
+	// agents. A halt is not a fault of the agent or of this machine's setup
+	// (the platform ended the run, and a start resumes it), so it is not a
+	// doctor finding, while the Hub's summary counts halted agents as
+	// needing attention so operators see them. The counts here are
+	// exclusive: an agent counts once, as errored (phase error) before
+	// crashed before offline (activity). The summary's problem groups can
+	// overlap instead (an agent in phase error with activity crashed is in
+	// both groups).
 	considered, errored, crashed, offline := 0, 0, 0, 0
 	for _, agent := range resp.Agents {
-		if agent.Phase == string(state.PhaseStopped) {
+		if agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseHalted) {
 			continue
 		}
 		considered++
@@ -1184,43 +1189,4 @@ func defaultServerWebPort() int {
 		}
 	}
 	return webPort
-}
-
-// checkDoctorServerHubEndpoint performs D11: it reports the server hub
-// endpoint deprecation with serverHubEndpointDeprecated, the check server
-// startup logs. Doctor does not see the server's flags, so unless the host
-// is known to run a standalone broker it evaluates every mode the server
-// could run in (workstation, hosted with and without the web frontend,
-// broker only, with default ports) and warns only when the server would be
-// affected in all of them: it never warns on a guess. For the same reason a
-// loopback legacy value is indeterminate unless the host runs a standalone
-// broker: a workstation on a port doctor cannot see may have written it as
-// its own endpoint. The bool is false when there is nothing to report.
-func checkDoctorServerHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings, host doctorServerHost, defaultWebPort int) (scionruntime.CheckResult, bool) {
-	if !host.configured {
-		return scionruntime.CheckResult{}, false
-	}
-	brokerOnly := serverEndpointMode{brokerEnabled: true}
-	modes := []serverEndpointMode{brokerOnly}
-	if !host.brokerOnly {
-		modes = append(modes,
-			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort},
-			serverEndpointMode{hubEnabled: true, brokerEnabled: true, webEnabled: true, webPort: defaultWebPort, hosted: true},
-			serverEndpointMode{hubEnabled: true, hosted: true},
-		)
-	}
-	legacy := settings.GetHubEndpoint()
-	if !host.brokerOnly && isLoopbackURL(legacy) {
-		return scionruntime.CheckResult{}, false
-	}
-	for _, m := range modes {
-		if !serverHubEndpointDeprecated(cfg, m, legacy) {
-			return scionruntime.CheckResult{}, false
-		}
-	}
-	return scionruntime.CheckResult{
-		Name:    "server-hub-endpoint",
-		Status:  "warn",
-		Message: serverHubEndpointDeprecationWarning,
-	}, true
 }
