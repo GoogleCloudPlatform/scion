@@ -344,27 +344,33 @@ func TestConduitBrokerTunnel_CallerCancelReachesBrokerHandler(t *testing.T) {
 // production code constructs the conduit broker tunnel and the broker's
 // conduit RPC handler. The hub-side local tunnel is constructed only by
 // its own constructor: broker requests reach conduit sessions through the
-// router (routedBrokerTunnel). The broker's RPC handler is constructed
-// only by its constructors and by (*HubConnection).startConduit, which
-// wires the guarded handler on the broker's conduit session.
+// router (routedBrokerTunnel). The broker's RPC handler is built only
+// through its constructor chain, and (*HubConnection).startConduit may use
+// only the guarded constructor NewConduitBrokerRPCHandler.
 func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 	// guarded maps each directory to the guarded names (a constructor
 	// called, or a type built with a composite literal) and to the free
 	// functions and receiver methods allowed to use them.
 	guarded := map[string]struct {
-		names   map[string]bool
-		allowed map[string]bool // "Func" or "(*Recv).Method"
+		names map[string]bool
+		// allowed maps a free function ("Func") or receiver method
+		// ("(*Recv).Method") to the guarded names it may use (nil: all).
+		allowed map[string]map[string]bool
 	}{
 		".": {
 			names:   map[string]bool{"newConduitBrokerTunnel": true, "conduitBrokerTunnel": true},
-			allowed: map[string]bool{"newConduitBrokerTunnel": true},
+			allowed: map[string]map[string]bool{"newConduitBrokerTunnel": nil},
 		},
 		"../runtimebroker": {
-			names: map[string]bool{"newConduitRPCHandler": true, "conduitRPCHandler": true, "newGuardedConduitRPCHandler": true},
-			allowed: map[string]bool{
-				"newConduitRPCHandler":          true,
-				"newGuardedConduitRPCHandler":   true,
-				"(*HubConnection).startConduit": true,
+			names: map[string]bool{
+				"newConduitRPCHandler": true, "conduitRPCHandler": true,
+				"newGuardedConduitRPCHandler": true, "NewConduitBrokerRPCHandler": true,
+			},
+			allowed: map[string]map[string]bool{
+				"newConduitRPCHandler":          {"conduitRPCHandler": true},
+				"newGuardedConduitRPCHandler":   {"newConduitRPCHandler": true},
+				"NewConduitBrokerRPCHandler":    {"newGuardedConduitRPCHandler": true},
+				"(*HubConnection).startConduit": {"NewConduitBrokerRPCHandler": true},
 			},
 		},
 	}
@@ -408,7 +414,7 @@ func TestConduitBrokerTunnel_NotConstructedInProduction(t *testing.T) {
 // guardedUses returns the calls of, and composite literals of, the names
 // in f outside the function named constructor.
 func guardedUses(f *ast.File, names map[string]bool, constructor string) []*ast.Ident {
-	return guardedUsesAllowing(f, names, map[string]bool{constructor: true})
+	return guardedUsesAllowing(f, names, map[string]map[string]bool{constructor: nil})
 }
 
 // funcDeclKey names fd as allowed lists it: "Func" for a free function,
@@ -429,13 +435,18 @@ func funcDeclKey(fd *ast.FuncDecl) string {
 }
 
 // guardedUsesAllowing returns the calls of, and composite literals of, the
-// names in f outside the functions and methods allowed lists (keys as
-// funcDeclKey gives them).
-func guardedUsesAllowing(f *ast.File, names, allowed map[string]bool) []*ast.Ident {
+// names in f, except where a function or method allowed lists (keys as
+// funcDeclKey gives them) may use that name (a nil set allows every
+// name).
+func guardedUsesAllowing(f *ast.File, names map[string]bool, allowed map[string]map[string]bool) []*ast.Ident {
 	var out []*ast.Ident
 	for _, decl := range f.Decls {
-		if fd, ok := decl.(*ast.FuncDecl); ok && allowed[funcDeclKey(fd)] {
-			continue
+		var permitted map[string]bool
+		all := false
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			if set, listed := allowed[funcDeclKey(fd)]; listed {
+				permitted, all = set, set == nil
+			}
 		}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			var id *ast.Ident
@@ -445,7 +456,7 @@ func guardedUsesAllowing(f *ast.File, names, allowed map[string]bool) []*ast.Ide
 			case *ast.CompositeLit:
 				id, _ = n.Type.(*ast.Ident)
 			}
-			if id != nil && names[id.Name] {
+			if id != nil && names[id.Name] && !all && !permitted[id.Name] {
 				out = append(out, id)
 			}
 			return true
@@ -484,8 +495,33 @@ func (hc *HubConnection) other() { _ = newConduitRPCHandler() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := guardedUsesAllowing(f, map[string]bool{"newConduitRPCHandler": true}, map[string]bool{"(*HubConnection).startConduit": true})
+	got := guardedUsesAllowing(f, map[string]bool{"newConduitRPCHandler": true}, map[string]map[string]bool{"(*HubConnection).startConduit": nil})
 	if len(got) != 1 {
 		t.Fatalf("guardedUsesAllowing found %d uses, want 1 (the call in other)", len(got))
+	}
+}
+
+// TestGuardedUsesStartConduitOnlyGuarded checks the production allowance
+// for startConduit: the guarded constructor passes, the unguarded one is
+// reported.
+func TestGuardedUsesStartConduitOnlyGuarded(t *testing.T) {
+	names := map[string]bool{"newConduitRPCHandler": true, "newGuardedConduitRPCHandler": true, "NewConduitBrokerRPCHandler": true}
+	allowed := map[string]map[string]bool{"(*HubConnection).startConduit": {"NewConduitBrokerRPCHandler": true}}
+	for _, tc := range []struct {
+		call string
+		want int
+	}{
+		{"NewConduitBrokerRPCHandler", 0},
+		{"newConduitRPCHandler", 1},
+		{"newGuardedConduitRPCHandler", 1},
+	} {
+		src := "package runtimebroker\nfunc (hc *HubConnection) startConduit() { _ = " + tc.call + "() }\n"
+		f, err := parser.ParseFile(token.NewFileSet(), "x.go", src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := guardedUsesAllowing(f, names, allowed); len(got) != tc.want {
+			t.Errorf("startConduit calling %s: %d uses reported, want %d", tc.call, len(got), tc.want)
+		}
 	}
 }
