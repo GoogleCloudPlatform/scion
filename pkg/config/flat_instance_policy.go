@@ -95,6 +95,8 @@ func (vs *VersionedSettings) ForFlatInstance(p *FlatInstancePolicy) *VersionedSe
 	view.activeProfileErr = nil
 	view.storedProfileNames = nil
 	view.activeProfileFallbackFrom = nil
+	view.retainedProfileNames = nil
+	view.retainedRuntimeNames = nil
 	view.flat = p
 	return &view
 }

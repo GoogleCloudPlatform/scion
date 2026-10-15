@@ -110,7 +110,10 @@ describe('scion-chat-file-preview', () => {
     el.target = TEXT_ATTACHMENT;
     await settle(el);
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/v1/chat/attachments/att-1', expect.anything());
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/attachments/att-1?stream=1',
+      expect.anything()
+    );
     const editor = dialog(el)?.querySelector('scion-code-editor');
     expect((editor as unknown as { content: string })?.content).toBe('hello');
     expect(dialog(el)?.getAttribute('label')).toBe('notes.txt');
@@ -338,6 +341,38 @@ describe('scion-chat-file-preview', () => {
     expect(dialog(el)?.querySelector('scion-code-editor')).not.toBeNull();
   });
 
+  it('asks the hub to stream attachment bytes, so an object-store redirect is never fetched cross-origin', async () => {
+    apiFetchMock.mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve('# hi') });
+    const el = await mount();
+    el.target = MD_ATTACHMENT;
+    await settle(el);
+    const [textUrl] = apiFetchMock.mock.calls[0] as [string];
+    expect(new URL(textUrl, 'http://hub').searchParams.get('stream')).toBe('1');
+
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: () => Promise.resolve(new Blob(['x'], { type: 'image/png' })),
+    });
+    el.target = IMAGE_ATTACHMENT;
+    await settle(el);
+    const [imageUrl] = apiFetchMock.mock.calls[0] as [string];
+    expect(new URL(imageUrl, 'http://hub').searchParams.get('stream')).toBe('1');
+
+    // A workspace path is not an attachment: its fetch is unchanged.
+    apiFetchMock.mockReset();
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ content: 'x', size: 1 }),
+    });
+    el.target = PATH_TARGET;
+    await settle(el);
+    const [pathUrl] = apiFetchMock.mock.calls[0] as [string];
+    expect(new URL(pathUrl, 'http://hub').searchParams.has('stream')).toBe(false);
+  });
+
   it('loads an image via a fetched object URL, not the bare attachment URL', async () => {
     apiFetchMock.mockResolvedValue({
       ok: true,
@@ -349,7 +384,7 @@ describe('scion-chat-file-preview', () => {
     await settle(el);
 
     expect(apiFetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/attachments/att-img?view=true',
+      '/api/v1/chat/attachments/att-img?view=true&stream=1',
       expect.anything()
     );
     const img = dialog(el)?.querySelector('img.file-preview-image');
@@ -867,7 +902,7 @@ describe('scion-chat-file-preview', () => {
 
       expect(apiFetchMock).toHaveBeenCalledTimes(2);
       expect(apiFetchMock).toHaveBeenLastCalledWith(
-        '/api/v1/chat/attachments/att-1',
+        '/api/v1/chat/attachments/att-1?stream=1',
         expect.anything()
       );
     });

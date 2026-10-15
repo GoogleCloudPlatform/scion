@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -978,12 +979,17 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				if prevSkillsDir == "" {
 					// The stored harness-config may have been Hub-supplied
 					// and is not on disk at this Start; nothing is copied.
-					util.Debugf("Start: harness-config %q not found; skipping the skills carry-over to %s", prevHC, h.SkillsDir())
+					slog.DebugContext(ctx, "Start: previous harness-config not found; skills carry-over skipped")
 				}
+				// The carry-over is logged in summary form: the number of
+				// skills copied, or a fixed warning with the failed step
+				// and the error class.
 				if copied, cpErr := carryOverSkillsDir(agentHome, prevSkillsDir, h.SkillsDir()); cpErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: copying skills to the new harness skills directory failed: %v\n", cpErr)
+					stage, class := carryOverFailureSummary(cpErr)
+					slog.WarnContext(ctx, "Start: skills carry-over after the harness-config switch failed")
+					slog.DebugContext(ctx, "Start: skills carry-over failure", "stage", stage, "class", class)
 				} else if len(copied) > 0 {
-					util.Debugf("Start: copied skills %v from %s to %s after the harness-config switch", copied, prevSkillsDir, h.SkillsDir())
+					slog.DebugContext(ctx, "Start: skills carried over after the harness-config switch", "count", len(copied))
 				}
 			}
 		}
@@ -1032,8 +1038,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// resolved skills) recorded at provisioning, so inputs/ holds only
 		// control-plane content.
 		if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome) }); err != nil {
+			// hub.agent_plugins is re-checked at every start: while it is off
+			// no plugins are restored, so the provisioner removes the ones
+			// Scion installed earlier.
+			includePlugins := agentPluginsEnabled(ctx, settings)
+			if err := writeAgentHome(ctx, func() error { return restoreControlPlaneInputs(agentDir, agentHome, includePlugins) }); err != nil {
 				return nil, fmt.Errorf("restage harness inputs: %w", err)
+			}
+			if msg := startAgentPluginsWarning(recordHasAgentPlugins(agentDir), includePlugins, harnessConfigName, h); msg != "" {
+				if !slices.Contains(warnings, msg) {
+					slog.Warn(msg, "agent", opts.Name)
+					warnings = append(warnings, msg)
+				}
 			}
 			// Restore exactly the secret files the control plane recorded;
 			// ApplyAuthSettings considers only these besides the secrets
@@ -2636,7 +2652,7 @@ authDone:
 			}
 			if matched {
 				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
+				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})

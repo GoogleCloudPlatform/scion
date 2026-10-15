@@ -72,6 +72,7 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "conduit"},
 	{"server", "hub", "port_proxy"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
+	{"server", "relay"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},

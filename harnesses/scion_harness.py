@@ -41,7 +41,7 @@ from typing import Any, Callable, Collection
 # ---------------------------------------------------------------------------
 
 INTERFACE_VERSION = 3
-LIB_VERSION = "2026-10-12"
+LIB_VERSION = "2026-10-13"
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -1237,6 +1237,10 @@ def _skill_sections(home: str, skills_dir: str, harness_name: str = "") -> list[
     for entry in entries:
         if entry.startswith("."):
             continue
+        # An Agent Plugins bundle (root plugin.json) is never an
+        # instruction skill, even if it ships a stray root SKILL.md.
+        if os.path.isfile(os.path.join(root, entry, "plugin.json")):
+            continue
         skill_md = os.path.join(root, entry, "SKILL.md")
         if not os.path.isfile(skill_md):
             continue
@@ -1991,6 +1995,497 @@ def read_json_skipping_comment_lines(path: str) -> Any:
         raise ProvisionError(f"{path} holds a number that cannot be converted") from None
     except RecursionError:
         raise ProvisionError(f"{path} is nested too deeply to read") from None
+
+
+# ---------------------------------------------------------------------------
+# Agent Plugins (hub.agent_plugins)
+# ---------------------------------------------------------------------------
+#
+# The control plane stages Agent Plugins 1.0.0 bundles into
+# inputs/plugins/<name>/ plus an index, inputs/plugins.json (schema_version
+# 1). A harness installs them natively by calling reconcile_agent_plugins
+# with its PluginInstaller, last in provision(). Scion's own state lives in
+# ~/.scion/agent-plugins/, which persists across starts (unlike the bundle).
+
+AGENT_PLUGINS_DIR = "~/.scion/agent-plugins"
+AGENT_PLUGINS_INDEX = "plugins.json"
+AGENT_PLUGINS_INDEX_SCHEMA_VERSION = 1
+AGENT_PLUGINS_STATE_SCHEMA_VERSION = 1
+AGENT_PLUGIN_CLI_TIMEOUT = 15.0
+AGENT_PLUGIN_VERSION_TIMEOUT = 10.0
+AGENT_PLUGIN_STDERR_LIMIT = 500
+
+_AGENT_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$")
+
+
+def agent_plugins_dir() -> str:
+    """Absolute path of ~/.scion/agent-plugins for the current $HOME."""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    return os.path.join(home, ".scion", "agent-plugins")
+
+
+def valid_agent_plugin_name(name: Any) -> bool:
+    """Spec §5.5 name rules; also guarantees the name is a safe path segment."""
+    return (
+        isinstance(name, str)
+        and bool(_AGENT_PLUGIN_NAME_RE.match(name))
+        and "--" not in name
+        and ".." not in name
+    )
+
+
+class AgentPlugin:
+    """One plugins.json entry, with its staged bundle directory resolved."""
+
+    def __init__(
+        self,
+        name: str,
+        version: str,
+        digest: str,
+        staged_dir: str,
+        skills: list[str],
+        skills_dir_conflict: bool,
+        mcp_servers: dict[str, dict[str, Any]] | None,
+        raw: dict[str, Any],
+    ):
+        self.name = name
+        self.version = version
+        self.digest = digest
+        self.staged_dir = staged_dir
+        self.skills = skills
+        self.skills_dir_conflict = skills_dir_conflict
+        self.mcp_servers = mcp_servers
+        self.raw = raw
+
+    def __repr__(self) -> str:
+        return f"AgentPlugin(name={self.name!r}, digest={self.digest!r})"
+
+
+class PluginInstallError(Exception):
+    """Raised by a PluginInstaller when an install or removal fails."""
+
+
+class PluginInstaller:
+    """Interface a harness implements for reconcile_agent_plugins.
+
+    harness:      the harness name (names the state and status files).
+    cli:          the CLI name used in messages.
+    min_version:  the oldest CLI version with Agent Plugins support.
+    """
+
+    harness: str = ""
+    cli: str = ""
+    min_version: tuple[int, int, int] = (0, 0, 0)
+    # Set by reconcile_agent_plugins: the end of the plugin time budget on
+    # its clock. Installers pass cli_timeout(...) to run_cli so a hanging CLI
+    # cannot carry the provisioner past its (fatal) timeout.
+    deadline: float | None = None
+    clock: Callable[[], float] = staticmethod(time.monotonic)
+
+    def cli_timeout(self, default: float) -> float:
+        """default, capped to the time left before the deadline (at least 1s)."""
+        if self.deadline is None:
+            return default
+        return max(1.0, min(default, self.deadline - self.clock()))
+
+    def detect_version(self) -> tuple[int, int, int] | None:
+        raise NotImplementedError
+
+    def install(self, plugin: AgentPlugin, bundle_dir: str) -> dict[str, Any]:
+        """Install plugin from bundle_dir; return a JSON-able native_ref.
+
+        Raises PluginInstallError on failure."""
+        raise NotImplementedError
+
+    def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
+        """Remove the plugin. Raises PluginInstallError on failure."""
+        raise NotImplementedError
+
+    def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
+        """Cheap filesystem check that the native install still exists."""
+        raise NotImplementedError
+
+    def prepare(self, desired: list[AgentPlugin]) -> None:
+        """Optional hook run once, before removals and installs, with every
+        desired plugin, whenever reconcile has work to do. Raising defers
+        the installs to the next start."""
+        return None
+
+
+def read_agent_plugins(ctx: ProvisionContext) -> list[AgentPlugin]:
+    """Read inputs/plugins.json. Returns [] when it is absent.
+
+    Raises ValueError when the index is malformed, so the caller changes
+    nothing (an unreadable index must never look like "no plugins wanted").
+    """
+    inputs = ctx.inputs_dir
+    path = os.path.join(inputs, AGENT_PLUGINS_INDEX)
+    if not os.path.lexists(path):
+        return []
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise ValueError(f"{AGENT_PLUGINS_INDEX} is not a regular file")
+    try:
+        doc = load_json(path)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read {AGENT_PLUGINS_INDEX}: {exc}") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{AGENT_PLUGINS_INDEX} is not a JSON object")
+    if doc.get("schema_version") != AGENT_PLUGINS_INDEX_SCHEMA_VERSION:
+        raise ValueError(f"unsupported {AGENT_PLUGINS_INDEX} schema_version {doc.get('schema_version')!r}")
+    entries = doc.get("plugins") or []
+    if not isinstance(entries, list):
+        raise ValueError(f"{AGENT_PLUGINS_INDEX}: plugins is not a list")
+    out: list[AgentPlugin] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: plugin entry is not an object")
+        name = entry.get("name")
+        if not valid_agent_plugin_name(name):
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: invalid plugin name {name!r}")
+        if name in seen:
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: duplicate plugin {name!r}")
+        seen.add(name)
+        if entry.get("dir") != f"plugins/{name}":
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: plugin {name!r} has unexpected dir {entry.get('dir')!r}")
+        digest = entry.get("digest")
+        if not isinstance(digest, str) or not digest:
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: plugin {name!r} has no digest")
+        staged = os.path.join(inputs, "plugins", name)
+        if os.path.islink(staged) or not os.path.isdir(staged):
+            raise ValueError(f"{AGENT_PLUGINS_INDEX}: staged bundle for {name!r} is missing")
+        skills = [s for s in (entry.get("skills") or []) if isinstance(s, str)]
+        mcp = entry.get("mcp")
+        servers = None
+        if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
+            servers = {k: v for k, v in mcp["servers"].items() if isinstance(v, dict)}
+        out.append(AgentPlugin(
+            name=name,
+            version=str(entry.get("version") or ""),
+            digest=digest,
+            staged_dir=staged,
+            skills=skills,
+            skills_dir_conflict=bool(entry.get("skills_dir_conflict")),
+            mcp_servers=servers,
+            raw=entry,
+        ))
+    return out
+
+
+def _bundle_digest_marker(bundles: str, name: str) -> str:
+    return os.path.join(bundles, f".{name}.digest")
+
+
+def mirror_bundle(plugin: AgentPlugin) -> str:
+    """Copy the staged bundle to ~/.scion/agent-plugins/bundles/<name>/.
+
+    The copy is replaced atomically (copy aside, swap, remove the old one)
+    when the digest changed, and left alone when it did not. Symlinks are
+    never followed (Go staging does not stage any). Returns the path.
+    """
+    import shutil
+
+    bundles = os.path.join(agent_plugins_dir(), "bundles")
+    os.makedirs(bundles, exist_ok=True)
+    target = os.path.join(bundles, plugin.name)
+    marker = _bundle_digest_marker(bundles, plugin.name)
+    if os.path.isdir(target) and not os.path.islink(target):
+        try:
+            with open(marker, "r", encoding="utf-8") as f:
+                if f.read().strip() == plugin.digest:
+                    return target
+        except OSError:
+            pass
+    tmp = tempfile.mkdtemp(prefix=f".{plugin.name}.tmp-", dir=bundles)
+    new = os.path.join(tmp, "bundle")
+    old = None
+    try:
+        shutil.copytree(plugin.staged_dir, new, symlinks=True)
+        if os.path.lexists(target):
+            old = os.path.join(tmp, "old")
+            os.rename(target, old)
+        os.rename(new, target)
+        atomic_write_text(marker, plugin.digest + "\n")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return target
+
+
+def remove_mirrored_bundle(name: str) -> None:
+    """Remove bundles/<name> and its digest marker, ignoring errors."""
+    import shutil
+
+    bundles = os.path.join(agent_plugins_dir(), "bundles")
+    target = os.path.join(bundles, name)
+    if os.path.islink(target):
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+    else:
+        shutil.rmtree(target, ignore_errors=True)
+    try:
+        os.unlink(_bundle_digest_marker(bundles, name))
+    except OSError:
+        pass
+
+
+def run_cli(
+    argv: list[str], *, timeout: float = AGENT_PLUGIN_CLI_TIMEOUT, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run a harness CLI non-interactively (stdin from /dev/null), capturing
+    output. Never raises on a non-zero exit: a missing binary gives rc 127
+    and a timeout rc 124, with the reason in stderr."""
+    try:
+        return subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout if isinstance(exc.stdout, str) else ""
+        return subprocess.CompletedProcess(argv, 124, out, f"timed out after {timeout:g}s")
+    except OSError as exc:
+        return subprocess.CompletedProcess(argv, 127, "", f"cannot run {argv[0]}: {exc}")
+
+
+_SEMVER_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def parse_semver(text: str) -> tuple[int, int, int] | None:
+    """The first major.minor.patch in text ('codex-cli 0.162.1', 'v2.1.270',
+    '2.1.270 (Claude Code)'), or None."""
+    if not text:
+        return None
+    m = _SEMVER_RE.search(text)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def format_semver(v: tuple[int, int, int] | None) -> str:
+    return "unknown" if v is None else ".".join(str(p) for p in v)
+
+
+def cli_failure(what: str, proc: subprocess.CompletedProcess) -> PluginInstallError:
+    """A PluginInstallError naming the CLI exit code and (truncated) stderr."""
+    detail = (proc.stderr or proc.stdout or "").strip()
+    if len(detail) > AGENT_PLUGIN_STDERR_LIMIT:
+        detail = detail[:AGENT_PLUGIN_STDERR_LIMIT] + "…"
+    return PluginInstallError(f"{what} exit {proc.returncode}: {detail}")
+
+
+def _agent_plugins_state_path(harness: str) -> str:
+    return os.path.join(agent_plugins_dir(), f"state-{harness}.json")
+
+
+def _load_agent_plugins_state(ctx: ProvisionContext, harness: str) -> dict[str, dict[str, Any]]:
+    path = _agent_plugins_state_path(harness)
+    if not os.path.lexists(path):
+        return {}
+    try:
+        if os.path.islink(path):
+            raise ValueError("state file is a symlink")
+        doc = load_json(path)
+        if not isinstance(doc, dict) or doc.get("schema_version") != AGENT_PLUGINS_STATE_SCHEMA_VERSION:
+            raise ValueError("unexpected state format")
+        plugins = doc.get("plugins")
+        if not isinstance(plugins, dict):
+            raise ValueError("plugins is not an object")
+        return {
+            k: v for k, v in plugins.items()
+            if valid_agent_plugin_name(k) and isinstance(v, dict)
+        }
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        ctx.warn(f"agent plugins: ignoring unreadable state file {path}: {exc}")
+        return {}
+
+
+def _save_agent_plugins_state(harness: str, state: dict[str, dict[str, Any]]) -> None:
+    atomic_write_json(_agent_plugins_state_path(harness), {
+        "schema_version": AGENT_PLUGINS_STATE_SCHEMA_VERSION,
+        "harness": harness,
+        "plugins": state,
+    })
+
+
+def _write_agent_plugins_status(
+    harness: str,
+    cli_version: tuple[int, int, int] | None,
+    state: dict[str, dict[str, Any]],
+    skipped: list[dict[str, str]],
+    removed: list[str],
+    desired: list[AgentPlugin],
+) -> None:
+    """status-<harness>.json. installed: desired plugins installed at the
+    desired digest. stale: other Scion-installed plugins still in place (an
+    older version kept after a failed upgrade, or a removal deferred to the
+    next start)."""
+    want = {p.name: p.digest for p in desired}
+    installed = sorted(n for n, rec in state.items() if want.get(n) == rec.get("digest"))
+    stale = sorted(n for n in state if n not in installed)
+    atomic_write_json(os.path.join(agent_plugins_dir(), f"status-{harness}.json"), {
+        "harness": harness,
+        "cli_version": None if cli_version is None else format_semver(cli_version),
+        "installed": installed,
+        "stale": stale,
+        "skipped": skipped,
+        "removed": removed,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+
+
+def reconcile_agent_plugins(
+    ctx: ProvisionContext,
+    installer: PluginInstaller,
+    *,
+    budget_s: float = 20.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Make the harness's Scion-installed plugins match inputs/plugins.json.
+
+    The only entry point a harness calls; it never raises (every failure
+    becomes a ctx.warn) and the agent never fails to start for plugin
+    reasons. Only plugins recorded in ~/.scion/agent-plugins/state-<h>.json
+    are ever removed, so user-installed plugins are never touched.
+
+    Steady state (every desired plugin recorded with the same digest and
+    still present, nothing extra recorded) makes no CLI call at all.
+
+    budget_s bounds the whole plugin phase: no removal or install starts
+    after it, and the installer caps each CLI call to the time left
+    (PluginInstaller.cli_timeout).
+    """
+    try:
+        _reconcile_agent_plugins(ctx, installer, budget_s, clock)
+    except Exception as exc:  # noqa: BLE001 - never fail provisioning
+        ctx.warn(f"agent plugins: reconcile failed: {exc}")
+
+
+def _reconcile_agent_plugins(
+    ctx: ProvisionContext,
+    installer: PluginInstaller,
+    budget_s: float,
+    clock: Callable[[], float],
+) -> None:
+    start = clock()
+    installer.deadline = start + budget_s
+    installer.clock = clock
+    harness = installer.harness or ctx.harness_name
+    try:
+        desired = read_agent_plugins(ctx)
+    except ValueError as exc:
+        ctx.warn(f"agent plugins skipped: {exc}")
+        return
+    if not desired and not os.path.lexists(_agent_plugins_state_path(harness)):
+        return  # never used on this agent: no files, no calls
+
+    state = _load_agent_plugins_state(ctx, harness)
+    desired_names = {p.name for p in desired}
+
+    def present(p: AgentPlugin) -> bool:
+        rec = state.get(p.name)
+        if not rec or rec.get("digest") != p.digest:
+            return False
+        ref = rec.get("native_ref")
+        try:
+            return installer.is_present(p.name, ref if isinstance(ref, dict) else {})
+        except Exception:  # noqa: BLE001
+            return False
+
+    pending = [p for p in desired if not present(p)]
+    extra = sorted(n for n in state if n not in desired_names)
+    if not pending and not extra:
+        _write_agent_plugins_status(harness, None, state, [], [], desired)
+        return
+
+    version = installer.detect_version()
+    if version is None or version < installer.min_version:
+        msg = (
+            f"agent plugins skipped: {installer.cli or harness} {format_semver(version)} is older than "
+            f"{format_semver(installer.min_version)} (needs Agent Plugins support)"
+        )
+        ctx.warn(msg)
+        _write_agent_plugins_status(
+            harness, version, state,
+            [{"name": p.name, "reason": msg} for p in pending], [], desired,
+        )
+        return
+
+    skipped: list[dict[str, str]] = []
+    removed: list[str] = []
+
+    # prepare() sees every desired plugin (for example to rewrite a local
+    # marketplace that lists exactly them) before removals and installs. A
+    # failure defers the installs; removals still run.
+    try:
+        installer.prepare(desired)
+    except Exception as exc:  # noqa: BLE001
+        ctx.warn(f"agent plugins: install preparation failed ({exc}); will retry next start")
+        for p in pending:
+            skipped.append({"name": p.name, "reason": f"preparation failed: {exc}"})
+        pending = []
+
+    for i, name in enumerate(extra):
+        if clock() - start > budget_s:
+            rest = extra[i:]
+            ctx.warn(f"agent plugins: time budget reached; {len(rest)} removal(s) deferred to next start")
+            for n in rest:
+                skipped.append({"name": n, "reason": "time budget reached (removal deferred)"})
+            break
+        rec = state[name]
+        ref = rec.get("native_ref")
+        try:
+            installer.uninstall(name, ref if isinstance(ref, dict) else {})
+        except Exception as exc:  # noqa: BLE001
+            ctx.warn(f"agent plugin {name}: removal failed ({exc}); will retry next start")
+            continue
+        state.pop(name, None)
+        _save_agent_plugins_state(harness, state)
+        remove_mirrored_bundle(name)
+        removed.append(name)
+        ctx.info(f"agent plugin {name}: removed")
+
+    for i, p in enumerate(pending):
+        if clock() - start > budget_s:
+            rest = pending[i:]
+            ctx.warn(f"agent plugins: time budget reached; {len(rest)} plugin(s) deferred to next start")
+            for q in rest:
+                skipped.append({"name": q.name, "reason": "time budget reached"})
+            break
+        try:
+            bundle = mirror_bundle(p)
+        except Exception as exc:  # noqa: BLE001
+            ctx.warn(f"agent plugin {p.name}: cannot copy bundle ({exc}); will retry next start")
+            skipped.append({"name": p.name, "reason": f"bundle copy failed: {exc}"})
+            continue
+        old = state.get(p.name)
+        if old is not None and old.get("digest") != p.digest:
+            ref = old.get("native_ref")
+            try:
+                installer.uninstall(p.name, ref if isinstance(ref, dict) else {})
+            except Exception as exc:  # noqa: BLE001
+                # Keep the old record: Scion still owns that install. If the
+                # install below fails too, the plugin stays pending (its
+                # digest differs) and is removed if the template drops it.
+                ctx.warn(f"agent plugin {p.name}: removing the previous version failed ({exc}); installing over it")
+            else:
+                state.pop(p.name, None)
+                _save_agent_plugins_state(harness, state)
+        try:
+            ref = installer.install(p, bundle)
+        except Exception as exc:  # noqa: BLE001
+            ctx.warn(f"agent plugin {p.name}: install failed ({exc}); will retry next start")
+            skipped.append({"name": p.name, "reason": str(exc)})
+            continue
+        state[p.name] = {
+            "digest": p.digest,
+            "version": p.version,
+            "native_ref": ref if isinstance(ref, dict) else {},
+        }
+        _save_agent_plugins_state(harness, state)
+        ctx.info(f"agent plugin {p.name}: installed")
+
+    _write_agent_plugins_status(harness, version, state, skipped, removed, desired)
 
 
 # ---------------------------------------------------------------------------

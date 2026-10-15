@@ -226,7 +226,10 @@ describe('scion-chat-message attachment previews', () => {
       { id: 'att-go', name: 'main.go', mime: 'text/plain', size: 42 },
     ]);
 
-    expect(apiFetchMock).toHaveBeenCalledWith('/api/v1/chat/attachments/att-go', undefined);
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/attachments/att-go?stream=1',
+      undefined
+    );
 
     const preview = el.shadowRoot?.querySelector('.attachment-preview');
     expect(preview?.querySelector('.preview-filename')?.textContent).toBe('main.go');
@@ -327,7 +330,7 @@ describe('scion-chat-message attachment previews', () => {
     // The overlay fetches the image itself (for uniform 403/404 handling)
     // and renders it from an object URL, not the bare attachment URL.
     expect(apiFetchMock).toHaveBeenCalledWith(
-      '/api/v1/chat/attachments/att-img?view=true',
+      '/api/v1/chat/attachments/att-img?view=true&stream=1',
       expect.anything()
     );
     const img = dialog?.querySelector('img.file-preview-image');
