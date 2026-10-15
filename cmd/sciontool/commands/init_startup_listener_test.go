@@ -82,3 +82,55 @@ func TestRunInit_StartupListenerBindFailureKeepsRunning(t *testing.T) {
 		t.Fatalf("harness did not run after the bind failure: %v", err)
 	}
 }
+
+// runInitPORT runs RunInit with the startup listener on a free port and PORT
+// set to port (or the listener port when port is ""), and returns the PORT
+// value the harness child saw ("unset" when absent).
+func runInitPORT(t *testing.T, port string) (listenerPort, seen string) {
+	t.Helper()
+	agentHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, agentHome)
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	listenerPort = strconv.Itoa(probe.Addr().(*net.TCPAddr).Port)
+	_ = probe.Close()
+	t.Setenv(startuplistener.EnvPort, listenerPort)
+	if port == "" {
+		port = listenerPort
+	}
+	t.Setenv("PORT", port)
+
+	out := filepath.Join(t.TempDir(), "port")
+	got := RunInit([]string{"sh", "-c", `printf '%s' "${PORT-unset}" > '` + out + `'`},
+		InitRunOptions{DisableTermSignalForwarding: true})
+	if got != 0 {
+		t.Fatalf("RunInit() = %d, want 0", got)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("reading harness output: %v", err)
+	}
+	return listenerPort, string(raw)
+}
+
+// TestRunInit_StartupListenerDropsMatchingPORT proves the harness does not
+// inherit a PORT that names the port the startup listener holds, so a
+// workload that honours PORT does not try to bind it.
+func TestRunInit_StartupListenerDropsMatchingPORT(t *testing.T) {
+	listenerPort, seen := runInitPORT(t, "")
+	if seen != "unset" {
+		t.Fatalf("harness saw PORT=%q, want it unset (the startup listener holds port %s)", seen, listenerPort)
+	}
+}
+
+// TestRunInit_StartupListenerKeepsOtherPORT proves a PORT that names some
+// other port is passed through unchanged.
+func TestRunInit_StartupListenerKeepsOtherPORT(t *testing.T) {
+	_, seen := runInitPORT(t, "3000")
+	if seen != "3000" {
+		t.Fatalf("harness saw PORT=%q, want 3000 (only the startup listener's port is dropped)", seen)
+	}
+}

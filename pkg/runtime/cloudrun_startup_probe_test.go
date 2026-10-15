@@ -15,10 +15,12 @@
 package runtime
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
@@ -89,5 +91,27 @@ func TestBuildCommonRunArgs_NoStartupListenerEnv(t *testing.T) {
 		if strings.Contains(arg, startuplistener.EnvPort) {
 			t.Errorf("run args carry %q; only the cloudrun Instances runtime sets %s", arg, startuplistener.EnvPort)
 		}
+	}
+}
+
+// TestCloudRunRun_StartupListenerEnvNotDuplicatedByResolvedValue checks that
+// a resolved env-type value targeting the startup listener variable is
+// skipped, so the instance carries the name once, with the runtime's port.
+func TestCloudRunRun_StartupListenerEnvNotDuplicatedByResolvedValue(t *testing.T) {
+	fake := &fakeInstancesClient{getErr: notFoundErr()}
+	rt := newFakeCloudRunRuntime(t, fake)
+
+	cfg := runConfigForTest()
+	cfg.UnixUsername = "scion"
+	cfg.ResolvedSecrets = []api.ResolvedSecret{
+		{Name: "s1", Type: "environment", Target: startuplistener.EnvPort, Value: "1234"},
+	}
+	if _, err := rt.Run(context.Background(), cfg); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// crInstanceEnv also fails the test when any name appears twice.
+	env := crInstanceEnv(t, fake)
+	if got, want := env[startuplistener.EnvPort], strconv.Itoa(startuplistener.Port); got != want {
+		t.Errorf("%s = %q, want %q", startuplistener.EnvPort, got, want)
 	}
 }

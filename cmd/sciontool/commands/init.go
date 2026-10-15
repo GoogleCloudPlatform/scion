@@ -595,11 +595,22 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// below so the probe sees the port early. A bind failure is logged and
 	// init carries on: the probe then fails and the platform restart makes
 	// the problem visible.
+	//
+	// Declaring the listener port as the container port makes the platform
+	// pass it in PORT. The listener holds that port for the life of init,
+	// so PORT is dropped from what the harness, hooks and services inherit;
+	// a workload that honours PORT then falls back to its own default
+	// instead of failing to bind.
 	if ln, err := startuplistener.Start(os.Getenv); err != nil {
 		log.Error("%v", err)
 	} else if ln != nil {
-		log.Info("Startup listener open on port %s", os.Getenv(startuplistener.EnvPort))
+		port := os.Getenv(startuplistener.EnvPort)
+		log.Info("Startup listener open on port %s", port)
 		defer func() { _ = ln.Close() }()
+		if os.Getenv("PORT") == port {
+			_ = os.Unsetenv("PORT")
+			log.Info("Dropped PORT=%s from the child environment (the startup listener holds it)", port)
+		}
 	}
 
 	// Start telemetry pipeline if configured. This must happen after

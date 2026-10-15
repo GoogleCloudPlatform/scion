@@ -235,7 +235,7 @@ var cloudRunEnvLimit = envSizeLimit{maxBytes: cloudRunMaxEnvValueBytes}
 
 // cloudRunRuntimeEnvKeys are set by buildCloudRunInstance after cfg.Env, so
 // an env-type secret must not also supply them (no duplicate EnvVar names).
-var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID"}
+var cloudRunRuntimeEnvKeys = []string{"SCION_HOST_UID", "SCION_HOST_GID", startuplistener.EnvPort}
 
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
 // as and owns its NFS workspace with: the broker's own ids for a
