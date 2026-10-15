@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1523,6 +1524,47 @@ func shouldCleanupPartialWorktree(projectRoot, worktreePath string, preExisted b
 	return worktreePath != "" && projectRoot != "" && isStrictWorktreeChild(projectRoot, worktreePath)
 }
 
+// cleanupPartialWorktree removes the partial worktree a failed
+// provisioning left at worktreePath, and git's entry for it. It uses `git
+// worktree remove --force` (via SafeGitCommand), so the worktree's admin
+// metadata in the base's .git/worktrees/<id> is unregistered too: a bare
+// os.RemoveAll would leave a stale registration that makes git refuse to
+// recreate the worktree at that path on retry. If that fails, it removes the
+// directory and then only that worktree's entry. It never runs a
+// repository-wide prune, which would also drop the entries of other
+// agents' worktrees that this process cannot see (ptone/scion#5071).
+// Callers gate worktreePath with shouldCleanupPartialWorktree.
+func cleanupPartialWorktree(ctx context.Context, projectRoot, worktreePath, agentID string) {
+	rm, rmCmdErr := provision.SafeGitCommand(ctx, projectRoot, "worktree", "remove", "--force", worktreePath)
+	var out []byte
+	var rmErr error
+	if rmCmdErr != nil {
+		rmErr = rmCmdErr
+	} else {
+		out, rmErr = rm.CombinedOutput()
+	}
+	if rmErr == nil {
+		slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
+			"agent_id", agentID, "path", worktreePath)
+		return
+	}
+	slog.Warn("worktree-per-agent: git worktree remove failed, removing the directory and its git entry",
+		"agent_id", agentID, "path", worktreePath,
+		"error", rmErr, "output", strings.TrimSpace(string(out)))
+	if cleanErr := os.RemoveAll(worktreePath); cleanErr != nil {
+		slog.Warn("worktree-per-agent: failed to clean up partial worktree",
+			"agent_id", agentID, "path", worktreePath, "error", cleanErr)
+		return
+	}
+	gitCmd := func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return provision.SafeGitCommand(ctx, projectRoot, args...)
+	}
+	if err := util.RemoveWorktreeEntry(ctx, worktreePath, gitCmd); err != nil {
+		slog.Warn("worktree-per-agent: could not remove the partial worktree's git entry",
+			"agent_id", agentID, "path", worktreePath, "error", err)
+	}
+}
+
 // validateMountedWorktree is the gate applied to the final resolved
 // workspace path for a worktree-per-agent dispatch, right before it is set
 // as opts.Workspace and mounted into the container. workspacePath itself —
@@ -1773,37 +1815,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		// isStrictWorktreeChild additionally guards that the path is a real
 		// descendant of <base>/worktrees and never that directory itself, so
 		// a resolver bug can never turn this into a removal of every agent's
-		// worktree. Uses `git worktree remove --force` (via SafeGitCommand)
-		// so the worktree's admin metadata in the base's .git/worktrees/<id> is
-		// unregistered too — a bare os.RemoveAll would leave a stale
-		// registration that makes git refuse to recreate the worktree at that
-		// path on retry. Falls back to os.RemoveAll + prune.
+		// worktree.
 		if shouldCleanupPartialWorktree(result.ProjectRoot, result.WorktreePath, preExisted) {
-			rm, rmCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot,
-				"worktree", "remove", "--force", result.WorktreePath)
-			var out []byte
-			var rmErr error
-			if rmCmdErr != nil {
-				rmErr = rmCmdErr
-			} else {
-				out, rmErr = rm.CombinedOutput()
-			}
-			if rmErr != nil {
-				slog.Warn("worktree-per-agent: git worktree remove failed, falling back to os.RemoveAll+prune",
-					"agent_id", in.AgentID, "path", result.WorktreePath,
-					"error", rmErr, "output", strings.TrimSpace(string(out)))
-				if cleanErr := os.RemoveAll(result.WorktreePath); cleanErr != nil {
-					slog.Warn("worktree-per-agent: failed to clean up partial worktree",
-						"agent_id", in.AgentID, "path", result.WorktreePath, "error", cleanErr)
-				}
-				// Prune the now-stale .git/worktrees/<id> registration so retries succeed.
-				if pruneCmd, pruneCmdErr := provision.SafeGitCommand(ctx, result.ProjectRoot, "worktree", "prune"); pruneCmdErr == nil {
-					_ = pruneCmd.Run()
-				}
-			} else {
-				slog.Info("worktree-per-agent: cleaned up partial worktree and unregistered from git",
-					"agent_id", in.AgentID, "path", result.WorktreePath)
-			}
+			cleanupPartialWorktree(ctx, result.ProjectRoot, result.WorktreePath, in.AgentID)
 		}
 		return false, "", nil
 	}
