@@ -133,7 +133,7 @@ func TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy(t *testing.T) {
 	assert.True(t, srv.testAdminTierEnabled(testAdminKindSuperAdmin))
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 	require.NoError(t, srv.emitTestAdminGateStart())
 	assert.Contains(t, buf.String(), "hub-admin and super-admin authority")
 	assert.Contains(t, buf.String(), `"test_super_admin"`)
@@ -893,6 +893,8 @@ var tiaKeyMaterialSites = map[string]string{
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
+	"conduit_admission.go:conduitAdmissionAEAD:crypto/aes.NewCipher":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:conduitAdmissionAEAD:crypto/cipher.NewGCM":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
