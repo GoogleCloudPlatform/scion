@@ -838,6 +838,12 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
 		rb = &stored
 	}
+	// A visitor rule's binding is written only at a visitor's first
+	// contact, never under shaping: an admin-kind test identity adds no
+	// visitor rule (CreateProjectVisitorRule).
+	if shaping != nil && rb.SourceRuleID != nil {
+		return nil, store.ErrTestAdminGrantRefused
+	}
 
 	// No super-admin binding is ever written under shaping, whatever
 	// CreatedBy the caller names (design §4.5).
@@ -966,6 +972,15 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 			}
 		}
 		// ent.NotFoundError means no existing membership — proceed.
+	}
+
+	// The shaping clamp is applied again last, after every window set
+	// above (a visitor rule's, an issuance binding's), so none of them can
+	// end the binding after the identity.
+	if shaping != nil {
+		stored := *rb
+		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
+		rb = &stored
 	}
 
 	builder := r.client.RoleBinding.Create().

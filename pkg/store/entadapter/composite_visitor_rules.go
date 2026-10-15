@@ -122,6 +122,17 @@ func (c *CompositeStore) CreateProjectVisitorRule(ctx context.Context, rule *sto
 	if rule.NotBefore != nil && rule.ExpiresAt != nil && !rule.ExpiresAt.After(*rule.NotBefore) {
 		return fmt.Errorf("%w: a visitor rule's expiry must be after its start", store.ErrInvalidInput)
 	}
+	// Grant shaping (admin tier A3): an admin-kind test identity may not
+	// add a visitor rule. A rule carries no issuance ID and its bindings
+	// are written later, at a visitor's first contact, so nothing it
+	// grants could be bounded by the identity's expiry.
+	shaping, err := grantShapingFor(ctx, c.client, rule.CreatedBy)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		return store.ErrTestAdminGrantRefused
+	}
 	create := c.client.ProjectVisitorRule.Create().
 		SetProjectID(projectID).
 		SetIssuer(issuer).
@@ -230,6 +241,16 @@ func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id 
 		txc, ok := tx.(*CompositeStore)
 		if !ok {
 			return fmt.Errorf("update project visitor rule window: unexpected transactional store %T", tx)
+		}
+		// Grant shaping (admin tier A3): an admin-kind test identity may
+		// not change a rule's window, not even to shorten it. The rule
+		// and its bindings carry no issuance ID of the identity.
+		shaping, err := grantShapingFor(ctx, txc.client)
+		if err != nil {
+			return err
+		}
+		if shaping != nil {
+			return store.ErrTestAdminGrantRefused
 		}
 		if err := txc.lockProjectVisitorRuleForChange(ctx, uid); err != nil {
 			return err
