@@ -577,14 +577,17 @@ func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx conte
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("worktree entry %q: path must be absolute", path)
 	}
+	// Clean first, so git gets exactly the path the checks below approve:
+	// git would resolve a ".." after a link physically, not lexically.
+	path = filepath.Clean(path)
 	if _, err := os.Lstat(path); err == nil {
 		return nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
 	// Resolve first: git itself follows symlinks in the existing part of
-	// path, so a path whose existing ancestor resolves outside the agent
-	// directory is refused before any git call.
+	// path, so a path whose existing part resolves to a path other than the
+	// agent's own directory is refused before any git call.
 	resolved, state, err := resolveMissingPath(path)
 	if err != nil {
 		return fmt.Errorf("worktree entry %s: %w", path, err)

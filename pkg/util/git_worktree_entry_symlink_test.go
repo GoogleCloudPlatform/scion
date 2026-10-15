@@ -295,3 +295,33 @@ func TestRemoveWorktreeEntryIn_SiblingAgentLinkIsRefused(t *testing.T) {
 		t.Errorf("the sibling agent's entry should be kept; worktree list:\n%s", list)
 	}
 }
+
+// The path is cleaned before any check and before git sees it: git would
+// resolve a ".." after a link physically, so agents/c/../b/workspace, with
+// agents/c linking into another directory, would name a different worktree
+// than the agents/b/workspace the checks approve.
+func TestRemoveWorktreeEntryIn_DotDotAfterLinkIsCleaned(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	repo := setupGitRepo(t)
+	agents := filepath.Join(t.TempDir(), "agents")
+	other := filepath.Join(agents, "z", "b", "workspace")
+	for _, d := range []string{filepath.Dir(other), filepath.Join(agents, "z", "q")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit(t, repo, "worktree", "add", "-b", "zb", other)
+	if err := os.RemoveAll(other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(agents, "z", "q"), filepath.Join(agents, "c")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveWorktreeEntryIn(repo, agents+"/c/../b/workspace"); err != nil {
+		t.Fatalf("RemoveWorktreeEntryIn: %v", err)
+	}
+	if list := worktreeEntries(t, repo); !strings.Contains(list, "branch refs/heads/zb\n") {
+		t.Errorf("the entry reached through the link and \"..\" should be kept; worktree list:\n%s", list)
+	}
+}
