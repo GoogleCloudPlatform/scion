@@ -535,8 +535,7 @@ func TestHeartbeat_NotPending_DoesNotBackfill(t *testing.T) {
 // Deregistering a broker clears its pending join-time backfill on this
 // replica.
 func TestJoinBackfill_DeleteClearsPending(t *testing.T) {
-	f := newReconcileFixture(t)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
+	f := newReconcileFixture(t) // grants the dev user runtime broker access
 	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationReadFaultStore {
 		return &reservationReadFaultStore{Store: inner, fault: fs}
 	})
