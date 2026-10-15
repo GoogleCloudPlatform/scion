@@ -269,7 +269,7 @@ func TestTIWebIAP_ProxyWithoutDriversStartsWithWebSessionsUnavailable(t *testing
 
 	status := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, status.Code)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"proxy_auth_without_driver_principals","testIssuerAudience":""}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"proxy_auth_without_driver_principals","testAdminWebSessions":false,"testIssuerAudience":""}`, status.Body.String())
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var summary HealthSummaryResponse

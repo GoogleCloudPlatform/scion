@@ -1446,7 +1446,7 @@ func (ws *WebServer) prefetchPageData(r *http.Request) template.JS {
 		}
 		// The session middleware admitted this request; a test identity
 		// row here means a valid test identity web session.
-		if row, ok := r.Context().Value(dbUserContextKey{}).(*store.User); ok && row != nil && row.IsTestFixture() && row.ID == u.UserID {
+		if row, ok := r.Context().Value(dbUserContextKey{}).(*store.User); ok && row != nil && testIdentityRowByKind(row) && row.ID == u.UserID {
 			if m, _ := ws.readTestIdentityMarker(r); m != nil && m.UserID == row.ID {
 				envelope.User.TestIdentity = &webTestIdentityInfo{ExpiresAt: time.UnixMilli(m.Expiry).UTC()}
 			}
