@@ -96,7 +96,9 @@ func TestServe_NotPausedSessionRegistersWithoutGoAway(t *testing.T) {
 // TestSetAdmitting_ResumeBeforeRegistrationRegistersWithoutGoAway: when
 // admission stops and resumes again inside the window between admission
 // and registration, the relay admits again by the time the session
-// registers, so it registers and serves with no GoAway.
+// registers, so it registers and serves with no GoAway. It passes with and
+// without the post-register paused check; it guards the resume path against
+// a fix that drains a session admission has already resumed for.
 func TestSetAdmitting_ResumeBeforeRegistrationRegistersWithoutGoAway(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
