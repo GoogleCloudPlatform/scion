@@ -267,7 +267,9 @@ func validHubInstanceFeature(f string) bool {
 	}
 	for i := 0; i < len(f); i++ {
 		c := f[i]
-		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_':
+		default:
 			return false
 		}
 	}

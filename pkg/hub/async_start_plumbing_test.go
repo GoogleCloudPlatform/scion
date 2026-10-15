@@ -306,29 +306,6 @@ func (d *plainStartDispatcher) DispatchAgentStart(_ context.Context, _ *store.Ag
 	return d.lastErr
 }
 
-// TestDispatchAgentStartWithOptions_Fallback pins the options helper: a
-// dispatcher that takes options gets them (and its result back); one
-// without gets the plain synchronous start and a nil result, error kept.
-func TestDispatchAgentStartWithOptions_Fallback(t *testing.T) {
-	ctx := context.Background()
-	a := &store.Agent{ID: "a1"}
-
-	od := &optionsProbeDispatcher{result: &StartDispatchResult{Launch: &LaunchAccepted{ID: "L1"}}}
-	res, err := dispatchAgentStartWithOptions(ctx, od, a, "", false, StartDispatchOptions{Async: true})
-	require.NoError(t, err)
-	assert.Equal(t, 1, od.optionStarts)
-	assert.Equal(t, 0, od.plainStarts)
-	assert.True(t, od.lastOpts.Async)
-	assert.Equal(t, "L1", res.AcceptedLaunch().ID)
-
-	pd := &plainStartDispatcher{lastErr: errors.New("boom")}
-	res, err = dispatchAgentStartWithOptions(ctx, pd, a, "", false, StartDispatchOptions{Async: true})
-	assert.EqualError(t, err, "boom")
-	assert.Nil(t, res)
-	assert.Nil(t, res.AcceptedLaunch(), "nil-safe")
-	assert.Equal(t, 1, pd.starts, "the fallback is the plain synchronous start")
-}
-
 // drainingErr is a broker's broker_draining answer.
 func drainingErr(retryAfter string) error {
 	return &brokerStatusError{
@@ -451,7 +428,7 @@ func countAgentPhaseReads(t *testing.T, path, name string) map[string]int {
 	t.Helper()
 	f, err := os.Open(path)
 	require.NoError(t, err)
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	counts := map[string]int{}
 	fn := ""
 	sc := bufio.NewScanner(f)

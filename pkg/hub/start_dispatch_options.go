@@ -49,20 +49,13 @@ func (r *StartDispatchResult) AcceptedLaunch() *LaunchAccepted {
 // startOptionsDispatcher is an AgentDispatcher that takes start options.
 // HTTPAgentDispatcher implements it. It is a separate interface, not a
 // change to AgentDispatcher.DispatchAgentStart, so dispatchers without it
-// (test fakes, other implementations) keep working: they get the
-// synchronous start (dispatchAgentStartWithOptions).
+// (test fakes, other implementations) keep working: a caller type-asserts
+// and falls back to the synchronous DispatchAgentStart (execDispatchStart).
+// Every call of DispatchAgentStartWithOptions is a guarded external-effect
+// and lifecycle dispatch call site (msg_helpers_test.go,
+// run_intent_guard_test.go).
 type startOptionsDispatcher interface {
 	DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error)
-}
-
-// dispatchAgentStartWithOptions dispatches a start through d with opts when
-// d takes start options, and otherwise through d.DispatchAgentStart, which
-// is always synchronous (a nil result).
-func dispatchAgentStartWithOptions(ctx context.Context, d AgentDispatcher, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
-	if od, ok := d.(startOptionsDispatcher); ok {
-		return od.DispatchAgentStartWithOptions(ctx, agent, task, resume, opts)
-	}
-	return nil, d.DispatchAgentStart(ctx, agent, task, resume)
 }
 
 // HTTPAgentDispatcher takes start options.

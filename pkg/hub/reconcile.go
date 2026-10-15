@@ -262,7 +262,17 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Async = args.Async
 	}
 	ctx, warns := withDispatchWarnings(ctx)
-	res, err := dispatchAgentStartWithOptions(ctx, dispatcher, agent, task, resume, opts)
+	// A dispatcher that takes start options gets the intent's options (and
+	// may return an accepted launch); any other runs the synchronous start
+	// (ptone/scion#4669). Both calls stay in this function, which the
+	// call-site and run-intent guards list.
+	var res *StartDispatchResult
+	var err error
+	if od, ok := dispatcher.(startOptionsDispatcher); ok {
+		res, err = od.DispatchAgentStartWithOptions(ctx, agent, task, resume, opts)
+	} else {
+		err = dispatcher.DispatchAgentStart(ctx, agent, task, resume)
+	}
 	if err != nil {
 		return "", fmt.Errorf("dispatch start: %w", err)
 	}

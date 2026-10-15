@@ -353,6 +353,8 @@ func TestAsyncStartExecDispatchStart_PassesAsync(t *testing.T) {
 	res, err := f.srv.execDispatchStart(ctx, row)
 	require.NoError(t, err)
 	assert.True(t, od.lastOpts.Async, "the intent's Async reaches the dispatcher")
+	assert.Equal(t, 1, od.optionStarts, "a dispatcher with options is called through them")
+	assert.Equal(t, 0, od.plainStarts)
 	launch := decodeLifecycleResult(res).Launch
 	require.NotNil(t, launch)
 	assert.Equal(t, "L1", launch.ID)
@@ -361,7 +363,7 @@ func TestAsyncStartExecDispatchStart_PassesAsync(t *testing.T) {
 	f.srv.SetDispatcher(pd)
 	res, err = f.srv.execDispatchStart(ctx, row)
 	require.NoError(t, err)
-	assert.Equal(t, 1, pd.starts)
+	assert.Equal(t, 1, pd.starts, "a dispatcher without options gets the synchronous start")
 	assert.Nil(t, decodeLifecycleResult(res).Launch)
 }
 

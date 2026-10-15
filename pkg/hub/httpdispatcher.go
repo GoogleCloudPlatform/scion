@@ -3440,10 +3440,11 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 // true, the harness is asked to continue its prior session (e.g. Claude
 // --continue) instead of starting a fresh conversation. The hub is the source
 // of truth for resume: callers compute it from the agent's stored phase
-// (suspended → resume). It is DispatchAgentStartWithOptions with no options.
+// (suspended → resume). It is DispatchAgentStartWithOptions with no options;
+// both call the synchronous dispatchAgentStart directly, so neither is a
+// guarded call site of the other.
 func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
-	_, err := d.DispatchAgentStartWithOptions(ctx, agent, task, resume, StartDispatchOptions{})
-	return err
+	return d.dispatchAgentStart(ctx, agent, task, resume)
 }
 
 // DispatchAgentStartWithOptions is DispatchAgentStart with per-call options
