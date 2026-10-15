@@ -7090,6 +7090,7 @@ func (s *Server) registerRoutes() {
 	// unless the test admin gate is on; the gate runs before the guard.
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin", s.handleIssueTestAdminIdentity)))
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
@@ -7179,6 +7180,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply admin mode middleware (after auth, so identity is available).
 	// Always applied — checks runtime MaintenanceState on each request.
 	h = adminModeMiddleware(s.maintenance)(h)
+
+	// Grant shaping (ptone/scion#4240, admin tier A3): records the
+	// request's grant actor and, for a test identity with an admin role,
+	// the shaping the store applies to every grant it writes.
+	h = s.grantShapingMiddleware(h)
 
 	// Test admin audit (ptone/scion#4240): runs right after authentication,
 	// so every request an admin-kind test identity makes is written to the
