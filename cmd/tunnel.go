@@ -106,7 +106,7 @@ func reportPlainError(w io.Writer, err error) int {
 	if errors.As(err, &te) {
 		code = te.Code
 	}
-	_, _ = fmt.Fprintf(w, "Error: %s\n", plainErrorLine(err.Error()))
+	_, _ = fmt.Fprintf(w, "Error: %s\n", plainErrorLine(config.RedactURLsIn(err.Error())))
 	return code
 }
 
