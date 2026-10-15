@@ -218,11 +218,13 @@ func recoverEmbeddedBrokerID(globalDir, embeddedID string, logf func(string, ...
 // template cache (ptone/scion#3538). It never lists settings files, other
 // hubs' credentials, another broker ID's state directory, or the hub-id file
 // (that belongs to a local hub, not to the broker). scionHome is the
-// directory the broker keeps its state under (~/.scion).
-func brokerLocalStatePaths(globalDir, scionHome, brokerID string) []string {
+// directory the broker keeps its template cache under (~/.scion); stateRoot
+// is the base of its state directories (configuredBrokerStateRoot:
+// server.broker.state_dir, default ~/.scion/runtime-broker-state).
+func brokerLocalStatePaths(globalDir, scionHome, stateRoot, brokerID string) []string {
 	paths := []string{daemon.GetLogPath(globalDir)}
 	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
-		paths = append(paths, filepath.Join(scionHome, "runtime-broker-state", brokerID))
+		paths = append(paths, filepath.Join(stateRoot, brokerID))
 	}
 	return append(paths, filepath.Join(scionHome, "cache", "templates"))
 }
@@ -262,7 +264,13 @@ func purgeBrokerLocalState(paths []string, out io.Writer) error {
 // non-zero exit; connections without a broker ID (which deregister cannot
 // remove) are named by file, to be removed by hand. Without purge it lists
 // what is left behind.
-func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr error, brokerRunning, purge bool, statePaths []string) error {
+//
+// stateDirErr is set when server.broker.state_dir could not be resolved
+// (configuredBrokerStateRoot); statePaths then hold the default state
+// directory, which is only a guess. The purge then refuses, removes nothing
+// and returns an error (fail closed); without --purge-local it is a warning
+// and the default path is listed with a note.
+func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercredentials.BrokerCredentials, listErr, stateDirErr error, brokerRunning, purge bool, statePaths []string) error {
 	if listErr == nil && len(remaining) == 0 && credsDir != "" {
 		if removed, err := removeDirIfEmpty(credsDir); err != nil {
 			_, _ = fmt.Fprintf(out, "Warning: failed to remove empty %s: %v\n", credsDir, err)
@@ -276,6 +284,8 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		switch {
 		case listErr != nil:
 			refusal = fmt.Errorf("--purge-local skipped: could not list hub connections (%v)", listErr)
+		case stateDirErr != nil:
+			refusal = fmt.Errorf("--purge-local skipped: cannot resolve the broker state directory (%v); no broker-local state was removed. Fix %s, then run 'scion runtime-broker deregister --purge-local' again", stateDirErr, brokerStateDirSetting)
 		case len(remaining) > 0:
 			refusal = remainingConnectionsError(credsDir, remaining)
 		case brokerRunning:
@@ -286,14 +296,28 @@ func cleanupAfterDeregister(out io.Writer, credsDir string, remaining []brokercr
 		default:
 			return purgeBrokerLocalState(left, out)
 		}
+		if stateDirErr != nil {
+			printStateDirGuessNote(out, stateDirErr)
+		}
 		printLeftInPlace(out, left)
 		return refusal
 	}
+	if stateDirErr != nil {
+		printStateDirGuessNote(out, stateDirErr)
+	}
 	printLeftInPlace(out, left)
-	if len(left) > 0 && listErr == nil && len(remaining) == 0 {
+	if stateDirErr != nil {
+		_, _ = fmt.Fprintf(out, "Fix %s, then remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.\n", brokerStateDirSetting)
+	} else if len(left) > 0 && listErr == nil && len(remaining) == 0 {
 		_, _ = fmt.Fprintln(out, "Remove it with 'scion runtime-broker deregister --purge-local' once the broker is stopped.")
 	}
 	return nil
+}
+
+// printStateDirGuessNote warns that server.broker.state_dir could not be
+// resolved, so the state directory listed is only the default.
+func printStateDirGuessNote(out io.Writer, stateDirErr error) {
+	_, _ = fmt.Fprintf(out, "Warning: cannot resolve the broker state directory (%v); the state directory listed is the default and may not be the one the broker uses\n", stateDirErr)
 }
 
 // printLeftInPlace lists the broker-local state paths that were not removed.

@@ -545,6 +545,11 @@ type RuntimeBrokerConfig struct {
 	// host.containers.internal for local development).
 	ContainerHubEndpoint string `json:"containerHubEndpoint" yaml:"containerHubEndpoint" koanf:"containerHubEndpoint"`
 
+	// StateDir is the base directory of the broker's runtime state
+	// (settings server.broker.state_dir); the broker uses
+	// <StateDir>/<broker-id>. Empty means ~/.scion/runtime-broker-state.
+	StateDir string `json:"stateDir" yaml:"stateDir" koanf:"stateDir"`
+
 	// BrokerID is a unique identifier for this runtime broker (auto-generated if empty)
 	BrokerID string `json:"brokerId" yaml:"brokerId" koanf:"brokerId"`
 	// BrokerName is a human-readable name for this runtime broker
@@ -1839,6 +1844,7 @@ var camelCaseFields = map[string]string{
 	"slowrequestthreshold":          "slowRequestThreshold",
 	"softdeleteretainfiles":         "softDeleteRetainFiles",
 	"softdeleteretention":           "softDeleteRetention",
+	"statedir":                      "stateDir",
 	"telemetryenabled":              "telemetryEnabled",
 	"useraccessmode":                "userAccessMode",
 	"webhooksenabled":               "webhooksEnabled",
