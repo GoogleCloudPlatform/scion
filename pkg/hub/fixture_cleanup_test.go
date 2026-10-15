@@ -781,6 +781,7 @@ func TestFixtureProvenance_ScopeAndDeletionRecords(t *testing.T) {
 	p2 := tiCreateProject(t, e.srv, f2.AccessToken, "fc-scope-p2")
 	fpAddProvider(t, e.store, p2)
 	purged := fpCreateAgent(t, e.srv, f2.AccessToken, p2, "fc-scope-purged")
+	purgedSchedule := fpCreateSchedule(t, e.srv, f2.AccessToken, p2, fpScheduleBody("fc-scope-purged-s"))
 	rec := tiPurge(t, e.srv, e.issuerTok, f2.Identity.ID, "", nil)
 	require.True(t, fpPurgeReport(t, rec).Complete, rec.Body.String())
 	require.False(t, fpAgentExists(t, e.store, purged))
@@ -792,6 +793,22 @@ func TestFixtureProvenance_ScopeAndDeletionRecords(t *testing.T) {
 	assert.NotEmpty(t, raw["deletionRecord"])
 	_, raw = fcProvenance(t, e.srv, jTok, "agent:"+purged)
 	fcUnprovenShape(t, raw, "agent:"+purged)
+	// The schedule and the project the purge removed (O3): proven by
+	// their own deletion records for I, unproven for J.
+	require.False(t, fcScheduleExists(t, e.store, purgedSchedule))
+	require.False(t, fpProjectExists(t, e.store, p2))
+	for _, tc := range []struct{ typ, id, mutation string }{
+		{"schedule", purgedSchedule, mutationTypeScheduleDelete},
+		{"project", p2, "project_delete"},
+	} {
+		del := fpPurgeAudits(t, e.store, tc.mutation, tc.id)
+		require.Len(t, del, 1, tc.typ)
+		p, _ = fcProvenance(t, e.srv, e.issuerTok, tc.typ+":"+tc.id)
+		assert.Equal(t, TestIdentityProvenance{Resource: tc.typ + ":" + tc.id, Proven: true, FixtureRootID: f2.Identity.ID, FixtureIssuerID: e.issuerID,
+			FixtureState: fixtureStateAbsent, Deleted: true, DeletionRecord: del[0].CorrelationID, Reason: "deleted under fixture stamp"}, p, tc.typ)
+		_, raw = fcProvenance(t, e.srv, jTok, tc.typ+":"+tc.id)
+		fcUnprovenShape(t, raw, tc.typ+":"+tc.id)
+	}
 
 	// Reaper-deleted: F3 expires and the reaper purges it after the grace
 	// period; its group is proven by its deletion record.
@@ -953,4 +970,60 @@ func TestFixtureCleanup_AdminKindTargets(t *testing.T) {
 		assert.Equal(t, *row.IssuanceID, b.IssuanceID)
 		assert.Equal(t, testIdentityCleanupMutation, b.Trigger)
 	}
+}
+
+// O4 (review round 2): a workload delegation's cleanup never reaches an
+// admin-kind identity, even an expired one its own grantor issued: neither
+// the run nor its dry run lists it, and the identity and its stamped group
+// stay. Control: the grantor's own session's dry run lists it.
+func TestFixtureCleanup_DelegationCannotReachAdminKind(t *testing.T) {
+	e := newX2Env(t, true)
+	ctx := context.Background()
+	grantor := e.grantor(t, "fc-dak-grantor")
+	d := e.delegate(t, grantor, nil)
+
+	rd, err := e.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	exp := time.Now().Add(-time.Minute)
+	issuer := grantor.ID
+	issuance := generateID()
+	admin := &store.User{
+		ID:          generateID(),
+		Email:       "test-admin-" + generateID()[:8] + "@" + store.TestHubAdminEmailDomain,
+		DisplayName: "fc admin kind",
+		Role:        store.TestAdminRole(store.UserKindTestHubAdmin),
+		Status:      store.UserStatusActive,
+		Kind:        store.UserKindTestHubAdmin,
+		ExpiresAt:   &exp,
+		IssuedBy:    &issuer,
+		IssuanceID:  &issuance,
+	}
+	_, err = e.s.CreateTestAdminUser(ctx, admin, rd.ID)
+	require.NoError(t, err)
+	gid := generateID()
+	require.NoError(t, e.s.CreateGroup(ctx, &store.Group{ID: gid, Name: "fc-dak-" + gid[:8], Slug: "fc-dak-" + gid[:8], CreatedBy: admin.ID,
+		Fixture: store.FixtureProvenance{RootID: admin.ID, IssuerID: grantor.ID}}))
+
+	for _, path := range []string{fcCleanupPath + "?dryRun=true", fcCleanupPath} {
+		rec := e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		r := fcReport(t, rec)
+		assert.Equal(t, fixtureCleanupScopeDelegation, r.Scope)
+		assert.Empty(t, r.Identities, path)
+		assert.Empty(t, r.Targets, path)
+	}
+	_, err = e.s.GetUser(ctx, admin.ID)
+	require.NoError(t, err, "the admin-kind identity stays")
+	assert.True(t, fcGroupExists(t, e.s, gid), "its stamped group stays")
+	// Provenance under the delegation: unproven (not its identity).
+	rec := e.workload(t, http.MethodGet, fcProvenancePath+"?resource=group:"+gid, x2Token(t, x2TokenOpts{}), d.ID, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	fcUnprovenShape(t, raw, "group:"+gid)
+
+	// Control: the grantor's own session reaches it (dry run).
+	rec = doRequestAsUser(t, e.srv, grantor, http.MethodPost, fcCleanupPath+"?dryRun=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, map[string]string{admin.ID: fixtureStateExpired}, fcIdentities(fcReport(t, rec)))
 }
