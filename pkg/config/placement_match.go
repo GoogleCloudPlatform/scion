@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -223,7 +224,7 @@ func IdentityGroups(runtimes map[string]V1RuntimeConfig, currentContext func() (
 		if !resolved {
 			resolved = true
 			if currentContext == nil {
-				hostErr = fmt.Errorf("no current-context reader")
+				hostErr = errors.New("no current-context reader")
 			} else {
 				hostCtx, hostConn, hostErr = currentContext()
 			}
