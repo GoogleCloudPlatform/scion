@@ -278,7 +278,7 @@ func init() {
 
 	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityOut, "out", "", "File to write the code to (required; must not exist; created 0600)")
 	hubTestIdentityWebCodeCmd.Flags().BoolVar(&testIdentityJSON, "json", false, "Print the code ID, expiry and file as JSON (never the code)")
-	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityAdminRole, "admin-role", "", `With a hub profile: mint through the admin delegation of this tier, "hub-admin" or "super-admin", for an admin-kind identity it issued`)
+	hubTestIdentityWebCodeCmd.Flags().StringVar(&testIdentityWebCodeAdminRole, "admin-role", "", `With a hub profile: mint through the admin delegation of this tier, "hub-admin" or "super-admin", for an admin-kind identity it issued`)
 	_ = hubTestIdentityWebCodeCmd.MarkFlagRequired("out")
 
 	hubTestIdentityListCmd.Flags().IntVar(&testIdentityListLimit, "limit", 0, "Maximum number of identities to list (default: the hub's, 100)")
@@ -376,12 +376,12 @@ func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
 // delegation of that tier (ptone/scion#4240, X4b). --admin-role needs a
 // hub profile; --as is refused either way.
 func testIdentityWebCodeClient() (hubclient.Client, error) {
-	role := strings.TrimSpace(testIdentityAdminRole)
+	role := strings.TrimSpace(testIdentityWebCodeAdminRole)
 	if role == "" {
 		return testIdentityIssuerClient()
 	}
 	if !hubprofile.IsAdminTier(role) {
-		return nil, newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
+		return nil, newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityWebCodeAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
 	}
 	if !hubProfileSelected() {
 		return nil, newUsageError("--admin-role needs a hub profile: it selects the profile's admin issuer delegation")

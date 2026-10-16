@@ -151,20 +151,27 @@ var hubTestIdentityDelegateRevokeCmd = &cobra.Command{
 }
 
 var (
-	testIdentityTeardownPurge bool
-	delegateWorkloadSub       string
-	delegateTTL               time.Duration
-	delegateMemberCap         int
-	delegateAdminCap          int
-	delegateScope             string
-	delegateLabel             string
-	delegateJSON              bool
+	// testIdentityIssueAdminRole is issue-admin's --admin-role. It is not
+	// shared with A4's 'issue --admin-role' (testIdentityAdminRole) or
+	// web-code's (testIdentityWebCodeAdminRole), so no command reads another
+	// command's flag value.
+	testIdentityIssueAdminRole string
+	// testIdentityWebCodeAdminRole is web-code's --admin-role.
+	testIdentityWebCodeAdminRole string
+	testIdentityTeardownPurge    bool
+	delegateWorkloadSub          string
+	delegateTTL                  time.Duration
+	delegateMemberCap            int
+	delegateAdminCap             int
+	delegateScope                string
+	delegateLabel                string
+	delegateJSON                 bool
 )
 
 func init() {
 	hubTestIdentityCmd.AddCommand(hubTestIdentityTeardownCmd, hubTestIdentityDelegateCmd, hubTestIdentityIssueAdminCmd)
 	af := hubTestIdentityIssueAdminCmd.Flags()
-	af.StringVar(&testIdentityAdminRole, "admin-role", "", `Admin kind to issue: "hub-admin" or "super-admin" (selects the profile's delegation of that tier)`)
+	af.StringVar(&testIdentityIssueAdminRole, "admin-role", "", `Admin kind to issue: "hub-admin" or "super-admin" (selects the profile's delegation of that tier)`)
 	af.StringVar(&testIdentityPurpose, "purpose", "", "Purpose recorded on the identity and in the audit log (required by the hub)")
 	af.DurationVar(&testIdentityTTL, "ttl", 0, "Token lifetime, e.g. 10m (default: the kind's; at most 30m hub-admin, 15m super-admin)")
 	af.DurationVar(&testIdentityLifetime, "lifetime", 0, "Identity lifetime, e.g. 30m (default: the kind's; at most 60m hub-admin, 30m super-admin)")
@@ -278,9 +285,9 @@ func runHubTestIdentityIssueAdmin(cmd *cobra.Command, _ []string) error {
 	if !hubProfileSelected() {
 		return fmt.Errorf("issue-admin needs a hub profile (--hub-profile or %s) holding an admin issuer delegation", hubprofile.EnvHubProfile)
 	}
-	role := strings.TrimSpace(testIdentityAdminRole)
+	role := strings.TrimSpace(testIdentityIssueAdminRole)
 	if !hubprofile.IsAdminTier(role) {
-		return newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
+		return newUsageError("invalid --admin-role %q: must be %q or %q", testIdentityIssueAdminRole, hubprofile.TierHubAdmin, hubprofile.TierSuperAdmin)
 	}
 	if hubProfileAs == "" {
 		return newUsageError("name the new identity with --as <alias> (and --run <label>); its token goes to the run cache")

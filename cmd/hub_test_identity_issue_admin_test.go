@@ -34,6 +34,16 @@ import (
 // hubprofiletest's fake, which accepts an admin delegation only with an ID
 // token of the admin issuer account.
 
+// resetAdminRoleFlags clears the --admin-role values these tests set (on
+// issue-admin, web-code and A4's issue) when the test ends, so a later test
+// that drives rootCmd without resetting flags never inherits them.
+func resetAdminRoleFlags(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		testIdentityIssueAdminRole, testIdentityWebCodeAdminRole, testIdentityAdminRole = "", "", ""
+	})
+}
+
 // saveAdminProfiles adds profile t9 (the fake target, with its member and
 // both admin delegations and the admin issuer account) and own9 (the same
 // delegations for the agent's own hub) to the x3b environment.
@@ -91,6 +101,7 @@ func assertAdminIssuerAuthorization(t *testing.T, req hubprofiletest.Request, de
 // request; teardown leaves it to expire and drops it from the cache.
 func TestHubTestIdentityIssueAdmin_Profile(t *testing.T) {
 	e := newX3bEnv(t)
+	resetAdminRoleFlags(t)
 	e.saveAdminProfiles(t)
 	projBefore, homeBefore := e.snapshot(t)
 
@@ -179,6 +190,7 @@ func TestHubTestIdentityIssueAdmin_Profile(t *testing.T) {
 // too, and with one it issues as in agent mode.
 func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 	e := newX3bEnv(t)
+	resetAdminRoleFlags(t)
 	e.saveAdminProfiles(t)
 	base := []string{"hub", "test-identity", "issue-admin", "--purpose", "admin journey", "--run", "r1"}
 	// Without a profile the gate refuses --as and --run first, so these
@@ -241,6 +253,7 @@ func TestHubTestIdentityIssueAdmin_Refusals(t *testing.T) {
 // existing alias refused before any request, leaving the file unchanged.
 func TestHubTestIdentityIssueAdmin_GoldenOutputAndFile(t *testing.T) {
 	e := newX3bEnv(t)
+	resetAdminRoleFlags(t)
 	e.saveAdminProfiles(t)
 	r, err := e.run(t, "--hub-profile", "t9", "hub", "test-identity", "issue-admin", "--admin-role", "hub-admin",
 		"--purpose", "admin journey", "--as", "admin1", "--run", "r1")
@@ -285,6 +298,7 @@ func TestHubTestIdentityIssueAdmin_GoldenOutputAndFile(t *testing.T) {
 // for the agent's own hub). No request, no file, no cache.
 func TestHubTestIdentityAdminCommands_EachInItsContext(t *testing.T) {
 	e := newX3bEnv(t)
+	resetAdminRoleFlags(t)
 	e.saveAdminProfiles(t)
 	dir := resolvedTempDir(t)
 	a4 := func(out string) []string {
