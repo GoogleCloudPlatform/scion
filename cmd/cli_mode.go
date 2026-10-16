@@ -167,6 +167,9 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
 	"hub.test-identity.web-code": true,
+	// issue-admin (X4b, DEC-7) issues through the profile's admin
+	// delegation; it needs a profile in every mode.
+	"hub.test-identity.issue-admin": true,
 
 	// Project thread groups (ptone/scion#4424, design section 4 and
 	// decision Q3): agents may list, read, create, rename and re-file

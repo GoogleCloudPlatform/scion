@@ -81,7 +81,10 @@ type RouteMetadata struct {
 	// the handler, which decides the requested kind's capability; POST
 	// /api/v1/test-identities/{id}/web-login-code admits both admin kinds'
 	// capabilities, and its handler requires the one the identity's kind
-	// needs (WS4).
+	// needs (WS4); POST /api/v1/test-identities/{id}/token admits both
+	// admin kinds' capabilities so that an admin-scope workload delegation
+	// reaches handleIssueTestAdminTokenThroughDelegation (X4b), while every
+	// other caller gets 409 for an admin-kind identity or 404.
 	AlsoPermits []string
 }
 
@@ -1097,11 +1100,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
+	// The handler requires test_identity.issue for a member-tier identity.
+	// The admin kinds' capabilities are admitted as well, so an admin-scope
+	// workload delegation (phase X4b) reaches the handler, which re-issues
+	// only for an admin-kind identity of the delegation's kind that the
+	// same delegation issued, with that kind's issuer checks
+	// (handleIssueTestAdminTokenThroughDelegation); any other caller gets
+	// no admin-kind token (409).
 	"POST /api/v1/test-identities/{id}/token": {
 		Pattern: "POST /api/v1/test-identities/{id}/token", RouteID: "testIdentities.token",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
+		AlsoPermits:  []string{"test_identity.issue_admin", "test_identity.issue_super_admin"},
 	},
 	// The handler further limits the code to the identity's issuer, a
 	// workload delegation for the member-tier identities it issued, or an
@@ -1111,7 +1122,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// an issuer token scoped to exactly one of them reaches the handler; it
 	// requires test_identity.issue for a member-tier identity and, for an
 	// admin-kind identity (WS4), that kind's capability and issuer checks
-	// (testAdminWebCodeIssuer).
+	// (testAdminCredentialIssuer). An admin-scope workload delegation
+	// reaches the code only for an admin-kind identity of its scope's kind
+	// that it issued itself (phase X4b).
 	"POST /api/v1/test-identities/{id}/web-login-code": {
 		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
 		Classification: RouteHubAdmin,
