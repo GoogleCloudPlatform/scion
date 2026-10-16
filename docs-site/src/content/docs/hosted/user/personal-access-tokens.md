@@ -76,7 +76,7 @@ boundary:
 | Scope | Boundary | Grants |
 |-------|----------|--------|
 | `broker:create` | Hub only | Register a Runtime Broker, or re-register (issue a new join token for) one your user created, including with `scion hub brokers join-token create`. A token does not let a super-admin re-register another user's broker. Requires that you currently hold `broker.create`, which hub members do. |
-| `broker:read` | Hub only | Read Runtime Broker records. `scion runtime-broker register` uses it to check an existing registration. |
+| `broker:read` | Hub only | Read Runtime Broker records and the projects a broker serves. `scion runtime-broker register` uses it to check an existing registration. It also reads the environment variables (sensitive values masked) and secret metadata of a Runtime Broker your user created. |
 | `federation_token:mint` | Hub only | Obtain a short-lived user access credential for yourself to present to a peer hub (`scion hub auth federation-token`). Experimental: available only while the `federation.project_visitors` experiment is on and the audience is listed in `server.oidc.user_token_audiences`. |
 
 `broker:create` covers registration only. It never associates a broker with a project, never
@@ -309,6 +309,12 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
   secret or carry the broker owner's consent to associate a broker with a project. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
+- **Runtime Broker changes**: updating or deregistering a Runtime Broker, writing its
+  environment variables or secrets, and sending a heartbeat on its behalf need a sign-in; a UAT
+  is denied with `403` and `details.reason` naming why.
+- **Image operations on a Runtime Broker**: pulling or removing a harness-config image on a
+  named Runtime Broker (`broker_id`) needs dispatch authority on that broker, which no UAT
+  scope carries, so a UAT is denied even on an auto-provide broker.
 
 ## Trust level separation
 

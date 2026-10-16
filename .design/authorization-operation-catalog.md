@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 298
+**Operations:** 303
 
 ## Table of Contents
 
@@ -274,6 +274,11 @@
 - [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
 - [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
+- [broker.material.read](#brokermaterialread) — Read a runtime broker's environment variables (sensitive values masked) and secret metadata. A user needs broker.read on the broker and, beyond it, the owner relationship or broker.update; the broker reads its own material
+- [broker.material.write](#brokermaterialwrite) — Set, patch or delete a runtime broker's environment variables and secrets. A user needs an interactive session and broker.update on the broker; the broker writes its own material
+- [broker.update](#brokerupdate) — Update a runtime broker's name, labels or host service account. A user needs an interactive session and broker.update on the broker
+- [broker.delete](#brokerdelete) — Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
+- [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
@@ -10020,10 +10025,13 @@
 | http_route | GET | `/api/v1/runtime-brokers` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/projects` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `broker.read`
 
@@ -10036,6 +10044,192 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestHubTokenBrokerOwner_ReadsOwnBrokerThroughOwnerGrant`
+
+---
+
+## broker.material.read
+
+**Domain:** broker
+
+**Description:** Read a runtime broker's environment variables (sensitive values masked) and secret metadata. A user needs broker.read on the broker and, beyond it, the owner relationship or broker.update; the broker reads its own material
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/runtime-brokers/{id}/env` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/env/{key}` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/secrets` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
+
+**Principals:** `user`, `broker`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `broker_token`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `broker.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestBrokerMaterial_ReadsRequireBrokerRead`
+
+---
+
+## broker.material.write
+
+**Domain:** broker
+
+**Description:** Set, patch or delete a runtime broker's environment variables and secrets. A user needs an interactive session and broker.update on the broker; the broker writes its own material
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/runtime-brokers/{id}/env/{key}` |
+| http_route | DELETE | `/api/v1/runtime-brokers/{id}/env/{key}` |
+| http_route | PUT | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
+| http_route | PATCH | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
+| http_route | DELETE | `/api/v1/runtime-brokers/{id}/secrets/{key}` |
+
+**Principals:** `user`, `broker`
+
+**Credentials:** `session_jwt`, `broker_token`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `broker.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `broker.material.write`
+- **Context Fields:** actor_id, broker_id
+- **Before Fields:** key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestBrokerMaterial_WritesSessionOnly`
+
+---
+
+## broker.update
+
+**Domain:** broker
+
+**Description:** Update a runtime broker's name, labels or host service account. A user needs an interactive session and broker.update on the broker
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/runtime-brokers/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `broker.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## broker.delete
+
+**Domain:** broker
+
+**Description:** Deregister a runtime broker: unlink it from every project, clear project defaults that name it, and remove its credentials. A user needs an interactive session and broker.delete on the broker
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/runtime-brokers/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `broker.delete`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `broker.deregister`
+- **Context Fields:** actor_id, broker_id
+- **Before Fields:** broker_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## broker.heartbeat
+
+**Domain:** broker
+
+**Description:** Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/runtime-brokers/{id}/heartbeat` |
+
+**Principals:** `broker`, `user`
+
+**Credentials:** `broker_token`, `session_jwt`
+
+**Bearer:** `session_only` (reason `HOST_OPERATIONS`)
+
+**Base Permission:** `broker.update`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestBrokerHeartbeat_UserPathSessionOnly`
 
 ---
 
