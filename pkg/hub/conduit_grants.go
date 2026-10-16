@@ -343,6 +343,9 @@ func (k *conduitGrantKeys) loadSettled(ctx context.Context) (*grant.KeyRing, err
 	if err != nil {
 		return nil, err
 	}
+	if ring == nil {
+		return nil, fmt.Errorf("%w: the store returned no ring", errConduitGrantRingUnreadable)
+	}
 	next := cloneKeyRing(ring)
 	if !next.Settle(now, k.retention()) {
 		return ring, nil
@@ -357,6 +360,9 @@ func (k *conduitGrantKeys) loadSettled(ctx context.Context) (*grant.KeyRing, err
 	}
 	if ring, _, err = k.store.Load(ctx); err != nil {
 		return nil, err
+	}
+	if ring == nil {
+		return nil, fmt.Errorf("%w: the store returned no ring", errConduitGrantRingUnreadable)
 	}
 	ring = cloneKeyRing(ring)
 	ring.Settle(now, k.retention())
@@ -392,6 +398,9 @@ func (k *conduitGrantKeys) bootstrap(ctx context.Context, now time.Time) (*grant
 	if errors.Is(err, store.ErrAlreadyExists) {
 		// Another node won the bootstrap; use its ring.
 		ring, _, err = k.store.Load(ctx)
+		if err == nil && ring == nil {
+			err = fmt.Errorf("%w: the store returned no ring", errConduitGrantRingUnreadable)
+		}
 		return ring, err
 	}
 	if err != nil {
@@ -526,6 +535,9 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 		if err != nil {
 			return ConduitGrantKeyRotation{}, fmt.Errorf("load conduit grant key ring: %w", err)
 		}
+		if ring == nil {
+			return ConduitGrantKeyRotation{}, fmt.Errorf("load conduit grant key ring: %w: the store returned no ring", errConduitGrantRingUnreadable)
+		}
 		if hasPendingConduitGrantKey(ring, now) {
 			return ConduitGrantKeyRotation{}, errConduitGrantKeyPending
 		}
@@ -581,6 +593,9 @@ func (k *conduitGrantKeys) revoke(ctx context.Context, kid string) error {
 		ring, rev, err := k.store.Load(ctx)
 		if err != nil {
 			return fmt.Errorf("load conduit grant key ring: %w", err)
+		}
+		if ring == nil {
+			return fmt.Errorf("load conduit grant key ring: %w: the store returned no ring", errConduitGrantRingUnreadable)
 		}
 		next := cloneKeyRing(ring)
 		next.Settle(now, k.retention())

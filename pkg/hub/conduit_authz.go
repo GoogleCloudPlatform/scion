@@ -497,6 +497,10 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		return nil, errConduitAgentGone
 	case err != nil:
 		return nil, fmt.Errorf("%w: agent lookup: %v", errConduitAuthzUnavailable, err)
+	case agent == nil:
+		// The store returned neither an agent nor an error: an internal
+		// inconsistency, not a deleted agent and not a decision.
+		return nil, fmt.Errorf("%w: agent lookup returned no agent", errConduitAuthzUnavailable)
 	case !agent.DeletedAt.IsZero():
 		return nil, errConduitAgentGone
 	case agent.ProjectID != c.ProjectID:
@@ -614,6 +618,10 @@ func (s *Server) conduitRenewalIdentity(ctx context.Context, c *grant.RecheckCla
 		return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
 	case err != nil:
 		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
+	case user == nil:
+		// The store returned neither a user nor an error: an internal
+		// inconsistency, not an inactive user and not a decision.
+		return nil, fmt.Errorf("%w: user lookup returned no user", errConduitAuthzUnavailable)
 	}
 	ident := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "")
 	if c.Scope == nil {
