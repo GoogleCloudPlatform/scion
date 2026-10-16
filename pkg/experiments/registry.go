@@ -200,8 +200,8 @@ const AsyncAgentLaunch = "hub.async_agent_launch"
 // on too. Turn it on only after every hub node runs a version that
 // advertises async_start_v1 in the hub-instance registry; to roll back,
 // turn it off and wait launch_timeout plus 15 seconds before downgrading
-// any node. This release registers it only: every start stays synchronous
-// whatever its value.
+// any node. While any live hub instance lacks async_start_v1, starts stay
+// synchronous whatever its value.
 const AsyncAgentStart = "hub.async_agent_start"
 
 // compiled is the production experiment list. It is reachable only through
@@ -211,7 +211,7 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentStart,
 		Title:       "Asynchronous agent start",
-		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node. In this release starts stay synchronous whatever its value.",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). While any live hub instance lacks async_start_v1, starts stay synchronous. To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

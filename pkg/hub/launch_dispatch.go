@@ -166,6 +166,76 @@ func (d *HTTPAgentDispatcher) asyncLaunchEligible(ctx context.Context, agent *st
 	return settings, true
 }
 
+// minAsyncStartLaunchTimeout is the smallest launch timeout an
+// asynchronous start is sent with: the broker takes its asynchronous
+// branch only when launchTimeoutSeconds is above 20 (as for a create), so
+// a shorter budget would only be answered synchronously.
+const minAsyncStartLaunchTimeout = 21 * time.Second
+
+// asyncStartEligible reports whether a start send for agent may request an
+// asynchronous launch (ptone/scion#4669): the caller asked for it
+// (opts.Async, after its own checks: the hub.async_agent_start experiment,
+// every live hub advertising async_start_v1, the request's opt-in and the
+// prior phase), the hub.async_agent_launch experiment is on, the launch
+// timeout leaves the broker room to go asynchronous, and the broker is not
+// known to lack AsyncStart. A broker with no recorded capabilities, or one
+// that cannot be read, is tried: its echo is authoritative.
+func (d *HTTPAgentDispatcher) asyncStartEligible(ctx context.Context, agent *store.Agent, opts StartDispatchOptions) (AsyncLaunchSettings, bool) {
+	if !opts.Async || d.asyncLaunchSettings == nil || d.store == nil {
+		return AsyncLaunchSettings{}, false
+	}
+	settings := d.asyncLaunchSettings()
+	if !settings.Enabled || settings.Timeout < minAsyncStartLaunchTimeout {
+		return settings, false
+	}
+	if broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil && broker.Capabilities != nil && !broker.Capabilities.AsyncStart {
+		return settings, false
+	}
+	return settings, true
+}
+
+// beginStartLaunch begins the asynchronous launch of a start when it is
+// eligible (asyncStartEligible) and this node will send it, and returns its
+// ID, the settings and the time its budget started. An empty ID with a nil
+// error means the start is sent synchronously: it is not eligible, the
+// client will hand it to the owner node (which begins its own launch from
+// the intent's options), or the row is not in a phase a launch of that
+// kind may begin on (BeginStartLaunch's ErrInvalidPhase; design D-b). A
+// row a delete holds returns ErrLaunchInvalidPhase wrapping
+// store.ErrDeleteInProgress, as for a create; any other store error is
+// returned. revokeOnFail is this call's synchronous revoke decision
+// (DispatchAgentStart's rule); a restart's launch never revokes.
+func (d *HTTPAgentDispatcher) beginStartLaunch(ctx context.Context, agent *store.Agent, endpoint string, opts StartDispatchOptions, revokeOnFail bool) (string, AsyncLaunchSettings, time.Time, error) {
+	settings, eligible := d.asyncStartEligible(ctx, agent, opts)
+	if !eligible {
+		return "", settings, time.Time{}, nil
+	}
+	if rc, ok := d.client.(createRouteChecker); ok && rc.createWithGatherWouldDefer(ctx, agent.RuntimeBrokerID, endpoint) {
+		return "", settings, time.Time{}, nil
+	}
+	kind := opts.launchKind()
+	// The timer starts immediately before BeginStartLaunch, so the
+	// remaining budget sent to the broker never exceeds the stored deadline.
+	began := time.Now()
+	launchID, err := d.store.BeginStartLaunch(ctx, agent.ID, kind, settings.Timeout, store.BeginLaunchOptions{
+		PriorPhase:   opts.PriorPhase,
+		RevokeOnFail: kind == store.LaunchKindStart && revokeOnFail,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidPhase) {
+			if fresh, gerr := d.store.GetAgent(ctx, agent.ID); gerr == nil &&
+				(!fresh.DeletedAt.IsZero() || fresh.DeletionHoldsRow(time.Now())) {
+				return "", settings, time.Time{}, fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, err, store.ErrDeleteInProgress)
+			}
+			d.log.Info("Start not eligible for async launch in its current phase; sending synchronously",
+				"agent_id", agent.ID, "kind", kind, "error", err)
+			return "", settings, time.Time{}, nil
+		}
+		return "", settings, time.Time{}, fmt.Errorf("begin start launch: %w", err)
+	}
+	return launchID, settings, began, nil
+}
+
 // remainingLaunchSeconds is ceil(timeout - elapsed) in whole seconds, at
 // least 1.
 func remainingLaunchSeconds(timeout, elapsed time.Duration) int {
@@ -240,12 +310,48 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		}
 		return nil, nil, nil, fmt.Errorf("begin launch: %w", err)
 	}
-	req.AsyncLaunch = true
-	req.LaunchID = launchID
-	req.LaunchTimeoutSeconds = remainingLaunchSeconds(settings.Timeout, time.Since(began))
-	req.LaunchKeepaliveSeconds = settings.KeepaliveSeconds
+	return d.sendLaunching(ctx, agent, launchID, settings, began, "Agent create accepted for async launch",
+		func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			req.AsyncLaunch = true
+			req.LaunchID = f.LaunchID
+			req.LaunchTimeoutSeconds = f.TimeoutSeconds
+			req.LaunchKeepaliveSeconds = f.KeepaliveSeconds
+			return send(ctx, req)
+		})
+}
 
-	resp, envReqs, err := send(ctx, req)
+// launchFields are the asynchronous launch fields of one launching send:
+// the launch ID, the remaining whole-launch budget and the keepalive.
+type launchFields struct {
+	LaunchID         string
+	TimeoutSeconds   int
+	KeepaliveSeconds int
+}
+
+// launchSendFunc performs the transport send of a launching request with
+// f applied, including any resend (a hash-mismatch repair), so one launch
+// covers every attempt.
+type launchSendFunc func(ctx context.Context, f launchFields) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+
+// sendLaunching is the kind-generic part of a launching send, shared by
+// create (dispatchLaunching) and start (dispatchAgentStart): launchID has
+// been begun (at began) and the send carries its fields. It resolves the
+// launch from the broker's answer as dispatchLaunching documents.
+// acceptedMsg is the log line of an accepted launch.
+func (d *HTTPAgentDispatcher) sendLaunching(
+	ctx context.Context,
+	agent *store.Agent,
+	launchID string,
+	settings AsyncLaunchSettings,
+	began time.Time,
+	acceptedMsg string,
+	send launchSendFunc,
+) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, *LaunchAccepted, error) {
+	resp, envReqs, err := send(ctx, launchFields{
+		LaunchID:         launchID,
+		TimeoutSeconds:   remainingLaunchSeconds(settings.Timeout, time.Since(began)),
+		KeepaliveSeconds: settings.KeepaliveSeconds,
+	})
 	switch {
 	case errors.Is(err, ErrLifecycleDeferred):
 		// Raised by routing before any send. The owner's BeginLaunch
@@ -276,7 +382,7 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		return resp, envReqs, nil, nil
 	case resp != nil && resp.LaunchPending && resp.LaunchID == launchID:
 		d.markLaunchAccepted(ctx, agent, launchID, resp.LaunchInstanceID)
-		d.log.Info("Agent create accepted for async launch",
+		d.log.Info(acceptedMsg,
 			"agent_id", agent.ID, "project_id", agent.ProjectID, "launch_id", launchID,
 			"launched_by", agent.CreatedBy, "relationship", launchRelationship(agent))
 		return resp, nil, &LaunchAccepted{ID: launchID, Owner: resp.LaunchInstanceID}, nil

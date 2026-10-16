@@ -406,6 +406,19 @@ type StartOpts struct {
 	// in a counted phase (a restart). A start from a resting phase always
 	// clears them.
 	NewGeneration bool
+	// AcceptAsyncLaunch is the request's opt-in to an asynchronous start
+	// (ptone/scion#4669). The start is sent asynchronously only when, in
+	// addition, the hub.async_agent_start experiment is on, every live hub
+	// instance advertises async_start_v1 (asyncStartAllowed), the agent was
+	// at rest (the dispatch wrote starting) or this is a restart's start
+	// leg, and the dispatcher's own rules hold (asyncStartEligible).
+	AcceptAsyncLaunch bool
+	// OnLaunchAccepted, when set, is called once a broker accepted the
+	// start as an asynchronous launch, while the claim is held, in place of
+	// AfterStart (which is not called). The agent row then reads starting
+	// with an active launch; the launch's end writes the outcome, settles
+	// the claim and keeps or releases the reservation.
+	OnLaunchAccepted func(ctx context.Context, agent *store.Agent)
 	// AfterStart, when set, runs after a successful dispatch while the claim
 	// is still held, in place of the default status write (phase from the
 	// broker response, or running; its container status; exit fields
@@ -490,7 +503,29 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			dctx, cancel = context.WithDeadline(ctx, callerDeadline)
 			defer cancel()
 		}
+		// An asynchronous start (ptone/scion#4669) is asked for only from
+		// a resting phase (the dispatch wrote starting; a start of a
+		// running agent keeps its pod and stays synchronous) or for a
+		// restart's start leg, and only through a dispatcher that takes
+		// options. The experiment and the hub-node check come last, so
+		// the registry is read only when the rest holds.
+		od, hasOptions := dispatcher.(startOptionsDispatcher)
+		async := opts.AcceptAsyncLaunch && hasOptions &&
+			(sd.wroteStarting() || opts.Kind == store.StartClaimRestart) &&
+			s.asyncStartAllowed()
+		var res *StartDispatchResult
 		dispatch := func(c context.Context) error {
+			if async {
+				kind := store.LaunchKindStart
+				if opts.Kind == store.StartClaimRestart {
+					kind = store.LaunchKindRestart
+				}
+				var err error
+				res, err = od.DispatchAgentStartWithOptions(c, agent, opts.Task, opts.Resume, StartDispatchOptions{
+					Async: true, Kind: kind, PriorPhase: sd.restingPhase(),
+				})
+				return err
+			}
 			return dispatcher.DispatchAgentStart(c, agent, opts.Task, opts.Resume)
 		}
 		var err error
@@ -502,6 +537,17 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		if err != nil {
 			sd.rollback(ctx)
 			return false, err
+		}
+		if res.AcceptedLaunch() != nil {
+			// Accepted as an asynchronous launch: keep the reservation
+			// (the launch's end or the launch reaper releases it), write
+			// no started status, and hand the claim to the launch, whose
+			// end settles it.
+			sd.settle()
+			if opts.OnLaunchAccepted != nil {
+				opts.OnLaunchAccepted(ctx, agent)
+			}
+			return true, nil
 		}
 		// The container is up: the reservation is kept whatever the
 		// status write below does.

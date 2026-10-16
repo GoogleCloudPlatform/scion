@@ -287,6 +287,9 @@ func lifecycleStartHasInputs(r *http.Request) bool {
 	if err := json.Unmarshal(body, &req); err != nil {
 		return true
 	}
+	// The asynchronous-start opt-in is not an input the launch ignores:
+	// the start is answered with the launching agent either way.
+	req.AcceptAsyncLaunch = false
 	return req != (AgentLifecycleStartRequest{})
 }
 
@@ -303,6 +306,22 @@ func (s *Server) writeExistingAgentLaunching(ctx context.Context, w http.Respons
 		resp.Warnings = []string{launchInFlightInputsWarning}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeExistingAgentLaunchAccepted answers handleExistingAgent's 200 shape
+// for a start a broker accepted as an asynchronous launch
+// (ptone/scion#4669): the re-read agent (phase starting, with its active
+// launch) and the dispatch warnings. The client follows the launch.
+func (s *Server) writeExistingAgentLaunchAccepted(ctx context.Context, w http.ResponseWriter, agent *store.Agent, project *store.Project) {
+	current := agent
+	if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+		current = fresh
+	}
+	s.enrichAgent(ctx, current, project, nil)
+	writeJSON(w, http.StatusOK, CreateAgentResponse{
+		Agent:    redactedAgentCopy(ctx, s, current),
+		Warnings: dispatchWarningsFromContext(ctx),
+	})
 }
 
 // writeExistingAgentGuardError answers a dispatcher start-guard error in

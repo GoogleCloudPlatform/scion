@@ -112,6 +112,7 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 		path += "?projectId=" + url.QueryEscape(projectID)
 	}
 	path = withRunIDURL(path, extras.RunID)
+	path = withDispatchAgentIDURL(ctx, path)
 
 	payload := map[string]interface{}{}
 	if task != "" {
