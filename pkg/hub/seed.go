@@ -97,7 +97,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    6, // R6: add user.list, which the user list checks (ptone/scion#2124); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    7, // R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
@@ -147,7 +147,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    9, // R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    10, // R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
@@ -303,9 +303,14 @@ func projectOwnerPermissionIDs() []string {
 		// Artifacts (pkg/artifacts): read the project's artifacts and
 		// publish new ones homed in the project. Writing to, deleting or
 		// managing grants on an existing artifact belongs to its owner or
-		// an explicit grant, not to project roles (design D7).
+		// an explicit grant, not to project roles (design D7), with one
+		// bounded exception for owners only (R10, design D25):
+		// artifact.steward makes them stewards of the artifacts agents own
+		// in the project (share up to edit, links, expiry, delete; never an
+		// admin grant or a move, and never a user-owned artifact).
 		"artifact.create",
 		"artifact.read",
+		"artifact.steward",
 		// Agent lifecycle and operations — human control-plane permissions.
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
@@ -398,6 +403,8 @@ func projectOwnerPermissionIDs() []string {
 // iteration. Compared to project-owner, this excludes:
 //   - All *.delete permissions (admins cannot delete resources)
 //   - agent.set_message_mode (D7: only project owners may unseal none-mode agents)
+//   - artifact.steward (design D25: only owners steward agents' artifacts;
+//     admins keep custodian delete)
 //
 // Agent-self credential permissions (status_update, log_append, token_refresh,
 // identity_token, port_forward, notify) and hub-level operations (project.create,

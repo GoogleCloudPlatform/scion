@@ -48,7 +48,7 @@ func heartbeatObservedState(hb brokerAgentHeartbeat) store.RecoveryObservedState
 		return store.ObservedPresentTerminal
 	}
 	switch state.Phase(hb.Phase) {
-	case state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		return store.ObservedPresentTerminal
 	}
 	cs := strings.ToLower(strings.TrimSpace(hb.ContainerStatus))

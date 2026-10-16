@@ -54,6 +54,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"artifact:delete":                 {"artifact.delete"},
 	"artifact:manage":                 {"artifact.manage"},
 	"artifact:read":                   {"artifact.read"},
+	"artifact:steward":                {"artifact.steward"},
 	"artifact:update":                 {"artifact.update"},
 	"broker:create":                   {"broker.create"},
 	"broker:list":                     {"broker.list"},

@@ -16,6 +16,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -517,5 +520,166 @@ func TestCarryOverSkillsDir_SkipsPythonBytecode(t *testing.T) {
 			t.Errorf("new dir = %v, want %v", got, want)
 			break
 		}
+	}
+}
+
+func TestCarryOverSkillsDir_SkipsAgentPluginDirs(t *testing.T) {
+	home := t.TempDir()
+	oldDir, newDir := filepath.Join(home, ".claude/skills"), filepath.Join(home, ".codex/skills")
+	writeSkill(t, oldDir, "one", "1")
+	// An Agent Plugins bundle installed by the claude harness: root
+	// plugin.json, generated .claude-plugin/, bundle skills below it.
+	writeSkill(t, filepath.Join(oldDir, "acme.tools", "skills"), "deploy", "d")
+	for path, content := range map[string]string{
+		"acme.tools/plugin.json":                `{"name":"acme.tools"}`,
+		"acme.tools/.claude-plugin/plugin.json": `{"name":"acme.tools"}`,
+	} {
+		p := filepath.Join(oldDir, path)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory named plugin.json, or a symlinked plugin.json, is not the
+	// mark of a bundle: those entries are still carried as skills.
+	writeSkill(t, oldDir, "dirmark", "2")
+	if err := os.MkdirAll(filepath.Join(oldDir, "dirmark", "plugin.json"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeSkill(t, oldDir, "linkmark", "3")
+	if err := os.Symlink("SKILL.md", filepath.Join(oldDir, "linkmark", "plugin.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	copied, err := carryOverSkillsDir(home, ".claude/skills", ".codex/skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(copied)
+	if strings.Join(copied, ",") != "dirmark,linkmark,one" {
+		t.Fatalf("copied = %v, want [dirmark linkmark one]", copied)
+	}
+	if _, err := os.Lstat(filepath.Join(newDir, "acme.tools")); !os.IsNotExist(err) {
+		t.Fatalf("plugin dir carried into the new skills dir (err=%v)", err)
+	}
+	if got, ok := readSkill(t, newDir, "one"); !ok || got != "1" {
+		t.Fatalf("skill one = %q, %v", got, ok)
+	}
+}
+
+func TestCarryOverSkillsDir_OnlyAgentPluginDirs(t *testing.T) {
+	home := t.TempDir()
+	oldDir := filepath.Join(home, ".claude/skills")
+	p := filepath.Join(oldDir, "scion-smoke", "plugin.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	copied, err := carryOverSkillsDir(home, ".claude/skills", ".codex/skills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(copied) != 0 {
+		t.Fatalf("copied = %v, want none", copied)
+	}
+	// Nothing was carried, so the new skills dir is not created.
+	if _, err := os.Lstat(filepath.Join(home, ".codex/skills")); !os.IsNotExist(err) {
+		t.Fatalf("new skills dir created (err=%v)", err)
+	}
+}
+
+// TestStart_HarnessConfigSwitchLogsCarryOverSummary checks that the
+// harness-config carry-over at Start logs the number of skills it copied
+// and none of their names.
+func TestStart_HarnessConfigSwitchLogsCarryOverSummary(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	for name, skillsDir := range map[string]string{"hc-a": ".a/skills", "hc-b": ".b/skills"} {
+		hcDir := filepath.Join(globalScionDir, "harness-configs", name)
+		_ = os.MkdirAll(hcDir, 0755)
+		_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"),
+			[]byte("harness: generic\nuser: scion\nimage: test-image:latest\nskills_dir: "+skillsDir+"\n"), 0644)
+	}
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "hc-a"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	agentDir := filepath.Join(projectScionDir, "agents", "switcher")
+	agentHome := filepath.Join(agentDir, "home")
+	entries := []string{"carry-entry-one", "carry-entry-two"}
+	for _, e := range entries {
+		writeSkill(t, filepath.Join(agentHome, ".a/skills"), e, "provisioned")
+	}
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+		[]byte(`{"harness": "generic", "harness_config": "hc-a"}`), 0644)
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+	records := captureSlog(t)
+	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name:          "switcher",
+		ProjectPath:   projectScionDir,
+		HarnessConfig: "hc-b",
+		BrokerMode:    true,
+		NoAuth:        true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	_, attrs := refLogFind(t, *records, "Start: skills carried over after the harness-config switch")
+	if got, _ := attrs["count"].(float64); got != float64(len(entries)) {
+		t.Errorf("count = %v, want %d", attrs["count"], len(entries))
+	}
+	for _, r := range *records {
+		line, _ := refLogRender(t, r)
+		for _, e := range entries {
+			if strings.Contains(line, e) {
+				t.Errorf("record %q holds the entry name %q: %s", r.Message, e, line)
+			}
+		}
+	}
+}
+
+// TestCarryOverFailureSummary checks the fixed step names and error classes
+// that the carry-over failure record carries.
+func TestCarryOverFailureSummary(t *testing.T) {
+	for _, tc := range []struct {
+		err          error
+		stage, class string
+	}{
+		{carryOverStage("read", fmt.Errorf("read: %w", fs.ErrNotExist)), "read", "not-exist"},
+		{carryOverStage("copy", &fs.PathError{Op: "open", Path: "p", Err: fs.ErrPermission}), "copy", "permission"},
+		{carryOverStage("create", fs.ErrExist), "create", "exist"},
+		{carryOverStage("open", errors.New("x")), "open", "other"},
+		{errors.Join(carryOverStage("copy", errors.New("x")), carryOverStage("remove", fs.ErrNotExist)), "copy", "other"},
+		{errors.New("x"), "other", "other"},
+	} {
+		if stage, class := carryOverFailureSummary(tc.err); stage != tc.stage || class != tc.class {
+			t.Errorf("carryOverFailureSummary(%v) = %q, %q; want %q, %q", tc.err, stage, class, tc.stage, tc.class)
+		}
+	}
+	if carryOverStage("read", nil) != nil {
+		t.Error("carryOverStage(nil) is not nil")
 	}
 }

@@ -50,7 +50,7 @@ instructions_file: .claude/CLAUDE.md
 system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native
 model_aliases:
-  small: haiku
+  small: claude-haiku-5-5
   medium: claude-sonnet-5-5
   large: claude-opus-5-5
   extra-large: claude-fable-5-1

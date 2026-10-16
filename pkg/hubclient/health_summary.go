@@ -106,6 +106,9 @@ type HealthSummaryHub struct {
 	// TestIdentityWebSessionsUnavailableReason names why test identity web
 	// sessions are unavailable while the member tier is on, or "".
 	TestIdentityWebSessionsUnavailableReason string `json:"test_identity_web_sessions_unavailable_reason"`
+	// TestAdminWebSessionsEnabled is true when admin-kind test identities
+	// may hold web sessions on the hub (phase WS4).
+	TestAdminWebSessionsEnabled bool `json:"test_admin_web_sessions_enabled"`
 	// TestMode is the hub's resolved --test-mode level (off, member, admin
 	// or super-admin); empty from a hub that predates --test-mode.
 	TestMode string `json:"test_mode"`

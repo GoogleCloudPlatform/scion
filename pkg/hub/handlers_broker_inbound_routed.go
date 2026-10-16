@@ -191,6 +191,9 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		req.Message.Msg = content
 		req.Message.Urgent = true
 	}
+	// Rewrite agent-prefixed mentions before routing extracts mentions, so
+	// the routed mentions and the stored body come from the same text.
+	req.Message.Msg = rewriteIncomingAgentMentions(req.Message.Msg)
 
 	// --- Resolve default agent ---
 	var defaultAgent *store.Agent

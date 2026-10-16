@@ -450,7 +450,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
-		"grantProjectVisitor": true,
+		"grantProjectVisitor": true, "linkPendingVisitor": true,
 	}, creators, "every function that calls CreateUser, CreateFederatedUser or another checked Create*User method")
 	for fn := range creators {
 		if reason, ok := exempt[fn]; ok {
@@ -510,10 +510,13 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 	// transport identity before its first lookup.
 	assert.Equal(t, []string{
 		"Exchange s.resolver",
-		"agentPTYPath rt.router",
+		"agentPTYPath rtr",
 		"authenticateExternalBearer cfg.GoogleResolver",
-		"brokerPTYPath rt.router",
+		"brokerPTYPath rtr",
 		"cleanupNFSSharedDirTree runtime.NewNFSBackend()",
+		// The experiments registry (Registry.Resolve), not a user or
+		// transport resolver.
+		"experimentEnabledIn s.experimentRegistry()",
 		"resolveAsNeededForKeys d.secretBackend",
 		"resolveNFSSharedDirPath runtime.NewNFSBackend()",
 		"resolveOutboundRouting messaging",

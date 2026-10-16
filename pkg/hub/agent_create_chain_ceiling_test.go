@@ -199,7 +199,9 @@ var expectedReadsBeforeDeliverEligibility = []string{
 	"walkDelegationChainHops",
 	"resolveChainRoot",
 	"agentSourceEffectCeiling",
-	"ceilingFilteredAgentScopes",
+	// The coverage read: the chain filter without the test-admin clamp
+	// (admin tier A3 keeps the clamp out of child edges).
+	"chainFilteredAgentScopes",
 }
 
 // edgeReadCaller names the innermost marker function on the stack of an
@@ -207,6 +209,7 @@ var expectedReadsBeforeDeliverEligibility = []string{
 func edgeReadCaller() string {
 	markers := []string{
 		"parentDeliverEligibility",
+		"chainFilteredAgentScopes",
 		"ceilingFilteredAgentScopes",
 		"agentSourceEffectCeiling",
 		"walkDelegationChainHops",

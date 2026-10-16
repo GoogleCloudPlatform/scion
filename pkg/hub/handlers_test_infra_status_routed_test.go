@@ -33,19 +33,19 @@ func TestTestInfraStatusRouted_UnauthenticatedFlagOff(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, false)
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":false,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"","testAdminWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 func TestTestInfraStatusRouted_UnauthenticatedMemberOn(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, true)
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`, rec.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`, rec.Body.String())
 }
 
 func TestTestInfraStatusRouted_SameForSignedInAndInvalidToken(t *testing.T) {
 	srv, _ := newTestIdentityServer(t, true)
-	want := `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testIssuerAudience":""}`
+	want := `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

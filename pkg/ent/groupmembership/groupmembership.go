@@ -28,6 +28,10 @@ const (
 	FieldUserID = "user_id"
 	// FieldAgentID holds the string denoting the agent_id field in the database.
 	FieldAgentID = "agent_id"
+	// FieldExpiresAt holds the string denoting the expires_at field in the database.
+	FieldExpiresAt = "expires_at"
+	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
+	FieldIssuanceID = "issuance_id"
 	// EdgeGroup holds the string denoting the group edge name in mutations.
 	EdgeGroup = "group"
 	// EdgeUser holds the string denoting the user edge name in mutations.
@@ -68,6 +72,8 @@ var Columns = []string{
 	FieldGroupID,
 	FieldUserID,
 	FieldAgentID,
+	FieldExpiresAt,
+	FieldIssuanceID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -150,6 +156,16 @@ func ByUserID(opts ...sql.OrderTermOption) OrderOption {
 // ByAgentID orders the results by the agent_id field.
 func ByAgentID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAgentID, opts...).ToFunc()
+}
+
+// ByExpiresAt orders the results by the expires_at field.
+func ByExpiresAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExpiresAt, opts...).ToFunc()
+}
+
+// ByIssuanceID orders the results by the issuance_id field.
+func ByIssuanceID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIssuanceID, opts...).ToFunc()
 }
 
 // ByGroupField orders the results by group field.

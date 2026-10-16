@@ -49,6 +49,17 @@ type UIDPreconditionDeleter interface {
 // context.WithTimeout(context.Background(), 60*time.Second) for this call.
 // Every handle is attempted even if one fails; the returned error joins all
 // failures (nil if every delete succeeded).
+//
+// What a successful delete means is the runtime's DeleteResource contract.
+// For Cloud Run Instances, nil means every delete was accepted, not that
+// each instance is confirmed gone: a delete can take longer than the
+// cleanup budget, and the server finishes it once accepted
+// (ptone/scion#5154). The broker's launch journal entry is removed when
+// the launch ends whatever cleanup returns (unless a shutdown drain cut the
+// launch short), so neither an accepted delete
+// that later fails on the server nor a cleanup error is retried from the
+// journal; the backstop is scion delete. This is accepted because the live
+// check (ptone/scion#4760) saw no accepted delete fail afterwards.
 func (m *AgentManager) CleanupLaunch(ctx context.Context, handles []ResourceHandle) error {
 	deleter, supportsUIDPrecondition := m.Runtime.(UIDPreconditionDeleter)
 

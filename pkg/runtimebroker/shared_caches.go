@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
@@ -136,8 +137,8 @@ func NewSharedCaches(templateDir string, maxSize int64) (*SharedCaches, error) {
 // instanceTemplateDir is the template directory of the instance's
 // partition.
 func (c *SharedCaches) instanceTemplateDir(brokerID string) (string, error) {
-	if brokerID == "" || brokerID == "." || brokerID == ".." || filepath.Base(brokerID) != brokerID {
-		return "", fmt.Errorf("broker ID %q is not a single path element", brokerID)
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", err
 	}
 	return filepath.Join(c.root, "instances", brokerID, "templates"), nil
 }

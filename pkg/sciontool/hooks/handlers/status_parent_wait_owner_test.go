@@ -126,6 +126,35 @@ func TestParentWaitOwners_LastOwnerLeavesParentQuestion(t *testing.T) {
 	}
 }
 
+// Edge 1: a clear or compact session-start does not answer the parent's
+// question. The parent's own restart and the last owner's restart each leave
+// the parent's question as an agent-set wait (no marker, no owner list, no
+// parentWait) and send no Hub update; the parent's question was already
+// reported as waiting_for_input.
+func TestParentWaitOwners_InPlaceSessionStartKeepsParentQuestion(t *testing.T) {
+	for _, source := range []string{"clear", "compact"} {
+		for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
+			for _, who := range []struct{ name, agentID string }{
+				{"parent restart", ""},
+				{"last owner restart", parentHeldSubA},
+			} {
+				t.Run(source+"/"+tool+"/"+who.name, func(t *testing.T) {
+					sh, hh, sent := claudeHubSetup(t)
+					_, info := ownerHeldWithParentQuestion(t, sh, hh, sent, tool)
+					require.Equal(t, parentWaitAgent, info[parentWaitKey])
+
+					got, info := parentHeldStep(t, sh, hh, sent, parentHeldSessionStart(t, source, who.agentID))
+					assert.Equal(t, "waiting_for_input", info["activity"], "the parent's question is still open")
+					assert.NotContains(t, info, activitySourceKey, "an agent-set wait, no session-restart marker")
+					assert.NotContains(t, info, notificationWaitAgentsKey)
+					assert.NotContains(t, info, parentWaitKey)
+					assert.Empty(t, got, "no Hub update")
+				})
+			}
+		}
+	}
+}
+
 // Edge 1: when the parent's question is answered first, its tool-end keeps
 // the question recorded (as for an agent-set wait), and its next tool-start
 // clears it while the owner's wait stays. The owner's SubagentStop then

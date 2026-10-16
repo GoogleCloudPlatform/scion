@@ -133,6 +133,11 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 	if denied := a.refuseTestAdminDeniedGrant(ctx, actor, grant); denied != nil {
 		return *denied
 	}
+	// Every grant an admin-kind test identity makes must expire with it
+	// (admin tier A3): without the request's grant shaping it is refused.
+	if denied := a.refuseTestAdminUnshapedGrant(ctx, actor, grant); denied != nil {
+		return *denied
+	}
 
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {

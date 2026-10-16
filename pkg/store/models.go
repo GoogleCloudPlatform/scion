@@ -153,8 +153,8 @@ type Agent struct {
 	//
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
-	// The only writers are BeginLaunch, MarkLaunchAccepted, EndLaunch,
-	// ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
+	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
+	// EndLaunch, ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
 	// launch_error / end an active launch" rule inside UpdateAgent and
 	// UpdateAgentStatus when the written phase is "running" (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
@@ -171,6 +171,21 @@ type Agent struct {
 	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
 	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
 	LaunchCause string `json:"-"`
+	// LaunchPriorPhase is the effective resting phase a start or restart
+	// launch began from (BeginStartLaunch; "" for a create launch). A
+	// failed start-kind launch reads it to choose its end phase
+	// (ptone/scion#4669).
+	LaunchPriorPhase string `json:"-"`
+	// LaunchRevokeOnFail is the Hub's decision, taken when a start launch
+	// began, whether a failed end revokes the start's credential.
+	LaunchRevokeOnFail bool `json:"-"`
+	// LaunchResumePhase is the resume memory of a failed start: the resting
+	// phase a start-kind launch began from when its failure left the row in
+	// phase error, or "". Read it through EffectiveRestingPhase. Written by
+	// the launch-ending writes of start-kind launches, and cleared by the
+	// store on any write of a phase other than starting or error
+	// (entc.ClearLaunchResumePhaseHook).
+	LaunchResumePhase string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -320,11 +335,30 @@ func (a *Agent) IsIncompleteCreate() bool {
 		return false
 	}
 	switch a.Phase {
-	case "suspended", "stopping", "stopped", "error":
+	case "suspended", "stopping", "stopped", "error", "halted":
 	default:
 		return false
 	}
 	return a.LaunchState == "active" || a.LaunchError != ""
+}
+
+// EffectiveRestingPhase returns the phase the Hub's branch selectors read
+// to choose how to start agent a (ptone/scion#4669): the resume memory
+// LaunchResumePhase when the stored phase is error, the memory is set and
+// no launch is active on the row, and otherwise the stored phase. A failed
+// async start from suspended, created, provisioning or halted leaves the row
+// in error with the memory set, so a later plain start or resume behaves
+// as it would have before the failed attempt. Callers keep the result in
+// a local variable and never write it back to a.Phase, which whole-row
+// UpdateAgent writes would persist.
+func EffectiveRestingPhase(a *Agent) string {
+	if a == nil {
+		return ""
+	}
+	if a.Phase == "error" && a.LaunchResumePhase != "" && a.LaunchState != LaunchStateActive {
+		return a.LaunchResumePhase
+	}
+	return a.Phase
 }
 
 // ReincarnationState values for Agent.ReincarnationState.
@@ -1343,6 +1377,14 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storageBucket,omitempty"` // Bucket name
 	StoragePath   string `json:"storagePath,omitempty"`   // Path within bucket
 
+	// Layout is the storage layout of the harness-config's files
+	// (ptone/scion#4219): "" (legacy) stores each file at
+	// <StoragePath>/<path>; HarnessConfigLayoutBlobs stores each file once,
+	// by content, at <StoragePath>.blobs/<sha256 hex>. Only the hub's
+	// harness-config commit path changes it; CreateHarnessConfig and
+	// UpdateHarnessConfigContent write it and UpdateHarnessConfig never does.
+	Layout string `json:"layout,omitempty"`
+
 	// File manifest
 	Files []TemplateFile `json:"files,omitempty"` // Manifest of harness config files (reuses TemplateFile)
 
@@ -1370,6 +1412,13 @@ type HarnessConfig struct {
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
+
+// HarnessConfigLayoutBlobs is the content-addressed harness-config storage
+// layout (HarnessConfig.Layout). It is the same layout as
+// TemplateLayoutBlobs: every file is stored once at
+// <StoragePath>.blobs/<sha256 hex>, and objects are never overwritten with
+// different content (ptone/scion#4219).
+const HarnessConfigLayoutBlobs = TemplateLayoutBlobs
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
@@ -1494,9 +1543,10 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
-	// IssuerDelegationID is set only on a test-fixture row issued through
-	// a workload-bound issuer delegation (TestIdentityDelegation), at
-	// create, and never changes. Nil for session and PAT issuance.
+	// IssuerDelegationID is set only on a test identity row (test fixture,
+	// or an admin kind since phase X4) issued through a workload-bound
+	// issuer delegation (TestIdentityDelegation), at create, and never
+	// changes. Nil for session and PAT issuance.
 	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
@@ -1556,6 +1606,10 @@ type ExpiredTestFixtureQuery struct {
 	AfterID        string
 	// Limit caps the rows returned when positive.
 	Limit int
+	// IncludeAdminKinds also selects the admin-kind test identities
+	// (test_hub_admin, test_super_admin; admin tier A3), which always
+	// carry an expiry as well. False selects test_fixture rows only.
+	IncludeAdminKinds bool
 }
 
 // FixtureRootedResources is what Store.ListFixtureRootedResources found for
@@ -1727,10 +1781,13 @@ type TestIdentityDelegation struct {
 	ID          string
 	GrantorID   string
 	WorkloadSub string
-	// Scope is the single delegated scope (test_identity:issue).
+	// Scope is the single delegated scope: test_identity:issue, or
+	// test_identity:issue_admin or test_identity:issue_super_admin (X4).
 	Scope string
 	// MemberCap is the number of live test identities the delegation may
-	// hold at once.
+	// hold at once: member and viewer identities for test_identity:issue,
+	// identities of the scope's admin kind for an admin scope (the API
+	// calls it adminCap there).
 	MemberCap int
 	Label     string
 	Created   time.Time
@@ -1875,6 +1932,11 @@ type InviteCode struct {
 	CreatedBy  string    `json:"createdBy"`
 	Note       string    `json:"note"`
 	Created    time.Time `json:"created"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // InviteCodePrefix distinguishes invite codes from other token types.
@@ -1942,6 +2004,11 @@ type BrokerJoinToken struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
 	CreatedBy string    `json:"createdBy"` // User ID who created the token
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // BrokerStatus constants
@@ -2060,6 +2127,14 @@ type NotificationSubscription struct {
 	CreatedAt         time.Time `json:"createdAt"`
 	CreatedBy         string    `json:"createdBy"`
 }
+
+// CreatorFallbackSubscriptionID is the SubscriptionID of a notification
+// sent to an agent's creator without a subscription: the HALTED
+// notification a halted agent's creator gets when none of the creator's
+// subscriptions matched (ptone/scion#4853). It is the nil UUID, which no
+// subscription has; the column carries no foreign key, and the retry sweep
+// rebuilds such a notification's subscriber from the notification itself.
+const CreatorFallbackSubscriptionID = "00000000-0000-0000-0000-000000000000"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
@@ -2304,6 +2379,15 @@ type GroupMember struct {
 	Role       string    `json:"role"`       // "member", "admin", "owner"
 	AddedAt    time.Time `json:"addedAt"`
 	AddedBy    string    `json:"addedBy,omitempty"`
+	// ExpiresAt bounds the membership: past it the membership confers
+	// nothing and is not read. Nil is unbounded. Grant shaping forces it
+	// for a membership an admin-kind test identity adds.
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // GroupMemberType constants
@@ -2515,6 +2599,9 @@ const (
 	LifecycleHookTriggerSuspended = "suspended"
 	LifecycleHookTriggerStopped   = "stopped"
 	LifecycleHookTriggerError     = "error"
+	// LifecycleHookTriggerHalted fires when the platform halts an agent
+	// (ptone/scion#4853).
+	LifecycleHookTriggerHalted = "halted"
 )
 
 // LifecycleHookActionType constants (v1).
@@ -3568,6 +3655,11 @@ type RoleDefinition struct {
 	// the seeded project-visitor role. CreateRoleDefinition stores nil
 	// as true. Read it through ConfersProjectMembership.
 	ConfersMembership *bool `json:"confersMembership,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ConfersProjectMembership reports whether a binding of rd makes its
@@ -3592,6 +3684,15 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
+	// IssuanceID is the issuance ID of the admin-kind test identity whose
+	// request created the row (admin tier A3 grant shaping). The store sets
+	// it only from the context's GrantShaping; a value supplied by the
+	// caller is ignored.
+	IssuanceID *string `json:"issuanceId,omitempty"`
 }
 
 // ProjectMembership is a convenience view of role bindings scoped to a project.
@@ -4406,10 +4507,13 @@ type MutationAuditFilter struct {
 	TargetType         string
 	TargetID           string
 	CorrelationID      string
-	Since              time.Time
-	Until              time.Time
-	Limit              int
-	Offset             int
+	// ExecutorID, when set, keeps only records whose executor_id equals
+	// it (for example a test identity purge's test_identity:<id>).
+	ExecutorID string
+	Since      time.Time
+	Until      time.Time
+	Limit      int
+	Offset     int
 }
 
 // =============================================================================
