@@ -187,6 +187,77 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the matrix server configures no attachment store, so every caller gets 503 before the attachment is looked up",
 		Pin:    "TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead",
 	},
+	// Global catalog and project-scope branches whose refusal the generic
+	// probes cannot observe. Each is pinned by a test that drives real
+	// tokens through the branch.
+	{OperationID: "template.clone", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the source needs template:read before the destination's template:create is checked, and a token without the read selector is answered 404 on the source, so a POST refusal is not 403",
+		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.clone", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
+		Reason: "the route gate needs harness_config:read on the source before the destination's harness_config:create is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
+	},
+	{OperationID: "template.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the record needs template:read before template:create on the owning scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.reimport", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
+		Reason: "the route gate needs harness_config:read before harness_config:create on the owning scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
+	},
+	{OperationID: "harnessconfig.delete", Method: "DELETE", Pattern: "/api/v1/harness-configs/{id}"}: {
+		Reason: "the route gate needs harness_config:read before harness_config:delete on the owning scope is checked, and a token without the read selector is answered 404, so a DELETE refusal is not 403",
+		Pin:    "TestHarnessDeleteToken_RequiresReadAndDelete",
+	},
+	{OperationID: "harnessconfig.read", Method: "GET", Pattern: "/api/v1/harness-configs/{id}/image-status"}: {
+		Reason: "an admitted read of a config with an image queries the image registry, and one without an image answers 400, so the admitting token cannot show the target exists with a 2xx",
+		Pin:    "TestHarnessImageStatusToken_RequiresRead",
+	},
+	{OperationID: "skill.resolve.local", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a reference the caller may not read answers as not found inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestLocalSkillResolve_TokenNeedsSkillRead",
+	},
+	{OperationID: "skill.resolve.github.project", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a refused reference answers forbidden inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestProjectGitHubSkillResolve_TokenNeedsSkillReadOnProject",
+	},
+	{OperationID: "skill.resolve.github.public", Method: "POST", Pattern: "/api/v1/skills/resolve"}: {
+		Reason: "a refused reference answers forbidden inside a 200 response, so a refused token is not answered 403",
+		Pin:    "TestPublicGitHubSkillResolve_TokenNeedsSkillReadOnHub",
+	},
+	{OperationID: "template.import.global", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "template.import.global", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "harnessconfig.import.global", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "harnessconfig.import.global", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestGlobalResourceImport_ResolvesHubThroughEvidence",
+	},
+	{OperationID: "template.import.project", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "template.import.project", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "harnessconfig.import.project", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "an admitted import fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
+	{OperationID: "harnessconfig.import.project", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "an admitted discovery fetches its source after the check; the pin stops the fetch at a source that is not a GitHub URL",
+		Pin:    "TestProjectResourceImport_TokenNeedsCreateOnTheProject",
+	},
 	{OperationID: "artifact.update", Method: "PATCH", Pattern: "/api/v1/artifacts/{id}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
