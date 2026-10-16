@@ -16,6 +16,7 @@ package config
 
 import (
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/knadh/koanf/v2"
@@ -267,20 +268,25 @@ func cloneStringMap(m map[string]string) map[string]string {
 // RedactImageRegistry returns registry with any userinfo (user:password@)
 // replaced by "***@", keeping the scheme, host and path. An image registry
 // prefix never needs credentials, so a value carrying them is an operator
-// mistake that must not be displayed or logged as is.
+// mistake that must not be displayed or logged as is. The userinfo ends at
+// the last "@" outside a trailing image digest ("@sha256:<hex>"), so a "/"
+// inside a password is redacted too.
 func RedactImageRegistry(registry string) string {
 	rest := registry
 	scheme := ""
 	if i := strings.Index(rest, "://"); i >= 0 {
 		scheme, rest = rest[:i+3], rest[i+3:]
 	}
-	authority := rest
-	if i := strings.Index(rest, "/"); i >= 0 {
-		authority = rest[:i]
+	digest := ""
+	if m := imageDigestSuffix.FindStringIndex(rest); m != nil {
+		rest, digest = rest[:m[0]], rest[m[0]:]
 	}
-	at := strings.LastIndex(authority, "@")
+	at := strings.LastIndex(rest, "@")
 	if at < 0 {
 		return registry
 	}
-	return scheme + "***@" + rest[at+1:]
+	return scheme + "***@" + rest[at+1:] + digest
 }
+
+// imageDigestSuffix matches a trailing image digest ("@sha256:<hex>").
+var imageDigestSuffix = regexp.MustCompile(`@[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[0-9a-fA-F]{32,}$`)

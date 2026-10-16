@@ -401,9 +401,13 @@ func TestRedactImageRegistry(t *testing.T) {
 		"user:secret@registry.example/team":        "***@registry.example/team",
 		"https://user:secret@registry.example/a/b": "https://***@registry.example/a/b",
 		"token@registry.example":                   "***@registry.example",
-		"registry.example/path@sha256:abc":         "registry.example/path@sha256:abc",
-		"a:b@c:d@registry.example:5000/x":          "***@registry.example:5000/x",
-		"":                                         "",
+		"registry.example/path@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "registry.example/path@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"user:pa/ss@registry.example/team": "***@registry.example/team",
+		"user:pa/ss@registry.example/team@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "***@registry.example/team@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"https://u:p/w@registry.example/x": "https://***@registry.example/x",
+		"registry.example/team/sub":        "registry.example/team/sub",
+		"a:b@c:d@registry.example:5000/x":  "***@registry.example:5000/x",
+		"":                                 "",
 	}
 	for in, want := range tests {
 		if got := RedactImageRegistry(in); got != want {

@@ -140,7 +140,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			eb := RuntimeBrokerWithProvider{
-				RuntimeBroker: broker,
+				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
 			if caps != nil && i < len(caps) {

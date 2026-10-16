@@ -36,6 +36,7 @@ import (
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	gcstorage "cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -231,32 +232,34 @@ func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params m
 		harnesses = []string{"claude", "antigravity"}
 	}
 
+	// The registry is shown redacted (config.RedactImageRegistry).
 	log.Debug("Starting pull-images",
-		"runtime", runtimeBin, "registry", registry, "tag", tag,
+		"runtime", runtimeBin, "registry", config.RedactImageRegistry(registry), "tag", tag,
 		"harnesses", fmt.Sprint(harnesses))
 
 	_, _ = fmt.Fprintf(logger, "Using runtime: %s\n", runtimeBin)
-	_, _ = fmt.Fprintf(logger, "Registry: %s, Tag: %s\n", registry, tag)
+	_, _ = fmt.Fprintf(logger, "Registry: %s, Tag: %s\n", config.RedactImageRegistry(registry), tag)
 	_, _ = fmt.Fprintf(logger, "Pulling %d image(s)...\n\n", len(harnesses))
 
 	pulled := 0
 	var lastErr error
 	for _, h := range harnesses {
 		image := fmt.Sprintf("%s/scion-%s:%s", registry, h, tag)
-		_, _ = fmt.Fprintf(logger, "Pulling %s ...\n", image)
-		log.Debug("Pulling image", "image", image)
+		shown := config.RedactImageRegistry(image)
+		_, _ = fmt.Fprintf(logger, "Pulling %s ...\n", shown)
+		log.Debug("Pulling image", "image", shown)
 
 		cmd := exec.CommandContext(ctx, runtimeBin, "image", "pull", image)
 		cmd.Stdout = logger
 		cmd.Stderr = logger
 		if err := cmd.Run(); err != nil {
 			_, _ = fmt.Fprintf(logger, "  ERROR: %v\n\n", err)
-			log.Error("Image pull failed", "image", image, "error", err)
+			log.Error("Image pull failed", "image", shown, "error", err)
 			lastErr = err
 			continue
 		}
 		_, _ = fmt.Fprintf(logger, "  OK\n\n")
-		log.Debug("Image pulled successfully", "image", image)
+		log.Debug("Image pulled successfully", "image", shown)
 		pulled++
 	}
 
