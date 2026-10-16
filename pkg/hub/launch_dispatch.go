@@ -326,6 +326,19 @@ type launchFields struct {
 	LaunchID         string
 	TimeoutSeconds   int
 	KeepaliveSeconds int
+	// Remaining recomputes the remaining whole-launch budget, for a
+	// resend within the same send (a hash-mismatch repair), so the budget
+	// the broker gets never exceeds the stored deadline. Nil means
+	// TimeoutSeconds.
+	Remaining func() int
+}
+
+// remaining returns f.Remaining(), or f.TimeoutSeconds when it is nil.
+func (f launchFields) remaining() int {
+	if f.Remaining == nil {
+		return f.TimeoutSeconds
+	}
+	return f.Remaining()
 }
 
 // launchSendFunc performs the transport send of a launching request with
@@ -351,6 +364,7 @@ func (d *HTTPAgentDispatcher) sendLaunching(
 		LaunchID:         launchID,
 		TimeoutSeconds:   remainingLaunchSeconds(settings.Timeout, time.Since(began)),
 		KeepaliveSeconds: settings.KeepaliveSeconds,
+		Remaining:        func() int { return remainingLaunchSeconds(settings.Timeout, time.Since(began)) },
 	})
 	switch {
 	case errors.Is(err, ErrLifecycleDeferred):

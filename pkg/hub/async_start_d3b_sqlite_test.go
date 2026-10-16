@@ -346,12 +346,15 @@ var errParityRefused = &brokerStatusError{StatusCode: 400, Body: "no"}
 // synchronously, as by an old broker.
 type asyncHubDispatcher struct {
 	*claimTestDispatcher
-	s       store.Store
-	accept  bool
-	mu      sync.Mutex
-	opts    []StartDispatchOptions
-	resumes []bool
-	plain   int
+	s      store.Store
+	accept bool
+	// onAccept, when set, runs after a start is accepted (for example a
+	// delete that wins while the start is in flight).
+	onAccept func(ctx context.Context, a *store.Agent)
+	mu       sync.Mutex
+	opts     []StartDispatchOptions
+	resumes  []bool
+	plain    int
 }
 
 func (d *asyncHubDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, resume bool) error {
@@ -376,6 +379,9 @@ func (d *asyncHubDispatcher) DispatchAgentStartWithOptions(ctx context.Context, 
 	}
 	if _, err := d.s.MarkLaunchAccepted(ctx, a.ID, id, "inst-1"); err != nil {
 		return nil, err
+	}
+	if d.onAccept != nil {
+		d.onAccept(ctx, a)
 	}
 	return &StartDispatchResult{Launch: &LaunchAccepted{ID: id, Owner: "inst-1"}}, nil
 }
@@ -597,6 +603,65 @@ func TestAsyncStart_CreateEndpointAccepted(t *testing.T) {
 	}
 }
 
+// TestAsyncStart_DeleteWonDuringAcceptedStart pins review r1 O3: a delete
+// that claims or removes the row while an asynchronous start is being
+// accepted answers 409 delete_in_progress, as a synchronous start does, on
+// lifecycle start, lifecycle restart and the create endpoint; with no
+// delete the answer is the launching agent.
+func TestAsyncStart_DeleteWonDuringAcceptedStart(t *testing.T) {
+	type entry struct {
+		name  string
+		phase state.Phase
+		send  func(t *testing.T, f *reconcileFixture, a *store.Agent) (int, string)
+	}
+	entries := []entry{
+		{"lifecycle start", state.PhaseStopped, func(t *testing.T, f *reconcileFixture, a *store.Agent) (int, string) {
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", map[string]bool{"acceptAsyncLaunch": true})
+			return rec.Code, rec.Body.String()
+		}},
+		{"lifecycle restart", state.PhaseRunning, func(t *testing.T, f *reconcileFixture, a *store.Agent) (int, string) {
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", map[string]bool{"acceptAsyncLaunch": true})
+			return rec.Code, rec.Body.String()
+		}},
+		{"create endpoint resume", state.PhaseSuspended, func(t *testing.T, f *reconcileFixture, a *store.Agent) (int, string) {
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: a.Slug, ProjectID: f.projectID, AcceptAsyncLaunch: true})
+			return rec.Code, rec.Body.String()
+		}},
+	}
+	deletes := []struct {
+		name  string
+		apply func(t *testing.T, s store.Store, id string)
+		won   bool
+	}{
+		{"none", func(*testing.T, store.Store, string) {}, false},
+		{"delete-claimed", func(t *testing.T, s store.Store, id string) {
+			claimForTest(t, s, id, store.DeletionStateDeleting, time.Minute)
+		}, true},
+		{"hard-deleted", func(t *testing.T, s store.Store, id string) {
+			require.NoError(t, s.DeleteAgent(context.Background(), id))
+		}, true},
+	}
+	for i, e := range entries {
+		for j, del := range deletes {
+			t.Run(e.name+"/"+del.name, func(t *testing.T) {
+				f, d := newAsyncStartFixture(t)
+				a := f.addAgent(fmt.Sprintf("as-dw-%d-%d", i, j), string(e.phase), "")
+				d.onAccept = func(_ context.Context, a *store.Agent) { del.apply(t, f.s, a.ID) }
+				code, body := e.send(t, f, a)
+				opts, _, _ := d.calls()
+				require.Len(t, opts, 1, "the start was accepted asynchronously")
+				if !del.won {
+					require.Equal(t, http.StatusOK, code, body)
+					assert.Contains(t, body, `"launch"`)
+					return
+				}
+				require.Equal(t, http.StatusConflict, code, body)
+				assert.Contains(t, body, ErrCodeDeleteInProgress)
+			})
+		}
+	}
+}
+
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase
 // rule on the create endpoint: the first start of a created agent (a
 // counted phase) is synchronous even when opted in.
@@ -678,7 +743,14 @@ func TestAsyncStart_CrossNode(t *testing.T) {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			if !ownerAsync {
 				assert.Nil(t, launchOf(body))
-				assert.Equal(t, string(state.PhaseRunning), getAgent(t, s, agent.ID).Phase, "the synchronous owner's start completes as before")
+				row := getAgent(t, s, agent.ID)
+				assert.Equal(t, string(state.PhaseRunning), row.Phase, "the synchronous owner's start completes as before")
+				// The requester began a launch, then its client deferred
+				// (no route check here): it ended that launch before
+				// handing off, so no launch is left for the reaper.
+				require.NotEmpty(t, row.LaunchID)
+				assert.Equal(t, store.LaunchStateEnded, row.LaunchState)
+				assert.Equal(t, store.LaunchEndReasonNotLaunched, row.LaunchEndReason)
 				return
 			}
 			od.mu.Lock()

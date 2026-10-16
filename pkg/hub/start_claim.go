@@ -484,6 +484,8 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	supersedesQueuedStop := agent.ContainerStatus == containerStatusStopQueued
 	sd := opts.Dispatch
 	callerDeadline, hasCallerDeadline := ctx.Deadline()
+	// accepted: a broker accepted the start as an asynchronous launch.
+	accepted := false
 	err := s.withStartClaim(ctx, agent, opts.Kind, opts.Existing, func(ctx context.Context, fence func() error) (bool, error) {
 		endOp := s.beginLifecycleOp(agent.ID)
 		defer endOp()
@@ -544,6 +546,7 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 			// no started status, and hand the claim to the launch, whose
 			// end settles it.
 			sd.settle()
+			accepted = true
 			if opts.OnLaunchAccepted != nil {
 				opts.OnLaunchAccepted(ctx, agent)
 			}
@@ -569,7 +572,14 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		s.addEphemeralWorkspaceStartWarning(ctx, agent, hadEphemeral)
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
-		s.clearSupersededQueuedStop(ctx, agent)
+		// A handed-off start's container is still launching: clear the
+		// queued stop but leave the container status to the launch.
+		s.clearSupersededQueuedStopFor(ctx, agent, !accepted)
+	}
+	if err == nil && accepted {
+		// Watchers see the launching agent (phase starting, its launch)
+		// now, not at the launch's first report (ptone/scion#4669).
+		s.publishAgentStatusByID(ctx, agent.ID)
 	}
 	if err != nil && provisioned && startDidNotHappen(err) && agent.RunIntentAt != nil {
 		s.settleFailedProvisionedStart(ctx, agent.ID, *agent.RunIntentAt, "Start failed: "+err.Error()+". "+provisionedRestingNote)
@@ -593,6 +603,14 @@ const provisionedRestingNote = "The agent is still provisioned and can be starte
 // would repaint a deleting row running (ptone/scion#3696). The container
 // status becomes running unless the broker reported one.
 func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
+	s.clearSupersededQueuedStopFor(ctx, agent, true)
+}
+
+// clearSupersededQueuedStopFor is clearSupersededQueuedStop; with
+// setRunning false (a start handed off to an asynchronous launch, whose
+// container is still launching) it clears the queued-stop notice and
+// leaves the container status alone.
+func (s *Server) clearSupersededQueuedStopFor(ctx context.Context, agent *store.Agent, setRunning bool) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(cctx, agent.ID)
@@ -601,7 +619,7 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 		return
 	}
 	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
-	if cur.ContainerStatus == containerStatusStopQueued {
+	if setRunning && cur.ContainerStatus == containerStatusStopQueued {
 		upd.ContainerStatus = "running"
 	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
@@ -611,6 +629,21 @@ func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Age
 	if upd.ContainerStatus != "" {
 		agent.ContainerStatus = upd.ContainerStatus
 	}
+}
+
+// publishAgentStatusByID publishes the agent's current row as a status
+// event, best effort; a soft-deleted or unreadable row publishes nothing.
+func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
+	if s.events == nil {
+		return
+	}
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	cur, err := s.store.GetAgent(pctx, agentID)
+	if err != nil || !cur.DeletedAt.IsZero() {
+		return
+	}
+	s.events.PublishAgentStatus(pctx, cur)
 }
 
 // startDidNotHappen reports whether err is a start that definitely never

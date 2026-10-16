@@ -303,8 +303,8 @@ func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *
 //     credential. This differs on purpose from a synchronous restart of a
 //     stopped agent, which can revoke through DispatchAgentStart.
 //
-// Only create launches exist until asynchronous start ships, so the start
-// and restart rules are not reached yet.
+// Start and restart launches exist once asynchronous start is on
+// (hub.async_agent_start).
 func launchFailureRevokeReason(a *store.Agent) string {
 	switch a.LaunchKind {
 	case store.LaunchKindStart:

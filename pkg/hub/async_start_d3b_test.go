@@ -51,8 +51,11 @@ type hubInstanceListStore struct {
 
 func (s *hubInstanceListStore) ListHubInstances(_ context.Context, _ time.Duration) ([]store.HubInstance, time.Time, error) {
 	s.reads.Add(1)
-	if s.release != nil {
-		<-s.release
+	s.mu.Lock()
+	release := s.release
+	s.mu.Unlock()
+	if release != nil {
+		<-release
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -201,6 +204,37 @@ func TestAsyncStartGate_CachedAndRefreshedInBackground(t *testing.T) {
 	advance(2 * time.Second)
 	assert.True(t, srv.allLiveHubsHaveAsyncStart(), "the cached value while the refresh runs")
 	require.Eventually(t, func() bool { return !srv.allLiveHubsHaveAsyncStart() }, 5*time.Second, 5*time.Millisecond, "a list error turns it false")
+	assert.Equal(t, int32(2), st.reads.Load())
+}
+
+// TestAsyncStartGate_ExpiredAnswerNotUsed pins review r1 R1: an answer
+// older than asyncStartGateMaxAge (an idle gate) is not used. The start
+// reads false while the refresh runs, and the refreshed answer is used once
+// it lands.
+func TestAsyncStartGate_ExpiredAnswerNotUsed(t *testing.T) {
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	clock := now
+	var clockMu sync.Mutex
+	prev := asyncStartGateNow
+	asyncStartGateNow = func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }
+	t.Cleanup(func() { asyncStartGateNow = prev })
+	advance := func(d time.Duration) { clockMu.Lock(); clock = clock.Add(d); clockMu.Unlock() }
+
+	st := &hubInstanceListStore{now: now, rows: []store.HubInstance{hubRow(t, "a", now, time.Second, false, api.HubInstanceFeatureAsyncStartV1)}}
+	srv := &Server{store: st}
+	assert.False(t, srv.allLiveHubsHaveAsyncStart())
+	require.Eventually(t, srv.allLiveHubsHaveAsyncStart, 5*time.Second, 5*time.Millisecond)
+
+	// Idle past the bound, with the next read held.
+	release := make(chan struct{})
+	st.mu.Lock()
+	st.release = release
+	st.mu.Unlock()
+	advance(asyncStartGateMaxAge + time.Second)
+	assert.False(t, srv.allLiveHubsHaveAsyncStart(), "an expired true is not used")
+	assert.False(t, srv.allLiveHubsHaveAsyncStart(), "still false while the refresh runs")
+	close(release)
+	require.Eventually(t, srv.allLiveHubsHaveAsyncStart, 5*time.Second, 5*time.Millisecond, "the refreshed answer is used")
 	assert.Equal(t, int32(2), st.reads.Load())
 }
 

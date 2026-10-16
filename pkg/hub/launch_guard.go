@@ -256,6 +256,19 @@ func (s *Server) writeLaunchingAgent(ctx context.Context, w http.ResponseWriter,
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// writeLaunchAccepted answers a lifecycle start or restart whose start a
+// broker accepted as an asynchronous launch (ptone/scion#4669): 409
+// delete_in_progress when a delete won meanwhile, by deleteWonAfterLanding's
+// rule, as a synchronous start answers; otherwise 200 with the launching
+// agent (writeLaunchingAgent). The delete ends the launch itself.
+func (s *Server) writeLaunchAccepted(ctx context.Context, w http.ResponseWriter, agent *store.Agent, warnings []string) {
+	if s.deleteWonAfterLanding(ctx, agent.ID) {
+		writeDeleteWon(w, agent.ID, deletedWhileStartingMessage, warnings)
+		return
+	}
+	s.writeLaunchingAgent(ctx, w, agent, warnings)
+}
+
 // createRequestHasInputs reports whether a create/start request carried
 // inputs that a launching agent will not apply (template, task, config and
 // the like).

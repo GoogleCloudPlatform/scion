@@ -1497,6 +1497,11 @@ func (s *Server) handleExistingAgent(
 		}
 
 		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
 			if req.Notify {
 				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 			}
@@ -1650,6 +1655,11 @@ func (s *Server) handleExistingAgent(
 			}
 
 			if launchAccepted {
+				// A delete that won during the send answers as for a
+				// synchronous start; the delete ends the launch.
+				if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+					return existingAgentErrored
+				}
 				if req.Notify {
 					s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 				}
@@ -1897,6 +1907,11 @@ func (s *Server) handleExistingAgent(
 		}
 
 		if launchAccepted {
+			// A delete that won during the send answers as for a
+			// synchronous start; the delete ends the launch.
+			if s.existingAgentDeleteWonBeforeAnswer(ctx, w, existingAgent.ID, nil) {
+				return existingAgentErrored
+			}
 			if req.Notify {
 				s.createNotifySubscription(ctx, existingAgent.ID, existingAgent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 			}

@@ -35,7 +35,9 @@ import (
 // row. The answer is cached: a start reads the cached value (false until
 // the first refresh) and, when it is older than asyncStartGateTTL, starts
 // one refresh in the background, so a slow registry read never delays a
-// start. Stale and stopped rows are ignored: a node whose registry writes
+// start. An answer older than asyncStartGateMaxAge (two TTLs: an idle gate)
+// is not used: the start runs synchronously while the refresh runs, as for
+// a fresh process. Stale and stopped rows are ignored: a node whose registry writes
 // fail stops blocking after hubInstanceStaleAfter. The check fails safe:
 // on any doubt the start runs synchronously. It does not replace the
 // rollback rule (turn the experiment off, then wait launch_timeout plus
@@ -45,6 +47,10 @@ const (
 	// asyncStartGateTTL is how long a computed answer is used before a
 	// start triggers a refresh.
 	asyncStartGateTTL = 30 * time.Second
+	// asyncStartGateMaxAge is the oldest answer a start may use. Steady
+	// traffic refreshes every TTL and never reaches it; after an idle
+	// period the first starts run synchronously until the refresh lands.
+	asyncStartGateMaxAge = 2 * asyncStartGateTTL
 	// asyncStartGateRefreshTimeout bounds one registry read.
 	asyncStartGateRefreshTimeout = 5 * time.Second
 )
@@ -56,8 +62,8 @@ type asyncStartGate struct {
 	value       bool
 	refreshedAt time.Time // zero until the first refresh completes
 	inFlight    bool
-	// reason is the last logged reason the value is false ("" while true),
-	// so a change is logged once.
+	// reason is the last logged reason the value is false ("" while true):
+	// the answer is logged once per change of its value or reason.
 	reason string
 	logged bool
 }
@@ -76,23 +82,30 @@ func (s *Server) asyncStartAllowed() bool {
 	return s.allLiveHubsHaveAsyncStart()
 }
 
-// allLiveHubsHaveAsyncStart returns the cached answer, false before the
-// first refresh. When the answer is missing or older than
-// asyncStartGateTTL and no refresh is running, it starts one in the
-// background; it never waits for it.
+// allLiveHubsHaveAsyncStart returns the cached answer: false before the
+// first refresh and false for an answer older than asyncStartGateMaxAge.
+// When the answer is missing or older than asyncStartGateTTL and no
+// refresh is running, it starts one in the background; it never waits for
+// it.
 func (s *Server) allLiveHubsHaveAsyncStart() bool {
 	g := &s.asyncStartGate
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.inFlight && (g.refreshedAt.IsZero() || asyncStartGateNow().Sub(g.refreshedAt) >= asyncStartGateTTL) {
+	age := asyncStartGateNow().Sub(g.refreshedAt)
+	if !g.inFlight && (g.refreshedAt.IsZero() || age >= asyncStartGateTTL) {
 		g.inFlight = true
 		go s.refreshAsyncStartGate(context.Background())
+	}
+	if g.refreshedAt.IsZero() || age >= asyncStartGateMaxAge {
+		return false
 	}
 	return g.value
 }
 
 // refreshAsyncStartGate computes the answer from the registry and stores
-// it. It runs the read with its own bounded context.
+// it. It runs the read with its own bounded context. It logs when the
+// answer or the reason for a false answer changes (a different node, or a
+// different error), so each distinct cause is logged once.
 func (s *Server) refreshAsyncStartGate(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, asyncStartGateRefreshTimeout)
 	defer cancel()

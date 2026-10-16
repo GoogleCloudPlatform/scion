@@ -834,7 +834,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			dispatchErr = s.startAgentCore(ctx, agent, StartOpts{Kind: store.StartClaimUser, Resume: resume, SyncDispatchBound: true,
 				AcceptAsyncLaunch: startReq.AcceptAsyncLaunch, OnLaunchAccepted: onLaunchAccepted})
 			if dispatchErr == nil && launchAccepted {
-				s.writeLaunchingAgent(ctx, w, agent, dispatchWarns.Warnings())
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
 				return
 			}
 			startDispatched = dispatchErr == nil || errors.Is(dispatchErr, errStartedStatusWrite)
@@ -1081,7 +1081,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				// The start leg was accepted as an asynchronous restart
 				// launch: its end records running or stopped, keeps or
 				// releases the slot and settles the restart's claim.
-				s.writeLaunchingAgent(ctx, w, agent, dispatchWarns.Warnings())
+				s.writeLaunchAccepted(ctx, w, agent, dispatchWarns.Warnings())
 				return
 			}
 			if dispatchErr == nil {

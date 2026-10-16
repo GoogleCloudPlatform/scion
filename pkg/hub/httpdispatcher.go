@@ -3691,6 +3691,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 		if isHashMismatchError(err) {
 			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+				if f != nil {
+					// The repair took time: send the budget left now.
+					ex.LaunchTimeoutSeconds = f.remaining()
+				}
 				resp, err = d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, ex)
 			}
 		}
