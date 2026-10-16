@@ -266,10 +266,8 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.federation.update":     "Reserved in the permission registry: no route checks it",
 		"hub.teams_manifest.update": "Reserved in the permission registry: no route checks it",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
-		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":                    "Reserved in the permission registry: no route checks it",
 		"project.clone":                "NonRouteUse only, no route declaration",
 		"project.list":                 "NonRouteUse only, no route declaration",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",

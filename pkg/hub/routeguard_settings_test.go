@@ -503,6 +503,7 @@ func TestHubPermissionSelectors_MatchApprovedSet(t *testing.T) {
 		"hub.metrics.read":            "hub_metrics:read",
 		"hub.github_app.read":         "hub_github_app:read",
 		"hub.github_app.update":       "hub_github_app:update",
+		"hub.audit.read":              "hub_audit:read",
 	}
 	got := map[string]string{}
 	for _, perm := range permissions.Registry {
