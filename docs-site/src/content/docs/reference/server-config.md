@@ -296,7 +296,7 @@ An optional block of workload defaults for the agents a flat Runtime Broker inst
 | Key | Type | Precedence |
 | :--- | :--- | :--- |
 | `default_harness_config` | string | Below the template's and the agent's stored harness config; above the top-level `default_harness_config`. |
-| `image_registry` | string | Above the top-level `image_registry`. |
+| `image_registry` | string | Above the top-level `image_registry` of the settings file; below a saved Hub top-level value and the node's `SCION_IMAGE_REGISTRY` (see [Image registry order](/scion/reference/settings-precedence/#image-registry-order)). |
 | `volumes` | list of volume mounts | Appended after the harness config's volumes. |
 | `resources` | resource spec | The agent's own resources win over it; it wins over the Hub `agent_defaults.resources` and `default_resources`. |
 | `harness_overrides.<harness-config>` | `image`, `image_pull_policy`, `user`, `auth_selected_type`, `env`, `volumes`, `resources` | Applied over `harness_configs.<harness-config>`, as a profile's harness override is. An explicit `image` outranks the template and inline images (only a request image beats it). Its `resources` rank above the agent's own. An empty `env` value in any override marks a key the user must supply. Validated like a profile's harness override. |

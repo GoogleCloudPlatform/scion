@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -93,6 +94,12 @@ type HeartbeatService struct {
 	// answer the reported Capabilities.Attach via scionrt.HasAttachSupport —
 	// never constructed here.
 	defaultRuntime scionrt.Runtime
+
+	// nodeImageRegistry is this broker's SCION_IMAGE_REGISTRY, read once
+	// when the service is constructed and reported in every heartbeat's
+	// capabilities (StaticCapabilities), so the hub resolves dispatches to
+	// this broker with its node env (ptone/scion#3916).
+	nodeImageRegistry string
 
 	// listingDeadline bounds how long a heartbeat waits for the agent
 	// listing of its runtime targets (default plus auxiliary). A target not
@@ -213,6 +220,8 @@ func NewHeartbeatService(client hubclient.RuntimeBrokerService, brokerID string,
 		manager:         manager,
 		projectFilter:   projectFilter,
 		log:             log,
+		// Read once at construction (broker start).
+		nodeImageRegistry: config.ImageRegistryFromEnv(),
 	}
 }
 
@@ -431,7 +440,7 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 		// `scion reincarnate` gate is never stuck on a stale join-time
 		// snapshot for an already-registered broker. The same static set is
 		// sent at registration (StaticCapabilities), plus TemplateTiers below.
-		Capabilities: heartbeatCapabilities(defaultRuntime),
+		Capabilities: heartbeatCapabilities(defaultRuntime, s.nodeImageRegistry),
 	}
 	if s.workspaceStorage != nil {
 		heartbeat.WorkspaceStorage = s.workspaceStorage()
@@ -897,8 +906,8 @@ func (s *HeartbeatService) ForceHeartbeat(ctx context.Context) error {
 // heartbeatCapabilities is the capability set a heartbeat reports: the
 // static set (StaticCapabilities, also sent at registration) plus
 // TemplateTiers, which only the heartbeat and the info endpoint report.
-func heartbeatCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
-	c := StaticCapabilities(rt)
+func heartbeatCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient.BrokerCapabilities {
+	c := StaticCapabilities(rt, nodeImageRegistry)
 	// This broker applies hub telemetry defaults and policy as separate
 	// tiers (ptone/scion#4218).
 	c.TemplateTiers = true

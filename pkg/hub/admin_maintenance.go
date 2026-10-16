@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -349,11 +350,11 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &TemplateBlobGCExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
-			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
+			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
 			"tag", mc.ImageTag, "harnesses", fmt.Sprint(mc.Harnesses))
 		return NewPullImagesExecutor(PullImagesOptions{
 			RuntimeBin: mc.RuntimeBin,
-			Registry:   mc.ImageRegistry,
+			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			Harnesses:  mc.Harnesses,
 		}), nil
@@ -378,12 +379,12 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return NewRebuildContainerBinariesExecutor(mc.RepoPath), nil
 	case "build-harness-config-image":
 		log.Debug("Resolved build-harness-config-image executor",
-			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry, "tag", mc.ImageTag)
+			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()), "tag", mc.ImageTag)
 		return NewBuildHarnessConfigImageExecutor(BuildHarnessConfigImageOptions{
 			Store:      s.store,
 			Storage:    s.GetStorage(),
 			RuntimeBin: mc.RuntimeBin,
-			Registry:   mc.ImageRegistry,
+			Registry:   s.maintenanceImageRegistry(),
 			Tag:        mc.ImageTag,
 			GCPProject: s.config.GCPProjectID,
 		}), nil

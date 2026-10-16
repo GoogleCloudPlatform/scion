@@ -40,7 +40,8 @@ through a `sudo` DNS rule that must be re-created after each reboot (or installe
 :::note[No image registry yet?]
 Without an `image_registry`, the server starts the hub and the web UI but not the Runtime Broker,
 and prints how to set the registry. Set it in the wizard (or with
-`scion config set --global image_registry <your-registry>`), then run `scion server restart`.
+`scion config set --global image_registry <your-registry>`), then run `scion server restart`;
+the restart picks up a registry saved in the wizard.
 :::
 
 ## 2. Initialize your repository

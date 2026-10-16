@@ -168,7 +168,7 @@ func TestRegisterInstance_CapabilitiesBeforeFirstHeartbeat(t *testing.T) {
 	row, err := s.GetRuntimeBroker(context.Background(), ti.id.RuntimeBrokerID)
 	require.NoError(t, err)
 	require.NotNil(t, row.Capabilities)
-	want := runtimebroker.StaticCapabilities(rt)
+	want := runtimebroker.StaticCapabilities(rt, "")
 	assert.Equal(t, want.Sync, row.Capabilities.Sync)
 	assert.Equal(t, want.Attach, row.Capabilities.Attach)
 	assert.Equal(t, want.Reprovision, row.Capabilities.Reprovision)
