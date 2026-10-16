@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // Wire headers of the target hub's workload issuer delegation arm.
@@ -83,6 +84,8 @@ type Deps struct {
 	IAMCredentialsURL string
 	// Now is the clock (default time.Now).
 	Now func() time.Time
+	// Debugf writes debug output (default util.Debugf).
+	Debugf func(format string, args ...any)
 }
 
 func (d *Deps) fill() {
@@ -103,6 +106,9 @@ func (d *Deps) fill() {
 	}
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+	if d.Debugf == nil {
+		d.Debugf = util.Debugf
 	}
 }
 
@@ -142,10 +148,15 @@ type Session struct {
 
 	recorder *wireRecorder
 	hc       *http.Client
+
+	ownHubOnce sync.Once
+	ownHubErr  error
 }
 
 // Open validates the profile and options and prepares a session. It does
-// not contact the target hub or mint any token yet.
+// not contact the target hub or mint any token yet. It applies the name
+// check (CheckNotOwnHub); the hub id check (CheckNotOwnHubByID) runs before
+// the first profile credential is sent.
 func Open(opts Options, deps Deps) (*Session, error) {
 	deps.fill()
 	p := opts.Profile
@@ -500,6 +511,10 @@ func (a *bearerAuth) ApplyAuth(req *http.Request) error {
 	}
 	tok, extra, err := a.s.bearer(req.Context(), a.alias)
 	if err != nil {
+		return err
+	}
+	// No profile credential leaves before the own-hub check by hub id.
+	if err := a.s.CheckNotOwnHubByID(req.Context()); err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)

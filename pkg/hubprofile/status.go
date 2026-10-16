@@ -87,6 +87,13 @@ func (s *Session) Status(ctx context.Context) *StatusReport {
 		r.Checks = append(r.Checks, StatusCheck{Name: name, OK: ok, Detail: detail})
 	}
 
+	// The own-hub check by hub id runs before any profile credential is
+	// sent; a refusal ends the probe.
+	if err := s.CheckNotOwnHubByID(ctx); err != nil {
+		add("not this agent's own hub", false, err.Error())
+		return r
+	}
+
 	alias := s.opts.Alias != ""
 	path := "/api/v1/test-identities?limit=1"
 	if alias {

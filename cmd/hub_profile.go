@@ -42,7 +42,11 @@ import (
 //     every other command is refused before it runs;
 //   - a profile whose endpoint names the agent's own hub (SCION_HUB_ENDPOINT,
 //     SCION_HUB_URL) is refused; the comparison is by parsed host name and
-//     port (hubprofile.CheckNotOwnHub) and does not resolve DNS aliases.
+//     port (hubprofile.CheckNotOwnHub). Before the first profile credential
+//     is sent, the session also compares hub identities: a target that
+//     reports the agent's own hub id is refused under any name
+//     (Session.CheckNotOwnHubByID; the name check alone applies when an id
+//     is unavailable).
 
 var (
 	hubProfileFlag string // --hub-profile

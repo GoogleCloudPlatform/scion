@@ -321,7 +321,9 @@ func ownHubAddrs(getenv func(string) string) ([]hubAddr, error) {
 //
 // It compares names, not servers: a DNS alias of the agent's own hub, or its
 // public URL when SCION_HUB_ENDPOINT holds a bridge or internal address, is
-// not detected. The target hub's own delegation remains the boundary.
+// not detected here. A session adds the comparison by hub identity
+// (Session.CheckNotOwnHubByID) before it sends a profile credential; the
+// target hub's own delegation remains the boundary.
 func CheckNotOwnHub(endpoint string, getenv func(string) string) error {
 	target, err := parseHubAddr(endpoint)
 	if err != nil {
