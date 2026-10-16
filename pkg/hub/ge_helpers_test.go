@@ -72,6 +72,7 @@ type fakeUserStore struct {
 	usersByEmail map[string]*store.User // by email (normalized lower-case key)
 	createErr    error
 	updateErr    error
+	updateCalls  int
 }
 
 func newFakeUserStore() *fakeUserStore {
@@ -241,6 +242,7 @@ func (s *fakeUserStore) CreateUser(_ context.Context, user *store.User) error {
 func (s *fakeUserStore) UpdateUser(_ context.Context, user *store.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateCalls++
 	if s.updateErr != nil {
 		return s.updateErr
 	}

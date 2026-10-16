@@ -1458,12 +1458,20 @@ func TestDevAuth_AutoLogin(t *testing.T) {
 }
 
 func TestDevAuth_RecordsLastLogin(t *testing.T) {
-	for _, previous := range []time.Time{{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)} {
-		t.Run(previous.String(), func(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		previous    time.Time
+		wantUpdates int
+	}{
+		{name: "first login", wantUpdates: 1},
+		{name: "older login", previous: time.Now().Add(-6 * time.Minute), wantUpdates: 1},
+		{name: "recent login", previous: time.Now().Add(-time.Minute)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			ws := newDevAuthWebServer(t)
 			s := newFakeUserStore()
 			require.NoError(t, s.CreateUser(context.Background(), &store.User{
-				ID: DevUserID, Email: "dev@localhost", LastLogin: previous,
+				ID: DevUserID, Email: "dev@localhost", LastLogin: tt.previous,
 			}))
 			ws.store = s
 			handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1476,8 +1484,13 @@ func TestDevAuth_RecordsLastLogin(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			user, err := s.GetUser(context.Background(), DevUserID)
 			require.NoError(t, err)
-			require.False(t, user.LastLogin.Before(before))
-			require.False(t, user.LastLogin.After(time.Now()))
+			if tt.wantUpdates > 0 {
+				require.False(t, user.LastLogin.Before(before))
+				require.False(t, user.LastLogin.After(time.Now()))
+			} else {
+				assert.Equal(t, tt.previous, user.LastLogin)
+			}
+			assert.Equal(t, tt.wantUpdates, s.updateCalls)
 			loginTime := user.LastLogin
 
 			// Reusing a session must not turn last login into last activity.
@@ -1491,6 +1504,16 @@ func TestDevAuth_RecordsLastLogin(t *testing.T) {
 			user, err = s.GetUser(context.Background(), DevUserID)
 			require.NoError(t, err)
 			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.updateCalls)
+
+			// Clients that discard cookies must not write on every request.
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+			assert.Equal(t, tt.wantUpdates, s.updateCalls)
 		})
 	}
 }

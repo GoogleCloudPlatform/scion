@@ -2510,9 +2510,12 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				if dbUser.DisplayName != "" {
 					devName = dbUser.DisplayName
 				}
-				dbUser.LastLogin = time.Now()
-				if err := ws.store.UpdateUser(r.Context(), dbUser); err != nil {
-					ws.logger().Warn("Failed to update dev-auth last login", "error", err)
+				// Throttle writes for clients that do not retain session cookies.
+				if dbUser.LastLogin.IsZero() || time.Since(dbUser.LastLogin) > 5*time.Minute {
+					dbUser.LastLogin = time.Now()
+					if err := ws.store.UpdateUser(r.Context(), dbUser); err != nil {
+						ws.logger().Warn("Failed to update dev-auth last login", "error", err)
+					}
 				}
 			}
 		}

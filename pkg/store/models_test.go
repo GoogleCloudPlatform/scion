@@ -20,10 +20,10 @@ import (
 	"time"
 )
 
-func TestUserLastLoginJSON(t *testing.T) {
-	for _, lastLogin := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
-		t.Run(lastLogin.String(), func(t *testing.T) {
-			data, err := json.Marshal(User{LastLogin: lastLogin})
+func TestUserActivityTimestampsJSON(t *testing.T) {
+	for _, timestamp := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
+		t.Run(timestamp.String(), func(t *testing.T) {
+			data, err := json.Marshal(User{LastLogin: timestamp, LastSeen: timestamp})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -31,12 +31,14 @@ func TestUserLastLoginJSON(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatal(err)
 			}
-			value, present := fields["lastLogin"]
-			if present == lastLogin.IsZero() {
-				t.Fatalf("lastLogin presence = %v for %v", present, lastLogin)
-			}
-			if present && string(value) != `"2026-10-16T08:00:00Z"` {
-				t.Errorf("lastLogin = %s", value)
+			for _, field := range []string{"lastLogin", "lastSeen"} {
+				value, present := fields[field]
+				if present == timestamp.IsZero() {
+					t.Fatalf("%s presence = %v for %v", field, present, timestamp)
+				}
+				if present && string(value) != `"2026-10-16T08:00:00Z"` {
+					t.Errorf("%s = %s", field, value)
+				}
 			}
 		})
 	}
