@@ -400,6 +400,22 @@ func (s *Server) writeCreateRegistrationError(w http.ResponseWriter, span trace.
 	}
 }
 
+// refuseCancelledStart answers an async start's admission failure with 409
+// start_cancelled when the start's registration has been cancelled (a stop
+// or delete of the agent, or a newer start of the name), and reports
+// whether it did. A cancelled registration also cancels admission's
+// context, so the step that failed may have failed only because of it;
+// either way nothing was started, which is what start_cancelled tells the
+// hub (design wave 3 §2 D-AC12 (i)). Without a registration (a synchronous
+// start) it does nothing.
+func (s *Server) refuseCancelledStart(w http.ResponseWriter, span trace.Span, ss *syncStart, id, projectID, runID string) bool {
+	if ss == nil || !ss.cancelled() {
+		return false
+	}
+	s.writeStartRegistrationError(w, span, id, projectID, runID, errCreateStartCancelled)
+	return true
+}
+
 // writeStartRegistrationError answers an async start whose registration
 // under the agent's name failed (beginNameRegistration, or handOff at the
 // transfer), with the codes a create gets (writeCreateRegistrationError):

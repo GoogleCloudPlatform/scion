@@ -3269,6 +3269,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			s.agentLifecycleLog.Warn("Start agent: auxiliary runtime list failed while recovering the project path",
 				"agent_id", id, "error", err)
 		case errors.Is(err, ErrAgentListUnavailable):
+			if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+				return
+			}
 			span.SetStatus(codes.Error, err.Error())
 			AgentLookupUnavailable(w, err, id, "start", "")
 			return
@@ -3315,6 +3318,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Operation:                opHTTPStart,
 	})
 	if err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, startContextSpanText(err))
 		s.writeStartContextError(w, err, "start agent")
 		return
@@ -3329,6 +3335,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if opts.ProjectPath != "" {
 		if projectDir, dirErr := config.GetResolvedProjectDir(opts.ProjectPath); dirErr == nil {
 			if _, containErr := agent.CheckAgentDirContained(projectDir, id, startReq.SharedWorkspace); containErr != nil {
+				if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+					return
+				}
 				span.SetStatus(codes.Error, containErr.Error())
 				ValidationError(w, "agent id resolves outside the project's agent directory", nil)
 				return
@@ -3353,6 +3362,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	runtimeOpts, provisioned, provErr := runtimeSelectionOpts(opts, opts.Name, false)
 	if provErr != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		s.writeImageProvenanceError(w, provErr, "start agent", id)
 		return
 	}
@@ -3362,6 +3374,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// logged any recorded-runtime fallback at Warn, so log it at Debug here.
 	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
 	if err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, err.Error())
 		writeProfileUnresolved(w, err)
 		return
@@ -3370,12 +3385,18 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if sce := rejectKubernetesAssignRuntimeChange(runtimeOpts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
 	if sce := rejectKubernetesBlockRuntimeChange(runtimeOpts, sc.BlockSelection, resolvedRuntimeType, func() dispatchProfileSelection {
 		return s.resolveDispatchProfileSelection(runtimeOpts)
 	}); sce != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
@@ -3383,6 +3404,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// must agree with this authoritative runtime; the specific rejections
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
@@ -3391,6 +3415,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// the single hydrated harness-config launch will use (opts, as built by
 	// buildStartContext above), before the start's side effects (applyInlineConfigUpdate, mgr.Start).
 	if d := s.enforceHarnessConfigPolicy(harnessPolicyInputForStart(opts, id)); !d.OK {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
 		span.SetStatus(codes.Error, d.detail())
 		s.writeHarnessPolicyRefusal(w, d, "start agent", id, nil)
 		return
@@ -3420,8 +3447,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// Transfer (design wave 3 §2 D-f step 5): the launch takes the
 			// registration over and runs Manager.Start; the 202 carries the
 			// launch echo. A refusal has written its own answer.
-			ownedHandoff = s.beginAsyncStart(w, r, ctx, ss, span, id, projectID, hubAgentID, startReq.LaunchID,
-				startReq.LaunchTimeoutSeconds, startReq.LaunchKeepaliveSeconds, opts, mgr, resolvedRuntimeType, sc.ownedStart, startReceivedAt)
+			ownedHandoff = s.beginAsyncStart(w, r, ctx, ss, span, opts, mgr, asyncStartInputs{
+				id:               id,
+				projectID:        projectID,
+				hubAgentID:       hubAgentID,
+				launchID:         startReq.LaunchID,
+				timeoutSeconds:   startReq.LaunchTimeoutSeconds,
+				keepaliveSeconds: startReq.LaunchKeepaliveSeconds,
+				receivedAt:       startReceivedAt,
+				runtimeName:      resolvedRuntimeType,
+				owned:            sc.ownedStart,
+			})
 			return
 		}
 		// This runtime cannot serve an async launch (as for a create,
@@ -3796,8 +3832,9 @@ func (s *Server) hasRecordlessProber() bool {
 	return false
 }
 
-// testHookStopBetweenCancels, when set (tests only), runs in a stop without
-// a run ID between its launch registry cancel and its start tracker cancel.
+// testHookStopBetweenCancels, when set (tests only), runs in a stop (with
+// or without a run ID) between its launch registry cancel and its start
+// tracker cancel.
 var testHookStopBetweenCancels func(key launchKey)
 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -3880,6 +3917,9 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
 		woken := s.cancelLocalLaunchRecord(key, hubAgentID, runID)
+		if testHookStopBetweenCancels != nil {
+			testHookStopBetweenCancels(key)
+		}
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
 		// Again after the tracker wait, as for a legacy stop above
 		// (Optional-1 case iv), with the same agent and run scope.

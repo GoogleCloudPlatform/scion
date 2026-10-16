@@ -17,7 +17,9 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -355,6 +357,19 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	startCh := make(chan startResult, 1)
 	go func() {
+		// A runtime panic in Manager.Start would end the whole broker
+		// process from this goroutine (net/http's per-request recovery does
+		// not reach it). It becomes the start's error instead, so the
+		// launch ends failed and cleans up as for any failure, as the
+		// synchronous start's reportRuntimePanic contains it there.
+		defer func() {
+			if p := recover(); p != nil {
+				s.agentLifecycleLog.Error("runLaunch: Manager.Start panicked",
+					"agent_id", rec.AgentID, "launch_id", rec.ID, "panic", p, "stack", string(debug.Stack()))
+				err := s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, fmt.Errorf("panic: %v", p), false)
+				startCh <- startResult{nil, err}
+			}
+		}()
 		ownedKey := s.ownedRunKeyFor(lc.opts.RunID)
 		rec.ownedRunMu.Lock()
 		rec.ownedRun = ownedKey

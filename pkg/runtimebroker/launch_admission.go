@@ -286,6 +286,26 @@ func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx c
 // the launch, with the admission context.
 var testHookAsyncLaunchBeforeHandOff func(ctx context.Context, key launchKey)
 
+// asyncStartInputs are an async start's identity, budget and resolved
+// runtime, as startAgent read and resolved them.
+type asyncStartInputs struct {
+	// id is the agent's slug (the URL path segment), projectID the
+	// request's project ID, and hubAgentID the hub's agent ID (the agentId
+	// query parameter).
+	id, projectID, hubAgentID string
+	// launchID, timeoutSeconds and keepaliveSeconds are the request's
+	// launch fields.
+	launchID         string
+	timeoutSeconds   int
+	keepaliveSeconds int
+	// receivedAt is when startAgent received the request.
+	receivedAt  time.Time
+	runtimeName string
+	// owned is the flat instance's ownership mirror for this run (nil on a
+	// legacy Runtime Broker), handed over to the launch.
+	owned *ownedStart
+}
+
 // beginAsyncStart is an async start of an existing agent (design wave 3 §2
 // D-f; ptone/scion#4669): startAgent has already registered the start under
 // the agent's name (ss), run buildStartContext, the runtime checks, the
@@ -298,28 +318,28 @@ var testHookAsyncLaunchBeforeHandOff func(ctx context.Context, key launchKey)
 // start request carries no kind, and broker-side the kind decides only that
 // a start launch never deletes agent files. The Hub's launch row holds the
 // real kind.
-func (s *Server) beginAsyncStart(w http.ResponseWriter, r *http.Request, ctx context.Context, ss *syncStart, span trace.Span, id, projectID, agentID string, launchID string, timeoutSeconds, keepaliveSeconds int, opts api.StartOptions, mgr agent.Manager, runtimeName string, owned *ownedStart, receivedAt time.Time) bool {
+func (s *Server) beginAsyncStart(w http.ResponseWriter, r *http.Request, ctx context.Context, ss *syncStart, span trace.Span, opts api.StartOptions, mgr agent.Manager, in asyncStartInputs) bool {
 	return s.acceptAsyncLaunch(w, r, ctx, ss, asyncAdmission{
 		op:             "start",
-		launchID:       launchID,
-		agentID:        agentID,
+		launchID:       in.launchID,
+		agentID:        in.hubAgentID,
 		kind:           store.LaunchKindStart,
 		runID:          opts.RunID,
-		receivedAt:     receivedAt,
-		timeoutSeconds: timeoutSeconds,
+		receivedAt:     in.receivedAt,
+		timeoutSeconds: in.timeoutSeconds,
 		status:         http.StatusAccepted,
-		runtimeName:    runtimeName,
+		runtimeName:    in.runtimeName,
 		lc: launchCtx{
-			projectID:       projectID,
-			keepalive:       time.Duration(keepaliveSeconds) * time.Second,
+			projectID:       in.projectID,
+			keepalive:       time.Duration(in.keepaliveSeconds) * time.Second,
 			opts:            opts,
 			mgr:             mgr,
 			key:             ss.key,
 			sharedWorkspace: opts.SharedWorkspace,
-			owned:           owned,
+			owned:           in.owned,
 		},
 		writeCancelled: func() {
-			s.writeStartRegistrationError(w, span, id, projectID, opts.RunID, errCreateStartCancelled)
+			s.writeStartRegistrationError(w, span, in.id, in.projectID, opts.RunID, errCreateStartCancelled)
 		},
 	})
 }

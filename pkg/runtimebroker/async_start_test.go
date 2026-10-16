@@ -245,8 +245,9 @@ func TestAsyncStart_StopBeforeTransfer(t *testing.T) {
 	})
 
 	w := postAsyncStart(t, srv, "agent-i", asyncStartQuery(), asyncStartBody("L-i"))
+	// The refusal is written before any launch exists, so nothing can call
+	// Start after it: no wait is needed for the negative checks below.
 	assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
-	time.Sleep(50 * time.Millisecond)
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Manager.Start called %d time(s) for a cancelled start", n)
 	}
@@ -297,15 +298,13 @@ func TestAsyncStart_StopBetweenCancels(t *testing.T) {
 	close(releaseStop)
 	<-stopDone
 
-	if w.Code == http.StatusConflict {
-		assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
-	} else if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
-	}
-	time.Sleep(100 * time.Millisecond)
-	if hasReport(rtb, hubclient.AgentLaunchReportStateSucceeded) || mgr.StartCallCount() != 0 {
-		t.Fatalf("a start the stop reached before its transfer still started (%d Start calls, succeeded reported: %v)",
-			mgr.StartCallCount(), hasReport(rtb, hubclient.AgentLaunchReportStateSucceeded))
+	// The stop's registry cancel ran while the start waited at the
+	// transfer, so here the transfer must refuse: design (ii) answers as
+	// (i). A 202 is a launch the stop's cancel missed.
+	assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
+	if mgr.StartCallCount() != 0 || len(rtb.getLaunchReports()) != 0 || !registryEmptyFor(srv, key) {
+		t.Fatalf("a start the stop reached before its transfer still launched (%d Start calls, %d reports)",
+			mgr.StartCallCount(), len(rtb.getLaunchReports()))
 	}
 }
 
@@ -344,9 +343,18 @@ type startIVFixture struct {
 	parked  chan struct{}
 	release chan struct{}
 	stopped chan struct{}
+	// stopResp is the stop's answer, set before stopped is closed.
+	stopResp *httptest.ResponseRecorder
 }
 
-func newStartIVFixture(t *testing.T, slug string) *startIVFixture {
+// legacyStopQuery is a stop without a run ID; runScopedStopQuery is the
+// run-scoped stop the hub sends when it knows the run.
+var (
+	legacyStopQuery    = api.AgentIDQueryParam + "=" + asyncStartHubAgentID
+	runScopedStopQuery = "runId=run-1&" + api.AgentIDQueryParam + "=" + asyncStartHubAgentID
+)
+
+func newStartIVFixture(t *testing.T, slug, stopQuery string) *startIVFixture {
 	f := &startIVFixture{
 		mgr:     newAsyncManager(),
 		key:     launchKey{Slug: slug},
@@ -364,7 +372,7 @@ func newStartIVFixture(t *testing.T, slug string) *startIVFixture {
 		}
 		stopOnce.Do(func() {
 			go func() {
-				postStop(f.srv, slug, api.AgentIDQueryParam+"="+asyncStartHubAgentID)
+				f.stopResp = postStop(f.srv, slug, stopQuery)
 				close(f.stopped)
 			}()
 			<-f.parked // the stop's registry cancel has run: nothing was registered yet
@@ -381,52 +389,70 @@ func newStartIVFixture(t *testing.T, slug string) *startIVFixture {
 
 // TestAsyncStart_RegistryCancelBeforeBegin_TrackerBeforeHandoff is D-T3
 // (iv), tracker cancel before the transfer: the registration follows the
-// tracker's context, so the start is refused and never starts.
+// tracker's context, so the start is refused and never starts. Run for a
+// legacy stop and for the run-scoped stop the hub sends.
 func TestAsyncStart_RegistryCancelBeforeBegin_TrackerBeforeHandoff(t *testing.T) {
-	f := newStartIVFixture(t, "agent-iva")
-	setHook(t, &testHookAsyncLaunchBeforeHandOff, func(ctx context.Context, k launchKey) {
-		if k != f.key {
-			return
-		}
-		close(f.release) // the stop goes on to cancel the tracked start
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-		}
-	})
+	for name, stopQuery := range map[string]string{"legacy": legacyStopQuery, "run-scoped": runScopedStopQuery} {
+		t.Run(name, func(t *testing.T) {
+			f := newStartIVFixture(t, "agent-iva", stopQuery)
+			setHook(t, &testHookAsyncLaunchBeforeHandOff, func(ctx context.Context, k launchKey) {
+				if k != f.key {
+					return
+				}
+				close(f.release) // the stop goes on to cancel the tracked start
+				select {
+				case <-ctx.Done():
+				case <-time.After(5 * time.Second):
+				}
+			})
 
-	w := postAsyncStart(t, f.srv, "agent-iva", asyncStartQuery(), asyncStartBody("L-iva"))
-	<-f.stopped
-	assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
-	time.Sleep(50 * time.Millisecond)
-	if n := f.mgr.StartCallCount(); n != 0 {
-		t.Fatalf("Manager.Start called %d time(s) after the stop's tracker cancel", n)
-	}
-	if !registryEmptyFor(f.srv, f.key) {
-		t.Fatal("a refused start left a registry record")
+			w := postAsyncStart(t, f.srv, "agent-iva", asyncStartQuery(), asyncStartBody("L-iva"))
+			<-f.stopped
+			// Refused before any launch exists: nothing can call Start
+			// after this answer.
+			assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
+			if n := f.mgr.StartCallCount(); n != 0 {
+				t.Fatalf("Manager.Start called %d time(s) after the stop's tracker cancel", n)
+			}
+			if !registryEmptyFor(f.srv, f.key) {
+				t.Fatal("a refused start left a registry record")
+			}
+			if f.stopResp.Code != http.StatusAccepted {
+				t.Fatalf("stop answered %d, want 202 (it cancelled the start): %s", f.stopResp.Code, f.stopResp.Body.String())
+			}
+		})
 	}
 }
 
 // TestAsyncStart_RegistryCancelBeforeBegin_TrackerAfterHandoff is D-T3
 // (iv), tracker cancel after the 202: the stop's second registry cancel,
-// after its tracker wait, ends the launch.
+// after its tracker wait, ends the launch. Run for a legacy stop and for
+// the run-scoped stop the hub sends; the run-scoped stop counts the launch
+// it woke as its own, so it answers 202 rather than 404.
 func TestAsyncStart_RegistryCancelBeforeBegin_TrackerAfterHandoff(t *testing.T) {
-	f := newStartIVFixture(t, "agent-ivb")
+	for name, stopQuery := range map[string]string{"legacy": legacyStopQuery, "run-scoped": runScopedStopQuery} {
+		t.Run(name, func(t *testing.T) {
+			f := newStartIVFixture(t, "agent-ivb", stopQuery)
 
-	w := postAsyncStart(t, f.srv, "agent-ivb", asyncStartQuery(), asyncStartBody("L-ivb"))
-	if w.Code != http.StatusAccepted || !decodeStartResponse(t, w).LaunchPending {
-		t.Fatalf("expected an accepted async start, got %d: %s", w.Code, w.Body.String())
-	}
-	if !waitUntil(t, 2*time.Second, func() bool { return f.mgr.StartCallCount() == 1 }) {
-		t.Fatal("the launch did not reach Manager.Start")
-	}
-	close(f.release)
-	<-f.stopped
-	if !waitUntil(t, 2*time.Second, func() bool { return f.mgr.CleanupCallCount() >= 1 }) {
-		t.Fatal("the stop left the launch running: no resource cleanup")
-	}
-	if hasReport(f.rtb, hubclient.AgentLaunchReportStateSucceeded) {
-		t.Fatal("the stopped launch reported succeeded")
+			w := postAsyncStart(t, f.srv, "agent-ivb", asyncStartQuery(), asyncStartBody("L-ivb"))
+			if w.Code != http.StatusAccepted || !decodeStartResponse(t, w).LaunchPending {
+				t.Fatalf("expected an accepted async start, got %d: %s", w.Code, w.Body.String())
+			}
+			if !waitUntil(t, 2*time.Second, func() bool { return f.mgr.StartCallCount() == 1 }) {
+				t.Fatal("the launch did not reach Manager.Start")
+			}
+			close(f.release)
+			<-f.stopped
+			if !waitUntil(t, 2*time.Second, func() bool { return f.mgr.CleanupCallCount() >= 1 }) {
+				t.Fatal("the stop left the launch running: no resource cleanup")
+			}
+			if hasReport(f.rtb, hubclient.AgentLaunchReportStateSucceeded) {
+				t.Fatal("the stopped launch reported succeeded")
+			}
+			if f.stopResp.Code != http.StatusAccepted {
+				t.Fatalf("stop answered %d, want 202 (it ended the launch): %s", f.stopResp.Code, f.stopResp.Body.String())
+			}
+		})
 	}
 }
 
@@ -569,5 +595,96 @@ func TestAsyncStart_RecoveryNeverDeletesFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, "prompt.md")); err != nil {
 		t.Fatalf("recovery of a start launch removed the agent's files: %v", err)
+	}
+}
+
+// panickingStartManager is an async-capable manager whose Start panics.
+type panickingStartManager struct {
+	*asyncManager
+}
+
+func (m *panickingStartManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	m.asyncManager.mu.Lock()
+	m.asyncManager.startCalls++
+	m.asyncManager.mu.Unlock()
+	panic("runtime exploded")
+}
+
+// TestAsyncStart_PanicInStartFailsLaunch: a runtime panic in an async
+// start's Manager.Start ends the launch failed (runtime_error) and cleans
+// up its resources, instead of ending the broker process, as the
+// synchronous start contains it (reportRuntimePanic). Agent files stay.
+func TestAsyncStart_PanicInStartFailsLaunch(t *testing.T) {
+	mgr := &panickingStartManager{asyncManager: newAsyncManager()}
+	srv, rtb := newAsyncTestServer(t, mgr)
+	projectDir, agentDir := asyncStartProject(t, "agent-p")
+
+	body := asyncStartBody("L-p")
+	body["projectPath"] = projectDir
+	w := postAsyncStart(t, srv, "agent-p", asyncStartQuery(), body)
+	if w.Code != http.StatusAccepted || !decodeStartResponse(t, w).LaunchPending {
+		t.Fatalf("expected an accepted async start, got %d: %s", w.Code, w.Body.String())
+	}
+	var failed *hubclient.AgentLaunchReport
+	if !waitUntil(t, 2*time.Second, func() bool {
+		for _, r := range rtb.getLaunchReports() {
+			if r.Report.State == hubclient.AgentLaunchReportStateFailed {
+				failed = r.Report
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatal("a panicking Start did not end the launch failed")
+	}
+	if failed.ErrorCode != api.LaunchCodeRuntimeError {
+		t.Errorf("failed report code = %q, want %q", failed.ErrorCode, api.LaunchCodeRuntimeError)
+	}
+	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
+		t.Fatal("the panicked launch's resources were not cleaned up")
+	}
+	if !waitUntil(t, 2*time.Second, func() bool { return registryEmptyFor(srv, launchKey{Slug: "agent-p"}) }) {
+		t.Fatal("the panicked launch did not end")
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "prompt.md")); err != nil {
+		t.Fatalf("a panicked start launch removed the agent's files: %v", err)
+	}
+}
+
+// listHookManager is an asyncManager whose List runs onList and then fails,
+// so startAgent's project-path recovery fails after the registration.
+type listHookManager struct {
+	*asyncManager
+	onList func()
+}
+
+func (m *listHookManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {
+	if m.onList != nil {
+		m.onList()
+	}
+	return nil, errors.New("list unavailable")
+}
+
+// TestAsyncStart_CancelDuringAdmissionAnswers409: a stop that reaches the
+// registration while admission runs, after which an admission step fails,
+// is answered 409 start_cancelled, as at the transfer (design D-AC12 (i)),
+// not with the step's own error.
+func TestAsyncStart_CancelDuringAdmissionAnswers409(t *testing.T) {
+	mgr := &listHookManager{asyncManager: newAsyncManager()}
+	srv, _ := newAsyncTestServer(t, mgr)
+	key := launchKey{Slug: "agent-adm"}
+	mgr.onList = func() { srv.cancelLocalLaunch(key, asyncStartHubAgentID) }
+
+	w := postAsyncStart(t, srv, "agent-adm", asyncStartQuery(), asyncStartBody("L-adm"))
+	assertErrorCode(t, w, http.StatusConflict, api.BrokerErrCodeStartCancelled)
+	if mgr.StartCallCount() != 0 || !registryEmptyFor(srv, key) {
+		t.Fatalf("a start cancelled during admission went on (%d Start calls)", mgr.StartCallCount())
+	}
+
+	// Control: the same failure with no cancel keeps its own answer.
+	mgr.onList = nil
+	w = postAsyncStart(t, srv, "agent-adm", asyncStartQuery(), asyncStartBody("L-adm2"))
+	if w.Code == http.StatusConflict {
+		t.Fatalf("an admission failure without a cancel answered 409: %s", w.Body.String())
 	}
 }
