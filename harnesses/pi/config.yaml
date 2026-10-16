@@ -1,0 +1,183 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+harness: pi
+# Pin the image tag to the pi version it was built with; override with -i/--image.
+image: scion-pi:1.3.0
+user: scion
+
+provisioner:
+  type: container-script
+  interface_version: 1
+  lib: vendored
+  command: ["python3", "/home/scion/.scion/harness/provision.py"]
+  timeout: 30s
+  lifecycle_events:
+    - pre-start
+  required_image_tools:
+    - python3
+
+config_dir: .pi/agent
+skills_dir: .pi/agent/skills
+# pi cancels the running turn on Escape.
+interrupt_key: Escape
+# Readiness and message delivery; see the authoring guide. These match the
+# repo-wide defaults pinned by the embedded-bundle tests. A hook-based ready
+# (strategy: hook, settle: 1.5s, timeout: 90s) would need the bridge's
+# session_start event wired to the ready marker and the legacy-table tests
+# updated; left as a follow-up. pi treats Enter while busy as a steering
+# message, so extra_submits may need lowering once tested against a live pi.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
+instructions_file: .pi/agent/AGENTS.md
+system_prompt_file: .pi/agent/APPEND_SYSTEM.md
+system_prompt_mode: native
+
+# Values are pi --model patterns (provider/id or fuzzy ID match). Edit them
+# here, per project, or set SCION_MODEL to a concrete provider/id.
+model_aliases:
+  small: anthropic/haiku
+  medium: anthropic/sonnet
+  large: anthropic/opus
+  extra-large: anthropic/opus
+
+command:
+  # Interactive REPL; the task is a positional prompt. Add pi flags here
+  # (for example "--thinking", "high" or "--tui-mode", "regular").
+  base: ["pi"]
+  resume_flag: "--continue"
+  task_position: after_base_args
+
+# Self-update checks and anonymous telemetry are off; override per project.
+env:
+  PI_SKIP_VERSION_CHECK: "1"
+  PI_TELEMETRY: "0"
+
+capabilities:
+  limits:
+    max_turns: { support: "yes" }
+    max_model_calls: { support: "no", reason: "No model start/end events are mapped by the bridge" }
+    max_duration: { support: "yes" }
+  telemetry:
+    enabled: { support: "yes" }
+    native_emitter: { support: "no", reason: "Native telemetry forwarding is not wired for this harness" }
+  prompts:
+    system_prompt: { support: "yes" }
+    agent_instructions: { support: "yes" }
+  auth:
+    api_key: { support: "yes" }
+    auth_file: { support: "partial", reason: "Written from a staged file secret; not exercised against a live Scion install" }
+    oauth_token: { support: "no", reason: "ANTHROPIC_OAUTH_TOKEN is not declared; use auth-file after pi /login" }
+    vertex_ai: { support: "no", reason: "Not implemented for this harness" }
+  mcp:
+    stdio: { support: "yes" }
+    sse: { support: "no", reason: "pi rejects the legacy SSE transport; such servers are skipped" }
+    streamable_http: { support: "yes" }
+    project_scope: { support: "no", reason: "Project-scoped MCP is demoted to the user-level mcp.json" }
+  resume: { support: "yes" }
+  agent_plugins: { support: "no", reason: "Native Agent Plugins install is not supported for this harness" }
+
+no_auth:
+  behavior: drop-to-shell
+  command: pi
+  message: |
+    This agent started without credentials.
+    Set a provider key (for example ANTHROPIC_API_KEY), or run: pi
+    and use /login to complete the interactive login flow.
+    Then run: python3 /home/scion/.scion/harness/capture_auth.py
+
+auth:
+  default_type: api-key
+  types:
+    api-key:
+      required_env:
+        - any_of: ["ANTHROPIC_API_KEY",
+           "AI_GATEWAY_API_KEY",
+           "ANT_LING_API_KEY",
+           "BASETEN_API_KEY",
+           "CEREBRAS_API_KEY",
+           "CLOUDFLARE_API_KEY",
+           "DEEPSEEK_API_KEY",
+           "FIREWORKS_API_KEY",
+           "GEMINI_API_KEY",
+           "GROQ_API_KEY",
+           "KIMI_API_KEY",
+           "META_API_KEY",
+           "MINIMAX_API_KEY",
+           "MINIMAX_CN_API_KEY",
+           "MISTRAL_API_KEY",
+           "MOONSHOT_API_KEY",
+           "NVIDIA_API_KEY",
+           "OPENAI_API_KEY",
+           "OPENCODE_API_KEY",
+           "OPENROUTER_API_KEY",
+           "QWEN_TOKEN_PLAN_API_KEY",
+           "QWEN_TOKEN_PLAN_CN_API_KEY",
+           "RADIUS_API_KEY",
+           "TOGETHER_API_KEY",
+           "TYPESAFE_API_KEY",
+           "XAI_API_KEY",
+           "XIAOMI_API_KEY",
+           "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+           "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+           "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+           "ZAI_API_KEY",
+           "ZAI_CODING_CN_API_KEY"]
+    auth-file:
+      required_files:
+        - name: PI_AUTH
+          type: file
+          target_suffix: "/.pi/agent/auth.json"
+          field: PiAuthFile
+  autodetect:
+    env:
+      ANTHROPIC_API_KEY: api-key
+      AI_GATEWAY_API_KEY: api-key
+      ANT_LING_API_KEY: api-key
+      BASETEN_API_KEY: api-key
+      CEREBRAS_API_KEY: api-key
+      CLOUDFLARE_API_KEY: api-key
+      DEEPSEEK_API_KEY: api-key
+      FIREWORKS_API_KEY: api-key
+      GEMINI_API_KEY: api-key
+      GROQ_API_KEY: api-key
+      KIMI_API_KEY: api-key
+      META_API_KEY: api-key
+      MINIMAX_API_KEY: api-key
+      MINIMAX_CN_API_KEY: api-key
+      MISTRAL_API_KEY: api-key
+      MOONSHOT_API_KEY: api-key
+      NVIDIA_API_KEY: api-key
+      OPENAI_API_KEY: api-key
+      OPENCODE_API_KEY: api-key
+      OPENROUTER_API_KEY: api-key
+      QWEN_TOKEN_PLAN_API_KEY: api-key
+      QWEN_TOKEN_PLAN_CN_API_KEY: api-key
+      RADIUS_API_KEY: api-key
+      TOGETHER_API_KEY: api-key
+      TYPESAFE_API_KEY: api-key
+      XAI_API_KEY: api-key
+      XIAOMI_API_KEY: api-key
+      XIAOMI_TOKEN_PLAN_AMS_API_KEY: api-key
+      XIAOMI_TOKEN_PLAN_CN_API_KEY: api-key
+      XIAOMI_TOKEN_PLAN_SGP_API_KEY: api-key
+      ZAI_API_KEY: api-key
+      ZAI_CODING_CN_API_KEY: api-key
+    files:
+      PI_AUTH: auth-file
