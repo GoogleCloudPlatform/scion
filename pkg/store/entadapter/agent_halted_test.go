@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -685,4 +686,222 @@ func TestAgentHalted_Sites(t *testing.T) {
 	assert.True(t, agentNeedsAttention("halted", ""))
 	a := &store.Agent{LaunchKind: "create", Phase: "halted", LaunchState: "active"}
 	assert.True(t, a.IsIncompleteCreate())
+}
+
+// The agent-reported "signaled" exit reason (ptone/scion#5278). These tests
+// use the string literal so they read the same before and after the value
+// is known to the store.
+
+// signaledReport is the agent's own stop report after a termination signal.
+func signaledReport(phase string) store.AgentStatusUpdate {
+	su := selfReport(phase, "")
+	su.ExitReason = "signaled"
+	return su
+}
+
+// rawUpdate writes fields onto an agent row directly, as other writers
+// (a delete claim, a reincarnation step) would.
+func rawUpdate(t *testing.T, ctx context.Context, s *AgentStore, id string, set func(*ent.AgentUpdateOne)) {
+	t.Helper()
+	uid, err := parseUUID(id)
+	require.NoError(t, err)
+	u := s.client.Agent.UpdateOneID(uid)
+	set(u)
+	_, err = u.Save(ctx)
+	require.NoError(t, err)
+}
+
+func exitReasonOf(t *testing.T, ctx context.Context, s *AgentStore, id string) string {
+	t.Helper()
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	return got.ExitReason
+}
+
+// storeSignaled applies the agent's signaled stop report and checks that
+// the reason is stored.
+func storeSignaled(t *testing.T, ctx context.Context, s *AgentStore, id string) {
+	t.Helper()
+	res := apply(t, ctx, s, id, signaledReport("stopped"))
+	require.False(t, res.Halted)
+	require.Equal(t, "signaled", exitReasonOf(t, ctx, s, id), "the signaled stop report is stored")
+}
+
+func TestAgentHalted_SignaledOnlyStopsAndIsStored(t *testing.T) {
+	// No runtime reason follows (docker stop, a host shutdown): the agent
+	// ends stopped, with the reason it reported.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "signaled-only", defaultHaltRow())
+
+	res := apply(t, ctx, s, id, signaledReport("stopped"))
+	assert.False(t, res.Halted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	assert.Equal(t, "signaled", got.ExitReason)
+}
+
+func TestAgentHalted_RuntimeFirstThenSignaledKeepsRuntimeReason(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "runtime-first", defaultHaltRow())
+
+	res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(143)))
+	require.True(t, res.Halted)
+	res = apply(t, ctx, s, id, signaledReport("stopped"))
+	assert.False(t, res.Halted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "halted", got.Phase)
+	assert.Equal(t, "preempted", got.ExitReason)
+}
+
+func TestAgentHalted_SignaledDoesNotReplaceReason_IntentStopped(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	r := defaultHaltRow()
+	r.phase = "stopped"
+	r.activity = ""
+	r.intent = store.RunIntentStopped
+	r.exitReason = "preempted"
+	id := newHaltAgent(t, ctx, s, projectID, "keep-preempted", r)
+
+	apply(t, ctx, s, id, signaledReport("stopped"))
+	assert.Equal(t, "preempted", exitReasonOf(t, ctx, s, id), "a recorded reason is never replaced")
+}
+
+func TestAgentHalted_SignaledDoesNotReplaceReason_ClaimHeld(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	r := defaultHaltRow()
+	r.phase = "error"
+	r.activity = ""
+	r.claimID = "claim-1"
+	r.exitReason = "evicted"
+	id := newHaltAgent(t, ctx, s, projectID, "keep-evicted", r)
+
+	apply(t, ctx, s, id, signaledReport("stopped"))
+	assert.Equal(t, "evicted", exitReasonOf(t, ctx, s, id), "a recorded reason is never replaced")
+}
+
+func TestAgentHalted_SignaledClearedByProvisionalStart(t *testing.T) {
+	// A start whose started-status write fails leaves the row at the
+	// provisional starting that beginStartDispatch wrote.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "provisional-start", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	apply(t, ctx, s, id, store.AgentStatusUpdate{Phase: "starting", IfPhase: "stopped"})
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "starting", got.Phase)
+	assert.Empty(t, got.ExitReason, "a move to starting clears the signaled reason")
+}
+
+func TestAgentHalted_SignaledClearedAfterReincarnation(t *testing.T) {
+	// The reincarnation worker's whole-row steps carry the stored reason
+	// through; the new generation's first running report clears it.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "reincarnate", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	// 1. The starting step.
+	a, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	a.ReincarnationState = store.ReincarnationStateStarting
+	a.Phase = "starting"
+	require.NoError(t, s.UpdateAgent(ctx, a))
+
+	// 2. The completion step: the phase is untouched.
+	a, err = s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	a.ReincarnationState = store.ReincarnationStateNone
+	require.NoError(t, s.UpdateAgent(ctx, a))
+	require.Equal(t, "signaled", exitReasonOf(t, ctx, s, id), "the whole-row steps keep the reason")
+
+	// 3. The new generation's running report.
+	apply(t, ctx, s, id, selfReport("running", "working"))
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Empty(t, got.ExitReason, "a move to running clears the signaled reason")
+}
+
+func TestAgentHalted_SignaledKeptUnderDeleteHold(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "delete-hold", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	rawUpdate(t, ctx, s, id, func(u *ent.AgentUpdateOne) {
+		u.SetDeletionState(store.DeletionStateDeleting).SetDeletionLeaseAt(time.Now().Add(time.Hour))
+	})
+	apply(t, ctx, s, id, selfReport("running", "working"))
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	assert.Equal(t, "signaled", got.ExitReason, "a report the delete hold neutralises does not clear it")
+}
+
+func TestAgentHalted_SignaledKeptWhileReincarnationInFlight(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	r := defaultHaltRow()
+	r.exitCode = intp(0)
+	id := newHaltAgent(t, ctx, s, projectID, "reincarnation-in-flight", r)
+	storeSignaled(t, ctx, s, id)
+
+	rawUpdate(t, ctx, s, id, func(u *ent.AgentUpdateOne) {
+		u.SetReincarnationState(store.ReincarnationStateStarting)
+	})
+	apply(t, ctx, s, id, selfReport("running", "working"))
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	assert.Equal(t, "signaled", got.ExitReason, "a report the reincarnation guard neutralises does not clear it")
+	require.NotNil(t, got.ExitCode)
+	assert.Equal(t, 0, *got.ExitCode, "the exit code is untouched")
+}
+
+func TestAgentHalted_SignaledFromAnotherRunDropped(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	same := newHaltAgent(t, ctx, s, projectID, "signaled-same-run", defaultHaltRow())
+	storeSignaled(t, ctx, s, same)
+
+	other := newHaltAgent(t, ctx, s, projectID, "signaled-other-run", defaultHaltRow())
+	su := signaledReport("stopped")
+	su.ReportRunID = "run-0"
+	apply(t, ctx, s, other, su)
+	got, err := s.GetAgent(ctx, other)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Phase)
+	assert.Empty(t, got.ExitReason, "another run's report changes nothing")
+}
+
+func TestAgentHalted_SignaledClearedByConfirmedStart(t *testing.T) {
+	// The started-status write of a lifecycle start (ClearExit).
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "confirmed-start", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	apply(t, ctx, s, id, store.AgentStatusUpdate{Phase: "running", ClearExit: true, StartWrite: true})
+	assert.Empty(t, exitReasonOf(t, ctx, s, id))
+}
+
+func TestAgentHalted_AgentReportedHaltEvidenceDroppedWhileSignaledStored(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "a3-signaled", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	su := selfReport("error", "")
+	su.ExitReason = "oom_killed"
+	res := apply(t, ctx, s, id, su)
+	assert.False(t, res.Halted)
+	assert.Equal(t, "signaled", exitReasonOf(t, ctx, s, id), "an agent report never records a halt-evidence reason")
 }

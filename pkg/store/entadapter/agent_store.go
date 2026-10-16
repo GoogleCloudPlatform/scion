@@ -1525,6 +1525,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.ReportSource != store.StatusReportSourceRuntime && store.IsHaltEvidence(su.ExitReason) {
 		su.ExitReason = ""
 	}
+	// The agent-reported signaled reason only fills an empty slot: a
+	// recorded reason is never replaced by it (ptone/scion#5278).
+	if su.ExitReason == string(state.ExitReasonSignaled) && current.ExitReason != "" {
+		su.ExitReason = ""
+	}
 
 	now := time.Now()
 
@@ -1683,6 +1688,17 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// up, so it must be cleared regardless of the current phase.
 	if su.ClearExit {
 		upd.ClearExitCode()
+		upd.SetExitReason("")
+	}
+
+	// A stored signaled reason describes the run that ended; it is cleared
+	// when the agent next moves to starting or running, by any path (a
+	// reincarnation, or a start whose started-status write failed). This
+	// reads the final phase, after every guard above, so a write those
+	// guards neutralised (a delete hold, a reincarnation in flight, another
+	// run's report) never clears it. Only the reason is cleared.
+	if current.ExitReason == string(state.ExitReasonSignaled) && su.ExitReason == "" &&
+		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
 		upd.SetExitReason("")
 	}
 
