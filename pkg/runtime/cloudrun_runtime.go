@@ -74,6 +74,10 @@ type CloudRunRuntime struct {
 	// production (the real Cloud Run Admin API); tests inject a fake so the
 	// lifecycle can be exercised without GCP credentials.
 	newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)
+	// provisionNFS overrides how Run prepares the agent's NFS directories.
+	// Nil in production (provisionCloudRunNFS); tests inject a stub so Run
+	// can reach the Instances API without a mounted NFS export.
+	provisionNFS func(ctx context.Context, cfg RunConfig, agentID string, uid, gid int) (*cloudRunNFSProvisionPaths, error)
 
 	// resolveMu protects the resolution of GCP metadata. When ProjectID
 	// and Location are both empty (auto-detected Cloud Run environment),
@@ -255,6 +259,12 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
 		return "", err
 	}
+	// Also checked up front: buildCloudRunInstance mounts the workspace,
+	// agent home and staged files only from the NFS share, so an instance
+	// on any other backend has none of them and can never run.
+	if err := rejectNonNFSOnCloudRun(cfg); err != nil {
+		return "", err
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
 	// plain variables, file/variable secrets as the staged blob that
 	// sciontool init writes out. Done before any provisioning so an
@@ -282,7 +292,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		return "", err
 	}
 
-	nfsPaths, err := r.provisionCloudRunNFS(ctx, cfg, agentID, uid, gid)
+	provision := r.provisionCloudRunNFS
+	if r.provisionNFS != nil {
+		provision = r.provisionNFS
+	}
+	nfsPaths, err := provision(ctx, cfg, agentID, uid, gid)
 	if err != nil {
 		return "", err
 	}
@@ -1229,6 +1243,26 @@ func sanitizeGCPLabelValue(value string) string {
 // empty-per-agent agent (design #2703).
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
 	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// errCloudRunNeedsNFSWorkspace is returned, wrapped with the backend name,
+// by CloudRunRuntime.Run for a workspace backend other than "nfs"
+// (ptone/scion#5264).
+var errCloudRunNeedsNFSWorkspace = errors.New("cloudrun: the Cloud Run runtime needs an NFS (Filestore) workspace share: " +
+	"it mounts the agent's workspace and home only from that share. Set server.workspace_storage.backend to \"nfs\" " +
+	"with the Filestore share in server.workspace_storage.nfs.shares[0] (server and export) and its mount point in " +
+	"nfs.mount_root, mounted on the broker, or use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// rejectNonNFSOnCloudRun fails when cfg's workspace backend is not "nfs".
+func rejectNonNFSOnCloudRun(cfg RunConfig) error {
+	if cfg.WorkspaceBackendName == "nfs" {
+		return nil
+	}
+	backend := cfg.WorkspaceBackendName
+	if backend == "" {
+		backend = "none"
+	}
+	return fmt.Errorf("%w (workspace backend: %s)", errCloudRunNeedsNFSWorkspace, backend)
+}
 
 // isEmptyPerAgentRun reports whether cfg starts an empty-per-agent agent,
 // identified by SCION_WORKSPACE_MODE in its env. Runtimes that cannot
