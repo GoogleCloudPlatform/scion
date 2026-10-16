@@ -81,6 +81,28 @@ type ConduitPeerAuthOptions struct {
 	Validate func(ctx context.Context, token, audience string) (*idtoken.Payload, error)
 }
 
+// Settings named by SettingError.
+const (
+	peerAuthSetting            = "server.hub.conduit.peer_auth"
+	peerSecretSetting          = "server.hub.conduit.peer_secret"
+	peerServiceAccountsSetting = "server.hub.conduit.peer_service_accounts"
+	sessionSecretSetting       = "--session-secret (SCION_SERVER_SESSION_SECRET)"
+)
+
+// SettingError is a relay startup refusal caused by one setting. Key names
+// the setting; the message is built only from fixed text and setting
+// names, never from a configured value, so both may be logged and shown.
+type SettingError struct {
+	Key string
+	Err error
+}
+
+// Error implements error.
+func (e *SettingError) Error() string { return e.Err.Error() }
+
+// Unwrap returns the underlying error.
+func (e *SettingError) Unwrap() error { return e.Err }
+
 // ResolveConduitPeerAuthMode returns the effective mode: hmac (signed
 // requests) or oidc (signed requests plus an OIDC ID token).
 func ResolveConduitPeerAuthMode(mode string, onGCP bool) (string, error) {
@@ -95,7 +117,7 @@ func ResolveConduitPeerAuthMode(mode string, onGCP bool) (string, error) {
 	case config.ConduitPeerAuthHMAC:
 		return config.ConduitPeerAuthHMAC, nil
 	default:
-		return "", fmt.Errorf("conduit peer auth: unknown mode %q (want auto, oidc or hmac)", mode)
+		return "", &SettingError{Key: peerAuthSetting, Err: errors.New("conduit peer auth: unknown mode in server.hub.conduit.peer_auth (want auto, oidc or hmac)")}
 	}
 }
 
@@ -112,22 +134,22 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (PeerAuth, string, error) {
 	switch {
 	case peerSecret != "":
 		if err := config.ValidatePeerSecret(peerSecret); err != nil {
-			return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
+			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): %w", mode, err)}
 		}
 		if o.SharedSecret != "" && o.SharedSecret == peerSecret {
-			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)
+			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret must differ from the session secret", mode)}
 		}
 		signer, err = NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: []byte(peerSecret), SelfID: o.SelfID})
 		if err != nil {
-			return nil, mode, fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)
+			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)}
 		}
 	case o.SharedSecret != "":
 		signer, err = NewHMACPeerAuthFromSecret(HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
 		if err != nil {
-			return nil, mode, fmt.Errorf("conduit peer auth (%s): %w", mode, err)
+			return nil, mode, &SettingError{Key: sessionSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): %w", mode, err)}
 		}
 	default:
-		return nil, mode, fmt.Errorf("conduit peer auth (%s): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node", mode)
+		return nil, mode, &SettingError{Key: sessionSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): no shared signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET on every hub node", mode)}
 	}
 	if mode == config.ConduitPeerAuthHMAC {
 		return signer, mode, nil
@@ -203,7 +225,7 @@ func newOIDCPeerAuth(o ConduitPeerAuthOptions) (*oidcPeerAuth, error) {
 		}
 	}
 	if len(accounts) == 0 {
-		return nil, errors.New("conduit peer auth (oidc): no allowed service accounts; this node's service account is unknown, so set server.hub.conduit.peer_service_accounts")
+		return nil, &SettingError{Key: peerServiceAccountsSetting, Err: errors.New("conduit peer auth (oidc): no allowed service accounts; this node's service account is unknown, so set server.hub.conduit.peer_service_accounts")}
 	}
 	allowed := make(map[string]bool, len(accounts))
 	for _, a := range accounts {

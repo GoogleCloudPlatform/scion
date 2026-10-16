@@ -151,12 +151,13 @@ func TestStoreDeleteArtifact(t *testing.T) {
 		ctx := context.Background()
 		a := seedOwned(t, st, PrincipalKindAgent, "agent-1")
 		if _, err := st.PutGrant(ctx, &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
-			SubjectRef: "user:x", Permission: GrantRead, CreatedAt: time.Now()}, 10, true); err != nil {
+			SubjectRef: "user:x", Permission: GrantRead, CreatedAt: time.Now()}, 10, true, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("tok"), time.Now().Add(time.Hour)), 5, time.Now()); err != nil {
+		if err := st.CreateLink(ctx, linkGrant(a.ID, LinkTokenHash("tok"), time.Now().Add(time.Hour)), 5, time.Now(), testActor); err != nil {
 			t.Fatal(err)
 		}
+		setup := len(eventsOf(t, st, a.ID)) // grant_created, link_created
 
 		for _, bad := range []*Actor{nil, {Kind: "user"}, {Kind: "user", Ref: "u"}} {
 			if _, err := st.DeleteArtifact(ctx, a.ID, DeleteOptions{Actor: bad}); !errors.Is(err, errNoActor) {
@@ -170,7 +171,7 @@ func TestStoreDeleteArtifact(t *testing.T) {
 		if _, err := st.GetArtifact(ctx, a.ID); err != nil {
 			t.Fatalf("refused deletes changed the artifact: %v", err)
 		}
-		if evs := eventsOf(t, st, a.ID); len(evs) != 0 {
+		if evs := eventsOf(t, st, a.ID); len(evs) != setup {
 			t.Fatalf("refused deletes recorded events: %+v", evs)
 		}
 
@@ -197,8 +198,8 @@ func TestStoreDeleteArtifact(t *testing.T) {
 		if _, err := st.DeleteArtifact(ctx, uuid.NewString(), DeleteOptions{Actor: testActor}); !errors.Is(err, ErrNotFound) {
 			t.Errorf("delete of a missing artifact: %v", err)
 		}
-		if n := len(eventsOf(t, st, a.ID)); n != 1 {
-			t.Errorf("events after refused second delete = %d; want 1", n)
+		if n := len(eventsOf(t, st, a.ID)); n != setup+1 {
+			t.Errorf("events after refused second delete = %d; want %d", n, setup+1)
 		}
 
 		// The expiry sweep goes through the same primitive: actor system,
@@ -208,8 +209,8 @@ func TestStoreDeleteArtifact(t *testing.T) {
 		if _, err := st.SetExpiry(ctx, x.ID, &past, testActor); err != nil {
 			t.Fatal(err)
 		}
-		if n, err := st.SweepExpired(ctx, time.Now(), 10); err != nil || n != 1 {
-			t.Fatalf("SweepExpired = %d, %v", n, err)
+		if ids, err := st.SweepExpired(ctx, time.Now(), 10); err != nil || len(ids) != 1 {
+			t.Fatalf("SweepExpired = %d, %v", len(ids), err)
 		}
 		e = onlyEvent(t, st, x.ID, EventDeleted, &retentionActor)
 		if e.Detail["grantsRemoved"] != float64(1) {
@@ -227,14 +228,15 @@ func TestStoreEventsOnOwnerPaths(t *testing.T) {
 		a := seedOwned(t, st, PrincipalKindUser, "user-1")
 		g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x",
 			Permission: GrantWrite, CreatedAt: time.Now()}
-		if _, err := st.PutGrant(ctx, g, 10, true); err != nil {
+		if _, err := st.PutGrant(ctx, g, 10, true, testActor); err != nil {
 			t.Fatal(err)
 		}
 		link := linkGrant(a.ID, LinkTokenHash("tok"), time.Now().Add(time.Hour))
-		if err := st.CreateLink(ctx, link, 5, time.Now()); err != nil {
+		if err := st.CreateLink(ctx, link, 5, time.Now(), testActor); err != nil {
 			t.Fatal(err)
 		}
 		exp := time.Now().Add(72 * time.Hour)
+		setup := len(eventsOf(t, st, a.ID)) // grant_created, link_created
 
 		// No actor: refused, nothing changed, nothing recorded.
 		if _, err := st.SetExpiry(ctx, a.ID, &exp, nil); !errors.Is(err, errNoActor) {
@@ -253,7 +255,7 @@ func TestStoreEventsOnOwnerPaths(t *testing.T) {
 		if gs, _ := st.ListGrants(ctx, a.ID); len(gs) != 3 || got.ExpiresAt != nil || got.ScopeRef != "project-1" {
 			t.Fatalf("refused changes applied: %+v grants %+v", got, gs)
 		}
-		if evs := eventsOf(t, st, a.ID); len(evs) != 0 {
+		if evs := eventsOf(t, st, a.ID); len(evs) != setup {
 			t.Fatalf("refused changes recorded: %+v", evs)
 		}
 
@@ -304,16 +306,16 @@ func TestStoreEventsOnOwnerPaths(t *testing.T) {
 		if e.Detail["fromScope"] != "project-1" || e.Detail["toScope"] != "project-2" || e.Detail["droppedGrantId"] != home[0].ID {
 			t.Errorf("moved detail = %+v", e.Detail)
 		}
-		if n := len(eventsOf(t, st, a.ID)); n != 5 {
-			t.Errorf("events = %d; want 5", n)
+		if n := len(eventsOf(t, st, a.ID)); n != setup+5 {
+			t.Errorf("events = %d; want %d", n, setup+5)
 		}
 		// A move to the current home is no move and records nothing.
 		if _, err := st.UpdateArtifact(ctx, a.ID, ArtifactUpdate{HomeGrant: scopeGrant(a.ID, "project-2", GrantRead),
 			MaxGrants: 10, Actor: testActor}); err != nil {
 			t.Fatal(err)
 		}
-		if n := len(eventsOf(t, st, a.ID)); n != 5 {
-			t.Errorf("events after a no-op move = %d; want 5", n)
+		if n := len(eventsOf(t, st, a.ID)); n != setup+5 {
+			t.Errorf("events after a no-op move = %d; want %d", n, setup+5)
 		}
 	})
 }
@@ -355,14 +357,20 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 
 		now := time.Now()
 		owner := Owner{Kind: PrincipalKindAgent, Ref: "a-1"}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || n != 2 {
-			t.Fatalf("first batch = %d, %v; want 2", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 2 {
+			t.Fatalf("first batch = %d, %v; want 2", len(ids), err)
+		} else {
+			for _, ref := range ids {
+				if ref.ScopeRef != gone[0].ScopeRef {
+					t.Errorf("changed %s has scope %q, want %q", ref.ID, ref.ScopeRef, gone[0].ScopeRef)
+				}
+			}
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || n != 1 {
-			t.Fatalf("second batch = %d, %v; want 1", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 1 {
+			t.Fatalf("second batch = %d, %v; want 1", len(ids), err)
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, true, now.Add(time.Hour), 2); err != nil || n != 0 {
-			t.Fatalf("marking again = %d, %v; want 0", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now.Add(time.Hour), 2); err != nil || len(ids) != 0 {
+			t.Fatalf("marking again = %d, %v; want 0", len(ids), err)
 		}
 		for _, a := range gone {
 			got, err := st.GetArtifact(ctx, a.ID)
@@ -384,11 +392,11 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 			t.Errorf("candidates = %+v, %v", cands, err)
 		}
 
-		if n, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || n != 3 {
-			t.Fatalf("clearing = %d, %v; want 3", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || len(ids) != 3 {
+			t.Fatalf("clearing = %d, %v; want 3", len(ids), err)
 		}
-		if n, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || n != 0 {
-			t.Fatalf("clearing again = %d, %v; want 0", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, owner, false, now, 10); err != nil || len(ids) != 0 {
+			t.Fatalf("clearing again = %d, %v; want 0", len(ids), err)
 		}
 		for _, a := range gone {
 			if got, _ := st.GetArtifact(ctx, a.ID); got.OrphanedAt != nil {
@@ -397,8 +405,8 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 			onlyEvent(t, st, a.ID, EventUnorphaned, &reconcilerActor)
 		}
 		// A deleted artifact is never marked.
-		if n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "u-dead"}, true, now, 10); err != nil || n != 0 {
-			t.Errorf("marking a deleted artifact's owner = %d, %v", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindUser, Ref: "u-dead"}, true, now, 10); err != nil || len(ids) != 0 {
+			t.Errorf("marking a deleted artifact's owner = %d, %v", len(ids), err)
 		}
 		if _, err := st.SetOwnerOrphaned(ctx, owner, true, now, 0); err == nil {
 			t.Error("SetOwnerOrphaned with no limit accepted")
@@ -416,11 +424,11 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		a := seedOwned(t, st, PrincipalKindAgent, "agent-rb")
 		g := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: "user:x",
 			Permission: GrantRead, CreatedAt: time.Now()}
-		if _, err := st.PutGrant(ctx, g, 10, true); err != nil {
+		if _, err := st.PutGrant(ctx, g, 10, true, testActor); err != nil {
 			t.Fatal(err)
 		}
 		link := linkGrant(a.ID, LinkTokenHash("rb"), time.Now().Add(time.Hour))
-		if err := st.CreateLink(ctx, link, 5, time.Now()); err != nil {
+		if err := st.CreateLink(ctx, link, 5, time.Now(), testActor); err != nil {
 			t.Fatal(err)
 		}
 		expired := seedOwned(t, st, PrincipalKindUser, "user-rb")
@@ -432,8 +440,8 @@ func TestStoreChangeAndEventCommitTogether(t *testing.T) {
 		// one with an expiry (for expiry_cleared).
 		marked := seedOwned(t, st, PrincipalKindAgent, "agent-rb-marked")
 		markedAt := time.Now()
-		if n, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, true, markedAt, 10); err != nil || n != 1 {
-			t.Fatalf("mark: %d, %v", n, err)
+		if ids, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: "agent-rb-marked"}, true, markedAt, 10); err != nil || len(ids) != 1 {
+			t.Fatalf("mark: %d, %v", len(ids), err)
 		}
 		expiring := seedOwned(t, st, PrincipalKindUser, "user-rb-exp")
 		keep := time.Now().Add(48 * time.Hour)

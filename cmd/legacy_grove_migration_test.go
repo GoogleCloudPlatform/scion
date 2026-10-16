@@ -115,11 +115,11 @@ func TestWarnRemovedLegacyEnv_StderrOnlyUnderJSON(t *testing.T) {
 	warnRemovedLegacyEnvOnce = sync.Once{}
 	t.Cleanup(func() { warnRemovedLegacyEnvOnce = sync.Once{} })
 
-	savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint :=
-		outputFormat, projectPath, globalMode, noHub, hubEndpoint
+	savedFormat, savedProjectPath, savedGlobal, savedHubEndpoint :=
+		outputFormat, projectPath, globalMode, hubEndpoint
 	t.Cleanup(func() {
-		outputFormat, projectPath, globalMode, noHub, hubEndpoint =
-			savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint
+		outputFormat, projectPath, globalMode, hubEndpoint =
+			savedFormat, savedProjectPath, savedGlobal, savedHubEndpoint
 	})
 
 	origStdout, origStderr := os.Stdout, os.Stderr
@@ -245,11 +245,11 @@ func TestGlobalLayoutMigration_CLIStderrOnlyUnderJSON(t *testing.T) {
 	t.Cleanup(func() { warnRemovedLegacyEnvOnce = sync.Once{} })
 	t.Cleanup(func() { config.SetProjectMigrationReporter(config.NewSlogReporter()) })
 
-	savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint :=
-		outputFormat, projectPath, globalMode, noHub, hubEndpoint
+	savedFormat, savedProjectPath, savedGlobal, savedHubEndpoint :=
+		outputFormat, projectPath, globalMode, hubEndpoint
 	t.Cleanup(func() {
-		outputFormat, projectPath, globalMode, noHub, hubEndpoint =
-			savedFormat, savedProjectPath, savedGlobal, savedNoHub, savedHubEndpoint
+		outputFormat, projectPath, globalMode, hubEndpoint =
+			savedFormat, savedProjectPath, savedGlobal, savedHubEndpoint
 	})
 
 	rootCmd.SetArgs([]string{"project", "list", "--format", "json"})

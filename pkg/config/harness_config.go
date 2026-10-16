@@ -172,6 +172,11 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	if err := entry.Delivery.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config.yaml: %w", err)
 	}
+	// Agent Plugins support comes from the bundle sidecar when present; a
+	// capabilities.agent_plugins value in config.yaml is the fallback.
+	// An invalid sidecar degrades to "no" with a warning; it never fails the
+	// load.
+	ApplyAgentPluginsSidecarDir(&entry, absPath)
 
 	name := filepath.Base(absPath)
 	if entry.Name != "" {
@@ -400,7 +405,7 @@ func mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, fileName str
 }
 
 func isHarnessConfigRootSupportFile(relPath string) bool {
-	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" {
+	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" || relPath == AgentPluginsSidecarFile {
 		return true
 	}
 	for _, prefix := range []string{"schema/", "schemas/", "examples/", "tests/fixtures/"} {

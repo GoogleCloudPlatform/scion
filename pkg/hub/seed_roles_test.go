@@ -1046,7 +1046,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
-				"artifact.create", "artifact.read",
+				"artifact.create", "artifact.read", "artifact.steward",
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
@@ -1119,7 +1119,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   9,
+		store.ProjectRoleOwner:   10,
 		store.ProjectRoleAdmin:   8,
 		store.ProjectRoleMember:  5,
 		store.ProjectRoleVisitor: 1,
@@ -1145,7 +1145,7 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 9, projectOwnerPermissionIDs},
+		{store.ProjectRoleOwner, 10, projectOwnerPermissionIDs},
 		{store.ProjectRoleAdmin, 8, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
