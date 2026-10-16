@@ -1249,8 +1249,8 @@ var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent
 // (ptone/scion#5264).
 var errCloudRunNeedsNFSWorkspace = errors.New("cloudrun: the Cloud Run runtime needs an NFS (Filestore) workspace share: " +
 	"it mounts the agent's workspace and home only from that share. Set server.workspace_storage.backend to \"nfs\" " +
-	"with the Filestore share in server.workspace_storage.nfs.shares[0] (server and export) and its mount point in " +
-	"nfs.mount_root, mounted on the broker, or use a Docker, Podman, Apple or Kubernetes broker for this project")
+	"with the Filestore share in server.workspace_storage.nfs.shares[0] (server and export), mounted on the broker " +
+	"under server.workspace_storage.nfs.mount_root, or use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 // rejectNonNFSOnCloudRun fails when cfg's workspace backend is not "nfs".
 func rejectNonNFSOnCloudRun(cfg RunConfig) error {
