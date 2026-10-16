@@ -91,7 +91,8 @@ export function iapJourneyConfig(
 }
 
 /**
-XX * <name> --json`. Throws (with no value from the profile in the message)
+ * Reads the journey's target from the JSON of `scion hub profile show
+ * <name> --json`. Throws (with no value from the profile in the message)
  * when the profile is not an IAP profile for an https origin.
  */
 export function profileTarget(showJSON: string): IapJourneyTarget {
