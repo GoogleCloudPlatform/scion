@@ -486,7 +486,10 @@ export interface AgentLaunch {
    * can be in.
    */
   active: boolean;
-  /** create | start | restart. Only `create` launches are async today. */
+  /**
+   * create | start | restart. A resume is a `start` launch. Start and
+   * restart launches exist only where the hub runs starts asynchronously.
+   */
   kind: string;
   /** The last step the broker reported, e.g. `claim` or `launching`. */
   step?: string;
@@ -499,6 +502,12 @@ export interface AgentLaunch {
   cause?: string;
   /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
   endReason?: string;
+  /**
+   * The resume memory of a failed start (ptone/scion#4669): the resting
+   * phase a later start or resume treats the agent as being in, sent only
+   * when it differs from the agent's phase.
+   */
+  resumePhase?: string;
   /** Present only while the launch is active. */
   deadline?: string;
   remainingSeconds?: number;
@@ -539,6 +548,22 @@ export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * Whether the agent's most recent start or restart launch failed, and the
+ * agent has not run since (design wave 3 D-c, ptone/scion#4669). Unlike an
+ * incomplete create, the hub still accepts a start or resume of such an
+ * agent, which ends in the phase the failure restored (stopped, error, or
+ * error with launch.resumePhase). A launch the user stopped
+ * (`launch_stopped`) is not a failure. The hub clears launch.error only when
+ * the agent runs, so a running agent never shows it.
+ */
+export function isFailedStartLaunch(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || (launch.kind !== 'start' && launch.kind !== 'restart')) return false;
+  if (launch.state !== 'ended' || !launch.error || launch.error === 'launch_stopped') return false;
+  return agent.phase !== 'running' && !isAgentLaunching(agent);
 }
 
 /**

@@ -28,7 +28,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { AgentLaunch, AgentPhase } from './types.js';
-import { isAgentLaunching, isIncompleteCreate } from './types.js';
+import { isAgentLaunching, isFailedStartLaunch, isIncompleteCreate } from './types.js';
 
 const base = { id: 'l-1', kind: 'create' };
 
@@ -100,5 +100,54 @@ describe('isIncompleteCreate', () => {
 
   it('is false without a launch', () => {
     expect(isIncompleteCreate({ phase: 'error' })).toBe(false);
+  });
+});
+
+/**
+ * A start or restart launch that failed (design wave 3 D-c): the hub ends
+ * it stopped, error, or error with a resume memory, and still accepts a
+ * start or resume.
+ */
+describe('isFailedStartLaunch', () => {
+  const failedStart: AgentLaunch = { ...failed, kind: 'start', step: 'container_create' };
+  const failedRestart: AgentLaunch = { ...failed, kind: 'restart' };
+
+  it.each<[AgentPhase, AgentLaunch]>([
+    ['stopped', failedStart],
+    ['error', failedStart],
+    ['error', { ...failedStart, resumePhase: 'suspended' }],
+    ['suspended', failedStart],
+    ['stopped', failedRestart],
+  ])('is true in phase %s', (phase, launch) => {
+    expect(isFailedStartLaunch({ phase, launch })).toBe(true);
+  });
+
+  it('is false for a create that failed', () => {
+    expect(isFailedStartLaunch({ phase: 'error', launch: failed })).toBe(false);
+  });
+
+  it('is false for a start the user stopped', () => {
+    const stopped: AgentLaunch = { ...failedStart, error: 'launch_stopped' };
+    expect(isFailedStartLaunch({ phase: 'stopped', launch: stopped })).toBe(false);
+  });
+
+  it('is false once the agent runs', () => {
+    expect(isFailedStartLaunch({ phase: 'running', launch: failedStart })).toBe(false);
+  });
+
+  it('is false for a start in flight or one that succeeded', () => {
+    const active: AgentLaunch = { ...inFlight, kind: 'start' };
+    expect(isFailedStartLaunch({ phase: 'starting', launch: active })).toBe(false);
+    const ok: AgentLaunch = { ...succeeded, kind: 'start' };
+    expect(isFailedStartLaunch({ phase: 'stopped', launch: ok })).toBe(false);
+  });
+
+  it('is false for a start winding down before its error is recorded', () => {
+    const windingStart: AgentLaunch = { ...windingDown, kind: 'start' };
+    expect(isFailedStartLaunch({ phase: 'stopped', launch: windingStart })).toBe(false);
+  });
+
+  it('is false without a launch', () => {
+    expect(isFailedStartLaunch({ phase: 'error' })).toBe(false);
   });
 });
