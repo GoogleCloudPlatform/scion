@@ -94,14 +94,16 @@ without a trailing dot, IP literals in canonical form, and loopback and containe
 names (such as `host.docker.internal`) treated as one host. This name check runs offline, when a
 profile is added or selected.
 
-Before a command sends its first profile credential, the CLI also compares hub identities. It
-reads the target hub's persistent hub id from the target's public health route (`GET /healthz`,
-with only the profile's IAP transport token and no bearer) and the agent's own hub id from the
+Before a command mints or sends a profile bearer (the issuer ID token or a cached identity's
+token), the CLI also compares hub identities. It reads the target hub's persistent hub id from the
+target's public health route (`GET /healthz`, with at most the profile's IAP transport token, none
+for `--transport none`, and no bearer) and the agent's own hub id from the
 own hub's health route (with no credential at all), and refuses the profile when the two ids are
 equal. This catches another name for the agent's own hub, such as its public URL while
 `SCION_HUB_ENDPOINT` holds a bridge address, or a DNS alias. When either id is unavailable (the
 health route does not answer `200` with a hub id, for example because the agent's own hub is
-reached through IAP), the name check is the only check; `--debug` says so. A lookup can only add a
+reached through IAP), the name check is the only check. `hub status` reports the outcome as its "not this agent's own
+hub" check (passed by hub id, by name only with the reason, or refused), and `--debug` logs it. A lookup can only add a
 refusal: the name check always runs first. Replicas of one hub share its hub id and count as one
 hub. The target hub's own delegation remains the boundary.
 :::
