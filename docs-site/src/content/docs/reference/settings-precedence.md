@@ -477,7 +477,7 @@ statement with **no truth value** about `resources`.
 :::note[Do not overstate the parallel — same path, different shape]
 The three-ranks-in-one-file shape appears on both axes. The env injection in `pkg/agent/run.go`
 (`resolveAuthEnvOverlay`) is no longer gated on `!opts.BrokerMode`: it runs on broker starts too,
-and it only fills keys the start's env (hub-supplied values included) has not already set. The
+and it only fills keys that the start's env (hub-supplied values included) has not already set. The
 CLI no longer takes a non-broker path (local mode was removed); every agent now starts through a
 broker. So the env sub-ladder in A3 and the `resources` interleave in
 [System B](#resources-interleaves-and-cannot-be-given-one-rank) both run on the **broker /
@@ -669,7 +669,7 @@ knowing which is which:
 | Reader | What it is for | Scoping |
 | --- | --- | --- |
 | `ResolveHarnessConfig` | **Resolution** — the values actually injected into the agent | **Filtered.** Only the override belonging to the harness config you selected is applied. |
-| `(*Server).extractRequiredEnvKeys` | **Secret discovery** — deciding which keys must be looked up or prompted for | **Unfiltered.** Every `harness_overrides` entry on the profile is walked, whichever harness config it belongs to. |
+| `(*runtimebroker.Server).extractRequiredEnvKeys` | **Secret discovery** — deciding which keys must be looked up or prompted for | **Unfiltered.** Every `harness_overrides` entry on the profile is walked, whichever harness config it belongs to. |
 
 The second reader is **broker-only** and runs only in the broker's create-time env-gather
 preflight (`createAgent`, when the request asks for env-gather and auth is on). It does not run on
