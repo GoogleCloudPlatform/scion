@@ -143,6 +143,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"artifact.update":       testAdminPolicyAllow,
 	"artifact.delete":       testAdminPolicyAllow,
 	"artifact.manage":       testAdminPolicyAllow,
+	"artifact.steward":      testAdminPolicyAllow,
 	"skill.create":          testAdminPolicyAllow,
 	"skill.create_global":   testAdminPolicyAllow,
 	"skill.read":            testAdminPolicyAllow,
@@ -396,6 +397,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer"},
 	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first"},
 	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)"},
+	"handlers_test_admin_identities.go:recheckTestAdminDelegationGrantor":  {Policy: testAdminPolicyAllow, Reason: "reads the super-admin binding of a workload delegation's grantor (not of the caller, a workload) inside the issuance transaction, after requiring the grantor's stored kind to be human; test kinds never hold a delegation (delegation create refuses them)"},
 	"test_admin_purge.go:canPurgeTestAdminIdentity":                        {Policy: testAdminPolicyDeny, Reason: "purging an admin-kind identity is for its issuer or a human super-admin (A3); test identities are also refused as purge callers by testIdentityCaller"},
 	"test_admin_residue.go:handleTestAdminResidue":                         {Policy: testAdminPolicyDeny, Reason: "the residue report is for human super-admins only (A3); also refused by kind first"},
 	// The role-claim fast path itself, moved to pkg/hub/internal/principal

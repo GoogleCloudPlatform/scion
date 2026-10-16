@@ -1942,6 +1942,11 @@ type Server struct {
 	// testAdminAudit is the synchronous, level-independent stdout writer
 	// for test admin tier events (test_admin_audit_sink.go).
 	testAdminAudit *testAdminAuditSink
+	// testAdminPolicyClassified is true when New found the test-admin
+	// policy classification complete (TestAdminPolicyComplete) on a hub
+	// running an admin level. Admin-tier workload delegation scopes need it
+	// (workloadAdminScopeAvailable). Set once in New.
+	testAdminPolicyClassified bool
 
 	// signingKeySources records the source label of each signing key
 	// resolved at startup (signingKeySource). Labels only, never keys.
@@ -2317,9 +2322,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestAdminWebSessionsConfig(cfg); err != nil {
 		return nil, err
 	}
-	// Workload issuer allowlist and issuer audience (X2): refuse a
-	// malformed allowlist, an admin-tier entry, a missing hub id, or an
-	// issuer audience shared with another accepted token audience.
+	// Workload issuer allowlist and issuer audience (X2, X4): refuse a
+	// malformed allowlist, an admin-tier entry below --test-mode=admin, a
+	// missing hub id, or an issuer audience shared with another accepted
+	// token audience.
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
@@ -2616,7 +2622,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
-	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
+	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() }, srv.workloadAdminScopeAvailable)
 	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
 		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
 	}
@@ -2702,6 +2708,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
+	if cfg.TestAdminGate.requested() {
+		srv.testAdminPolicyClassified = TestAdminPolicyComplete() == nil
+	}
 	testModeCfg := cfg.TestMode
 	if cfg.TestAdminGate.requested() {
 		// verifyTestAdminSigningKeys passed above.

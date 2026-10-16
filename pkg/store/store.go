@@ -221,9 +221,10 @@ type Store interface {
 	// UserKindTestHubAdmin or UserKindTestSuperAdmin. It requires an admin
 	// Kind, the kind's role (TestAdminRole), an email in the kind's domain
 	// (TestAdminEmailDomain), a non-nil ExpiresAt, a non-empty IssuedBy and
-	// IssuanceID, and a system-scoped roleDefinitionID, and refuses a non-nil
-	// IssuerDelegationID (workload issuer delegations issue the member tier
-	// only); it returns ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
+	// IssuanceID, and a system-scoped roleDefinitionID, and refuses an empty
+	// non-nil IssuerDelegationID (a non-empty one, from a workload issuer
+	// delegation of the kind's scope, is written once); it returns
+	// ErrInvalidInput otherwise. The binding is created with ExpiresAt equal
 	// to the identity's expiry and CreatedBy TestIdentityIssuanceCreatedBy,
 	// so it never outlives the identity. It is a Store method because it
 	// spans the user and role-binding sub-stores.
@@ -276,6 +277,84 @@ type Store interface {
 	// re-read with GetFederatedUserBySubject. It returns the updated
 	// account. It is safe to call on the store passed to WithTx.
 	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
+
+	// CreateProjectVisitorRule creates a project visitor rule. It requires
+	// a ProjectID, an Issuer (normalized with NormalizeFederatedIssuer) and
+	// a Domain (normalized with NormalizeVisitorRuleDomain) that passes
+	// ValidVisitorRuleDomain, and, when both bounds are set, an ExpiresAt
+	// after NotBefore; it returns ErrInvalidInput otherwise. It generates
+	// the ID when empty and writes the normalized fields, the ID and
+	// CreatedAt back to rule. A second rule for the same (ProjectID,
+	// Issuer, Domain) returns ErrAlreadyExists. It is safe to call on the
+	// store passed to WithTx.
+	CreateProjectVisitorRule(ctx context.Context, rule *ProjectVisitorRule) error
+
+	// GetProjectVisitorRule returns the project visitor rule id, or
+	// ErrNotFound.
+	GetProjectVisitorRule(ctx context.Context, id string) (*ProjectVisitorRule, error)
+
+	// ListProjectVisitorRules returns the project visitor rules of
+	// projectID, oldest first.
+	ListProjectVisitorRules(ctx context.Context, projectID string) ([]*ProjectVisitorRule, error)
+
+	// ListActiveProjectVisitorRules returns the project visitor rules, of
+	// every project, for issuer and domain (both normalized before the
+	// lookup; the domain matches exactly) whose window contains at
+	// (ProjectVisitorRule.ActiveAt), oldest first.
+	ListActiveProjectVisitorRules(ctx context.Context, issuer, domain string, at time.Time) ([]*ProjectVisitorRule, error)
+
+	// UpdateProjectVisitorRuleWindow replaces the NotBefore and
+	// ExpiresAt of the project visitor rule id (nil clears a bound)
+	// and of every role binding the rule created (SourceRuleID), in
+	// one transaction, and returns the updated rule and the updated
+	// bindings. The project row (as LockProjectForMembership does)
+	// and then the rule row are locked before the bindings are
+	// changed, so a rule binding created concurrently either
+	// is changed too or takes the new window, and a concurrent
+	// deletion of the project runs before or after it. A missing
+	// rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
+	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, []*RoleBinding, error)
+
+	// DeleteProjectVisitorRule deletes the project visitor rule id, every
+	// role binding it created (SourceRuleID) and its exclusions, in one
+	// transaction, and returns the deleted bindings. A binding with no
+	// SourceRuleID (a visitor grant by email) is never deleted. The
+	// project row (as LockProjectForMembership does) and then the rule row
+	// are locked before the bindings are deleted, so a rule binding
+	// created concurrently is either deleted too or refused, and a
+	// concurrent deletion of the project runs before or after it. A missing
+	// rule returns ErrNotFound. It is safe to call on the store passed to
+	// WithTx.
+	DeleteProjectVisitorRule(ctx context.Context, id string) ([]*RoleBinding, error)
+
+	// DeleteProjectVisitorRulesByProject deletes every project visitor
+	// rule of projectID, every role binding they created (SourceRuleID)
+	// and their exclusions, in one transaction, and returns the number of
+	// rules deleted. Project deletion calls it, so no rule of a deleted
+	// project binds anyone afterwards. It is safe to call on the store
+	// passed to WithTx.
+	DeleteProjectVisitorRulesByProject(ctx context.Context, projectID string) (int, error)
+
+	// DeleteInactiveVisitorGrant deletes the project-visitor binding
+	// bindingID when it is a visitor grant by email (no SourceRuleID) whose
+	// window does not contain at (expired, or not started yet), and
+	// reports whether it deleted it. Any other binding, an active grant
+	// and a missing binding are left alone and return false. The binding
+	// is read and checked in the same transaction as the delete. It is
+	// safe to call on the store passed to WithTx.
+	DeleteInactiveVisitorGrant(ctx context.Context, bindingID string, at time.Time) (bool, error)
+
+	// CreateProjectVisitorExclusion records that the project visitor rule
+	// ruleID no longer binds the user userID, so the rule does not create
+	// that binding again. Recording an existing exclusion is not an error.
+	// A missing rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
+	CreateProjectVisitorExclusion(ctx context.Context, ruleID, userID, createdBy string) error
+
+	// IsProjectVisitorExcluded reports whether the project visitor rule
+	// ruleID has an exclusion for the user userID.
+	IsProjectVisitorExcluded(ctx context.Context, ruleID, userID string) (bool, error)
 
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
@@ -2083,6 +2162,11 @@ type TestIdentityDelegationStore interface {
 	// issued through delegationID whose expiry is after now.
 	CountLiveTestFixtureUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
 
+	// CountLiveTestAdminUsersByDelegation counts admin-kind test
+	// identities (either kind) issued through delegationID whose expiry is
+	// after now. An empty delegationID returns ErrInvalidInput.
+	CountLiveTestAdminUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error)
+
 	// ListTestFixtureUsersByDelegation returns test fixture users issued
 	// through delegationID, newest first, with ListTestFixtureUsers'
 	// liveAt and limit semantics.
@@ -3527,8 +3611,14 @@ type RoleStore interface {
 	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
 	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
 	// be empty, in which case the project-visitor role is resolved by
-	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
-	// on the store passed to WithTx.
+	// name. SourceRuleID, when set, names the project visitor rule that
+	// creates the binding: the rule must exist, be of the binding's
+	// project and of the account's home issuer, and be active now
+	// (ErrVisitorBindingRefused otherwise); the binding then takes the
+	// rule's window, read in the same transaction, in place of NotBefore
+	// and ExpiresAt. Create a rule binding inside WithTx, so the rule
+	// cannot change before the binding commits. Returns ErrAlreadyExists for a duplicate. It is safe to
+	// call on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// ListVisitorRoleBindings returns the project-visitor bindings at the
