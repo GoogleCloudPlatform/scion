@@ -205,8 +205,9 @@ func TestSubmitAgentEnv_AsyncLaunch(t *testing.T) {
 	})
 
 	// A failed finalize keeps the row in provisioning (the env can be
-	// submitted again), so the ended launch carries dispatch_failed: a
-	// client following the launch sees it failed (ptone/scion#5283).
+	// submitted again once the start claim is released), so the ended
+	// launch carries dispatch_failed: a client following the launch sees it
+	// failed (ptone/scion#5283).
 	t.Run("send failure keeps provisioning and ends the launch with dispatch_failed", func(t *testing.T) {
 		srv, s := testServer(t)
 		f, path := setup(t, s)
@@ -232,6 +233,26 @@ func TestSubmitAgentEnv_AsyncLaunch(t *testing.T) {
 		assert.False(t, got.Launch.Active)
 		assert.Equal(t, store.LaunchEndReasonNotLaunched, got.Launch.EndReason)
 		assert.Equal(t, store.LaunchErrorDispatchFailed, got.Launch.Error)
+
+		// The failed send keeps the start claim unconfirmed, so the env
+		// can be submitted again once the start-claim reaper releases it
+		// (simulated here). The next launch then clears the code.
+		// Mutant: drop SetLaunchError("") in the store's beginLaunch.
+		claimed := f.row(t, agent.ID)
+		require.Equal(t, store.StartClaimUnconfirmed, claimed.StartClaimState, "setup: the failed finalize keeps its claim unconfirmed")
+		released, err := s.ReleaseUnconfirmedStart(context.Background(), agent.ID, claimed.StartClaimID)
+		require.NoError(t, err)
+		require.True(t, released)
+		f.client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			return acceptedAnswer(req, req.LaunchID), nil, nil
+		}
+		rec = doRequest(t, srv, http.MethodPost, fmt.Sprintf(path, agent.Slug), envBody)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Len(t, f.client.sends, 2)
+		row := f.row(t, agent.ID)
+		assert.True(t, row.IsInFlight(), "the resubmitted launch is active")
+		assert.Equal(t, f.client.sends[1].LaunchID, row.LaunchID)
+		assert.Empty(t, row.LaunchError, "the new launch clears the failed launch's code")
 	})
 
 	t.Run("launch that cannot begin answers 409 with no send", func(t *testing.T) {
