@@ -66,7 +66,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/groups", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/message-logs/stream", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/messages/stream", Method: "GET", Area: AreaAgents},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/agents/{agentId}/cloud-logs/stream", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/agents/{agentId}/message-logs/stream", Method: "GET", Area: AreaAgents},
 	// --- projects ---
@@ -221,7 +220,6 @@ var PendingBearerOperations = []OperationID{
 	"access.constraint.delete",
 	"access.constraint.read",
 	"access.constraint.update",
-	"agent.list",
 	"agent.message.send",
 	"broker.read",
 	"env.hub.list",
@@ -246,7 +244,6 @@ var PendingBearerOperations = []OperationID{
 	"hub.allowlist.update",
 	"hub.maintenance.execute",
 	"project.lifecycle.create",
-	"project.list",
 	"project.register",
 	"role.binding.create",
 	"role.binding.delete",
