@@ -298,7 +298,7 @@ func TestLifecycleStartHasInputs_IgnoresAcceptAsync(t *testing.T) {
 	req := func(body string) *http.Request {
 		return httptest.NewRequest(http.MethodPost, "/api/v1/agents/x/start", bytes.NewBufferString(body))
 	}
-	assert.False(t, lifecycleStartHasInputs(req(`{"acceptAsyncLaunch":true}`)))
+	assert.False(t, lifecycleStartHasInputs(req(`{"acceptAsyncLaunch":true}`)), "the opt-in alone is not an ignored input")
 	assert.True(t, lifecycleStartHasInputs(req(`{"forceResume":true}`)))
 	assert.True(t, lifecycleStartHasInputs(req(`{"forceResume":true,"acceptAsyncLaunch":true}`)))
 	assert.False(t, lifecycleStartHasInputs(req(`{}`)))

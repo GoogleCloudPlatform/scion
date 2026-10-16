@@ -250,7 +250,7 @@ func TestDispatchAgentStart_AttachesAgentID(t *testing.T) {
 	f := newAsyncDispatchFixture(t, "asd-plain", string(state.PhaseStopped), true, nil, asyncOn)
 	require.NoError(t, f.d.DispatchAgentStart(context.Background(), f.agent, "", false))
 	require.Len(t, f.client.agentIDQ, 1)
-	assert.Equal(t, api.AgentIDQueryParam+"="+url.QueryEscape(f.agent.ID), f.client.agentIDQ[0])
+	assert.Equal(t, api.AgentIDQueryParam+"="+url.QueryEscape(f.agent.ID), f.client.agentIDQ[0], "the plain start sends the agent ID")
 	assert.False(t, f.client.sent()[0].AsyncLaunch)
 }
 
@@ -480,7 +480,7 @@ func TestAsyncStart_LifecycleStartAccepted(t *testing.T) {
 
 	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
 	require.Equal(t, http.StatusOK, code, body)
-	assert.Equal(t, string(state.PhaseStarting), body["phase"])
+	assert.Equal(t, string(state.PhaseStarting), body["phase"], "the accepted start answers phase starting")
 	l := launchOf(body)
 	require.NotNil(t, l, "the answer carries the launch")
 	assert.Equal(t, store.LaunchKindStart, l["kind"])
@@ -547,7 +547,7 @@ func TestAsyncStart_LifecycleRestartAccepted(t *testing.T) {
 	a := f.addAgent("as-restart", string(state.PhaseRunning), "")
 
 	code, body := lifecycleWithBody(t, f, a.ID, "restart", map[string]bool{"acceptAsyncLaunch": true})
-	require.Equal(t, http.StatusOK, code, body)
+	require.Equal(t, http.StatusOK, code, "the accepted restart answers 200: %v", body)
 	assert.Equal(t, int32(1), d.stops.Load(), "the stop leg ran")
 	l := launchOf(body)
 	require.NotNil(t, l)
@@ -903,8 +903,8 @@ func TestAsyncStartGuard0f_NoopReason(t *testing.T) {
 
 	for _, run := range []string{"", "run-old"} {
 		out := postAgentStatusAsAgentRun(t, srv, a, run, report)
-		assert.Equal(t, false, out["applied"], "run %q", run)
-		assert.Equal(t, statusUpdateReasonStartLaunchOtherRun, out["reason"], "run %q", run)
+		assert.Equal(t, false, out["applied"], "a report of another run is not applied (token run "+run+")")
+		assert.Equal(t, statusUpdateReasonStartLaunchOtherRun, out["reason"], "the reason names the other run (token run "+run+")")
 		assert.Equal(t, string(state.PhaseStarting), getAgent(t, s, a.ID).Phase)
 	}
 	out := postAgentStatusAsAgentRun(t, srv, a, "run-new", `{"phase":"running","activity":"working"}`)
@@ -923,7 +923,7 @@ func TestAsyncStartExecDispatchStart_PlainDispatcherError(t *testing.T) {
 	pd := &plainStartDispatcher{lastErr: fmt.Errorf("x: %w", errStartRequestNotSent)}
 	f.srv.SetDispatcher(pd)
 	res, err := f.srv.execDispatchStart(context.Background(), row)
-	require.Error(t, err)
+	require.Error(t, err, "the plain dispatcher's error is returned")
 	assert.Contains(t, err.Error(), "dispatch start:")
 	assert.ErrorIs(t, err, errStartRequestNotSent)
 	assert.Empty(t, res)
@@ -941,7 +941,7 @@ func TestAsyncStartExecDispatchStart_PassesKindAndPriorPhase(t *testing.T) {
 	f.srv.SetDispatcher(od)
 	_, err = f.srv.execDispatchStart(context.Background(), row)
 	require.NoError(t, err)
-	assert.Equal(t, StartDispatchOptions{Async: true, Kind: store.LaunchKindRestart, PriorPhase: "running"}, od.lastOpts)
+	assert.Equal(t, StartDispatchOptions{Async: true, Kind: store.LaunchKindRestart, PriorPhase: "running"}, od.lastOpts, "the owner passes the intent's Kind and PriorPhase")
 }
 
 // ---- D2 wire contract -------------------------------------------------------
