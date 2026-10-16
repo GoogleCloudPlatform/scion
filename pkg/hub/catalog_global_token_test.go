@@ -393,8 +393,19 @@ func ghResolveBody(projectID string) ResolveSkillsRequest {
 func TestPublicGitHubSkillResolve_TokenNeedsSkillReadOnHub(t *testing.T) {
 	f := newGCFixture(t, false)
 	for _, key := range []string{f.hubToken(t, "template:read"), f.projectToken(t, f.projectA, "skill:read")} {
-		_, codes := resolveCodes(t, f.call(t, key, http.MethodPost, "/api/v1/skills/resolve", ghResolveBody("")))
+		logs := captureJSONSlog(t)
+		rec := f.call(t, key, http.MethodPost, "/api/v1/skills/resolve", ghResolveBody(""))
+		_, codes := resolveCodes(t, rec)
 		assert.Equal(t, agent.SkillErrCodeForbidden, codes[gcInvalidGitHubRef])
+		// The client gets the fixed phrase and a correlation ID; the
+		// detail goes only to the log record.
+		var resp ResolveSkillsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.Len(t, resp.Errors, 1)
+		assert.Equal(t, "access denied", resp.Errors[0].Message)
+		require.NotEmpty(t, resp.Errors[0].CorrelationID)
+		logRec := findResolveLog(t, logs(), resp.Errors[0].CorrelationID, agent.SkillErrCodeForbidden)
+		assert.Equal(t, "caller may not resolve GitHub skills", logRec["error"])
 	}
 	_, codes := resolveCodes(t, f.call(t, f.hubToken(t, "skill:read"), http.MethodPost, "/api/v1/skills/resolve", ghResolveBody("")))
 	require.Contains(t, codes, gcInvalidGitHubRef)
