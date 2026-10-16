@@ -42,6 +42,7 @@ import (
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -126,6 +127,20 @@ func NewCloudRunRuntimeFromInstances(cfg *config.V1CloudRunInstancesConfig) (*Cl
 		},
 		exec: execConn,
 	}, nil
+}
+
+// NewCloudRunRuntimeForTest builds a CloudRunRuntime for cfg whose Instances
+// API client comes from newClient. Exported so tests in other packages (e.g.
+// pkg/agent, pkg/runtimebroker) can drive the real runtime through a fake
+// Instances client, as NewCloudRunSandboxRuntimeForTest does for the
+// sandbox runtime.
+func NewCloudRunRuntimeForTest(cfg *config.CloudRunConfig, newClient func(ctx context.Context) (cloudrun.InstancesAPI, error)) (*CloudRunRuntime, error) {
+	rt, err := NewCloudRunRuntime(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rt.newClient = newClient
+	return rt, nil
 }
 
 // resolveConfig ensures that ProjectID and Location are populated. When both
@@ -1038,13 +1053,28 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 			ID:              inst.Labels["agent_id"],
 			ContainerID:     cloudRunShortInstanceID(inst.Name),
 			RunID:           inst.Labels[sanitizeGCPLabelKey(api.LabelRunID)], // Run stored scion.run_id under its GCP-sanitized key
-			Name:            inst.Name,
+			Name:            cloudRunAgentName(inst),
+			ProjectID:       inst.Labels[sanitizeGCPLabelKey(projectkeys.LabelProjectID)],
 			ContainerStatus: status,
 			Labels:          inst.Labels,
 		})
 	}
 
 	return agents, nil
+}
+
+// cloudRunAgentName is the agent name List reports for inst: the agent slug
+// from the scion.name label (stored under its GCP-sanitized key), as
+// DockerRuntime.List reports it, not the instance resource name. The
+// broker's delete and stop resolution and AgentManager match the hub-side
+// agent name against Name, so a resource-name Name never matches and the
+// instance is left behind (ptone/scion#5268). An instance without the label
+// falls back to its resource name.
+func cloudRunAgentName(inst *runpb.Instance) string {
+	if name := inst.GetLabels()[sanitizeGCPLabelKey("scion.name")]; name != "" {
+		return name
+	}
+	return inst.GetName()
 }
 
 func (r *CloudRunRuntime) GetLogs(ctx context.Context, id string) (string, error) {
