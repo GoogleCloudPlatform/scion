@@ -398,7 +398,8 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
     }
-    .agent-error-banner .error-cause {
+    .agent-error-banner .error-cause,
+    .agent-error-banner .error-step {
       font-size: 0.8125rem;
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
@@ -1549,7 +1550,7 @@ export class ScionPageAgentDetail extends LitElement {
           </div>`
         : nothing}
       ${code && launch.step
-        ? html`<div class="error-cause" data-testid="launch-failed-step" data-step=${launch.step}>
+        ? html`<div class="error-step" data-testid="launch-failed-step" data-step=${launch.step}>
             Failed at: ${launchStepLabel(launch.step)}
           </div>`
         : nothing}

@@ -39,10 +39,23 @@ function goSource(path: string): string {
   return readFileSync(resolve(REPO_ROOT, path), 'utf-8');
 }
 
-/** The string values of the Go constants whose names start with prefix. */
-function goStringConstants(src: string, prefix: string): string[] {
-  const re = new RegExp(`^\\s*${prefix}\\w*\\s*=\\s*"([^"]+)"`, 'gm');
-  return Array.from(src.matchAll(re), (m) => m[1]);
+/**
+ * The string values of the Go constants whose names start with prefix, in a
+ * const block or a one-line const, typed or not. A constant of that prefix
+ * defined as an alias of another identifier fails the test unless it is in
+ * aliases (its value is checked separately).
+ */
+function goStringConstants(src: string, prefix: string, aliases: string[] = []): string[] {
+  const lit = new RegExp(`^\\s*(?:const\\s+)?(${prefix}\\w*)(?:\\s+\\w+)?\\s*=\\s*"([^"]+)"`, 'gm');
+  const alias = new RegExp(
+    `^\\s*(?:const\\s+)?(${prefix}\\w*)(?:\\s+\\w+)?\\s*=\\s*[A-Za-z]`,
+    'gm'
+  );
+  const unknownAliases = Array.from(src.matchAll(alias), (m) => m[1]).filter(
+    (name) => !aliases.includes(name)
+  );
+  expect(unknownAliases, `${prefix} constants defined as aliases`).toEqual([]);
+  return Array.from(src.matchAll(lit), (m) => m[2]);
 }
 
 describe('launch label vocabulary', () => {
@@ -56,13 +69,14 @@ describe('launch label vocabulary', () => {
   });
 
   it('labels every launch code in pkg/api and the broker codes that reach launch.error', () => {
-    const codes = goStringConstants(launchCodes, 'LaunchCode');
+    // LaunchCodeHarnessConfigUnusable aliases the broker code checked below.
+    const codes = goStringConstants(launchCodes, 'LaunchCode', ['LaunchCodeHarnessConfigUnusable']);
     expect(codes.length).toBeGreaterThanOrEqual(19);
     const brokerCodes = goStringConstants(
       goSource('pkg/api/broker_error_codes.go'),
       'BrokerErrCode(?:SkillResolution|HarnessConfigUnusable)'
     );
-    expect(brokerCodes).toEqual(['skill_resolution_failed', 'harness_config_unusable']);
+    expect([...brokerCodes].sort()).toEqual(['harness_config_unusable', 'skill_resolution_failed']);
     expect([...codes, ...brokerCodes].filter((c) => !Object.hasOwn(LAUNCH_CODE_LABELS, c))).toEqual(
       []
     );

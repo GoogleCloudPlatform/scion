@@ -139,6 +139,15 @@ describe('isFailedStartLaunch', () => {
     expect(isFailedStartLaunch({ phase: 'running', launch: failedStart })).toBe(false);
   });
 
+  // A later synchronous start (the web Start button, a wake) leaves the
+  // ended launch and its error in place while the agent starts.
+  it.each<AgentPhase>(['created', 'provisioning', 'cloning', 'starting', 'stopping'])(
+    'is false while a later start or stop moves the agent through phase %s',
+    (phase) => {
+      expect(isFailedStartLaunch({ phase, launch: failedStart })).toBe(false);
+    }
+  );
+
   it('is false for a start in flight or one that succeeded', () => {
     const active: AgentLaunch = { ...inFlight, kind: 'start' };
     expect(isFailedStartLaunch({ phase: 'starting', launch: active })).toBe(false);

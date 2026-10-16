@@ -507,7 +507,7 @@ export interface AgentLaunch {
    * phase a later start or resume treats the agent as being in, sent only
    * when it differs from the agent's phase.
    */
-  resumePhase?: string;
+  resumePhase?: AgentPhase;
   /** Present only while the launch is active. */
   deadline?: string;
   remainingSeconds?: number;
@@ -551,19 +551,28 @@ export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
 }
 
 /**
- * Whether the agent's most recent start or restart launch failed, and the
- * agent has not run since (design wave 3 D-c, ptone/scion#4669). Unlike an
- * incomplete create, the hub still accepts a start or resume of such an
- * agent, which ends in the phase the failure restored (stopped, error, or
- * error with launch.resumePhase). A launch the user stopped
- * (`launch_stopped`) is not a failure. The hub clears launch.error only when
- * the agent runs, so a running agent never shows it.
+ * Whether the agent rests after a start or restart launch that failed
+ * (design wave 3 D-c, ptone/scion#4669). Unlike an incomplete create, the hub
+ * still accepts a start or resume of such an agent. A failed start launch
+ * ends in a resting phase: stopped, error (with launch.resumePhase when the
+ * agent rested in another phase before), or suspended. A launch the user
+ * stopped (`launch_stopped`) is not a failure. The hub clears launch.error
+ * only on a new launch or a running write, so a later synchronous start
+ * keeps the old error while it runs through starting, provisioning and
+ * cloning; those phases do not count.
  */
 export function isFailedStartLaunch(agent: AgentLaunchFields): boolean {
   const launch = agent.launch;
   if (!launch || (launch.kind !== 'start' && launch.kind !== 'restart')) return false;
   if (launch.state !== 'ended' || !launch.error || launch.error === 'launch_stopped') return false;
-  return agent.phase !== 'running' && !isAgentLaunching(agent);
+  switch (agent.phase) {
+    case 'stopped':
+    case 'suspended':
+    case 'error':
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**

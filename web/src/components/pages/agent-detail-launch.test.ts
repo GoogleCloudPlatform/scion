@@ -366,7 +366,9 @@ describe('agent page for a start or restart that did not complete', () => {
       'Failed at: starting the container'
     );
     expect(text(banner!.querySelector('[data-testid="launch-error-message"]'))).toBe(message);
-    expect(text(banner!.querySelector('.error-hint'))).toBe('Start or resume the agent to try again.');
+    expect(text(banner!.querySelector('.error-hint'))).toBe(
+      'Start or resume the agent to try again.'
+    );
     expect(host.querySelector('[data-testid="incomplete-create-banner"]')).toBeNull();
     expect(banner!.querySelector('.error-actions')).toBeNull();
   });
@@ -424,6 +426,14 @@ describe('agent page for a start or restart that did not complete', () => {
     expect(host.querySelector('[data-testid="failed-start-banner"]')).toBeNull();
     expect(host.querySelector('.agent-error-banner')).toBeNull();
     expect(host.textContent ?? '').not.toContain('did not complete');
+  });
+
+  it('shows no failure while a later synchronous start runs', () => {
+    const host = renderBanner(makeAgent({ phase: 'starting', launch: failedStart }));
+
+    expect(host.querySelector('[data-testid="failed-start-banner"]')).toBeNull();
+    expect(host.querySelector('[data-testid="agent-launch-banner"]')).toBeNull();
+    expect(host.querySelector('.agent-error-banner')).toBeNull();
   });
 
   it('shows no banner once the agent runs', () => {
