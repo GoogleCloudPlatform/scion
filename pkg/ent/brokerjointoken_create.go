@@ -56,6 +56,20 @@ func (_c *BrokerJoinTokenCreate) SetNillableCreated(v *time.Time) *BrokerJoinTok
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *BrokerJoinTokenCreate) SetIssuanceID(v string) *BrokerJoinTokenCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *BrokerJoinTokenCreate) SetNillableIssuanceID(v *string) *BrokerJoinTokenCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *BrokerJoinTokenCreate) SetID(v uuid.UUID) *BrokerJoinTokenCreate {
 	_c.mutation.SetID(v)
@@ -179,6 +193,10 @@ func (_c *BrokerJoinTokenCreate) createSpec() (*BrokerJoinToken, *sqlgraph.Creat
 		_spec.SetField(brokerjointoken.FieldCreated, field.TypeTime, value)
 		_node.Created = value
 	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(brokerjointoken.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
 	return _node, _spec
 }
 
@@ -286,6 +304,9 @@ func (u *BrokerJoinTokenUpsertOne) UpdateNewValues() *BrokerJoinTokenUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(brokerjointoken.FieldCreated)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(brokerjointoken.FieldIssuanceID)
 		}
 	}))
 	return u
@@ -545,6 +566,9 @@ func (u *BrokerJoinTokenUpsertBulk) UpdateNewValues() *BrokerJoinTokenUpsertBulk
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(brokerjointoken.FieldCreated)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(brokerjointoken.FieldIssuanceID)
 			}
 		}
 	}))

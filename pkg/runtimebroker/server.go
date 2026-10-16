@@ -375,6 +375,11 @@ type Server struct {
 	// boot recovery's sends. Zero in production; only tests set it.
 	launchRecoveryTTL time.Duration
 
+	// agentFilesLockWait, when positive, replaces the 60s a launch's file
+	// clean-up waits for the agent's workspace lock. Zero in production;
+	// only tests set it.
+	agentFilesLockWait time.Duration
+
 	// createSupersedeWait overrides defaultCreateSupersedeWait when
 	// positive (see beginCreateRegistration). Zero in production.
 	createSupersedeWait time.Duration
@@ -401,6 +406,9 @@ type Server struct {
 	// ownershipSetupErr refuses a flat instance whose manager could not be
 	// owner-scoped (startServices).
 	ownershipSetupErr error
+	// stateDirSetupErr refuses to start a server whose broker ID cannot
+	// name its default state directory (DefaultStateDir; startServices).
+	stateDirSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -590,7 +598,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
-		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
+		if dir, err := DefaultStateDir(cfg.BrokerID); errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement) {
+			srv.stateDirSetupErr = fmt.Errorf("runtime broker state directory: %w", err)
+			slog.Error("Runtime Broker will not start", "error", srv.stateDirSetupErr)
+		} else if err != nil {
 			slog.Warn("Failed to resolve user home directory for state dir", "error", err)
 		} else {
 			srv.stateDir = dir
@@ -718,14 +729,18 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 
 // DefaultStateDir is a Runtime Broker's state root when ServerConfig.StateDir
 // is not set: ~/.scion/runtime-broker-state/<brokerID> ("default" when the
-// ID is empty).
+// ID is empty). An ID that is not a single path element is an error
+// (brokercredentials.ErrBrokerIDNotPathElement).
 func DefaultStateDir(brokerID string) (string, error) {
+	if brokerID == "" {
+		brokerID = "default"
+	}
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", err
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
-	}
-	if brokerID == "" {
-		brokerID = "default"
 	}
 	return filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerID), nil
 }
@@ -1400,6 +1415,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	}
 	if s.ownershipSetupErr != nil {
 		return s.ownershipSetupErr
+	}
+	if s.stateDirSetupErr != nil {
+		return s.stateDirSetupErr
 	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr

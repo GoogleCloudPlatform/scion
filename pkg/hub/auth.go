@@ -826,7 +826,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							return
 						}
 						if kind.isTestAdmin() {
-							ctx = contextWithTestAdminActor(ctx, u)
+							ctx = contextWithTestAdminActor(ctx, u, testAdminCredentialFor(claims.ClientType))
 						}
 					}
 				}

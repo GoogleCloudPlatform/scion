@@ -244,6 +244,26 @@ func (_u *HarnessConfigUpdate) ClearStoragePath() *HarnessConfigUpdate {
 	return _u
 }
 
+// SetLayout sets the "layout" field.
+func (_u *HarnessConfigUpdate) SetLayout(v string) *HarnessConfigUpdate {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *HarnessConfigUpdate) SetNillableLayout(v *string) *HarnessConfigUpdate {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *HarnessConfigUpdate) ClearLayout() *HarnessConfigUpdate {
+	_u.mutation.ClearLayout()
+	return _u
+}
+
 // SetFiles sets the "files" field.
 func (_u *HarnessConfigUpdate) SetFiles(v string) *HarnessConfigUpdate {
 	_u.mutation.SetFiles(v)
@@ -561,6 +581,12 @@ func (_u *HarnessConfigUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(harnessconfig.FieldStoragePath, field.TypeString)
 	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(harnessconfig.FieldLayout, field.TypeString)
+	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)
 	}
@@ -845,6 +871,26 @@ func (_u *HarnessConfigUpdateOne) SetNillableStoragePath(v *string) *HarnessConf
 // ClearStoragePath clears the value of the "storage_path" field.
 func (_u *HarnessConfigUpdateOne) ClearStoragePath() *HarnessConfigUpdateOne {
 	_u.mutation.ClearStoragePath()
+	return _u
+}
+
+// SetLayout sets the "layout" field.
+func (_u *HarnessConfigUpdateOne) SetLayout(v string) *HarnessConfigUpdateOne {
+	_u.mutation.SetLayout(v)
+	return _u
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_u *HarnessConfigUpdateOne) SetNillableLayout(v *string) *HarnessConfigUpdateOne {
+	if v != nil {
+		_u.SetLayout(*v)
+	}
+	return _u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (_u *HarnessConfigUpdateOne) ClearLayout() *HarnessConfigUpdateOne {
+	_u.mutation.ClearLayout()
 	return _u
 }
 
@@ -1194,6 +1240,12 @@ func (_u *HarnessConfigUpdateOne) sqlSave(ctx context.Context) (_node *HarnessCo
 	}
 	if _u.mutation.StoragePathCleared() {
 		_spec.ClearField(harnessconfig.FieldStoragePath, field.TypeString)
+	}
+	if value, ok := _u.mutation.Layout(); ok {
+		_spec.SetField(harnessconfig.FieldLayout, field.TypeString, value)
+	}
+	if _u.mutation.LayoutCleared() {
+		_spec.ClearField(harnessconfig.FieldLayout, field.TypeString)
 	}
 	if value, ok := _u.mutation.Files(); ok {
 		_spec.SetField(harnessconfig.FieldFiles, field.TypeString, value)

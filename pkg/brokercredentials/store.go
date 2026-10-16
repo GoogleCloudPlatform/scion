@@ -155,6 +155,9 @@ func (s *Store) Save(creds *BrokerCredentials) error {
 	if creds.BrokerID == "" {
 		return errors.New("brokerId is required")
 	}
+	if err := ValidateBrokerIDPathElement(creds.BrokerID); err != nil {
+		return err
+	}
 	if creds.SecretKey == "" {
 		return errors.New("secretKey is required")
 	}

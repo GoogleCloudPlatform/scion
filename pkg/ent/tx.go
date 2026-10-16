@@ -132,6 +132,10 @@ type Tx struct {
 	ProjectPreStartHook *ProjectPreStartHookClient
 	// ProjectSyncState is the client for interacting with the ProjectSyncState builders.
 	ProjectSyncState *ProjectSyncStateClient
+	// ProjectVisitorExclusion is the client for interacting with the ProjectVisitorExclusion builders.
+	ProjectVisitorExclusion *ProjectVisitorExclusionClient
+	// ProjectVisitorRule is the client for interacting with the ProjectVisitorRule builders.
+	ProjectVisitorRule *ProjectVisitorRuleClient
 	// RelayInstance is the client for interacting with the RelayInstance builders.
 	RelayInstance *RelayInstanceClient
 	// RoleBinding is the client for interacting with the RoleBinding builders.
@@ -367,6 +371,8 @@ func (tx *Tx) init() {
 	tx.ProjectContributor = NewProjectContributorClient(tx.config)
 	tx.ProjectPreStartHook = NewProjectPreStartHookClient(tx.config)
 	tx.ProjectSyncState = NewProjectSyncStateClient(tx.config)
+	tx.ProjectVisitorExclusion = NewProjectVisitorExclusionClient(tx.config)
+	tx.ProjectVisitorRule = NewProjectVisitorRuleClient(tx.config)
 	tx.RelayInstance = NewRelayInstanceClient(tx.config)
 	tx.RoleBinding = NewRoleBindingClient(tx.config)
 	tx.RoleDefinition = NewRoleDefinitionClient(tx.config)

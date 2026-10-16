@@ -18,11 +18,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -63,17 +65,17 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("open agent home: %w", err)
+		return nil, carryOverStage("open", fmt.Errorf("open agent home: %w", err))
 	}
 	defer func() { _ = root.Close() }()
 
 	// The source and every parent component of both directories must be
 	// real directories, not symbolic links.
 	if ok, err := realDirChain(root, oldRel, true); err != nil || !ok {
-		return nil, err
+		return nil, carryOverStage("check", err)
 	}
 	if ok, err := realDirChain(root, newRel, false); err != nil || !ok {
-		return nil, err
+		return nil, carryOverStage("check", err)
 	}
 
 	newMissing := false
@@ -82,7 +84,7 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 	} else if os.IsNotExist(err) {
 		newMissing = true
 	} else if err != nil {
-		return nil, fmt.Errorf("read skills dir %s: %w", newRel, err)
+		return nil, carryOverStage("read", fmt.Errorf("read skills dir %s: %w", newRel, err))
 	}
 
 	entries, err := readRootDir(root, oldRel)
@@ -90,7 +92,7 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read skills dir %s: %w", oldRel, err)
+		return nil, carryOverStage("read", fmt.Errorf("read skills dir %s: %w", oldRel, err))
 	}
 
 	var copied []string
@@ -104,7 +106,7 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		errs := []error{cause}
 		if newMissing {
 			if err := root.RemoveAll(newRel); err != nil {
-				errs = append(errs, fmt.Errorf("remove %s: %w", newRel, err))
+				errs = append(errs, carryOverStage("remove", fmt.Errorf("remove %s: %w", newRel, err)))
 			}
 			return errors.Join(errs...)
 		}
@@ -114,7 +116,7 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 			}
 			p := filepath.Join(newRel, name)
 			if err := root.RemoveAll(p); err != nil {
-				errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
+				errs = append(errs, carryOverStage("remove", fmt.Errorf("remove %s: %w", p, err)))
 			}
 		}
 		return errors.Join(errs...)
@@ -124,15 +126,70 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || skipCopyEntry(e) {
 			continue
 		}
+		// An Agent Plugins bundle (claude installs them in its skills dir)
+		// is not a skill: the new harness installs it natively from the
+		// control-plane record instead.
+		if isAgentPluginDir(root, filepath.Join(oldRel, e.Name())) {
+			continue
+		}
 		if err := root.MkdirAll(newRel, 0755); err != nil {
-			return nil, undo(fmt.Errorf("create skills dir %s: %w", newRel, err), "")
+			return nil, undo(carryOverStage("create", fmt.Errorf("create skills dir %s: %w", newRel, err)), "")
 		}
 		if err := copyRootTree(root, filepath.Join(oldRel, e.Name()), filepath.Join(newRel, e.Name())); err != nil {
-			return nil, undo(fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err), e.Name())
+			return nil, undo(carryOverStage("copy", fmt.Errorf("copy skill %s to %s: %w", e.Name(), newRel, err)), e.Name())
 		}
 		copied = append(copied, e.Name())
 	}
 	return copied, nil
+}
+
+// isAgentPluginDir reports whether the directory rel under root holds a
+// regular-file plugin.json at its top level, the mark of an Agent Plugins
+// bundle. A symlinked plugin.json does not count (Lstat, never followed).
+func isAgentPluginDir(root *os.Root, rel string) bool {
+	fi, err := root.Lstat(filepath.Join(rel, agentplugin.ManifestFile))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// carryOverStageError is a carry-over failure together with the fixed name
+// of the step that failed. Its text is the underlying error's.
+type carryOverStageError struct {
+	stage string
+	err   error
+}
+
+func (e *carryOverStageError) Error() string { return e.err.Error() }
+func (e *carryOverStageError) Unwrap() error { return e.err }
+
+// carryOverStage returns err tagged with stage, or nil when err is nil.
+func carryOverStage(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &carryOverStageError{stage: stage, err: err}
+}
+
+// carryOverFailureSummary returns, for a carryOverSkillsDir error, the
+// fixed name of the step that failed ("open", "check", "read", "create",
+// "copy" or "remove"; "other" when unknown) and the class of its error
+// ("permission", "not-exist", "exist" or "other"), for the log.
+func carryOverFailureSummary(err error) (stage, class string) {
+	stage, cause := "other", err
+	var se *carryOverStageError
+	if errors.As(err, &se) {
+		stage, cause = se.stage, se.err
+	}
+	switch {
+	case errors.Is(cause, fs.ErrPermission):
+		class = "permission"
+	case errors.Is(cause, fs.ErrNotExist):
+		class = "not-exist"
+	case errors.Is(cause, fs.ErrExist):
+		class = "exist"
+	default:
+		class = "other"
+	}
+	return stage, class
 }
 
 // skipCopyEntry reports whether the carry-over leaves out e: Python bytecode

@@ -101,7 +101,6 @@ capabilities:
     sse: { support: "partial", reason: "Codex maps SSE to its single HTTP server type (url + http_headers)" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.codex/mcp_servers.json) is not implemented yet; project entries are demoted to global" }
-  agent_plugins: { support: "partial", reason: "Native install via local marketplace; Codex skips sse MCP servers" }
 no_auth:
   behavior: drop-to-shell
   command: codex login --device-auth

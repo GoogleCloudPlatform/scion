@@ -47,6 +47,22 @@ type PeerAuth interface {
 // valid peer identity.
 var ErrPeerUnauthenticated = errors.New("conduit relay: relay-peer identity missing or invalid")
 
+// ErrNoInternalRelayAPI is returned by NoPeerAuth.Sign: this node serves no
+// internal relay API, so it holds no relay-peer credential to sign with.
+var ErrNoInternalRelayAPI = errors.New("conduit relay: internal relay API not served on this node (server.hub.conduit.internal_listen is unset), so requests to other relays are refused")
+
+// NoPeerAuth is the relay-peer authenticator of a node that serves no
+// internal relay API (no internal listener): it refuses in both directions.
+// Verify accepts no peer and Sign signs nothing, so the node never answers
+// a relay-peer request and never sends an unsigned one.
+type NoPeerAuth struct{}
+
+// Sign implements PeerAuth: it always fails.
+func (NoPeerAuth) Sign(*http.Request) error { return ErrNoInternalRelayAPI }
+
+// Verify implements PeerAuth: it always refuses.
+func (NoPeerAuth) Verify(*http.Request) (string, error) { return "", ErrPeerUnauthenticated }
+
 // HMAC peer-auth headers.
 const (
 	HeaderPeerID        = "X-Conduit-Peer"

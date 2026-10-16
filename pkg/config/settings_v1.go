@@ -1393,28 +1393,6 @@ func (vs *VersionedSettings) TierDefaultHarnessConfig(profileName string) (strin
 	return "", ""
 }
 
-// RequireImageRegistry checks that image_registry is configured and returns an
-// actionable error if not. This is called early in command execution to fail fast.
-func RequireImageRegistry(projectPath, profileName string) error {
-	vs, _, err := LoadEffectiveSettings(projectPath)
-	if err != nil {
-		// Can't load settings — let other code handle this error
-		return nil
-	}
-	if vs == nil {
-		return nil
-	}
-	if vs.IsImageRegistryConfigured(profileName) {
-		return nil
-	}
-	return fmt.Errorf("image_registry is not configured.\n\n" +
-		"Scion requires container images to run agents. To get started:\n\n" +
-		"  1. Build your images:  image-build/scripts/build-images.sh --registry <your-registry> --push\n" +
-		"     See image-build/README.md for detailed instructions.\n\n" +
-		"  2. Configure scion:   scion config set --global image_registry <your-registry>\n" +
-		"     Example:           scion config set --global image_registry ghcr.io/myorg")
-}
-
 // RewriteImageRegistry replaces the registry prefix of a container image reference
 // with newRegistry for any short-form (non-fully-qualified) image.
 // If newRegistry is empty, the original image is returned unchanged.
@@ -1847,6 +1825,9 @@ type V1PluginEntry struct {
 // settings layout.
 type V1TestIdentitiesConfig struct {
 	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
+	// (see TestIdentitiesConfig.AdminWebSessions).
+	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -3157,6 +3138,12 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+
+	// AgentPluginsSidecar is the agent_plugins capability read from the
+	// bundle's agent-plugins.yaml (AgentPluginsSidecarFile), nil when the
+	// bundle has none. It is not part of config.yaml. Read the effective value
+	// with AgentPluginsCapability.
+	AgentPluginsSidecar *api.CapabilityField `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessThinkingConfig maps the canonical 0-100 thinking level
@@ -4405,7 +4392,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{}
+			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4855,7 +4842,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{}
+		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}
