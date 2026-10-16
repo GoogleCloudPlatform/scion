@@ -166,5 +166,5 @@ func TestPTYSession_CredentialCheckClosesWithAuthzExpired(t *testing.T) {
 	assert.Equal(t, wsprotocol.ClosePTYAuthRequired, code)
 	assert.Equal(t, conduitReasonAuthzExpired, reason)
 	assert.True(t, isExpectedPTYEnd(errPTYCredentialEnded))
-	assert.False(t, errors.Is(context.Canceled, errPTYCredentialEnded))
+	assert.False(t, errors.Is(errPTYCredentialEnded, context.Canceled), "the credential end is not a cancellation")
 }

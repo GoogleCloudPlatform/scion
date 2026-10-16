@@ -127,8 +127,8 @@ func TestWebEventStream_RefusesUserAccessToken(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ws.Handler().ServeHTTP(rec, req)
 		cancel()
-		assert.NotEqual(t, http.StatusOK, rec.Code, "auth %q: %s", auth != "", rec.Body.String())
+		assert.NotEqual(t, http.StatusOK, rec.Code, "token header %t: %s", auth != "", rec.Body.String())
 		assert.False(t, strings.HasPrefix(rec.Header().Get("Content-Type"), "text/event-stream"),
-			"auth %q: the event stream must not open", auth != "")
+			"token header %t: the event stream must not open", auth != "")
 	}
 }
