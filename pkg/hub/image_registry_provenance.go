@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sort"
 
@@ -107,6 +108,9 @@ func (s *Server) imageRegistryProvenance(ctx context.Context, ops *OperationalSe
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
 			store.ListOptions{Limit: imageRegistryProvenancePageSize, Cursor: cursor, SkipTotalCount: true})
+		if err == nil && page == nil {
+			err = errors.New("no result")
+		}
 		if err != nil {
 			slog.Warn("image_registry provenance: listing brokers failed; node env overrides are partial", "error", err)
 			break

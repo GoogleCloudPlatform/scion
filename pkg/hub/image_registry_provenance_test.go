@@ -185,18 +185,31 @@ func (brokerListErrorStore) ListRuntimeBrokers(context.Context, store.RuntimeBro
 	return nil, errors.New("database unavailable")
 }
 
+// brokerListNilStore answers every broker listing with no result and no error.
+type brokerListNilStore struct {
+	store.Store
+}
+
+func (brokerListNilStore) ListRuntimeBrokers(context.Context, store.RuntimeBrokerFilter, store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	return nil, nil
+}
+
 // TestImageRegistryProvenance_ListingErrorIsPartial: a broker listing
-// failure leaves the overrides empty; the rest of the report and the GET
-// still answer.
+// failure, or a listing with no result, leaves the overrides empty; the rest
+// of the report and the GET still answer.
 func TestImageRegistryProvenance_ListingErrorIsPartial(t *testing.T) {
-	tempSettingsHome(t)
-	srv, _, ops := newTestDBServerWithStore(t, brokerListErrorStore{})
-	setTestImageRegistryFileTier(t, ops, "file.example", nil)
-	p := srv.imageRegistryProvenance(context.Background(), ops)
-	require.NotNil(t, p)
-	assert.Equal(t, "file", p.Source)
-	assert.Equal(t, "file.example", p.Value)
-	assert.Empty(t, p.NodeEnvOverrides)
+	for name, st := range map[string]store.Store{"error": brokerListErrorStore{}, "nil result": brokerListNilStore{}} {
+		t.Run(name, func(t *testing.T) {
+			tempSettingsHome(t)
+			srv, _, ops := newTestDBServerWithStore(t, st)
+			setTestImageRegistryFileTier(t, ops, "file.example", nil)
+			p := srv.imageRegistryProvenance(context.Background(), ops)
+			require.NotNil(t, p)
+			assert.Equal(t, "file", p.Source)
+			assert.Equal(t, "file.example", p.Value)
+			assert.Empty(t, p.NodeEnvOverrides)
+		})
+	}
 }
 
 // TestPutServerConfig_EchoOfGETWithProvenance: a client that sends a whole
