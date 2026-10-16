@@ -831,6 +831,9 @@ func (r *CommandRouter) cmdCreate(ctx context.Context, event *ChatEvent, args []
 	if err != nil {
 		return textResponse(event, fmt.Sprintf("Failed to create agent: %v", err)), nil
 	}
+	if createResp == nil || createResp.Agent == nil {
+		return textResponse(event, "Failed to create agent: received empty response from server"), nil
+	}
 	created := createResp.Agent
 	if hubclient.LaunchActive(created) {
 		// Async answer: reply now and post the outcome in the same space

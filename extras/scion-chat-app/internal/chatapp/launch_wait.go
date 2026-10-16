@@ -154,6 +154,8 @@ func (r *CommandRouter) deferUntilRunning(key string, svc hubclient.AgentGetter,
 		q.items = append(q.items, w)
 		return true, nil
 	}
+	// a may be nil (the respond relay's read failed): LaunchActive is
+	// nil-safe and reports false, so the caller sends at once.
 	if !hubclient.LaunchActive(a) {
 		return false, nil
 	}

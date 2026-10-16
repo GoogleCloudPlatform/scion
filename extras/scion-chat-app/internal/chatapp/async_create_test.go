@@ -916,3 +916,31 @@ func TestCmdThread_AfterShutdown_NoStaleCard(t *testing.T) {
 		t.Errorf("after Shutdown: %d sends, want 0", n)
 	}
 }
+
+// TestCmdCreate_EmptyResponse checks that a create answer without an agent
+// is reported, not dereferenced.
+func TestCmdCreate_EmptyResponse(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, nil)
+	router, m := newAsyncRouter(t, hub.client(), rec)
+	var resp *EventResponse
+	var err error
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("empty create answer: cmdCreate panicked: %v", p)
+			}
+		}()
+		resp, err = router.cmdCreate(context.Background(), threadEvent(), []string{"a1"})
+	}()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Failed to create agent: received empty response from server"; resp == nil || resp.Message == nil || resp.Message.Text != want {
+		t.Errorf("empty create answer: reply = %+v, want %q", resp, want)
+	}
+	waitWatchers(t, router)
+	if p := m.posts(); len(p) != 0 {
+		t.Errorf("empty create answer: %d posts, want 0", len(p))
+	}
+}
