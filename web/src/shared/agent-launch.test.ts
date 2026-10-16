@@ -112,14 +112,18 @@ describe('isFailedStartLaunch', () => {
   const failedStart: AgentLaunch = { ...failed, kind: 'start', step: 'container_create' };
   const failedRestart: AgentLaunch = { ...failed, kind: 'restart' };
 
-  it.each<[AgentPhase, AgentLaunch]>([
-    ['stopped', failedStart],
-    ['error', failedStart],
-    ['error', { ...failedStart, resumePhase: 'suspended' }],
-    ['suspended', failedStart],
-    ['stopped', failedRestart],
-  ])('is true in phase %s', (phase, launch) => {
+  it.each<[string, AgentPhase, AgentLaunch]>([
+    ['start', 'stopped', failedStart],
+    ['start', 'error', failedStart],
+    ['start', 'suspended', failedStart],
+    ['restart', 'stopped', failedRestart],
+  ])('is true for a failed %s in phase %s', (_kind, phase, launch) => {
     expect(isFailedStartLaunch({ phase, launch })).toBe(true);
+  });
+
+  it('is true for a failed start in phase error with a resume memory', () => {
+    const launch: AgentLaunch = { ...failedStart, resumePhase: 'suspended' };
+    expect(isFailedStartLaunch({ phase: 'error', launch })).toBe(true);
   });
 
   it('is false for a create that failed', () => {
