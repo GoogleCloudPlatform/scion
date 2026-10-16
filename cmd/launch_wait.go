@@ -298,8 +298,8 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 }
 
 // launchOutcome maps an agent to the end of the wait: the phase rule of
-// launchPhaseOutcome, and also a launch that has ended with an error,
-// whatever the phase (design wave 3 D-g): a failed start can leave the agent
+// launchPhaseOutcome, and also a launch that has ended with an error code
+// or a failed end reason, whatever the phase (design wave 3 D-g): a failed start can leave the agent
 // in any phase its start path restores. priorLaunchID names a launch that
 // had already ended before this wait (the create answer showed it ended);
 // its error is an earlier attempt's, so it does not end the wait.
@@ -307,10 +307,25 @@ func launchOutcome(name string, a *hubclient.Agent, priorLaunchID string) (bool,
 	if done, err := launchPhaseOutcome(name, a); done {
 		return done, err
 	}
-	if l := a.Launch; l != nil && !l.Active && l.Error != "" && l.ID != priorLaunchID {
+	if l := a.Launch; l != nil && !l.Active && l.ID != priorLaunchID && (l.Error != "" || failedLaunchEndReason(l.EndReason)) {
 		return true, newLaunchFailedError(name, a)
 	}
 	return false, nil
+}
+
+// failedLaunchEndReason reports whether an ended launch's end reason means
+// it did not bring the agent up, even without an error code. It follows
+// pkg/hubclient's rule except for not_launched: the Hub also ends a launch
+// not_launched when a broker without async launch answered the start
+// synchronously (pkg/hub/launch_dispatch.go, endLaunchNotLaunched after a
+// synchronous answer), and that start goes on, so it must not end the wait.
+// pkg/hubclient's rule has the same exposure (ptone/scion#5283).
+func failedLaunchEndReason(reason string) bool {
+	switch reason {
+	case "failed", "timed_out", "lost":
+		return true
+	}
+	return false
 }
 
 // launchPhaseOutcome is the phase-only end of the wait, which is all that
@@ -412,17 +427,16 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 		if e.Incomplete {
 			reason = fmt.Sprintf("agent '%s' create did not complete (%s)", name, code)
 		}
-		if a.Launch.Step != "" {
-			reason += " while " + launchStepLabel(a.Launch.Step)
-		}
-		if a.Launch.Error == api.LaunchCodeLaunchStopped {
+		switch {
+		case a.Launch.Error == api.LaunchCodeLaunchStopped && e.Incomplete:
 			// A launch someone stopped did not fail: the text says so
 			// without the failure framing (the exit status stays 1, the
 			// start did not happen).
+			reason = fmt.Sprintf("agent '%s' create did not complete: the create was stopped (%s)", name, a.Launch.Error)
+		case a.Launch.Error == api.LaunchCodeLaunchStopped:
 			reason = fmt.Sprintf("agent '%s' did not start: the start was stopped (%s)", name, a.Launch.Error)
-			if e.Incomplete {
-				reason = fmt.Sprintf("agent '%s' create did not complete: the create was stopped (%s)", name, a.Launch.Error)
-			}
+		case a.Launch.Step != "":
+			reason += " while " + launchStepLabel(a.Launch.Step)
 		}
 		if a.Message != "" {
 			reason += ": " + a.Message

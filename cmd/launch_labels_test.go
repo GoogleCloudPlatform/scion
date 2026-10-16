@@ -270,6 +270,45 @@ func TestWaitForAgentLaunch_EndedLaunchErrorEndsWaitInAnyPhase(t *testing.T) {
 	}
 }
 
+// TestWaitForAgentLaunch_FailedEndReasonEndsWait: a launch that ended
+// failed, timed_out or lost ends the wait even without an error code
+// (as pkg/hubclient's wait does). not_launched does not: the Hub also ends a
+// launch not_launched when a broker without async launch started the agent
+// synchronously, and that start goes on. superseded does not either.
+func TestWaitForAgentLaunch_FailedEndReasonEndsWait(t *testing.T) {
+	shortenLaunchWaitTimings(t)
+	for _, tc := range []struct {
+		endReason string
+		ends      bool
+	}{
+		{"failed", true},
+		{"timed_out", true},
+		{"lost", true},
+		{"not_launched", false},
+		{"superseded", false},
+	} {
+		t.Run(tc.endReason, func(t *testing.T) {
+			ended := &hubclient.AgentLaunch{ID: "l2", State: "ended", Kind: "start", EndReason: tc.endReason}
+			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+				agentResult(&hubclient.Agent{Phase: "starting", Launch: ended}),
+				agentResult(&hubclient.Agent{ID: "id-1", Phase: "running"}),
+			}}
+			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+				AgentName: "a1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+			})
+			if !tc.ends {
+				require.NoError(t, err, "end reason %s keeps the wait going", tc.endReason)
+				assert.Equal(t, 2, seq.calls)
+				return
+			}
+			var failed *launchFailedError
+			require.ErrorAs(t, err, &failed, "end reason %s ends the wait (got %v)", tc.endReason, err)
+			assert.Equal(t, "agent 'a1' failed to start (phase: starting)", failed.Reason)
+			assert.Equal(t, 1, seq.calls, "ended at the first read")
+		})
+	}
+}
+
 // TestStartAgentViaHub_AsyncResumeOutput (D-T8): `scion resume` through a
 // Hub that answers with an accepted start launch prints the step labels
 // while waiting, and on success the resumed line; a failed start launch
