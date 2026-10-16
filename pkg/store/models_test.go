@@ -14,7 +14,33 @@
 
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+	"time"
+)
+
+func TestUserLastLoginJSON(t *testing.T) {
+	for _, lastLogin := range []time.Time{{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)} {
+		t.Run(lastLogin.String(), func(t *testing.T) {
+			data, err := json.Marshal(User{LastLogin: lastLogin})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			value, present := fields["lastLogin"]
+			if present == lastLogin.IsZero() {
+				t.Fatalf("lastLogin presence = %v for %v", present, lastLogin)
+			}
+			if present && string(value) != `"2026-10-16T08:00:00Z"` {
+				t.Errorf("lastLogin = %s", value)
+			}
+		})
+	}
+}
 
 func TestResolveWorkspaceSharingMode(t *testing.T) {
 	tests := []struct {

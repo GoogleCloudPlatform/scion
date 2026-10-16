@@ -2510,6 +2510,10 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 				if dbUser.DisplayName != "" {
 					devName = dbUser.DisplayName
 				}
+				dbUser.LastLogin = time.Now()
+				if err := ws.store.UpdateUser(r.Context(), dbUser); err != nil {
+					ws.logger().Warn("Failed to update dev-auth last login", "error", err)
+				}
 			}
 		}
 		devUser := &webSessionUser{

@@ -1551,7 +1551,7 @@ type User struct {
 
 	// Timestamps
 	Created   time.Time `json:"created"`
-	LastLogin time.Time `json:"lastLogin,omitempty"`
+	LastLogin time.Time `json:"lastLogin,omitzero"`
 	LastSeen  time.Time `json:"lastSeen,omitempty"`
 }
 

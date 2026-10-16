@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1454,6 +1455,61 @@ func TestDevAuth_AutoLogin(t *testing.T) {
 		}
 	}
 	assert.NotNil(t, sessionCookie, "session cookie should be set")
+}
+
+func TestDevAuth_RecordsLastLogin(t *testing.T) {
+	for _, previous := range []time.Time{{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)} {
+		t.Run(previous.String(), func(t *testing.T) {
+			ws := newDevAuthWebServer(t)
+			s := newFakeUserStore()
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: DevUserID, Email: "dev@localhost", LastLogin: previous,
+			}))
+			ws.store = s
+			handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			before := time.Now()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err := s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			require.False(t, user.LastLogin.Before(before))
+			require.False(t, user.LastLogin.After(time.Now()))
+			loginTime := user.LastLogin
+
+			// Reusing a session must not turn last login into last activity.
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			for _, cookie := range rec.Result().Cookies() {
+				req.AddCookie(cookie)
+			}
+			rec = httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusOK, rec.Code)
+			user, err = s.GetUser(context.Background(), DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, loginTime, user.LastLogin)
+		})
+	}
+}
+
+func TestDevAuth_LastLoginWriteFailure(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	s := newFakeUserStore()
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{ID: DevUserID}))
+	s.updateErr = errors.New("last login write failed")
+	ws.store = s
+	handler := ws.devAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	user, err := s.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	assert.True(t, user.LastLogin.IsZero())
 }
 
 func TestDevAuth_SessionPersists(t *testing.T) {
