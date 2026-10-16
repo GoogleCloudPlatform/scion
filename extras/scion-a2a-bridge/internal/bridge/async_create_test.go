@@ -96,6 +96,8 @@ type launchHub struct {
 	// records the message texts in the order their sends completed.
 	sendDelay func(msg *messages.StructuredMessage) time.Duration
 	completed []string
+	// failSend, when set, can refuse a send (after the hold) with an error.
+	failSend func(msg *messages.StructuredMessage) error
 }
 
 func newLaunchHub(created *hubclient.Agent, script ...*hubclient.Agent) *launchHub {
@@ -145,6 +147,11 @@ func (h *launchHub) service() *mockAgentService {
 				case <-h.hold:
 				default:
 					return nil, errors.New("agent_not_running: agent is still launching")
+				}
+			}
+			if h.failSend != nil {
+				if err := h.failSend(msg); err != nil {
+					return nil, err
 				}
 			}
 			h.mu.Lock()
@@ -667,11 +674,20 @@ func TestSendFollowUp_GetErrorStillSends(t *testing.T) {
 }
 
 // A follow-up sent while the task's first message still waits for the
-// launching agent is delivered after that message, not before it.
+// launching agent is delivered after that message, not before it, whichever
+// path made the first send (legacy non-blocking or blocking, or streaming).
 func TestSendFollowUp_WaitsForPendingFirstSend(t *testing.T) {
-	for _, blocking := range []bool{true, false} {
-		name := map[bool]string{true: "blocking follow-up", false: "non-blocking follow-up"}[blocking]
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		first          string // "non-blocking", "blocking" or "streaming"
+		followBlocking bool
+	}{
+		{"blocking follow-up", "non-blocking", true},
+		{"non-blocking follow-up", "non-blocking", false},
+		{"blocking first send", "blocking", false},
+		{"streaming first send", "streaming", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			hub := newLaunchHub(launchingAgent("pod_create"), launchingAgent("pod_create"), runningAgent())
 			hub.hold = make(chan struct{})
 			// The first send takes a while to complete: a follow-up that
@@ -685,29 +701,69 @@ func TestSendFollowUp_WaitsForPendingFirstSend(t *testing.T) {
 			var b *Bridge
 			var firstTask atomic.Value
 			hub.onSend = func(msg *messages.StructuredMessage) {
-				if msg.Msg == "second" {
+				// Answer the blocking sends so they return.
+				if (msg.Msg == "second" && tc.followBlocking) || (msg.Msg == "first" && tc.first == "blocking") {
 					injectResponseEvent(t, b.store, firstTask.Load().(string), "done")
 				}
 			}
 			b = newLaunchBridge(t, hub.service(), nil)
-			res, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", []Part{{Text: "first"}}, false)
-			if err != nil {
-				t.Fatalf("SendMessage: %v", err)
+			firstParts := []Part{{Text: "first"}}
+			firstErr := make(chan error, 1)
+			switch tc.first {
+			case "non-blocking":
+				res, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", firstParts, false)
+				if err != nil {
+					t.Fatalf("SendMessage: %v", err)
+				}
+				firstTask.Store(res.ID)
+				firstErr <- nil
+			case "blocking":
+				go func() {
+					_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", firstParts, true)
+					firstErr <- err
+				}()
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					tasks, err := b.store.ListTasksByAgent(context.Background(), "proj-1", resolveTestSlug)
+					if err == nil && len(tasks) == 1 {
+						firstTask.Store(tasks[0].ID)
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("the blocking first send created no task")
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+			case "streaming":
+				taskID, _, cleanup, err := b.SendStreamingMessage(context.Background(), "proj-1", resolveTestSlug, "", firstParts)
+				if err != nil {
+					t.Fatalf("SendStreamingMessage: %v", err)
+				}
+				defer cleanup()
+				firstTask.Store(taskID)
+				firstErr <- nil
 			}
-			firstTask.Store(res.ID)
-			waitTaskState(t, b, res.ID, TaskStateWorking)
+			taskID := firstTask.Load().(string)
+			waitTaskState(t, b, taskID, TaskStateWorking)
 
 			followUpErr := make(chan error, 1)
 			go func() {
-				_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", res.ID, []Part{{Text: "second"}}, blocking)
+				_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", taskID, []Part{{Text: "second"}}, tc.followBlocking)
 				followUpErr <- err
 			}()
 			time.Sleep(50 * time.Millisecond) // the follow-up is waiting too
 			close(hub.hold)
 			hub.waitSend(t)
 			hub.waitSend(t)
-			if err := <-followUpErr; err != nil {
-				t.Fatalf("follow-up: %v", err)
+			for _, ch := range []chan error{followUpErr, firstErr} {
+				select {
+				case err := <-ch:
+					if err != nil {
+						t.Fatalf("send: %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("a send did not return")
+				}
 			}
 			hub.mu.Lock()
 			order := append([]string(nil), hub.completed...)
@@ -716,6 +772,77 @@ func TestSendFollowUp_WaitsForPendingFirstSend(t *testing.T) {
 				t.Errorf("send completion order = %v, want [first second]: the follow-up must not overtake the first message", order)
 			}
 		})
+	}
+}
+
+// slowFailStore delays every write of the failed state, so a reader that
+// does not wait for that write sees the task still working.
+type slowFailStore struct {
+	state.Store
+	delay time.Duration
+}
+
+func (s slowFailStore) UpdateTaskState(ctx context.Context, id, taskState string) (bool, error) {
+	if taskState == TaskStateFailed {
+		time.Sleep(s.delay)
+	}
+	return s.Store.UpdateTaskState(ctx, id, taskState)
+}
+
+// When the blocking first send fails after the agent started, a follow-up
+// waiting for it sees the task failed and is not sent.
+func TestSendMessage_Legacy_FailedFirstSend_FollowUpNotSent(t *testing.T) {
+	hub := newLaunchHub(launchingAgent("pod_create"), launchingAgent("pod_create"), runningAgent())
+	hub.hold = make(chan struct{})
+	hub.failSend = func(msg *messages.StructuredMessage) error {
+		if msg.Msg == "first" {
+			return errors.New("hub unavailable")
+		}
+		return nil
+	}
+	b := newLaunchBridge(t, hub.service(), nil)
+	b.store = slowFailStore{Store: b.store, delay: 150 * time.Millisecond}
+
+	firstErr := make(chan error, 1)
+	go func() {
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", []Part{{Text: "first"}}, true)
+		firstErr <- err
+	}()
+	var taskID string
+	deadline := time.Now().Add(5 * time.Second)
+	for taskID == "" {
+		tasks, err := b.store.ListTasksByAgent(context.Background(), "proj-1", resolveTestSlug)
+		if err == nil && len(tasks) == 1 {
+			taskID = tasks[0].ID
+		} else if time.Now().After(deadline) {
+			t.Fatal("the blocking first send created no task")
+		} else {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitTaskState(t, b, taskID, TaskStateWorking)
+	followUpErr := make(chan error, 1)
+	go func() {
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", taskID, []Part{{Text: "second"}}, false)
+		followUpErr <- err
+	}()
+	if err := <-followUpErr; err != nil {
+		t.Fatalf("non-blocking follow-up: %v", err)
+	}
+	close(hub.hold)
+	select {
+	case err := <-firstErr:
+		if err == nil {
+			t.Fatal("first send: want an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first send did not return")
+	}
+	// A follow-up that did not wait for the failed write would have been
+	// sent before the first send returned; allow it time to show anyway.
+	time.Sleep(200 * time.Millisecond)
+	if n := len(hub.sends()); n != 0 {
+		t.Errorf("sends = %d, want 0: a follow-up must not be sent after the first send failed", n)
 	}
 }
 
