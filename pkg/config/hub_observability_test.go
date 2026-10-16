@@ -44,15 +44,15 @@ func TestHubObservability_EnvMapping(t *testing.T) {
 	for _, tc := range []struct {
 		field, env, camel, underscored string
 	}{
-		{"metrics_enabled", "SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED", "server.hub.observability.metricsEnabled", "SCION_SERVER_HUB_OBSERVABILITY_METRICS_ENABLED"},
-		{"tracing_enabled", "SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED", "server.hub.observability.tracingEnabled", "SCION_SERVER_HUB_OBSERVABILITY_TRACING_ENABLED"},
+		{"metrics_enabled", "SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED", "hub.observability.metricsEnabled", "SCION_SERVER_HUB_OBSERVABILITY_METRICS_ENABLED"},
+		{"tracing_enabled", "SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED", "hub.observability.tracingEnabled", "SCION_SERVER_HUB_OBSERVABILITY_TRACING_ENABLED"},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			key := "server.hub.observability." + tc.field
 			assert.Equal(t, tc.env, observabilitySchemaEnvVar(t, tc.field))
 			suffix := tc.env[len("SCION_SERVER_"):]
 			assert.Equal(t, key, serverEnvToOpsettingsKey(suffix))
-			assert.Equal(t, tc.camel, envKeyToConfigKey("SERVER_"+suffix))
+			assert.Equal(t, tc.camel, envKeyToConfigKey(suffix))
 			assert.Equal(t, key, versionedEnvKeyMapper(tc.env))
 			assert.Equal(t, key, versionedEnvKeyMapper(tc.underscored))
 		})

@@ -84,7 +84,7 @@ func TestPortProxyResponseHeaderTimeout_EnvMapping(t *testing.T) {
 	const env = "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT"
 	assert.Equal(t, env, portProxySchemaEnvVar(t, "response_header_timeout"))
 	assert.Equal(t, "server.hub.port_proxy.response_header_timeout", serverEnvToOpsettingsKey("HUB_PORTPROXY_RESPONSEHEADERTIMEOUT"))
-	assert.Equal(t, "server.hub.portProxy.responseHeaderTimeout", envKeyToConfigKey("SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT"))
+	assert.Equal(t, "hub.portProxy.responseHeaderTimeout", envKeyToConfigKey("HUB_PORTPROXY_RESPONSEHEADERTIMEOUT"))
 	assert.Equal(t, "server.hub.port_proxy.response_header_timeout", versionedEnvKeyMapper("SCION_SERVER_HUB_PORT_PROXY_RESPONSE_HEADER_TIMEOUT"))
 
 	t.Setenv(env, "30s")
