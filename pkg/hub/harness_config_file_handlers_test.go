@@ -23,6 +23,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestHandleHarnessConfigFileWrite_UpdatesImage(t *testing.T) {
@@ -61,16 +63,24 @@ func TestHandleHarnessConfigFileWrite_UpdatesImage(t *testing.T) {
 		t.Errorf("expected path config.yaml, got %s", resp.Path)
 	}
 
-	// Verify storage content
-	storedContent := stor.content[hc.StoragePath+"/config.yaml"]
-	if string(storedContent) != configYAML {
-		t.Errorf("unexpected stored content: %s", string(storedContent))
-	}
-
 	// Verify hc.Config.Image was updated
 	updated, err := s.GetHarnessConfig(ctx, hc.ID)
 	if err != nil {
 		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+
+	// Verify storage content: the write committed a blob and migrated the
+	// legacy row to the blob layout (ptone/scion#4219 part 2).
+	entry, ok := templateFileByPath(updated.Files, "config.yaml")
+	if !ok {
+		t.Fatal("config.yaml missing from the manifest after the write")
+	}
+	storedContent := stor.content[srv.harnessConfigObjectPath(updated, entry)]
+	if string(storedContent) != configYAML {
+		t.Errorf("unexpected stored content: %s", string(storedContent))
+	}
+	if updated.Layout != store.HarnessConfigLayoutBlobs {
+		t.Errorf("layout = %q, want blobs after the first commit", updated.Layout)
 	}
 	if updated.Config == nil {
 		t.Fatal("expected Config to be non-nil after writing config.yaml")

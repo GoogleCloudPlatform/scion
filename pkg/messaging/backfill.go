@@ -155,10 +155,14 @@ func (s *BackfillService) Run(ctx context.Context, cfg BackfillConfig) (*Backfil
 	groups := make(map[string]*conversationGroup)
 	cursor := cfg.Checkpoint // empty string = start from beginning; cursor string = resume
 
+	// Nothing reads the page TotalCount, so skip it: the store would
+	// otherwise COUNT every matching message on each page. The keyset
+	// cursor alone decides when the scan ends.
 	for {
 		page, err := s.msgStore.ListMessages(ctx, filter, store.ListOptions{
-			Limit:  cfg.BatchSize,
-			Cursor: cursor,
+			Limit:          cfg.BatchSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("listing messages: %w", err)

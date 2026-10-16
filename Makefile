@@ -142,7 +142,7 @@ test-hub-sqlite: test-sqlite-nonhub test-hub-shards
 SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
 	./pkg/store/entadapter/... ./pkg/artifacts/... ./pkg/brokerownership/... \
 	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
-	./pkg/store/storetest/... ./pkg/testinfra/...
+	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/...
 SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 
 # SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
@@ -231,10 +231,12 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 $(FIXTURE_PKGS)
 
-# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
-# concurrency tests (ptone/scion#4240, Phase 3b) run by
-# test-launch-store-postgres (pkg/hub shard Postgres (integration) jobs in CI).
-TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
+# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity concurrency
+# tests (ptone/scion#4240: the Phase 3b purge, and the X4 parallel admin-kind
+# mints across workload delegations) run by test-launch-store-postgres
+# (pkg/hub shard Postgres (integration) jobs in CI).
+TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres \
+	TestWorkloadAdminDelegation_ParallelMintsHoldCaps_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.
@@ -571,7 +573,8 @@ test-launch-store-postgres: test-store-postgres
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
-	$(TEST_IDENTITY_POSTGRES_TESTS)
+	$(TEST_IDENTITY_POSTGRES_TESTS) \
+	TestHubInternal_ReplayAcrossHubReplicas
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
@@ -651,7 +654,8 @@ test-webchat-postgres:
 CONDUIT_AUTHZ_POSTGRES_TESTS := TestConduitAuthzPostgres_NotifyAcrossNodes \
 	TestConduitAuthzPostgres_UserSuspendDeleteAndTokenRevoke \
 	TestConduitAuthzPostgres_ListenGapResync \
-	TestConduitAuthzPostgres_BulkRevocation
+	TestConduitAuthzPostgres_BulkRevocation \
+	TestSeparateRelayListenerReceivesHubEvents
 
 test-conduit-authz-postgres:
 	@if [ -z "$$SCION_TEST_POSTGRES_DSN" ]; then \

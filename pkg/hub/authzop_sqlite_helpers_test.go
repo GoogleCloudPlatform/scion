@@ -94,6 +94,8 @@ type idFixtures struct {
 	projectMembershipUpdate string
 	projectVisitor          string
 	projectVisitorUpdate    string
+	projectVisitorRule      string
+	projectVisitorRuleUpd   string
 	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
@@ -531,6 +533,19 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		require.NoError(t, err)
 		*v.dst = acct.ID
 	}
+	// project.visitors.rules.update / .remove address a visitor rule of
+	// f.project by ID; update gets its own rule so remove's is still there.
+	for _, v := range []struct {
+		domain string
+		dst    *string
+	}{
+		{"li-rule.example", &f.projectVisitorRule},
+		{"li-rule-update.example", &f.projectVisitorRuleUpd},
+	} {
+		rule := &store.ProjectVisitorRule{ProjectID: f.project, Issuer: "https://li-issuer.example.com", Domain: v.domain, CreatedBy: f.user}
+		require.NoError(t, s.CreateProjectVisitorRule(ctx, rule))
+		*v.dst = rule.ID
+	}
 
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
@@ -818,6 +833,8 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
 		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
+		// Visitor rule update takes its own rule; remove takes the other.
+		{"project.visitors.rules.update", "/api/v1/projects/{id}/visitors/rules/{ruleId}"}: {"id": f.project, "ruleId": f.projectVisitorRuleUpd},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -930,6 +947,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
 		"/api/v1/projects/{id}/visitors":             {"id": f.project},
 		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
+		// Visitor rules (the item pattern addresses the rule remove takes).
+		"/api/v1/projects/{id}/visitors/rules":          {"id": f.project},
+		"/api/v1/projects/{id}/visitors/rules/{ruleId}": {"id": f.project, "ruleId": f.projectVisitorRule},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},

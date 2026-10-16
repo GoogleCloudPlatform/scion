@@ -1147,6 +1147,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
 		return
 	}
+	// Rewrite agent-prefixed mentions once, here, so every branch below
+	// (agent DM, mention fan-out, human mentions, the stored row) sees the
+	// same body.
+	req.Msg = rewriteIncomingAgentMentions(req.Msg)
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
@@ -1807,6 +1811,7 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// Marked as a restore so web clients that tombstoned the ID on deleted
 	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
 	// row's Updated with the restore time, so that is the marker.
+	s.enrichAgentRuntime(ctx, agent)
 	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
@@ -1835,7 +1840,7 @@ type MessageRequest struct {
 	Interrupt bool `json:"interrupt,omitempty"`
 
 	// Notify subscribes the sender to status notifications for this agent
-	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR).
+	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR, HALTED).
 	Notify bool `json:"notify,omitempty"`
 
 	// Wake resumes a suspended agent before delivering the message.
@@ -1953,6 +1958,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "message or structured_message is required", nil)
 		return
 	}
+
+	// Rewrite agent-prefixed mentions once, before validation, so the group,
+	// direct and mention fan-out paths below all see the same body.
+	structuredMsg.Msg = rewriteIncomingAgentMentions(structuredMsg.Msg)
+	plainMessage = structuredMsg.Msg
 
 	// Validate the assembled message through the new envelope choke point.
 	// The structuredMsg is still the primary type during the transition;
@@ -2238,6 +2248,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		case state.PhaseStopped:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 				fmt.Sprintf("Agent %q is stopped. Use 'scion resume' to restart it with its previous state.", agent.Slug), nil)
+			return
+		case state.PhaseHalted:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is halted. Use 'scion start' to restart it.", agent.Slug), nil)
 			return
 		case state.PhaseError:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,

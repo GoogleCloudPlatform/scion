@@ -113,6 +113,20 @@ func (_c *RoleDefinitionCreate) SetNillableUpdated(v *time.Time) *RoleDefinition
 	return _c
 }
 
+// SetIssuanceID sets the "issuance_id" field.
+func (_c *RoleDefinitionCreate) SetIssuanceID(v string) *RoleDefinitionCreate {
+	_c.mutation.SetIssuanceID(v)
+	return _c
+}
+
+// SetNillableIssuanceID sets the "issuance_id" field if the given value is not nil.
+func (_c *RoleDefinitionCreate) SetNillableIssuanceID(v *string) *RoleDefinitionCreate {
+	if v != nil {
+		_c.SetIssuanceID(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *RoleDefinitionCreate) SetID(v uuid.UUID) *RoleDefinitionCreate {
 	_c.mutation.SetID(v)
@@ -297,6 +311,10 @@ func (_c *RoleDefinitionCreate) createSpec() (*RoleDefinition, *sqlgraph.CreateS
 		_spec.SetField(roledefinition.FieldUpdated, field.TypeTime, value)
 		_node.Updated = value
 	}
+	if value, ok := _c.mutation.IssuanceID(); ok {
+		_spec.SetField(roledefinition.FieldIssuanceID, field.TypeString, value)
+		_node.IssuanceID = &value
+	}
 	if nodes := _c.mutation.RoleBindingsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2M,
@@ -480,6 +498,9 @@ func (u *RoleDefinitionUpsertOne) UpdateNewValues() *RoleDefinitionUpsertOne {
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(roledefinition.FieldCreated)
+		}
+		if _, exists := u.create.mutation.IssuanceID(); exists {
+			s.SetIgnore(roledefinition.FieldIssuanceID)
 		}
 	}))
 	return u
@@ -809,6 +830,9 @@ func (u *RoleDefinitionUpsertBulk) UpdateNewValues() *RoleDefinitionUpsertBulk {
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(roledefinition.FieldCreated)
+			}
+			if _, exists := b.mutation.IssuanceID(); exists {
+				s.SetIgnore(roledefinition.FieldIssuanceID)
 			}
 		}
 	}))

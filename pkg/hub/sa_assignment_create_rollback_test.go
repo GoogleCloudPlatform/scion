@@ -251,6 +251,31 @@ func TestSAParentCeiling_CreateRollbackDeactivatesAssignment(t *testing.T) {
 		assert.Empty(t, activeAssignments(t, f.s, f.agent.ID), "the fallback deactivates the assignment")
 		assert.Empty(t, activeEdgesFor(t, f.s, f.agent.ID), "the fallback deactivates the edge")
 		assert.Empty(t, agentAudits(t, f.s, mutationTypeAgentCreateDispatchFailed, f.agent.ID), "the failed compensation wrote nothing")
+		// The edge and the assignment were deactivated together, with
+		// cause create_compensation under one op ID.
+		all, err := f.s.ListAllDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, f.agent.ID)
+		require.NoError(t, err)
+		require.Len(t, all, 1)
+		assert.Equal(t, store.EdgeDeactivationCreateCompensation, all[0].Cause)
+		require.NotEmpty(t, all[0].OpID)
+		n, err := f.s.ReactivateAgentServiceAccountAssignments(context.Background(), f.agent.ID, store.EdgeDeactivationCreateCompensation, all[0].OpID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n, "the assignment was deactivated under the edge's op ID")
+	})
+
+	t.Run("fallback keeps the row when the assignment deactivation fails", func(t *testing.T) {
+		f := newRollbackAssignmentFixture(t)
+		_, fault := installRollbackStore(t, f.srv, f.s, rollbackFaults{assignDeactErr: errors.New("injected assignment deactivation fault")})
+		fault.Arm()
+
+		corrID, deleteWon := f.rollback()
+		assert.NotEmpty(t, corrID, "the failed compensation is reported")
+		assert.False(t, deleteWon)
+		row := mustGetAgent(t, f.s, f.agent.ID)
+		assert.True(t, row.DeletedAt.IsZero())
+		assert.Equal(t, createRowRemoveFailedMessage, row.Message, "the kept row is marked failed")
+		assert.Len(t, activeAssignments(t, f.s, f.agent.ID), 1, "the kept row keeps its assignment")
+		assert.Len(t, activeEdgesFor(t, f.s, f.agent.ID), 1, "the edge deactivation rolled back with the row delete")
 	})
 }
 
