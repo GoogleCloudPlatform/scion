@@ -65,8 +65,8 @@ func (b *Bridge) waitForAgentLaunch(ctx context.Context, launching *hubclient.Ag
 // wait returns errTaskEndedDuringLaunch. The caller sends only on nil.
 func (b *Bridge) ensureRunningBeforeFollowUp(ctx context.Context, agentID, taskID string) error {
 	getCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	a, err := b.hubClient.Agents().Get(getCtx, agentID)
-	cancel()
 	if err != nil || a == nil {
 		b.log.Warn("follow-up: reading agent before send failed; sending anyway", "error", err, "agent_id", agentID, "task_id", taskID)
 		return nil
@@ -163,7 +163,7 @@ func (b *Bridge) launchKeepAliveInterval() time.Duration {
 
 // keepTaskAlive touches the legacy task (updated_at only) every keepalive
 // interval until the returned stop function is called. stop waits for the
-// goroutine to end.
+// goroutine to end and may be called more than once.
 func (b *Bridge) keepTaskAlive(ctx context.Context, taskID string) (stop func()) {
 	done := make(chan struct{})
 	exited := make(chan struct{})
@@ -185,8 +185,9 @@ func (b *Bridge) keepTaskAlive(ctx context.Context, taskID string) (stop func())
 			}
 		}
 	}()
+	var once sync.Once
 	return func() {
-		close(done)
+		once.Do(func() { close(done) })
 		<-exited
 	}
 }

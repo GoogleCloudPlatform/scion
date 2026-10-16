@@ -149,6 +149,7 @@ func (e *ScionExecutor) Execute(ctx context.Context, execCtx *a2asrv.ExecutorCon
 		// launch step, and fails without a send when the launch fails.
 		if hubclient.LaunchActive(launching) {
 			waitCtx, cancelWait := context.WithCancel(ctx)
+			defer cancelWait()
 			consumerGone := false
 			report := launchStepReporter(func(text string) {
 				if consumerGone {
