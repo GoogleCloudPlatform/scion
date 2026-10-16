@@ -186,6 +186,7 @@ Edit `scion-a2a-bridge.yaml`. The required fields are:
 | `hub.signing_key_secret` | GCP Secret Manager resource name for the signing key. Mutually exclusive with `hub.signing_key`. | `projects/my-project/secrets/hub-signing-key` |
 | `bridge.listen_address` | Address for the A2A HTTP server | `:8443` |
 | `bridge.external_url` | Public URL where A2A clients reach the bridge | `https://a2a.example.com` |
+| `bridge.async_create` | Optional, default `true`. Auto-provisioning asks the Hub for an asynchronous create. With a Hub that has async launch on, the task reports `working` ("provisioning agent (<step>)") while the agent starts, then the message is sent; a failed start ends the task `failed` ("Agent failed to start (<code>): <message>") without a send. `false` always uses the synchronous create. | `true` |
 | `auth.api_key` | Static API key clients pass in the `X-API-Key` header. Supports env var expansion. | `${A2A_API_KEY}` |
 | `projects[].slug` | Project slug to expose. Add one entry per project. | `my-project` |
 | `plugin.listen_address` | Broker plugin RPC listen address | `localhost:9090` |
