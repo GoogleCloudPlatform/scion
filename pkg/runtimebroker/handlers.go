@@ -3588,16 +3588,18 @@ func isContainerStopTolerable(err error) bool {
 }
 
 // agentsWithoutProjectLabel returns the subset of agents that carry no
-// scion.project_id label. The project-scoped lookups fall back to a
+// project identity: no scion.project_id label and no ProjectID field
+// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
 // slug-only search for backward compatibility with pre-existing / solo-mode
 // containers that predate project labels; that fallback must only match such
 // genuinely unlabeled containers. A container labeled for a *different*
 // project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide.
+// across projects would collide. The ProjectID field counts too, because
+// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
 func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if a.Labels["scion.project_id"] == "" {
+		if agentHasNoProjectIdentity(a) {
 			filtered = append(filtered, a)
 		}
 	}
