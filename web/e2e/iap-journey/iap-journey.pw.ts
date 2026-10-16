@@ -160,9 +160,13 @@ test.describe('IAP browser journey (operator-run)', () => {
     fs.chmodSync(dir, 0o700);
     const codeFile = path.join(dir, 'code.txt');
     let issued = false;
+    let failed = false;
     const context = await browser.newContext({ baseURL: hub });
     try {
       // 2. Issue a member identity into the run cache, then mint a code.
+      // Marked issued first: a CLI failure after the hub issued it still
+      // tears the run down (a teardown of an empty run is harmless).
+      issued = true;
       const out = await scion(cfg.scionBin, [
         ...prof,
         'hub',
@@ -178,7 +182,6 @@ test.describe('IAP browser journey (operator-run)', () => {
         'iap browser journey',
         '--json',
       ]);
-      issued = true;
       const ident = (JSON.parse(out) as { identity?: { id?: unknown; email?: unknown } }).identity;
       const identityId = typeof ident?.id === 'string' ? ident.id : '';
       const fixtureEmail = typeof ident?.email === 'string' ? ident.email : '';
@@ -258,6 +261,9 @@ test.describe('IAP browser journey (operator-run)', () => {
       );
       console.log(`/auth/me after teardown: ${after.status}`);
       expect(after.status, 'the session ended with the identity').toBe(401);
+    } catch (err) {
+      failed = true;
+      throw err;
     } finally {
       await context.close();
       if (issued) {
@@ -279,8 +285,15 @@ test.describe('IAP browser journey (operator-run)', () => {
         return [...tokens].some((t) => text.includes(t)) || /"cookies"\s*:\s*\[/.test(text);
       });
       fs.rmSync(dir, { recursive: true, force: true });
-      expect(leaks.length, 'files holding a driver token or a storage state').toBe(0);
-      expect(tokens.size, 'driver tokens were obtained').toBeGreaterThan(0);
+      if (failed) {
+        // Keep the original error; only report a leak next to it.
+        if (leaks.length > 0) {
+          console.log(`also: ${leaks.length} files hold a driver token or a storage state`);
+        }
+      } else {
+        expect(leaks.length, 'files holding a driver token or a storage state').toBe(0);
+        expect(tokens.size, 'driver tokens were obtained').toBeGreaterThan(0);
+      }
     }
   });
 });
