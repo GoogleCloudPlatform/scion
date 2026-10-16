@@ -33,7 +33,6 @@ assert scion_harness.INTERFACE_VERSION >= 3, (
 PROVISION_VERSION = "2026-07-09T01:00:00Z"
 
 FLASH_MODEL = "Gemini 3.8 Flash (Medium)"
-PRO_MODEL = "Gemini 3.1 Pro (Low)"
 
 
 AGY_MCP_MAPPING: dict[str, Any] = {

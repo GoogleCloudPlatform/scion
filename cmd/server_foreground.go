@@ -52,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
@@ -145,7 +146,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
+	logCleanups, requestLogger, messageLogger, artifactLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
@@ -157,6 +158,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	cfg, err := loadAndReconcileConfig(cmd)
 	if err != nil {
 		return err
+	}
+	if err := validateServerRole(serverRole); err != nil {
+		return err
+	}
+	if serverRole == serverRoleRelay {
+		// A separate conduit relay: no hub, Runtime Broker or web.
+		if err := validateRelayRoleFlags(cmd.Flags()); err != nil {
+			return err
+		}
+		applyServerLogLevelSetting(cfg.LogLevel)
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return runRelayRole(ctx, cfg)
 	}
 	// Server secrets are now in memory; remove them from the process env
 	// before anything below can start a child process. Two earlier
@@ -416,7 +432,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, artifactLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
@@ -1021,7 +1037,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 }
 
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
-func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
+func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, messageLogger, artifactLogger *slog.Logger, err error) {
 	useGCP := parseBoolEnv("SCION_LOG_GCP")
 	if cloudrunenv.IsService() {
 		useGCP = true
@@ -1139,7 +1155,33 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		cleanups = append(cleanups, msgLogCleanup)
 	}
 
-	return cleanups, requestLogger, messageLogger, nil
+	// Initialize the artifact decision logger (hub only; the broker serves
+	// no artifacts).
+	if enableHub {
+		artLogCfg := logging.ArtifactLoggerConfig{
+			Component: component,
+			HubName:   hubName,
+			HubID:     hubID,
+			UseGCP:    useGCP,
+			Level:     logging.ResolveLogLeveler(enableDebug),
+		}
+		if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
+			artLogCfg.CloudClient = ch.Client()
+			artLogCfg.CircuitOpen = ch.CircuitOpen
+		}
+		var artLogCleanup func()
+		var artErr error
+		artifactLogger, artLogCleanup, artErr = logging.NewArtifactLogger(artLogCfg)
+		if artErr != nil {
+			slog.Warn("Failed to initialize artifact logger", "error", artErr)
+			artifactLogger = nil
+		}
+		if artLogCleanup != nil {
+			cleanups = append(cleanups, artLogCleanup)
+		}
+	}
+
+	return cleanups, requestLogger, messageLogger, artifactLogger, nil
 }
 
 // applyServerLogLevelSetting applies the server.log_level setting to the
@@ -1481,6 +1523,12 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 		return err
 	}
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.Relay.Validate(); err != nil {
+		return err
+	}
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
 		return err
 	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
@@ -2264,6 +2312,24 @@ func resolveSessionSecret() string {
 	return secret
 }
 
+// sessionSecretValue is the configured session secret, or "": the
+// --session-secret flag, else the value scrubServerSecretEnv read at
+// startup, else SCION_SERVER_SESSION_SECRET, then SESSION_SECRET. It only
+// reads: no deprecation or hosted-mode warning (resolveSessionSecret adds
+// the hosted-mode one).
+func sessionSecretValue() string {
+	if webSessionSecret != "" {
+		return webSessionSecret
+	}
+	if capturedSessionSecret != "" {
+		return capturedSessionSecret
+	}
+	if s := os.Getenv(sessionSecretEnv); s != "" {
+		return s
+	}
+	return os.Getenv(legacySessionSecretEnv)
+}
+
 // hubObservabilityExport decides at startup whether the hub's own metrics
 // and trace exporters run, and their export project (ptone/scion#4914).
 // See decideHubObservabilityExport for the inputs.
@@ -2597,6 +2663,10 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
+	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
+		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
+	}
+
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
 	} else {
@@ -2660,7 +2730,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	warnNonConformingHubName(cfg.Hub.HubName)
@@ -2759,6 +2829,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
+	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -2789,6 +2860,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubSrv.SetIntegrationHA(cfg.Database.Driver, entClient, cfg.Database.URL)
 	if messageLogger != nil {
 		hubSrv.SetMessageLogger(messageLogger)
+	}
+	if artifactLogger != nil {
+		hubSrv.SetArtifactLogger(artifactLogger)
 	}
 
 	// Load notification channels from versioned settings. With operational
@@ -3035,10 +3109,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
-	bootstrapKoanf := config.LoadBootstrapKoanfWithConfigPath(serverConfigPath)
 	// Seed material never carries the removed key, so the every-boot sync
 	// cannot write it back into a seeded profiles row.
-	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
+	bootstrapKoanf := config.LoadServerBootstrapKoanf(serverConfigPath, tzScan.ProfileTimezones)
 
 	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
 	// Layer-1 settings (these should use SCION_SEED_* instead).
@@ -3159,37 +3232,47 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 			return fmt.Errorf("checking section %q: %w", sec.Name, err)
 		}
 
+		// The decision is opsettings.SyncedSection, shared with the rebuild
+		// preflight. BackfillOrigin has already run, so the stored origin is
+		// the effective one and UpdatedBy is not passed.
+		var row *opsettings.SectionRow
+		if existing != nil {
+			row = &opsettings.SectionRow{Origin: existing.Origin, Value: existing.Value}
+		}
+		doc, present := opsettings.SyncedSection(sec.Name, row, bootstrapDoc)
+
 		if existing == nil {
 			// An empty catalog section is left absent: an empty stored
 			// runtimes, profiles or harness_configs map means "not managed
 			// in the hub", and absent says so without a row
 			// (ptone/scion#5007).
-			if isEmptyCatalogSeed(sec.Name, bootstrapDoc) {
+			if !present {
 				slog.Debug("Empty catalog section not seeded", "section", sec.Name)
 				continue
 			}
 			// No row — create with bootstrap material.
-			if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+			if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded"); err != nil {
 				return fmt.Errorf("seeding section %q: %w", sec.Name, err)
 			}
 			log.Printf("  Seeded section: %s (new)", sec.Name)
 			continue
 		}
 
-		if existing.Origin == "managed" {
-			slog.Debug("Skipping managed section", "section", sec.Name)
-			continue
-		}
-
-		// Origin is "seeded" — update only if content differs.
-		// Compare semantically (not byte-for-byte) because Postgres jsonb
+		// Write only when SyncedSection's document differs from the row, so
+		// the write set comes from the shared rule alone: a managed row's
+		// document is its own value and is never rewritten. Compare
+		// semantically (not byte-for-byte) because Postgres jsonb
 		// re-serializes values, changing whitespace and key ordering.
-		if jsonEqual(existing.Value, bootstrapDoc) {
-			slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+		if jsonEqual(existing.Value, doc) {
+			if existing.Origin == opsettings.OriginManaged {
+				slog.Debug("Skipping managed section", "section", sec.Name)
+			} else {
+				slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+			}
 			continue
 		}
 
-		if _, err := s.UpsertHubSetting(ctx, sec.Name, bootstrapDoc, "seed", -1, "seeded"); err != nil {
+		if _, err := s.UpsertHubSetting(ctx, sec.Name, doc, "seed", -1, "seeded"); err != nil {
 			return fmt.Errorf("re-syncing section %q: %w", sec.Name, err)
 		}
 		log.Printf("  Re-synced section: %s (content changed)", sec.Name)
@@ -3206,22 +3289,6 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 
 	log.Println("Hub settings sync complete")
 	return nil
-}
-
-// isEmptyCatalogSeed reports whether doc is an empty bootstrap document for
-// one of the map-of-objects catalog sections (runtimes, profiles,
-// harness_configs), which syncHubSettings does not create a row for.
-func isEmptyCatalogSeed(section string, doc json.RawMessage) bool {
-	switch section {
-	case "runtimes", "profiles", "harness_configs":
-	default:
-		return false
-	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(doc, &m); err != nil {
-		return false
-	}
-	return len(m) == 0
 }
 
 // jsonEqual compares two JSON documents semantically, ignoring whitespace
@@ -3830,7 +3897,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	brokerID, err := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	if err != nil {
+		return err
+	}
 	// Resolve broker name
 	brokerName := resolveBrokerName(cfg, settings, vsBroker)
 
@@ -3888,10 +3958,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
 				log.Printf("Broker ID updated from %s to %s (name-based dedup)", brokerID, effectiveID)
-				brokerID = effectiveID
-				if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-					log.Printf("Warning: failed to persist deduplicated broker ID: %v", err)
+				if err := adoptDedupedBrokerID(globalDir, effectiveID, log.Printf); err != nil {
+					return err
 				}
+				brokerID = effectiveID
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
 			if statelessCloudRunBroker {
@@ -3974,6 +4044,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			log.Printf("WARNING: %s", warning)
 		}
 	}
+	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
+		log.Printf("WARNING: %s", warning)
+	}
 
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
@@ -4027,7 +4100,12 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
 	// exists, so it comes from the settings file and startup never sees an
 	// overlay-only active_profile error.
-	installColocatedSettingsOverlay(cfg, hubSrv)
+	if installColocatedSettingsOverlay(cfg, hubSrv) {
+		// Built-in profile retention (ptone/scion#5113): enabled only for the
+		// legacy co-located broker, whose ID is known here (registered above).
+		// A failed registration leaves it disabled: the overlay is unchanged.
+		enableColocatedProfileReferences(ctx, hubSrv)
+	}
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)
@@ -4245,7 +4323,7 @@ var cloudRunLogicalBrokerNamespace = uuid.MustParse("c10f7a0a-6f03-5f9f-8d52-1d9
 // It checks (in order): versioned settings, legacy settings, global config,
 // deterministic Cloud Run ID, DB recovery (single embedded broker), and
 // finally generates a new UUID as a last resort.
-func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) string {
+func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) (string, error) {
 	var brokerID string
 	if vsBroker != nil && vsBroker.BrokerID != "" {
 		brokerID = vsBroker.BrokerID
@@ -4257,7 +4335,7 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 	}
 	if brokerID == "" && defaultBrokerID != "" {
 		log.Printf("Using deterministic logical broker ID: %s", defaultBrokerID)
-		return defaultBrokerID
+		brokerID = defaultBrokerID
 	}
 
 	// Recover from DB: if exactly one embedded broker exists, reuse its ID.
@@ -4266,12 +4344,8 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 		if err != nil {
 			log.Printf("Warning: failed to query database for broker ID recovery: %v", err)
 		} else if embedded != nil {
-			brokerID = embedded.ID
-			log.Printf("NOTICE: recovered broker ID %s from database (single embedded broker)", brokerID)
-			// Persist so we don't re-recover on next boot (writes to both legacy
-			// hub.brokerId and versioned server.broker.broker_id via UpdateSetting).
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-				log.Printf("Warning: failed to persist recovered broker ID to settings: %v", err)
+			if brokerID, err = recoverEmbeddedBrokerID(globalDir, embedded.ID, log.Printf); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -4284,7 +4358,12 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 			log.Printf("Generated and persisted new broker ID: %s", brokerID)
 		}
 	}
-	return brokerID
+	// Every source of the ID (configured, deterministic default, recovered,
+	// generated) is checked before it is used.
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", fmt.Errorf("broker ID: %w", err)
+	}
+	return brokerID, nil
 }
 
 func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) (string, error) {

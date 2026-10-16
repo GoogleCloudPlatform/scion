@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -61,7 +62,9 @@ func warnf(format string, args ...interface{}) {
 	if out == nil {
 		out = os.Stderr
 	}
-	_, _ = fmt.Fprintf(out, "Warning: "+format+"\n", args...)
+	// The message can quote an error carrying a hub URL; it is shown
+	// without the URL's user info.
+	_, _ = fmt.Fprintf(out, "Warning: %s\n", config.RedactURLsIn(fmt.Sprintf(format, args...)))
 }
 
 // AgentRef holds both name and ID for an agent.
@@ -634,7 +637,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 				// every hub: a silent pick could attach this directory to
 				// another clone's project.
 				if IsLocalWorkstationEndpoint(endpoint) {
-					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, endpoint)
+					_, _ = fmt.Fprintf(promptOut, "Linking project '%s' to the local hub at %s\n", projectName, config.RedactURL(endpoint))
 				} else if !ShowLinkPrompt(projectName, opts.AutoConfirm) {
 					return nil, errProjectMustBeLinked()
 				}
@@ -697,7 +700,7 @@ func hubUnreachableError(endpoint string, err error) error {
 	if IsLocalWorkstationEndpoint(endpoint) && !config.IsHubManagedAgent() {
 		return &LocalServerNotRunningError{Endpoint: endpoint, Err: err}
 	}
-	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+	return wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", config.RedactURL(endpoint), hubclient.HintProxyError(err)))
 }
 
 // LegacyModeIgnoredNotice is printed once, when the link is recorded, to a
@@ -1793,14 +1796,25 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	if globalErr != nil {
 		_, _ = fmt.Fprintf(promptOut, "Warning: failed to get global directory: %v\n", globalErr)
 	} else {
-		if resp.BrokerToken != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
-			}
-		}
+		// A broker ID that is not a single path element rejects the
+		// response's broker settings as a whole: neither the token nor the
+		// ID is saved.
+		var brokerIDErr error
 		if resp.Broker != nil && resp.Broker.ID != "" {
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
-				_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+			brokerIDErr = brokercredentials.ValidateBrokerIDPathElement(resp.Broker.ID)
+		}
+		if brokerIDErr != nil {
+			_, _ = fmt.Fprintf(promptOut, "Warning: not saving the broker token or broker ID: %v\n", brokerIDErr)
+		} else {
+			if resp.BrokerToken != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerToken", resp.BrokerToken, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker token: %v\n", err)
+				}
+			}
+			if resp.Broker != nil && resp.Broker.ID != "" {
+				if err := config.UpdateSetting(globalDir, "hub.brokerId", resp.Broker.ID, true); err != nil {
+					_, _ = fmt.Fprintf(promptOut, "Warning: failed to save broker ID: %v\n", err)
+				}
 			}
 		}
 	}
@@ -2215,12 +2229,12 @@ const hubGlobalProjectSlug = "global"
 func resolveHubGlobalProjectID(ctx context.Context, client hubclient.Client, endpoint string) (string, error) {
 	resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: hubGlobalProjectSlug})
 	if err != nil {
-		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", endpoint, err))
+		return "", wrapHubError(endpoint, fmt.Errorf("failed to look up the Global project on hub %s: %w", config.RedactURL(endpoint), err))
 	}
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project with slug %q was found on hub %s, or you do not have access to it.\n\n"+
 			"--global (-g global) targets the hub's Global project when no local global project is linked.\n"+
-			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, endpoint)
+			"Ask a hub admin to create it or grant access, or pass --project <slug|id> to target another hub project", hubGlobalProjectSlug, config.RedactURL(endpoint))
 	}
 	return resp.Projects[0].ID, nil
 }

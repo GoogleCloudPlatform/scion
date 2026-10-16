@@ -125,6 +125,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	if !canCreateIn(ctx, s.host, scope) {
 		// A credential that does not permit artifact.create may be
 		// explained; the decision itself is canCreateIn's.
+		s.logCreateRefusal(r, scope)
 		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
 			return
 		}
@@ -208,9 +209,11 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
 	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
+		s.logVersionError(r, a, 1, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
+	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 

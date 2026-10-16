@@ -1078,7 +1078,7 @@ type createRollback struct {
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
 // delete + 5s compensation + 5s release), plus about 20s for the fallback
 // below (up to three row-delete attempts with backoff, then marking the row
-// failed or deactivating its edges and service-account assignments).
+// failed).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
@@ -1090,9 +1090,10 @@ type createRollback struct {
 // quotas held (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
-// delete of the agent row on its own, then, once the row is gone, a
-// standalone best-effort deactivation of the agent's delegation edges and
-// service-account assignments (same cause and op ID). The correlation ID is
+// delete of the agent row without the audit record, in one transaction
+// with the deactivation of the agent's delegation edges and
+// service-account assignments and the hard-delete hooks (same cause and op
+// ID; deleteFailedCreateRow). The correlation ID is
 // returned so the caller can report it (writeCreateFailure). The return
 // value is "" when the compensation committed.
 func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
@@ -1172,19 +1173,17 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		compensationFailureCorrelationID = compensationFailureID(ctx)
 		logCompensationFailure(ctx, agent.ID, compensationFailureCorrelationID, opID, err)
-		// Fallback, sharing one store budget. First remove the row so a
-		// failed compensation does not also leave the agent in place. Only
-		// once the row is gone, deactivate its edges on their own (this
-		// succeeds when the transaction failed on another write, for example
-		// the audit insert). When the delete fails, the row keeps its active
-		// edge, so it stays held to its recorded ceiling. When the
-		// deactivation fails, the edge stays active with a deleted delegate,
-		// which nothing reads as authority (the walk, the provenance lookup
-		// and the mint all need the agent row).
+		// Fallback: remove the row so a failed compensation does not also
+		// leave the agent in place. The row delete commits only together
+		// with the deactivation of the agent's edges and service-account
+		// assignments under the same cause and op ID, without the audit
+		// record (this succeeds when the compensation failed on the audit
+		// insert). When it fails, the row keeps its active edge and
+		// assignment, so it stays held to its recorded ceiling.
 		// The row delete is retried a few times; if it still fails, the row
 		// is left visibly failed rather than in phase created with no
 		// message.
-		derr := s.deleteFailedCreateRow(ctx, agent.ID)
+		derr := s.deleteFailedCreateRow(ctx, agent, opID)
 		if errors.Is(derr, errCreateRowDeleteHeld) {
 			// A delete claimed the row since: it owns the row and its
 			// edge. The failed compensation's correlation ID is logged
@@ -1215,23 +1214,6 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 				s.agentLifecycleLog.Warn("Create-failure cleanup: marking the row failed also failed", "agent_id", agent.ID, "error", err)
 			}
 			return
-		}
-		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
-		defer fcancel()
-		now := time.Now()
-		if _, derr := s.store.DeactivateDelegationEdgesForDelegate(fctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
-			Cause: store.EdgeDeactivationCreateCompensation,
-			At:    &now,
-			OpID:  opID,
-		}); derr != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
-		}
-		if _, derr := s.store.DeactivateAgentServiceAccountAssignments(fctx, agent.ID, store.Deactivation{
-			Cause: store.EdgeDeactivationCreateCompensation,
-			At:    &now,
-			OpID:  opID,
-		}); derr != nil {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: service-account assignment deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
 		}
 	}()
 	if rb.DeleteWon != nil {
@@ -1301,7 +1283,15 @@ func isCreateCleanupRefusedRow(a *store.Agent) bool {
 // in the delete's transaction; ptone/scion#3557, ptone/scion#3958); a row a
 // delete holds, or one already gone or soft-deleted, returns
 // errCreateRowDeleteHeld.
-func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) error {
+//
+// Each attempt runs agentHardDeleteWork in the row delete's transaction:
+// the agent's delegation edges and service-account assignments are
+// deactivated with cause create_compensation under opID, and the
+// hard-delete hooks run, so the row is removed only together with them.
+// A failure there rolls the attempt back and keeps the row.
+func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, opID string) error {
+	agentID := agent.ID
+	actor := auditActorFromContext(ctx)
 	var err error
 	for attempt := 0; attempt < createCleanupDeleteAttempts; attempt++ {
 		if attempt > 0 {
@@ -1310,8 +1300,17 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agentID string) erro
 		func() {
 			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 			defer cancel()
+			now := time.Now()
 			var n int
-			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{}, createRowHeldCheck(nil))
+			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+				createRowHeldCheck(func(tx store.Store) error {
+					_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
+						Cause: store.EdgeDeactivationCreateCompensation,
+						At:    &now,
+						OpID:  opID,
+					}, "compensation fallback")
+					return werr
+				}))
 			if err == nil && n == 0 {
 				err = errCreateRowDeleteHeld
 			}
@@ -2285,8 +2284,9 @@ func (s *Server) createAgentInProject(
 	//
 	// gVisor sandboxes cannot reach the real GCE metadata server at
 	// 169.254.169.254, so passthrough mode produces no credentials. When
-	// the target broker runs a cloudrun-sandbox profile, translate
-	// passthrough to assign using the broker's host service account —
+	// the agent's resolved runtime profile on the target broker is a
+	// cloudrun-sandbox profile, translate passthrough to assign using the
+	// broker's host service account —
 	// semantically equivalent (same identity) and the assign machinery
 	// works inside the sandbox.
 	//
@@ -2296,7 +2296,7 @@ func (s *Server) createAgentInProject(
 		agent.AppliedConfig.GCPIdentity != nil &&
 		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
 		runtimeBrokerID != "" {
-		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID); err != nil {
+		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID, project); err != nil {
 			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
 				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -3114,7 +3114,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 		return true
 	}
 	p := state.Phase(current.Phase)
-	if p == state.PhaseError || p == state.PhaseStopped {
+	if p == state.PhaseError || p == state.PhaseStopped || p == state.PhaseHalted {
 		agent.Phase = current.Phase
 		agent.Activity = current.Activity
 		agent.Message = current.Message
@@ -3337,7 +3337,7 @@ func copyHubWorkspaceStorage(dst, src *store.Agent) {
 
 func isTerminalAgentPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseError:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		return true
 	case state.PhaseCreated,
 		state.PhaseProvisioning,
@@ -3811,6 +3811,26 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 				agents[i].Template = slug
 			}
 		}
+	}
+}
+
+// enrichAgentRuntime fills agent.Runtime, when none is recorded, with the
+// runtime resolveAgentRuntime derives from the agent's broker, as
+// enrichAgent does. It is for the raw (otherwise unenriched) reads that are
+// published as events: the derived runtime is display-only and is never
+// persisted, because the halt rule trusts only a broker-reported runtime
+// (ptone/scion#2262, ptone/scion#4853).
+func (s *Server) enrichAgentRuntime(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.Runtime != "" || agent.RuntimeBrokerID == "" {
+		return
+	}
+	b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		s.agentLifecycleLog.Debug("failed to get runtime broker for runtime enrichment", "agent_id", agent.ID, "brokerID", agent.RuntimeBrokerID, "error", err)
+		return
+	}
+	if rt := resolveAgentRuntime(agent, b); rt != "" {
+		agent.Runtime = rt
 	}
 }
 
@@ -4558,7 +4578,15 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			// Passthrough-to-assign translation for cloudrun-sandbox runtimes
 			// (same logic as the create path — see createAgentInProject).
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID); err != nil {
+			// The project supplies its active profile when the agent names
+			// none; a failed lookup fails the request rather than resolving
+			// the profile without it.
+			passthroughProject, err := s.store.GetProject(ctx, agent.ProjectID)
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, passthroughProject); err != nil {
 				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
 					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
@@ -4848,7 +4876,7 @@ func removedEntriesWarnings(removed map[string][]string) []string {
 // AppliedConfig.
 func configPatchPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		return true
 	}
 	return false
@@ -5940,20 +5968,41 @@ func skillResolutionClientDetails(details map[string]interface{}) map[string]int
 // Passthrough-to-assign translation for cloudrun-sandbox runtimes
 // ---------------------------------------------------------------------------
 
-// brokerHasCloudRunSandboxProfile reports whether any profile on the broker has
-// the "cloudrun-sandbox" runtime type. This indicates the broker runs gVisor
-// sandboxes that cannot reach the real GCE metadata server.
-func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
-	for _, p := range broker.Profiles {
-		if p.Type == "cloudrun-sandbox" {
-			return true
-		}
+// resolvePassthroughProfile resolves the one runtime profile an agent runs
+// under on broker and reports whether it has the "cloudrun-sandbox" type:
+// such a profile runs gVisor sandboxes that cannot reach the real GCE
+// metadata server. resolvedProfile is that profile's name, or "" when none
+// resolves.
+// profileName is the agent's effective profile (see
+// effectiveRuntimeProfileName); resolveAgentRuntimeProfileType falls back to
+// the broker's default profile, then to a sole profile. A profile that cannot
+// be resolved (including any flat Runtime Broker, which stores no profiles)
+// is reported as not cloudrun-sandbox, so no host service account is
+// assigned on a guess.
+func resolvePassthroughProfile(broker *store.RuntimeBroker, profileName string) (resolvedProfile string, isSandbox bool) {
+	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
+	if !ok {
+		return "", false
 	}
-	return false
+	return resolvedProfile, runtimeType == "cloudrun-sandbox"
 }
 
 // translatePassthroughForSandbox translates a passthrough GCP identity config
-// to assign mode when the target broker runs a cloudrun-sandbox runtime.
+// to assign mode when the runtime profile the agent resolves to on the target
+// broker has the cloudrun-sandbox type. The mode follows that one profile's
+// type: other profiles the broker also offers play no part.
+//
+// project supplies the project's active profile when the agent names none
+// (effectiveRuntimeProfileName); it may be nil only where the project has no
+// active profile to contribute.
+//
+// Whenever the profile resolves, it is recorded on the agent
+// (pinResolvedProfile: AppliedConfig.Profile and CreateInputs.Profile, when
+// empty) in the same change as the mode, whichever way the mode goes.
+// Later starts and reincarnations then run under the profile the mode was
+// decided on, rather than one resolved afresh from the project's active
+// profile or the broker's default at that time. A profile that cannot be
+// resolved is not recorded.
 //
 // Inside gVisor sandboxes the real GCE metadata server at 169.254.169.254 is
 // unreachable, so passthrough mode produces no credentials. The translation
@@ -5962,11 +6011,14 @@ func brokerHasCloudRunSandboxProfile(broker *store.RuntimeBroker) bool {
 // emulator → hub gcp-token endpoint → IAM impersonation) works inside the
 // sandbox.
 //
-// The method is a no-op when:
+// The GCP setting is left unchanged when:
 //   - the agent's config is not passthrough,
-//   - the broker has no cloudrun-sandbox profile, or
+//   - the agent's profile cannot be resolved (passthrough is kept and no
+//     profile is recorded),
+//   - the agent's resolved profile is not a cloudrun-sandbox profile
+//     (passthrough is kept and the profile is recorded), or
 //   - the broker has no host SA registered (leaves passthrough as-is with a
-//     warning — identical to pre-fix behavior).
+//     warning; the profile is recorded).
 //
 // On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
 // assign mode with the broker's host SA, and a GCPServiceAccount record is
@@ -5975,6 +6027,7 @@ func (s *Server) translatePassthroughForSandbox(
 	ctx context.Context,
 	agent *store.Agent,
 	brokerID string,
+	project *store.Project,
 ) error {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return nil
@@ -5991,8 +6044,11 @@ func (s *Server) translatePassthroughForSandbox(
 	if err != nil {
 		return fmt.Errorf("load broker %s: %w", brokerID, err)
 	}
-	if !brokerHasCloudRunSandboxProfile(broker) {
-		return nil // not a sandbox runtime — passthrough works as-is
+	profileName := effectiveRuntimeProfileName(agent.AppliedConfig.Profile, project)
+	resolvedProfile, isSandbox := resolvePassthroughProfile(broker, profileName)
+	pinResolvedProfile(agent.AppliedConfig, resolvedProfile)
+	if !isSandbox {
+		return nil // not a sandbox profile — passthrough works as-is
 	}
 
 	if broker.GCPHostServiceAccountEmail == "" {

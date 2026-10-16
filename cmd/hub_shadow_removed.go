@@ -29,7 +29,7 @@ var errHubShadowRemoved = errors.New("'scion hub shadow' was removed; run 'scion
 
 // hubShadowRemovedCmd keeps 'scion hub shadow' as a hidden command that
 // points to 'scion use' and fails. It is deleted together with the shadow
-// directory read path (isShadowProject).
+// project read paths in pkg/config.
 var hubShadowRemovedCmd = &cobra.Command{
 	Use:                "shadow",
 	Hidden:             true,

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
@@ -41,6 +42,16 @@ type linkedUserHub struct {
 	// fail maps "METHOD path" to an error answer for that request. A key
 	// of "METHOD path?scope=value" matches only requests with that scope.
 	fail map[string]hubFailure
+
+	// createAgent, when set, is the agent in the create answer (its slug
+	// and name come from the request). createBodies records each create
+	// request body.
+	createAgent  *hubclient.Agent
+	createBodies []string
+	// agentReads scripts the GET agent answers in order; the last one
+	// repeats. Empty answers 404.
+	agentReads []hubclient.Agent
+	agentReadN int
 }
 
 // hubFailure is an error answer from the fake hub.
@@ -117,13 +128,31 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+luProject+"/agents":
 		_ = json.NewEncoder(w).Encode(hubAgentsResponse{Agents: []hubAgent{{ID: "a1", Slug: "worker", Phase: "running", Activity: "idle"}}})
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+luProject+"/agents":
+		raw, _ := io.ReadAll(r.Body)
 		var body CreateAgentRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		w.WriteHeader(http.StatusCreated)
+		_ = json.Unmarshal(raw, &body)
 		resp := hubCreateAgentResponse{}
+		h.mu.Lock()
+		h.createBodies = append(h.createBodies, string(raw))
+		if h.createAgent != nil {
+			resp.Agent = *h.createAgent
+		}
+		h.mu.Unlock()
 		resp.Agent.Slug = body.Name
 		resp.Agent.Name = body.Name
+		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(resp)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/projects/"+luProject+"/agents/"):
+		h.mu.Lock()
+		if len(h.agentReads) == 0 {
+			h.mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		a := h.agentReads[min(h.agentReadN, len(h.agentReads)-1)]
+		h.agentReadN++
+		h.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(a)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/templates":
 		_ = json.NewEncoder(w).Encode(hubTemplatesResponse{Templates: []hubTemplate{{Slug: "default", Name: "Default"}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/secrets":
@@ -145,6 +174,8 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type discordStub struct {
 	mu     sync.Mutex
 	bodies []string
+	// failPath, when set, makes requests to that URL path answer 403.
+	failPath string
 }
 
 func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -154,7 +185,16 @@ func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	d.mu.Lock()
 	d.bodies = append(d.bodies, string(body))
+	failing := d.failPath != "" && req.URL.Path == d.failPath
 	d.mu.Unlock()
+	if failing {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Missing Access","code":50001}`)),
+			Request:    req,
+		}, nil
+	}
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},

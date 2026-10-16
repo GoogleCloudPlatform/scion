@@ -984,7 +984,8 @@ type brokerAgentHeartbeat struct {
 	// empty for an unlabelled entry or an older broker. OtherEntries are
 	// the agent's entries on the broker's other targets
 	// (hubclient.AgentHeartbeat.OtherEntries). Read only by the
-	// stranded-run adoption (broker_heartbeat_run_adoption.go).
+	// stranded-run adoption (broker_heartbeat_run_adoption.go) and the
+	// store's run check (AgentStatusUpdate.ReportRunID).
 	RunID        string                    `json:"runId,omitempty"`
 	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
 }
@@ -1069,12 +1070,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 	// heartbeatBroker is loaded at most once per heartbeat, on first use: either
 	// eagerly right below when Capabilities need refreshing, or lazily by
-	// loadHeartbeatBroker the first time an agent's Runtime backfill actually
-	// needs it (ptone/scion#2262). Current brokers report Capabilities on
-	// every heartbeat, so this is normally the one read the Capabilities
-	// refresh already makes, and the Runtime backfill reuses it rather than
-	// adding another. A heartbeat without Capabilities reads the broker only
-	// if some agent needs a Runtime backfill. The error (if any) is cached
+	// loadHeartbeatBroker the first time an agent's Profile backfill needs its
+	// flat-broker check (ptone/scion#2262). Current brokers report
+	// Capabilities on every heartbeat, so this is normally the one read the
+	// Capabilities refresh already makes, and the Profile backfill reuses it
+	// rather than adding another. A heartbeat without Capabilities reads the
+	// broker only if some agent needs a Profile backfill. The error (if any) is cached
 	// alongside the broker so each caller can log it with its own message
 	// and level.
 	var heartbeatBroker *store.RuntimeBroker
@@ -1208,10 +1209,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// When the broker sends structured Phase/Activity fields, use
 			// them directly. Fall back to container-status derivation for
 			// backward compatibility with older brokers.
+			// ReportRunID lets the store drop a report of an older run
+			// (ptone/scion#4853); Result tells this handler whether the
+			// write halted the agent.
+			var statusResult store.AgentStatusResult
 			statusUpdate := store.AgentStatusUpdate{
 				ContainerStatus: agentHB.ContainerStatus,
 				Heartbeat:       true, // Ensures LastSeen is updated
 				Message:         agentHB.Message,
+				ReportSource:    store.StatusReportSourceRuntime,
+				ReportRunID:     agentHB.RunID,
+				Result:          &statusResult,
 			}
 			// A stop queued while the broker was offline keeps its
 			// stop_queued status and notice while it is still the agent's
@@ -1232,7 +1240,8 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// can race and overwrite the stopped state with stale
 			// container data.
 			agentInTerminalPhase := agent.Phase == string(state.PhaseStopped) ||
-				agent.Phase == string(state.PhaseError)
+				agent.Phase == string(state.PhaseError) ||
+				agent.Phase == string(state.PhaseHalted)
 
 			// Suspended is sticky: a suspended agent's container is being torn
 			// down, so a racing heartbeat reporting stopped/crashed must not
@@ -1299,11 +1308,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// phase, so without this the more specific reason is
 					// silently dropped and the agent is stuck reading as a
 					// plain stop — the exact symptom in #2528. Back it in
-					// only when nothing more specific is stored yet, and
-					// leave the phase itself untouched.
+					// only when no platform-observed reason is stored yet
+					// (a reason the agent reported itself does not block
+					// it), and leave the phase itself untouched.
 					hbExitReason := state.ExitReason(agentHB.ExitReason)
 					isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-					if isDisruption && agent.ExitReason == "" {
+					if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 						statusUpdate.ExitReason = agentHB.ExitReason
 						statusUpdate.ExitCode = agentHB.ExitCode
 						if isGenericStopMessage(agent.Message) {
@@ -1327,10 +1337,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					// its own crash report (for example when only the
 					// harness process was killed) or an earlier heartbeat
 					// recorded a plain crash. Record the more specific
-					// reason over an empty or crashed one, keep the phase,
-					// and replace only a message that says nothing more.
+					// reason over any reason that is not platform-observed
+					// (store.IsHaltEvidence), keep the phase, and replace
+					// only a message that says nothing more.
 					if hbExitReason == state.ExitReasonOOMKilled &&
-						(agent.ExitReason == "" || agent.ExitReason == string(state.ExitReasonCrashed)) {
+						!store.IsHaltEvidence(agent.ExitReason) {
 						statusUpdate.ExitReason = agentHB.ExitReason
 						if agentHB.ExitCode != nil {
 							statusUpdate.ExitCode = agentHB.ExitCode
@@ -1355,7 +1366,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if isDisruption && agentHB.Phase == string(state.PhaseError) &&
 						agent.Phase == string(state.PhaseStopped) &&
 						agent.RunIntent != store.RunIntentStopped &&
-						(agent.ExitReason == "" || agent.ExitReason == agentHB.ExitReason) {
+						(!store.IsHaltEvidence(agent.ExitReason) || agent.ExitReason == agentHB.ExitReason) {
 						statusUpdate.Phase = string(state.PhaseError)
 						statusUpdate.ExitReason = agentHB.ExitReason
 						if agentHB.ExitCode != nil {
@@ -1472,7 +1483,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						// replacement.
 						hbExitReason := state.ExitReason(agentHB.ExitReason)
 						isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-						if isDisruption && agent.ExitReason == "" {
+						if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 							statusUpdate.ExitReason = agentHB.ExitReason
 						}
 					}
@@ -1549,7 +1560,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// touching the phase or message derived from ContainerStatus.
 				hbExitReason := state.ExitReason(agentHB.ExitReason)
 				isDisruption := hbExitReason == state.ExitReasonPreempted || hbExitReason == state.ExitReasonEvicted
-				if isDisruption && agent.ExitReason == "" {
+				if isDisruption && !store.IsHaltEvidence(agent.ExitReason) {
 					statusUpdate.ExitReason = agentHB.ExitReason
 				}
 			}
@@ -1597,40 +1608,11 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				agent.AppliedConfig.Profile = agentHB.Profile
 				needsUpdate = true
 			}
-			// Companion to the Profile backfill above: when Runtime is
-			// still empty, resolve it from the applied profile (or from the
-			// broker's single shared profile type when the profile is
-			// unknown or unmatched) (ptone/scion#2262). This only fires for
-			// the broker sending this heartbeat, which is the broker the
-			// agent is actually running on.
-			//
-			// Runtime is persisted here (not left purely derived, the way
-			// display-time enrichment computes it on every read) because a
-			// couple of raw, unenriched reads of store.Agent surface it
-			// directly: restoreAgent publishes AgentCreatedEvent and returns
-			// agent.ToAPI() without enrichment (handlers_agent_messaging.go),
-			// and the agent-create path re-reads the row before publishing
-			// its own AgentCreatedEvent (handlers_agents_core.go) — so a
-			// heartbeat that backfills Runtime before either of those runs
-			// is reflected there.
-			//
-			// Only fires when Runtime is empty. The only other writer of a
-			// non-empty Runtime for a broker-hosted agent is the dispatch
-			// response path (httpdispatcher.go's applyBrokerResponse), which
-			// sets Runtime from the broker's own AgentInfo for the agent it
-			// actually started (recording Profile too when AppliedConfig
-			// exists), so it is authoritative and must never be overwritten
-			// by a resolveAgentRuntime guess here, even when a
-			// newly-backfilled Profile would resolve to a different value.
-			if agent.Runtime == "" {
-				broker, err := loadHeartbeatBroker()
-				if err != nil {
-					s.agentLifecycleLog.Debug("heartbeat: failed to load broker for runtime backfill", "broker_id", id, "error", err)
-				} else if rt := resolveAgentRuntime(agent, broker); rt != "" {
-					agent.Runtime = rt
-					needsUpdate = true
-				}
-			}
+			// Runtime is not backfilled here. The halt rule trusts the
+			// runtime recorded on the agent, so only the broker's own
+			// reports write it (the dispatch response, the launch report,
+			// a reincarnation move); a guess resolved from the profile is
+			// display-only (enrichAgentRuntime) (ptone/scion#4853).
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
@@ -1650,8 +1632,12 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// Reconcile the max_agents_per_broker reservation against the
 			// phase this heartbeat will actually persist — e.g. release on an
 			// observed crash/exit, or best-effort re-reserve on an observed
-			// out-of-band restart (ptone/scion#1963).
-			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+			// out-of-band restart (ptone/scion#1963). A report of another
+			// run changes nothing (the store's run check), so it leaves the
+			// reservation alone too.
+			if !reportOfOtherRun(agentHB.RunID, agent.RunID) {
+				s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+			}
 
 			// Update the agent's status
 			if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
@@ -1667,6 +1653,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// (a delete finishing concurrently) publishes nothing.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
+					if statusResult.Halted {
+						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
+					}
 				}
 			}
 		}

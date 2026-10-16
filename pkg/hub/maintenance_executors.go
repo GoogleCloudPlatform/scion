@@ -704,13 +704,13 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	return nil
 }
 
-// materializeHarnessConfigFiles downloads all files from a harness config's
-// storage path into the given directory. It is shared by both the local and
-// Cloud Build executors.
+// materializeHarnessConfigFiles downloads all files of a harness config (its
+// blobs, or its path objects for a legacy row) into the given directory. It
+// is shared by both the local and Cloud Build executors.
 func materializeHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, destDir string, logger io.Writer) error {
 	_, _ = fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
 	for _, f := range hc.Files {
-		objectPath := hc.StoragePath + "/" + f.Path
+		objectPath := harnessConfigFileObjectPath(hc, f)
 		reader, _, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)

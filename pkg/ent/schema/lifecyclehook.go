@@ -47,7 +47,7 @@ func (LifecycleHook) Fields() []ent.Field {
 		field.JSON("selector", &LifecycleHookSelector{}).
 			Optional(),
 		field.Enum("trigger").
-			Values("running", "suspended", "stopped", "error"),
+			Values("running", "suspended", "stopped", "error", "halted"),
 		field.JSON("action", &LifecycleHookAction{}).
 			Optional(),
 		field.String("execution_identity").

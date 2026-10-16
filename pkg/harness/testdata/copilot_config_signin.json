@@ -15,6 +15,21 @@
     "signIn": false
   },
   {
+    "name": "copilot plugin install registry (copilot 1.0.97 shape)",
+    "data": "// User settings belong in settings.json.\n// This file is managed automatically.\n{\n  \"trustedFolders\": [\n    \"/workspace\"\n  ],\n  \"installedPlugins\": [\n    {\n      \"name\": \"x\",\n      \"marketplace\": \"\",\n      \"version\": \"0.1.0\",\n      \"installed_at\": \"2026-10-13T21:58:10.207811723Z\",\n      \"cache_path\": \"/home/scion/.copilot/installed-plugins/_direct/x\",\n      \"enabled\": true,\n      \"source\": {\n        \"source\": \"local\",\n        \"path\": \"/home/scion/.scion/agent-plugins/bundles/x\"\n      }\n    }\n  ]\n}\n",
+    "signIn": false
+  },
+  {
+    "name": "installedPlugins empty after uninstall",
+    "data": "{\"trustedFolders\": [\"/workspace\"], \"installedPlugins\": []}",
+    "signIn": false
+  },
+  {
+    "name": "installedPlugins with tokens",
+    "data": "{\"installedPlugins\": [{\"name\": \"x\", \"marketplace\": \"\", \"version\": \"0.1.0\", \"installed_at\": \"2026-10-13T21:58:10.207811723Z\", \"cache_path\": \"/home/scion/.copilot/installed-plugins/_direct/x\", \"enabled\": true, \"source\": {\"source\": \"local\", \"path\": \"/home/scion/.scion/agent-plugins/bundles/x\"}}], \"copilot_tokens\": {\"https://github.com:octo\": \"placeholder-token\"}}",
+    "signIn": true
+  },
+  {
     "name": "empty object",
     "data": "{}",
     "signIn": false

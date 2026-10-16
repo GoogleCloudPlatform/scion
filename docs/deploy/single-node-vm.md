@@ -526,7 +526,7 @@ is not working:
    gcloud compute ssh scion-hub-my-hub \
      --zone=us-central1-b \
      --project=PROJECT_ID \
-     --command='cat /home/scion/.scion/settings.yaml'
+     --command='sudo -u scion cat /home/scion/.scion/settings.yaml'
    ```
 2. Confirm `auth.mode` is `proxy` and the `audience` string matches the
    project number and service name.

@@ -273,28 +273,6 @@ func TestRequireHub_ClearedPathKeepsEnvProject(t *testing.T) {
 	}
 }
 
-// TestSkillResolverHubOptions pins the create command's skill-resolver
-// hub context: only a flag-named, non-empty path is an explicit target.
-func TestSkillResolverHubOptions(t *testing.T) {
-	cases := []struct {
-		name, flag, path string
-		want             bool
-	}{
-		{name: "-g global", flag: "global", path: "global", want: true},
-		{name: "-g dir", flag: "/some/project", path: "/some/project", want: true},
-		{name: "no flag", flag: "", path: "", want: false},
-		{name: "flag, cleared path", flag: "other-project", path: "", want: false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			setProjectFlagForTest(t, tc.flag)
-			opts := skillResolverHubOptions(tc.path)
-			assert.Equal(t, tc.want, opts.ExplicitProject)
-			assert.True(t, opts.AutoConfirm)
-		})
-	}
-}
-
 // TestTemplateSyncHubContext covers template sync after hub link: the
 // context targets the just-linked project, and with --global the settings
 // keep the global project's own ID over SCION_PROJECT_ID.

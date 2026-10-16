@@ -275,12 +275,12 @@ func TestHubCheckHint_LocalAndRemote(t *testing.T) {
 // TestHintHubEndpoint_Resolves checks the production resolver: the --hub
 // flag wins, then the environment.
 func TestHintHubEndpoint_Resolves(t *testing.T) {
-	origHub, origNoHub, origProject := hubEndpoint, noHub, projectPath
-	t.Cleanup(func() { hubEndpoint, noHub, projectPath = origHub, origNoHub, origProject })
+	origHub, origProject := hubEndpoint, projectPath
+	t.Cleanup(func() { hubEndpoint, projectPath = origHub, origProject })
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SCION_HUB_URL", "")
 	t.Chdir(t.TempDir())
-	noHub, projectPath = false, ""
+	projectPath = ""
 
 	hubEndpoint = "https://flag.example.com"
 	t.Setenv("SCION_HUB_ENDPOINT", "https://env.example.com")

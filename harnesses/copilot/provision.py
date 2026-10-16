@@ -26,6 +26,8 @@ Copilot-native concerns handled here:
   - ~/.copilot/settings.json and config.json get sane defaults.
   - Native OTel telemetry, when enabled, always routes to sciontool's local
     receiver (never a cloud endpoint); see the Telemetry section below.
+  - Agent Plugins (hub.agent_plugins) install through `copilot plugin
+    install` / `uninstall`, last in provision(); see CopilotPluginInstaller.
 
 Exception to §4.2 (env.json placeholder policy): copilot receives its auth
 token exclusively via env.json — the runtime env projection does not deliver
@@ -38,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
 import sys
 from typing import Any
 
@@ -62,12 +65,14 @@ COPILOT_CONFIG_FILE = "~/.copilot/config.json"
 #
 # Top-level keys, lowercased, that hold settings or identity but never a
 # credential (copilotSettingsKeys on the host). Includes trustedFolders,
-# which _ensure_settings writes on every provision.
+# which _ensure_settings writes on every provision, and installedPlugins,
+# where `copilot plugin install` records plugins (CopilotPluginInstaller).
 _COPILOT_SETTINGS_KEYS = frozenset({
     "banner",
     "beep",
     "copilot_integration_id",
     "copilot_url",
+    "installedplugins",
     "last_logged_in_user",
     "logged_in_users",
     "model",
@@ -561,6 +566,201 @@ def _ensure_settings(ctx: scion_harness.ProvisionContext) -> None:
         scion_harness.atomic_write_json(config_path, config)
 
 
+# ---------------------------------------------------------------------------
+# Agent Plugins (hub.agent_plugins)
+# ---------------------------------------------------------------------------
+#
+# Route: `copilot plugin install <abs dir>` from the mirrored bundle
+# (~/.scion/agent-plugins/bundles/<name>) and `copilot plugin uninstall
+# <name>@` (the direct install only; see below). Observed with copilot 1.0.97:
+#   - install has no --json flag; it prints a plain-text result and a
+#     deprecation warning for direct (non-marketplace) installs;
+#   - it copies the source into ~/.copilot/installed-plugins/_direct/<id>,
+#     where <id> is the basename of the source dir (not the plugin name), and
+#     records {name, marketplace: "", version, cache_path, enabled, source}
+#     under the top-level installedPlugins list in ~/.copilot/config.json;
+#   - installing over an installed (even disabled) plugin replaces and
+#     re-enables it;
+#   - uninstall of a plugin that is not installed exits 1;
+#   - `copilot plugin uninstall <name>` is ambiguous: with a same-named
+#     marketplace plugin it acts on that one (a local marketplace plugin is
+#     disabled, the direct install stays). `<name>@` (empty marketplace)
+#     targets only the direct install and leaves marketplace plugins alone.
+# config.json is also copilot's sign-in file and an auth-file provision
+# replaces it with the staged secret, so registration is read back from
+# config.json rather than inferred from the cache dir.
+
+COPILOT_PLUGINS_MIN_VERSION = (1, 0, 74)
+
+
+class CopilotPluginInstaller(scion_harness.PluginInstaller):
+    harness = "copilot"
+    cli = "copilot"
+    min_version = COPILOT_PLUGINS_MIN_VERSION
+
+    def __init__(self, ctx: scion_harness.ProvisionContext):
+        self.ctx = ctx
+        self.copilot_home = os.path.join(ctx.home, ".copilot")
+
+    def _env(self) -> dict[str, str]:
+        # COPILOT_HOME pins the CLI to the directory this provisioner writes
+        # (settings.json, config.json); auto-update is off so a plugin call
+        # never downloads a CLI.
+        return {**os.environ, "COPILOT_HOME": self.copilot_home, "COPILOT_AUTO_UPDATE": "false"}
+
+    def _run(self, *args: str, timeout: float = scion_harness.AGENT_PLUGIN_CLI_TIMEOUT):
+        return scion_harness.run_cli(["copilot", *args], timeout=self.cli_timeout(timeout), env=self._env())
+
+    def detect_version(self) -> tuple[int, int, int] | None:
+        # copilot 1.0.97 prints "GitHub Copilot CLI 1.0.97."
+        proc = self._run("--version", timeout=scion_harness.AGENT_PLUGIN_VERSION_TIMEOUT)
+        if proc.returncode != 0:
+            return None
+        return scion_harness.parse_semver(proc.stdout or proc.stderr or "")
+
+    def prepare(self, desired: list[scion_harness.AgentPlugin]) -> None:
+        os.makedirs(self.copilot_home, exist_ok=True)
+
+    def registration(self, name: str, *, strict: bool = False) -> dict[str, Any] | None:
+        """The direct-install entry for name in config.json installedPlugins,
+        or None. Read-only.
+
+        Lenient by default (is_present): a config.json that exists but
+        cannot be parsed here (invalid UTF-8, an over-long integer, NaN, too
+        deep) counts as not registered, so the plugin is reinstalled. With
+        strict (install, uninstall), an unparseable file raises
+        PluginInstallError instead: uninstall must not take it as removed
+        (copilot's own parser may still list the plugin), and install
+        reports the real cause. A missing file is "not registered" either
+        way."""
+        path = os.path.join(self.copilot_home, "config.json")
+        try:
+            with open(path, "rb") as f:
+                data = _load_config_strictly(f.read())
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, RecursionError) as exc:
+            if strict:
+                raise scion_harness.PluginInstallError(
+                    f"cannot read ~/.copilot/config.json to confirm the result ({type(exc).__name__})"
+                ) from None
+            return None
+        plugins = data.get("installedPlugins") if isinstance(data, dict) else None
+        if not isinstance(plugins, list):
+            return None
+        for entry in plugins:
+            if (isinstance(entry, dict) and entry.get("name") == name
+                    and not entry.get("marketplace")):
+                return entry
+        return None
+
+    @staticmethod
+    def enabled(entry: dict[str, Any] | None) -> bool:
+        """The one "registered and enabled" predicate install and is_present
+        share. Strict: copilot 1.0.97 always writes enabled: true; an entry
+        without it fails the install loudly rather than reinstalling
+        silently every start."""
+        return isinstance(entry, dict) and entry.get("enabled") is True
+
+    def direct_root(self) -> str:
+        return os.path.join(self.copilot_home, "installed-plugins", "_direct")
+
+    def _remove_direct_dir(self, name: str, path: Any) -> None:
+        """Remove a leftover install dir, only when it is strictly inside
+        installed-plugins/_direct (never the root, never outside it)."""
+        if not isinstance(path, str) or not path or not os.path.lexists(path):
+            return
+        root = os.path.realpath(self.direct_root())
+        real = os.path.realpath(path)
+        if os.path.dirname(real) != root or os.path.islink(path):
+            self.ctx.info(f"agent plugin {name}: not removing {path}: not a dir directly under {root}")
+            return
+        shutil.rmtree(real, ignore_errors=True)
+        if os.path.lexists(real):
+            raise scion_harness.PluginInstallError(f"cannot remove leftover install dir {real}")
+
+    def _find_direct_dir(self, name: str) -> str:
+        """Scan installed-plugins/_direct for a dir whose plugin.json names
+        the plugin; "" when none does."""
+        root = self.direct_root()
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            return ""
+        for entry in entries:
+            d = os.path.join(root, entry)
+            try:
+                manifest = scion_harness.load_json(os.path.join(d, "plugin.json"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and manifest.get("name") == name:
+                return d
+        return ""
+
+    def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
+        proc = self._run("plugin", "install", os.path.abspath(bundle_dir))
+        if proc.returncode != 0:
+            raise scion_harness.cli_failure("copilot plugin install", proc)
+        try:
+            entry = self.registration(plugin.name, strict=True)
+        except scion_harness.PluginInstallError as exc:
+            # Same outcome as "not registered" (not recorded, retried next
+            # start), with the real cause in the warning.
+            raise scion_harness.PluginInstallError(f"copilot plugin install exit 0, but {exc}") from None
+        if not self.enabled(entry):
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin install exit 0 but {plugin.name} is not registered "
+                "as enabled in ~/.copilot/config.json")
+        path = entry.get("cache_path")
+        if not isinstance(path, str) or not path or not os.path.isdir(path):
+            path = self._find_direct_dir(plugin.name)
+        if not path:
+            # Recording it would report "installed" while is_present stays
+            # false, a silent reinstall every start.
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin install registered {plugin.name} but no install dir was found "
+                "(no cache_path, nothing under installed-plugins/_direct)")
+        return {"name": plugin.name, "path": path}
+
+    def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
+        """copilot plugin uninstall <name>@ (the direct install only, never a
+        user's same-named marketplace plugin). Success is judged by the
+        result: the plugin must no longer be registered in config.json
+        (copilot 1.0.97 exits 1 for a plugin that is not installed). A
+        leftover install dir is then removed: when the registration was
+        already gone (an auth-file start rewrites config.json), the CLI
+        removes nothing."""
+        proc = self._run("plugin", "uninstall", f"{name}@")
+        try:
+            entry = self.registration(name, strict=True)
+        except scion_harness.PluginInstallError as exc:
+            # Unknown outcome: keep the state record and the install dir,
+            # and retry next start.
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin uninstall exit {proc.returncode}, but {exc}") from None
+        if entry is not None:
+            if proc.returncode != 0:
+                raise scion_harness.cli_failure("copilot plugin uninstall", proc)
+            raise scion_harness.PluginInstallError(
+                f"copilot plugin uninstall exit 0 but {name} is still registered in ~/.copilot/config.json")
+        if proc.returncode != 0:
+            self.ctx.info(
+                f"agent plugin {name}: copilot plugin uninstall exit {proc.returncode}, "
+                "plugin no longer registered")
+        self._remove_direct_dir(name, native_ref.get("path"))
+
+    def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
+        """The install still exists and copilot still lists it as enabled.
+        config.json can lose installedPlugins while the cache dir survives
+        (an auth-file provision writes the staged config.json, a re-provision
+        can reset the home); the plugin is then reinstalled. No CLI call."""
+        entry = self.registration(name)
+        if not self.enabled(entry):
+            return False
+        path = entry.get("cache_path") or native_ref.get("path")
+        return isinstance(path, str) and bool(path) and os.path.isdir(path)
+
+
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     """Main provisioning logic for the Copilot harness."""
 
@@ -670,6 +870,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.warn(f"failed to write settings: {exc}")
 
     ctx.info(f"method={resolved.method}")
+
+    # Last: `copilot plugin install` rewrites config.json (installedPlugins),
+    # so it must be the final writer this start, after _ensure_settings.
+    scion_harness.reconcile_agent_plugins(ctx, CopilotPluginInstaller(ctx))
 
 
 if __name__ == "__main__":

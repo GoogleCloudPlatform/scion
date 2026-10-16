@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -65,12 +66,15 @@ type ResolveResult struct {
 // RetryAfter is a delay in whole seconds, as text, when one is known: for
 // SkillErrCodeRateLimited, the time left on the credential's cooldown; for
 // other causes, the upstream Retry-After header, if any. ProvisionAgent
-// copies it to SkillResolutionError.RetryAfter.
+// copies it to SkillResolutionError.RetryAfter. Status is the HTTP status
+// of the upstream response that failed the resolution, when one is known,
+// else 0; ProvisionAgent copies it to SkillResolutionError.Status.
 type ResolveError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 // Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
@@ -100,6 +104,9 @@ const (
 	// resolved but could not be downloaded, verified or installed into the
 	// agent home. The create path keeps it on the 5xx path.
 	SkillErrCodeInstallFailed = "install_failed"
+	// SkillErrCodeInvalidURI is the code for a skill reference that does
+	// not parse as a URI the resolver accepts.
+	SkillErrCodeInvalidURI = "invalid_uri"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
@@ -111,12 +118,17 @@ const (
 // SkillErrCodeRateLimited, the time left on the credential's cooldown (see
 // GitHubCooldown); for other causes, the upstream Retry-After header, if
 // any. It is empty otherwise. The broker sends it as a Retry-After header
-// only for SkillErrCodeRateLimited.
+// only for SkillErrCodeRateLimited. Status is the HTTP status of the
+// upstream response that failed the resolution, when one is known, else 0.
+//
+// Message is resolver text for the server-side log; it is not shown to the
+// user (the agent runtime stores a fixed reason phrase instead).
 type SkillResolutionError struct {
 	URI        string
 	Code       string
 	Message    string
 	RetryAfter string
+	Status     int
 }
 
 func (e *SkillResolutionError) Error() string {
@@ -166,6 +178,31 @@ func publicInstallReason(err error) string {
 		return ie.public
 	}
 	return skillInstallFailedOnBroker
+}
+
+// upstreamStatusError is a resolver error that came from a non-OK upstream
+// HTTP response. Its text is the resolver's full message, for the log.
+type upstreamStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *upstreamStatusError) Error() string           { return e.msg }
+func (e *upstreamStatusError) upstreamHTTPStatus() int { return e.status }
+
+// upstreamStatus returns the HTTP status of the upstream response recorded
+// in err's chain, or 0 when none is known.
+func upstreamStatus(err error) int {
+	var se interface{ upstreamHTTPStatus() int }
+	for err != nil {
+		if errors.As(err, &se) {
+			if st := se.upstreamHTTPStatus(); st != 0 {
+				return st
+			}
+		}
+		err = errors.Unwrap(err)
+	}
+	return 0
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.
@@ -527,21 +564,28 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 			DroppedScope: loser.Scope,
 		})
 
+		// The destination name comes from both references, so it is
+		// withheld when either is redacted (see LoggedSkillName).
+		destForLog := LoggedSkillName(winner.URI, dest)
+		if SkillRefRedacted(loser.URI) {
+			destForLog = SkillNameWithheld
+		}
+
 		// Log at appropriate level: Debug for optional losers, Warn otherwise.
 		if loser.Optional {
 			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		} else {
 			slog.WarnContext(ctx, "skill destination-name collision resolved",
-				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"dest_name", destForLog,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		}
@@ -607,20 +651,22 @@ func installResolvedSkills(
 			reason := publicInstallReason(err)
 			if skill.Optional {
 				slog.WarnContext(ctx, "optional skill could not be installed; skipped",
-					"skill_uri", skill.URI, "skill_name", skill.Name,
-					"reason", reason, "error", err)
+					"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+					"reason", ResolverReasonForLog(skill.URI, reason),
+					"error", ResolverReasonForLog(skill.URI, err.Error()))
 				skipped = append(skipped, SkippedSkill{URI: skill.URI, Reason: reason})
 				continue
 			}
 			slog.WarnContext(ctx, "required skill could not be installed",
-				"skill_uri", skill.URI, "skill_name", skill.Name,
-				"reason", reason, "error", err)
+				"skill_uri", LoggedSkillRef(skill.URI), "skill_name", LoggedSkillName(skill.URI, skill.Name),
+				"reason", ResolverReasonForLog(skill.URI, reason),
+				"error", ResolverReasonForLog(skill.URI, err.Error()))
 			return nil, nil, &SkillResolutionError{URI: skill.URI, Code: SkillErrCodeInstallFailed, Message: reason}
 		}
 		record.Skills = append(record.Skills, *entry)
 
 		if skill.Deprecated {
-			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", skill.Name, skill.Version)
+			msg := fmt.Sprintf("Warning: skill %s@%s is deprecated", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 			if skill.DeprecationMessage != "" {
 				msg += ": " + skill.DeprecationMessage
 			}
@@ -674,21 +720,21 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
 					return nil, err
 				}
-				util.Debugf("provision: skill installed from cache: %s@%s", skill.Name, skill.Version)
+				util.Debugf("provision: skill installed from cache: %s@%s", LoggedSkillName(skill.URI, skill.Name), skill.Version)
 				slog.InfoContext(ctx, "skill_content_cache: cache hit",
-					"skill", skill.Name, "version", skill.Version,
+					"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 					"hash", truncHash(skill.Hash), "cache_hit", true)
 				return buildSkillEntry(skill, dest, skillsDest)
 			}
 			// Cache entry unusable (copy or hash verification failed) — re-downloading.
-			util.Debugf("provision: cached skill unusable, falling through to download: %v", copyErr)
+			util.Debugf("provision: cached skill unusable, falling through to download: %s", ResolverReasonForLog(skill.URI, copyErr.Error()))
 			_ = os.RemoveAll(skillStagingDir)
 			slog.InfoContext(ctx, "skill_content_cache: cache error, re-downloading",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		} else {
 			slog.InfoContext(ctx, "skill_content_cache: cache miss, will download",
-				"skill", skill.Name, "version", skill.Version,
+				"skill", LoggedSkillName(skill.URI, skill.Name), "version", skill.Version,
 				"hash", truncHash(skill.Hash), "cache_hit", false)
 		}
 	}
@@ -855,15 +901,15 @@ func populateSkillCache(cache interface {
 	for _, f := range skill.Files {
 		content, err := os.ReadFile(filepath.Join(installedDir, f.Path))
 		if err != nil {
-			util.Debugf("provision: failed to read skill file for caching: %s: %v", f.Path, err)
+			util.Debugf("provision: failed to read skill file for caching: %s: %s", f.Path, ResolverReasonForLog(skill.URI, err.Error()))
 			return
 		}
 		files[f.Path] = content
 	}
 	if _, err := cache.Put(skill.Hash, files); err != nil {
-		util.Debugf("provision: failed to cache skill %s@%s: %v", skill.Name, skill.Version, err)
+		util.Debugf("provision: failed to cache skill %s@%s: %v", LoggedSkillName(skill.URI, skill.Name), skill.Version, err)
 	} else {
-		util.Debugf("provision: cached skill %s@%s (%s)", skill.Name, skill.Version, skill.Hash)
+		util.Debugf("provision: cached skill %s@%s (%s)", LoggedSkillName(skill.URI, skill.Name), skill.Version, skill.Hash)
 	}
 }
 
@@ -1220,6 +1266,11 @@ func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
 	var result []SkillResolutionEntry
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		// An Agent Plugins bundle installed in the skills dir (claude) is
+		// not a skill; the harness loads it as a plugin.
+		if fi, err := os.Lstat(filepath.Join(skillsPath, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
 			continue
 		}
 		entry := SkillResolutionEntry{
