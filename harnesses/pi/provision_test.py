@@ -20,6 +20,8 @@ import json
 import os
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -219,12 +221,6 @@ class SettingsTest(unittest.TestCase):
             invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
             self.assertEqual(read_json(tmp, *SETTINGS)["defaultProjectTrust"], "ask")
 
-    def test_settings_overlay_cannot_set_invalid_trust(self) -> None:
-        overlay = json.dumps({"defaultProjectTrust": "whatever"})
-        with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_SETTINGS=overlay):
-            with self.assertRaises(sh.ProvisionError):
-                invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
-
     def test_settings_overlay_deep_merges(self) -> None:
         overlay = json.dumps({"theme": "dark", "compaction": {"enabled": False}})
         with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_SETTINGS=overlay):
@@ -249,16 +245,18 @@ class SettingsTest(unittest.TestCase):
                     invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
                 self.assertNotIn(SECRET, str(cm.exception))
 
-    def test_overlay_does_not_disable_auth_no_overwrite_protection(self) -> None:
-        # The overlay only reaches settings.json; it cannot reach auth handling.
-        overlay = json.dumps({"overwriteAuth": True, "authFile": "/tmp/x"})
+    def test_overlay_credential_name_variants_rejected(self) -> None:
+        for name in ("apiToken", "token", "key", "pat", "secretKey", "authToken", "api_key"):
+            overlay = json.dumps({"providers": {name: "x"}})
+            with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_SETTINGS=overlay):
+                with self.assertRaises(sh.ProvisionError, msg=name):
+                    invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+
+    def test_overlay_benign_token_named_settings_allowed(self) -> None:
+        overlay = json.dumps({"compaction": {"reserveTokens": 1, "keepRecentTokens": 2}, "keybindings": {}})
         with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_SETTINGS=overlay):
-            path = os.path.join(tmp, *AUTH)
-            os.makedirs(os.path.dirname(path))
-            with open(path, "w", encoding="utf-8") as f:
-                f.write('{"keep": 1}')
-            invoke(tmp, auth_secret='{"new": 1}')
-            self.assertEqual(read_json(tmp, *AUTH), {"keep": 1})
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertEqual(read_json(tmp, *SETTINGS)["compaction"]["reserveTokens"], 1)
 
     def test_provider_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_PROVIDER="openai"):
@@ -282,6 +280,154 @@ class SettingsTest(unittest.TestCase):
             invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
             s = read_json(tmp, *SETTINGS)
         self.assertNotIn("defaultModel", s)
+
+
+class TrustPolicyTest(unittest.TestCase):
+    """pi v1.3.0 resolves trust: CLI override, user extension, trust.json, then
+    defaultProjectTrust. provision.py writes the policy; the bridge enforces it
+    above trust.json (see scion-bridge.test.mjs)."""
+
+    def _trust(self, tmp: str) -> str:
+        return read_json(tmp, *SETTINGS)["defaultProjectTrust"]
+
+    def test_default_is_never(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, env(tmp):
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertEqual(self._trust(tmp), "never")
+
+    def test_env_removal_reverts_to_never(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with env(tmp, SCION_PI_PROJECT_TRUST="always"):
+                invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+                self.assertEqual(self._trust(tmp), "always")
+            with env(tmp):
+                invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+                self.assertEqual(self._trust(tmp), "never")
+
+    def test_hand_edited_always_in_settings_is_not_sticky(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, env(tmp):
+            path = os.path.join(tmp, *SETTINGS)
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"defaultProjectTrust": "always"}, f)
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertEqual(self._trust(tmp), "never")
+
+    def test_overlay_alone_cannot_raise_trust(self) -> None:
+        for value in ("always", "ask", "whatever"):
+            overlay = json.dumps({"defaultProjectTrust": value})
+            with tempfile.TemporaryDirectory() as tmp, env(tmp, SCION_PI_SETTINGS=overlay):
+                invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+                self.assertEqual(self._trust(tmp), "never", value)
+
+    def test_overlay_does_not_lower_explicit_env(self) -> None:
+        overlay = json.dumps({"defaultProjectTrust": "never"})
+        with tempfile.TemporaryDirectory() as tmp, env(
+            tmp, SCION_PI_SETTINGS=overlay, SCION_PI_PROJECT_TRUST="ask"
+        ):
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"])
+            self.assertEqual(self._trust(tmp), "ask")
+
+
+class FileModeTest(unittest.TestCase):
+    def test_auth_json_created_without_world_readable_window(self) -> None:
+        seen: list[int] = []
+        real = sh.atomic_write_text
+
+        def spy(path: str, content: str, *, mode: int | None = None) -> None:
+            real(path, content, mode=None)  # mode set later by chmod; umask must already cover it
+            seen.append(stat.S_IMODE(os.stat(path).st_mode))
+            os.chmod(path, 0o600) if mode else None
+
+        with tempfile.TemporaryDirectory() as tmp, env(tmp), unittest.mock.patch.object(
+            sh, "atomic_write_text", spy
+        ):
+            invoke(tmp, auth_secret='{"a": 1}')
+        self.assertEqual(seen, [0o600])
+
+    def test_mcp_json_is_0600_even_when_it_existed_world_readable(self) -> None:
+        servers = {"web": {"transport": "streamable-http", "url": "https://example.invalid/m", "headers": {"H": "v"}}}
+        with tempfile.TemporaryDirectory() as tmp, env(tmp):
+            path = os.path.join(tmp, ".pi", "agent", "mcp.json")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{}")
+            os.chmod(path, 0o644)
+            invoke(tmp, env_vars=["ANTHROPIC_API_KEY"], mcp_servers=servers)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+
+class CaptureAuthTest(unittest.TestCase):
+    """Runs capture_auth.py with a fake sciontool that only logs its argv."""
+
+    FAKE = (
+        "#!/bin/sh\n"
+        'echo "$@" >> "$FAKE_LOG"\n'
+        '[ -n "$FAKE_CONFLICT" ] && [ "$1 $2" = "secret set" ] && '
+        '{ case " $* " in *" --force "*) ;; *) echo "secret already exists" >&2; exit 1;; esac; }\n'
+        "exit 0\n"
+    )
+
+    def _run(self, *args: str, conflict: bool = False) -> tuple[int, list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            fake = os.path.join(bin_dir, "sciontool")
+            with open(fake, "w", encoding="utf-8") as f:
+                f.write(self.FAKE)
+            os.chmod(fake, 0o755)
+            agent = os.path.join(tmp, ".pi", "agent")
+            os.makedirs(agent)
+            with open(os.path.join(agent, "auth.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+            inputs = os.path.join(tmp, ".scion", "harness", "inputs")
+            os.makedirs(inputs)
+            cfg = {"schema_version": 1, "credentials": [{
+                "key": "PI_AUTH", "source": "~/.pi/agent/auth.json",
+                "type": "file", "target": "~/.pi/agent/auth.json"}]}
+            with open(os.path.join(inputs, "capture-auth-config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            log = os.path.join(tmp, "log")
+            child_env = {
+                "HOME": tmp, "FAKE_LOG": log, "PATH": f"{bin_dir}:/usr/bin:/bin",
+            }
+            if conflict:
+                child_env["FAKE_CONFLICT"] = "1"
+            proc = subprocess.run(
+                [sys.executable, os.path.join(HERE, "capture_auth.py"), *args],
+                env=child_env, capture_output=True, text=True, timeout=60,
+            )
+            calls = []
+            if os.path.exists(log):
+                with open(log, encoding="utf-8") as f:
+                    calls = f.read().splitlines()
+            return proc.returncode, calls
+
+    def test_single_write_at_default_user_scope(self) -> None:
+        rc, calls = self._run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("secret set PI_AUTH", calls[0])
+        self.assertIn("--scope user", calls[0])
+        self.assertNotIn("--force", calls[0])
+
+    def test_scope_project_honoured_with_single_write(self) -> None:
+        rc, calls = self._run("--scope", "project")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--scope project", calls[0])
+
+    def test_conflict_exits_nonzero_and_does_not_force(self) -> None:
+        rc, calls = self._run(conflict=True)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertNotIn("--force", calls[0])
+
+    def test_explicit_force_overwrites(self) -> None:
+        rc, calls = self._run("--force", conflict=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn("--force", calls[0])
 
 
 class McpAndPromptTest(unittest.TestCase):
@@ -334,7 +480,7 @@ class StaticBundleTest(unittest.TestCase):
         self.assertRegex(c, r"(?m)^harness: pi$")
         self.assertIn("PI_TELEMETRY", c)
         self.assertIn("PI_SKIP_VERSION_CHECK", c)
-        self.assertIn("scion-pi:1.3.0", c)
+        self.assertRegex(c, r"(?m)^image: scion-pi:latest$")
 
     def test_dialect_events_match_bridge_emissions(self) -> None:
         d = self._read("dialect.yaml")
@@ -348,7 +494,7 @@ class StaticBundleTest(unittest.TestCase):
         s = json.loads(self._read("home", ".pi", "agent", "settings.json"))
         self.assertEqual(s["defaultProjectTrust"], "never")
 
-    def test_no_secrets_or_internal_names_in_bundle(self) -> None:
+    def test_no_secret_patterns_in_bundle(self) -> None:
         pat = re.compile(r"sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|BEGIN [A-Z ]*PRIVATE KEY", re.I)
         for root, _dirs, files in os.walk(HERE):
             for name in files:

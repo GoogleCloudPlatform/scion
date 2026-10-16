@@ -13,8 +13,9 @@
 # limitations under the License.
 
 harness: pi
-# Pin the image tag to the pi version it was built with; override with -i/--image.
-image: scion-pi:1.3.0
+# The pi version is pinned in the Dockerfile (ARG PI_VERSION); the catalog
+# builds push :latest (the default _TAG) like every other bundle.
+image: scion-pi:latest
 user: scion
 
 provisioner:
@@ -81,7 +82,7 @@ capabilities:
     system_prompt: { support: "yes" }
     agent_instructions: { support: "yes" }
   auth:
-    api_key: { support: "yes" }
+    api_key: { support: "partial", reason: "Env selection and provisioning are unit-tested; not exercised against a live provider" }
     auth_file: { support: "partial", reason: "Written from a staged file secret; not exercised against a live Scion install" }
     oauth_token: { support: "no", reason: "ANTHROPIC_OAUTH_TOKEN is not declared; use auth-file after pi /login" }
     vertex_ai: { support: "no", reason: "Not implemented for this harness" }

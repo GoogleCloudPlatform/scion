@@ -42,6 +42,7 @@ stdlib-only and idempotent: it runs on every start and resume.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import os
@@ -80,9 +81,11 @@ VALID_AUTH_TYPES = ("api-key", "auth-file")
 _TIER_NAMES = frozenset({"small", "medium", "large", "extra-large", "s", "m", "l", "xl"})
 _PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _CREDENTIAL_KEY_RE = re.compile(
-    r"(api[_-]?key|secret|passw|credential|authoriz|bearer|(access|auth|refresh|oauth|id)[_-]?token)",
+    r"(api[_-]?key|secret|passw|credential|authoriz|bearer|token$|^(key|pat)$|[_-]key$)",
     re.IGNORECASE,
 )
+# camelCase names ending in Key (e.g. secretKey) without matching "monkey".
+_CAMEL_KEY_RE = re.compile(r"[a-z0-9]Key$")
 
 # Provider variables mirror config.yaml's auth.types.api-key.required_env.
 # Anthropic is listed first and wins when several are present.
@@ -139,6 +142,16 @@ AUTH = sh.AuthSpec(
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _private_umask():
+    """Create files 0600 from the start (no world-readable window before chmod)."""
+    old = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
 def _write_auth_file(ctx: sh.ProvisionContext) -> bool:
     """Write ~/.pi/agent/auth.json from the staged PI_AUTH secret.
 
@@ -164,7 +177,8 @@ def _write_auth_file(ctx: sh.ProvisionContext) -> bool:
         os.chmod(target, 0o600)
         ctx.info(f"{target} already exists; kept (delete it to apply the staged PI_AUTH secret)")
         return False
-    sh.atomic_write_text(target, content + "\n", mode=0o600)
+    with _private_umask():
+        sh.atomic_write_text(target, content + "\n", mode=0o600)
     return True
 
 
@@ -201,7 +215,7 @@ def _credential_paths(value: Any, prefix: str = "") -> list[str]:
     if isinstance(value, dict):
         for k, v in value.items():
             path = f"{prefix}.{k}" if prefix else str(k)
-            if _CREDENTIAL_KEY_RE.search(str(k)):
+            if _CREDENTIAL_KEY_RE.search(str(k)) or _CAMEL_KEY_RE.search(str(k)):
                 found.append(path)
             else:
                 found.extend(_credential_paths(v, path))
@@ -241,6 +255,13 @@ def _validate_trust(value: Any, source: str) -> str:
     return text
 
 
+def effective_project_trust() -> str:
+    raw = os.environ.get(PROJECT_TRUST_ENV, "").strip()
+    if not raw:
+        return DEFAULT_PROJECT_TRUST
+    return _validate_trust(raw, PROJECT_TRUST_ENV)
+
+
 def _is_concrete_model(raw: str) -> bool:
     return bool(raw) and raw.lower() not in _TIER_NAMES
 
@@ -276,18 +297,23 @@ def _write_settings(ctx: sh.ProvisionContext) -> dict[str, Any]:
 
     for key, value in DEFAULT_SETTINGS.items():
         settings.setdefault(key, copy.deepcopy(value))
-    settings.setdefault("defaultProjectTrust", DEFAULT_PROJECT_TRUST)
 
-    _deep_merge(settings, _env_settings_overlay())
+    overlay = _env_settings_overlay()
+    if "defaultProjectTrust" in overlay:
+        print(
+            f"pi provision: warning: {SETTINGS_ENV} cannot set defaultProjectTrust; "
+            f"use {PROJECT_TRUST_ENV}",
+            file=sys.stderr,
+        )
+        del overlay["defaultProjectTrust"]
+    _deep_merge(settings, overlay)
     settings.update(_model_settings(ctx))
 
-    trust_env = os.environ.get(PROJECT_TRUST_ENV, "").strip()
-    if trust_env:
-        settings["defaultProjectTrust"] = _validate_trust(trust_env, PROJECT_TRUST_ENV)
-    else:
-        settings["defaultProjectTrust"] = _validate_trust(
-            settings["defaultProjectTrust"], f"{path} defaultProjectTrust"
-        )
+    # The policy is recomputed on every start from the env alone (default
+    # "never"): a value persisted by an earlier run, a hand edit or the overlay
+    # can neither keep trust raised nor raise it. The bridge extension enforces
+    # the same value above pi's saved trust.json decisions.
+    settings["defaultProjectTrust"] = effective_project_trust()
 
     sh.atomic_write_json(path, settings)
     return settings
@@ -355,7 +381,9 @@ def _write_mcp_config(servers: dict[str, Any]) -> None:
         block = {}
     block.update(servers)
     config["mcpServers"] = block
-    sh.atomic_write_json(path, config)
+    # Entries can carry env/headers tokens, so the file is owner-only.
+    with _private_umask():
+        sh.atomic_write_json(path, config)
 
 
 # ---------------------------------------------------------------------------

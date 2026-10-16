@@ -12,76 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Capture-auth for pi — delegates to the standard capture flow, then
-captures ~/.pi/agent/auth.json (written by pi's /login) as a PI_AUTH file
-secret."""
+"""Capture-auth shim — delegates to scion_harness.capture_auth_main().
+
+The PI_AUTH mapping (~/.pi/agent/auth.json) comes from config.yaml's
+auth-file required_files, so the shared flow does the single write, at the
+requested --scope (default: user), and reports a conflict with a non-zero
+exit instead of overwriting."""
 
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scion_harness
 
-_PI_AUTH = os.path.join(
-    os.environ.get("HOME") or os.path.expanduser("~"),
-    ".pi", "agent", "auth.json",
-)
-
-
-def _capture_auth_json(quiet: bool = False, scope: str = "project") -> bool:
-    """Capture ~/.pi/agent/auth.json as a PI_AUTH file secret.
-
-    Uses --force unconditionally: capture_auth_main() may already have set
-    PI_AUTH via capture-auth-config.json, and re-capturing from the same
-    source file is always safe.
-    """
-    if not os.path.isfile(_PI_AUTH):
-        if not quiet:
-            print(
-                f"capture-auth: {_PI_AUTH} not found — "
-                "run 'pi' and complete /login first, then re-run this script",
-                file=sys.stderr,
-            )
-        return False
-
-    cmd = [
-        "sciontool", "secret", "set", "PI_AUTH",
-        f"@{_PI_AUTH}",
-        "--type", "file",
-        "--target", _PI_AUTH,
-        "--force",
-        "--scope", scope,
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except FileNotFoundError:
-        print("capture-auth: sciontool not found in PATH", file=sys.stderr)
-        return False
-    except subprocess.TimeoutExpired:
-        print("capture-auth: sciontool timed out setting PI_AUTH", file=sys.stderr)
-        return False
-
-    if result.returncode != 0:
-        print(f"capture-auth: failed to set PI_AUTH: {result.stderr.strip()}", file=sys.stderr)
-        return False
-
-    if not quiet:
-        print(f"capture-auth: PI_AUTH: captured from {_PI_AUTH}")
-    return True
-
-
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--scope", choices=["project", "user"], default="project")
-    known, _ = parser.parse_known_args()
-
-    rc = scion_harness.capture_auth_main()
-
-    auth_ok = _capture_auth_json(quiet=(rc == 0), scope=known.scope)
-
-    if rc != 0 and auth_ok:
-        sys.exit(0)
-    sys.exit(rc)
+    sys.exit(scion_harness.capture_auth_main())

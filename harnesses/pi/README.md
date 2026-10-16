@@ -32,7 +32,7 @@ Everything has a safe default and is overridable per agent through env
 
 | Setting | Env var | Default | Notes |
 |---------|---------|---------|-------|
-| Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Highest precedence. Invalid values fail provisioning |
+| Project trust | `SCION_PI_PROJECT_TRUST` = `never` \| `ask` \| `always` | `never` | Wins over `SCION_PI_SETTINGS` and over a value left in `settings.json`; recomputed on every start (unset means `never`). Invalid values fail provisioning |
 | Provider | `SCION_PI_PROVIDER` | unset | Sets `defaultProvider` |
 | Model | `SCION_MODEL` | unset | A concrete `provider/id[:thinking]` sets `defaultProvider`/`defaultModel`. Size tiers (`small`/`medium`/`large`/`extra-large`) resolve via `model_aliases` in `config.yaml` and are passed with `--model` |
 | Other pi settings | `SCION_PI_SETTINGS` (JSON object) | unset | Deep-merged into `settings.json`. Keys that look like credentials are rejected; it cannot change auth handling |
@@ -44,10 +44,38 @@ second provisioning run is a no-op.
 
 ### Project trust
 
-pi can load extensions, skills and settings from a repository's `.pi/`
-directory. Those run with the agent's privileges, so the default is
-`never`: only the user-level agent directory is trusted. Set
+pi can load settings, MCP servers, extensions, skills, prompts, themes and
+system-prompt files from a repository's `.pi/` directory. Those run with the
+agent's privileges, so the default is `never`. Set
 `SCION_PI_PROJECT_TRUST=always` only for repositories you control.
+
+What the policy does and does not cover (pi v1.3.0,
+[security.md](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/security.md)):
+
+- pi decides in this order: command-line `--approve`/`--no-approve`; the
+  `project_trust` event of a user-level extension; a saved decision in
+  `~/.pi/agent/trust.json` (closest directory wins); then `defaultProjectTrust`.
+- Scion enforces the policy above the saved decisions: the bridge extension
+  answers `project_trust` from `SCION_PI_PROJECT_TRUST` (`never` = no,
+  `always` = yes, `ask` = leave to pi), so a saved `/trust` decision cannot
+  override `never`. `provision.py` also writes `defaultProjectTrust` on every
+  start from the env alone, so removing the env variable returns to `never` and
+  `SCION_PI_SETTINGS` cannot change it (it is dropped with a warning).
+- With `never`, protected project resources (`.pi/settings.json`,
+  `.pi/mcp.json`, `.pi/extensions|skills|prompts|themes`, `.pi/SYSTEM.md`,
+  `.pi/APPEND_SYSTEM.md`, project `.agents/skills`) are skipped. The user-level
+  agent directory (`~/.pi/agent`) is unaffected.
+- Not covered: `AGENTS.md`/`CLAUDE.md` context files load regardless of trust
+  and are untrusted input; the project `sessionDir` setting is read before
+  trust is resolved; trust does not restrict what tools can do. pi has no
+  sandbox: the container is the security boundary.
+- A direct `pi --approve` on the command line overrides everything.
+- `SCION_PI_SETTINGS` is an operator-controlled surface: it can set
+  code-loading keys (`packages`, `extensions`, `shellCommandPrefix`,
+  `npmCommand`) in the user-level settings. Its credential-name filter
+  (`apiKey`, `token`, `secret`, ...) is best-effort, not a guarantee.
+- `~/.pi/agent/mcp.json` may carry `env`/`headers` secrets from Scion's MCP
+  config; it is written `0600`. Servers removed from Scion are not pruned.
 
 ## Lifecycle signals
 
@@ -59,11 +87,12 @@ directory. Those run with the agent's privileges, so the default is
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error | `sciontool status task_completed` |
+| `agent_settled`, not aborted, no error, and the agent did not set `ask_user`/`blocked`/`limits_exceeded` this turn | `sciontool status task_completed -- <summary>` |
 
-`ask_user` and `blocked` are not detectable from pi events. Instruct the
-agent to run `sciontool status ask_user "<question>"` or
-`sciontool status blocked "<reason>"` through its bash tool.
+`ask_user` and `blocked` are not pi events. Instruct the agent to run
+`sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
+through its bash tool; the bridge sees that command on `tool_execution_start`
+and skips the automatic `task_completed` until the next human input.
 
 ## Bundle Layout
 
@@ -86,7 +115,7 @@ pi/
 
 ```sh
 # Local Docker build
-docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-pi:1.3.0 -f Dockerfile .
+docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-pi:latest -f Dockerfile .
 
 # Cloud Build
 gcloud builds submit --config cloudbuild.yaml .
@@ -102,6 +131,8 @@ not pinned by npm's global install.
 cd harnesses/pi
 python3 -m unittest provision_test
 node --test scion-bridge.test.mjs
+# also drive a locally built sciontool (go build ./cmd/sciontool):
+SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
 ```
 
 ## Known limits
