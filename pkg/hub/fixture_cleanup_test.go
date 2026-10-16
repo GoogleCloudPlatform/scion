@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1078,4 +1079,96 @@ func TestFixtureCleanup_RevokeAllGrantRowsCarryBasis(t *testing.T) {
 		assert.NotEmpty(t, b.RunID)
 		assert.Equal(t, b.RunID, rows[0].CorrelationID)
 	}
+}
+
+// X4 (forward merge onto the admin-tier workload delegations): an
+// admin-scope workload delegation is refused (403) on cleanup, its dry run
+// and provenance, on the route's permission (test_identity.issue: the
+// delegation's scope test_identity:issue_admin does not cover it), and
+// nothing is removed. Controls: a member-scope delegation of the same
+// grantor and the grantor's own session are admitted. The A3 purge check
+// cleanup admits admin kinds through still refuses every workload
+// delegation caller, whatever its scope.
+func TestFixtureCleanup_AdminScopeDelegationRefused(t *testing.T) {
+	e := newX4Env(t, true)
+	ctx := context.Background()
+	super := taUser(t, e.s, "fc-x4-grantor", store.SystemRoleSuperAdmin)
+	hd := e.delegateScope(t, super, testIdentityDelegationAdminScope, nil)
+	md := e.delegateScope(t, super, testIdentityDelegationScope, map[string]any{"workloadSub": x2Sub})
+	rec := e.mintAdmin(t, hd.ID, testAdminRoleHubAdmin)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	admin := taDecode(t, rec)
+	gid := generateID()
+	require.NoError(t, e.s.CreateGroup(ctx, &store.Group{ID: gid, Name: "fc-x4-" + gid[:8], Slug: "fc-x4-" + gid[:8], CreatedBy: admin.Identity.ID,
+		Fixture: store.FixtureProvenance{RootID: admin.Identity.ID, IssuerID: super.ID}}))
+
+	// Past the admin-kind identity's expiry; workload tokens issued for
+	// the shifted clock.
+	clock := admin.Identity.ExpiresAt.Add(time.Minute)
+	e.srv.testIdentities.now = func() time.Time { return clock }
+	adminTok := func() string {
+		return x2Token(t, x2TokenOpts{sub: x4AdminSub, iat: clock.Add(-time.Minute), exp: clock.Add(time.Hour)})
+	}
+	memberTok := func() string {
+		return x2Token(t, x2TokenOpts{iat: clock.Add(-time.Minute), exp: clock.Add(time.Hour)})
+	}
+
+	for _, req := range []struct{ method, path string }{
+		{http.MethodPost, fcCleanupPath + "?dryRun=true"},
+		{http.MethodPost, fcCleanupPath},
+		{http.MethodGet, fcProvenancePath + "?resource=group:" + gid},
+	} {
+		got := e.workload(t, req.method, req.path, adminTok(), hd.ID, nil, nil)
+		require.Equal(t, http.StatusForbidden, got.Code, "admin-scope delegation %s %s: %s", req.method, req.path, got.Body.String())
+		var body struct {
+			Error struct {
+				Code    string            `json:"code"`
+				Details map[string]string `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(got.Body.Bytes(), &body), got.Body.String())
+		assert.Equal(t, ErrCodeForbidden, body.Error.Code)
+		assert.Equal(t, "test_identity", body.Error.Details["resource_type"], "refused on the route's permission")
+		assert.Equal(t, "issue", body.Error.Details["denied_action"], "refused on the route's permission")
+		keys := x4JSONKeys(t, got.Body.Bytes())
+		assert.NotContains(t, keys, "targets")
+		assert.NotContains(t, keys, "proven")
+	}
+	_, err := e.s.GetUser(ctx, admin.Identity.ID)
+	require.NoError(t, err, "nothing removed")
+	assert.True(t, fcGroupExists(t, e.s, gid))
+
+	// Member-scope delegation of the same grantor: admitted, and it does
+	// not reach the admin-kind identity.
+	got := e.workload(t, http.MethodPost, fcCleanupPath+"?dryRun=true", memberTok(), md.ID, nil, nil)
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	assert.Empty(t, fcReport(t, got).Identities)
+	got = e.workload(t, http.MethodGet, fcProvenancePath+"?resource=group:"+gid, memberTok(), md.ID, nil, nil)
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(got.Body.Bytes(), &raw))
+	fcUnprovenShape(t, raw, "group:"+gid)
+
+	// The grantor's own session reaches it.
+	got = doRequestAsUser(t, e.srv, super, http.MethodPost, fcCleanupPath+"?dryRun=true", nil)
+	require.Equal(t, http.StatusOK, got.Code, got.Body.String())
+	assert.Equal(t, fixtureStateExpired, fcIdentities(fcReport(t, got))[admin.Identity.ID])
+
+	// canPurgeTestAdminIdentity refuses every workload delegation caller,
+	// for both scopes, even with the grantor as the issuer; the grantor's
+	// own session is admitted.
+	for _, d := range []TestIdentityDelegationView{hd, md} {
+		dl, err := e.s.GetTestIdentityDelegation(ctx, d.ID)
+		require.NoError(t, err)
+		base := NewAuthenticatedUser(super.ID, super.Email, super.DisplayName, super.Role, string(ClientTypeAPI))
+		ceiling, ok := permissions.BuildCeilingFromSelectors([]string{dl.Scope})
+		require.True(t, ok)
+		ident := NewScopedUserIdentityWithBoundary(base, TokenBoundary{Kind: BoundaryKindHub}, []string{dl.Scope}, dl.ID, ceiling)
+		cred := credentialContextForIdentity(ident)
+		cred.Kind = CredentialKindWorkloadDelegation
+		c := contextWithCredentialContext(contextWithIdentity(context.Background(), ident), cred)
+		c = contextWithWorkloadDelegationState(c, &workloadDelegationState{delegation: dl})
+		assert.False(t, e.srv.canPurgeTestAdminIdentity(c, ident, super.ID), "scope %s", dl.Scope)
+	}
+	assert.True(t, e.srv.canPurgeTestAdminIdentity(context.Background(), NewAuthenticatedUser(super.ID, super.Email, super.DisplayName, super.Role, string(ClientTypeAPI)), super.ID))
 }

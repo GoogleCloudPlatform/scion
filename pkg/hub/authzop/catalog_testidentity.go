@@ -207,6 +207,7 @@ var testIdentityOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive"},
 			{Package: "pkg/hub", Function: "TestFixtureCleanup_AdminKindTargets"},
 			{Package: "pkg/hub", Function: "TestFixtureCleanup_DelegationCannotReachAdminKind"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_AdminScopeDelegationRefused"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},

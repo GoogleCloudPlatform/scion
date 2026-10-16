@@ -10792,6 +10792,7 @@
 - `pkg/hub:TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive`
 - `pkg/hub:TestFixtureCleanup_AdminKindTargets`
 - `pkg/hub:TestFixtureCleanup_DelegationCannotReachAdminKind`
+- `pkg/hub:TestFixtureCleanup_AdminScopeDelegationRefused`
 
 ---
 
