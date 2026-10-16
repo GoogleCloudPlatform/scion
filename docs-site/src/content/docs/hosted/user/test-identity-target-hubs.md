@@ -91,10 +91,19 @@ A profile must name another hub. The CLI refuses a profile whose endpoint names 
 hub (`SCION_HUB_ENDPOINT` or `SCION_HUB_URL`), and refuses every profile when either of those is
 set but is not an absolute URL. The check compares parsed host names and ports: lowercase,
 without a trailing dot, IP literals in canonical form, and loopback and container bridge host
-names (such as `host.docker.internal`) treated as one host. It does not resolve DNS aliases, so
-a profile naming another name for the agent's own hub, such as its public URL while
-`SCION_HUB_ENDPOINT` holds a bridge address, is not detected. The target hub's own delegation
-remains the boundary.
+names (such as `host.docker.internal`) treated as one host. This name check runs offline, when a
+profile is added or selected.
+
+Before a command sends its first profile credential, the CLI also compares hub identities. It
+reads the target hub's persistent hub id from the target's public health route (`GET /healthz`,
+with only the profile's IAP transport token and no bearer) and the agent's own hub id from the
+own hub's health route (with no credential at all), and refuses the profile when the two ids are
+equal. This catches another name for the agent's own hub, such as its public URL while
+`SCION_HUB_ENDPOINT` holds a bridge address, or a DNS alias. When either id is unavailable (the
+health route does not answer `200` with a hub id, for example because the agent's own hub is
+reached through IAP), the name check is the only check; `--debug` says so. A lookup can only add a
+refusal: the name check always runs first. Replicas of one hub share its hub id and count as one
+hub. The target hub's own delegation remains the boundary.
 :::
 
 ## 3. Issue identities into the run cache
@@ -161,7 +170,8 @@ The code goes **only** to the file named by `--out`, exactly as without a profil
 not exist yet (an existing file, a symlink, or a path under a symlinked directory is refused
 before any request is sent), the file is created with mode `0600`, and the code is never
 printed. A browser redeems it at `POST /auth/test-identity/redeem` on the target (see
-[Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/)).
+[Browser Sessions as Test Identities](/scion/contributing/test-identity-browser-sessions/), and
+for an IAP-fronted target [IAP Driver Tokens for Browser Journeys](/scion/contributing/test-identity-iap-driver/)).
 `--as` does not apply: the issuer delegation mints the code. The target mints codes only for
 member and viewer identities issued through the same delegation, and only where its own test
 identity web sessions are available; for any other identity it answers `404`. `hub test-identity

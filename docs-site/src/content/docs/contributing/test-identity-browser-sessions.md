@@ -144,6 +144,8 @@ const page = await context.newPage();
 await page.goto('/', { waitUntil: 'domcontentloaded' });
 ```
 
+On a Scion runner, get `driverToken` from the runner's metadata emulator at run time, never from a file: see [IAP Driver Tokens for Browser Journeys](/scion/contributing/test-identity-iap-driver/), which also describes the operator-run IAP browser journey (`web/e2e/iap-journey/`).
+
 ## Session lifetime and teardown
 
 The session ends when the identity expires, when it is deleted, or when the hub's key changes; an admin identity's session also ends at its kind's maximum lifetime and on revoke-all. There is no refresh. After that, the next request with the session cookie answers `401` (an API or `fetch` request) or shows a "session ended" page (a browser navigation).
