@@ -791,3 +791,112 @@ func TestAsyncStartExecDispatchStart_PassesKindAndPriorPhase(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StartDispatchOptions{Async: true, Kind: store.LaunchKindRestart, PriorPhase: "running"}, od.lastOpts)
 }
+
+// ---- D2 wire contract -------------------------------------------------------
+
+// d2Broker is an HTTP broker answering a start as the D2 broker does
+// (agreed with as-d2-dev): it takes the asynchronous branch only when the
+// agentId query parameter is present and the body carries asyncLaunch, a
+// launchId and launchTimeoutSeconds above 20, and then answers 202
+// {launchPending, launchId (echo), launchInstanceId} with no agent;
+// otherwise it answers the synchronous 202 {agent, created:false}.
+type d2Broker struct {
+	mu     sync.Mutex
+	asyncs int
+	syncs  int
+	query  url.Values
+	body   map[string]interface{}
+}
+
+func (b *d2Broker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var body map[string]interface{}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.query, b.body = r.URL.Query(), body
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	timeout, _ := body["launchTimeoutSeconds"].(float64)
+	launchID, _ := body["launchId"].(string)
+	if r.URL.Query().Get(api.AgentIDQueryParam) != "" && body["asyncLaunch"] == true && launchID != "" && timeout > 20 {
+		b.asyncs++
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"launchPending": true, "launchId": launchID, "launchInstanceId": "d2-inst"})
+		return
+	}
+	b.syncs++
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"created": false, "agent": map[string]interface{}{"id": "x", "name": "x", "phase": "running"}})
+}
+
+// TestAsyncStartD2Contract pins the hub side of the start contract agreed
+// with D2 (the broker's async startAgent) over the real HTTP transport: the
+// URL carries agentId; an async start's body carries asyncLaunch, launchId,
+// launchTimeoutSeconds (> 20) and launchKeepaliveSeconds; the broker's 202
+// launchPending echo is an accepted launch owned by launchInstanceId; its
+// synchronous 202 (no launchPending) ends the launch not_launched and is a
+// synchronous success; and the broker's capability names asyncStart (JSON)
+// and "asyncStart" (registration list) are read as AsyncStart.
+func TestAsyncStartD2Contract(t *testing.T) {
+	ctx := context.Background()
+	for _, async := range []bool{true, false} {
+		t.Run(fmt.Sprintf("async %v", async), func(t *testing.T) {
+			b := &d2Broker{}
+			srv := httptest.NewServer(b)
+			defer srv.Close()
+			name := fmt.Sprintf("d2c-%v", async)
+			s := createTestStore(t)
+			require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("p-" + name), Name: name, Slug: name}))
+			require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+				ID: tid("b-" + name), Name: "b-" + name, Slug: "b-" + name, Endpoint: srv.URL, Status: store.BrokerStatusOnline,
+				Capabilities: &store.BrokerCapabilities{AsyncLaunch: true, AsyncStart: true},
+			}))
+			a := &store.Agent{ID: tid("a-" + name), Name: name, Slug: name, ProjectID: tid("p-" + name), RuntimeBrokerID: tid("b-" + name),
+				Phase: string(state.PhaseSuspended), AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"}}
+			require.NoError(t, s.CreateAgent(ctx, a))
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+			d := NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default())
+			d.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return asyncOn })
+
+			res, err := d.DispatchAgentStartWithOptions(ctx, a, "", true, StartDispatchOptions{Async: async, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseSuspended)})
+			require.NoError(t, err)
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			assert.Equal(t, a.ID, b.query.Get(api.AgentIDQueryParam), "agentId on every start")
+			assert.Equal(t, true, b.body["resume"])
+			row := getAgent(t, s, a.ID)
+			if !async {
+				assert.Equal(t, 1, b.syncs)
+				assert.Nil(t, b.body["asyncLaunch"], "no launch fields on a synchronous start")
+				assert.Nil(t, b.body["launchId"])
+				assert.Nil(t, res)
+				assert.Empty(t, row.LaunchID)
+				return
+			}
+			require.Equal(t, 1, b.asyncs, "the broker took its async branch")
+			assert.Equal(t, row.LaunchID, b.body["launchId"])
+			assert.Greater(t, b.body["launchTimeoutSeconds"].(float64), float64(20))
+			assert.Equal(t, float64(30), b.body["launchKeepaliveSeconds"])
+			require.NotNil(t, res.AcceptedLaunch())
+			assert.Equal(t, "d2-inst", res.Launch.Owner)
+			assert.Equal(t, "d2-inst", row.LaunchOwner)
+			assert.Equal(t, store.LaunchStateActive, row.LaunchState)
+		})
+	}
+
+	t.Run("sync 202 answers an async request", func(t *testing.T) {
+		// A runtime that cannot launch asynchronously (D2: substrate,
+		// cloudrun) answers the plain 202 even to an async request.
+		f := newAsyncDispatchFixture(t, "d2c-syncanswer", string(state.PhaseStopped), true, nil, asyncOn)
+		f.client.mode = "sync"
+		res, err := f.d.DispatchAgentStartWithOptions(ctx, f.agent, "", false, StartDispatchOptions{Async: true, Kind: store.LaunchKindStart, PriorPhase: string(state.PhaseStopped)})
+		require.NoError(t, err)
+		assert.Nil(t, res.AcceptedLaunch())
+		assert.Equal(t, store.LaunchEndReasonNotLaunched, getAgent(t, f.s, f.agent.ID).LaunchEndReason)
+	})
+
+	t.Run("capability names", func(t *testing.T) {
+		assert.True(t, capabilitiesFromStrings([]string{"asyncStart"}).AsyncStart, "registration name asyncStart")
+		var caps store.BrokerCapabilities
+		require.NoError(t, json.Unmarshal([]byte(`{"asyncStart":true}`), &caps))
+		assert.True(t, caps.AsyncStart, "heartbeat/info JSON field asyncStart")
+	})
+}
