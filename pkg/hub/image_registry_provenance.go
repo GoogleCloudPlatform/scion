@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"sort"
 
@@ -55,14 +57,18 @@ type ImageRegistryNodeEnvOverride struct {
 type ImageRegistryProfileProvenance struct {
 	Source string `json:"source"`
 	Value  string `json:"value,omitempty"`
-	// FileValue is the profile's settings-file value: what it inherits
-	// when no value is saved for it in the hub.
+	// FileValue is the profile's settings-file value.
 	FileValue string `json:"file_value,omitempty"`
+	// InheritedSource and InheritedValue are what the profile resolves to
+	// without a value saved for it in the hub: what the editor shows as
+	// inherited, also while an admin clears a saved value.
+	InheritedSource string `json:"inherited_source"`
+	InheritedValue  string `json:"inherited_value,omitempty"`
 }
 
 // imageRegistryProvenancePageSize is the broker listing page size for
-// node env overrides.
-const imageRegistryProvenancePageSize = 200
+// node env overrides (a variable so tests can page with few brokers).
+var imageRegistryProvenancePageSize = 200
 
 // imageRegistryProvenance builds the provenance report. A broker listing
 // failure is logged and leaves the overrides partial.
@@ -71,18 +77,26 @@ func (s *Server) imageRegistryProvenance(ctx context.Context, ops *OperationalSe
 		return nil
 	}
 	top := s.hubScopeImageRegistry()
-	p := &ImageRegistryProvenance{Source: string(top.Source), Value: top.Value}
+	// Every value shown is redacted (config.RedactImageRegistry): a node env
+	// is operator input that is never validated.
+	p := &ImageRegistryProvenance{Source: string(top.Source), Value: config.RedactImageRegistry(top.Value)}
 
 	in := ops.ImageRegistryHubInputs()
 	for _, name := range in.Catalog {
-		r := config.ResolveImageRegistryLayers(in.Layers(name, ""))
+		layers := in.Layers(name, "")
+		r := config.ResolveImageRegistryLayers(layers)
+		layers.HubDBProfile = ""
+		inherited := config.ResolveImageRegistryLayers(layers)
 		if p.Profiles == nil {
 			p.Profiles = map[string]ImageRegistryProfileProvenance{}
 		}
 		p.Profiles[name] = ImageRegistryProfileProvenance{
 			Source:    string(r.Source),
-			Value:     r.Value,
-			FileValue: in.FileTier.ProfileValue(name, in.Catalog),
+			Value:     config.RedactImageRegistry(r.Value),
+			FileValue: config.RedactImageRegistry(in.FileTier.ProfileValue(name, in.Catalog)),
+
+			InheritedSource: string(inherited.Source),
+			InheritedValue:  config.RedactImageRegistry(inherited.Value),
 		}
 	}
 
@@ -103,7 +117,7 @@ func (s *Server) imageRegistryProvenance(ctx context.Context, ops *OperationalSe
 			}
 			v := b.Capabilities.NodeImageRegistry
 			p.NodeEnvOverrides = append(p.NodeEnvOverrides, ImageRegistryNodeEnvOverride{
-				BrokerID: b.ID, BrokerName: b.Name, Value: v, Differs: v != top.Value,
+				BrokerID: b.ID, BrokerName: b.Name, Value: config.RedactImageRegistry(v), Differs: v != top.Value,
 			})
 		}
 		if page.NextCursor == "" || len(page.Items) == 0 {
@@ -119,4 +133,52 @@ func (s *Server) imageRegistryProvenance(ctx context.Context, ops *OperationalSe
 		return a.BrokerID < b.BrokerID
 	})
 	return p
+}
+
+// imageRegistryProvenanceKey is the response key of the provenance report.
+const imageRegistryProvenanceKey = "image_registry_provenance"
+
+// dropImageRegistryProvenance removes the read-only image_registry_provenance
+// from a server-config PUT body, matched as the typed decode matches member
+// names. A client that sends a GET body back gets a 200 even when the report
+// changed in between (a broker heartbeat changes it at any time); the key is
+// never stored. Any other body is returned as it is.
+func dropImageRegistryProvenance(rawBody []byte) []byte {
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	dec.UseNumber()
+	var top map[string]json.RawMessage
+	if err := dec.Decode(&top); err != nil || top == nil {
+		return rawBody
+	}
+	want := foldJSONMemberName(imageRegistryProvenanceKey)
+	dropped := false
+	for name := range top {
+		if foldJSONMemberName(name) == want {
+			delete(top, name)
+			dropped = true
+		}
+	}
+	if !dropped {
+		return rawBody
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return rawBody
+	}
+	return out
+}
+
+// brokerForDisplay returns b with the reported node image registry redacted
+// for display (config.RedactImageRegistry). The capabilities are copied, so
+// the stored broker and the value dispatch resolves with are unchanged.
+func brokerForDisplay(b store.RuntimeBroker) store.RuntimeBroker {
+	if b.Capabilities == nil || b.Capabilities.NodeImageRegistry == "" {
+		return b
+	}
+	if r := config.RedactImageRegistry(b.Capabilities.NodeImageRegistry); r != b.Capabilities.NodeImageRegistry {
+		c := *b.Capabilities
+		c.NodeImageRegistry = r
+		b.Capabilities = &c
+	}
+	return b
 }

@@ -104,7 +104,7 @@ With --global, it initializes in the user's home folder.`,
 			if registryValue != "" {
 				fmt.Printf("Image registry: %s\n", registryValue)
 			} else if envRegistry != "" {
-				fmt.Printf("Image registry: %s (from %s; not saved to settings)\n", envRegistry, config.EnvImageRegistry)
+				fmt.Printf("Image registry: %s (from %s; not saved to settings)\n", config.RedactImageRegistry(envRegistry), config.EnvImageRegistry)
 			} else {
 				fmt.Println()
 				fmt.Println("Note: image_registry is not configured. Agents cannot start without it.")

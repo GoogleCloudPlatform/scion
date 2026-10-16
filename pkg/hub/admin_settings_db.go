@@ -966,6 +966,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// answers as an update that changes nothing.
 	sentBody := rawBody
 	rawBody = dropEmptyPeerSecret(rawBody)
+	// The read-only image_registry provenance of a GET body sent back is
+	// ignored, so the echo of a changed report is not refused
+	// (ptone/scion#3916).
+	rawBody = dropImageRegistryProvenance(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}

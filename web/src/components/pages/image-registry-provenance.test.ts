@@ -46,12 +46,18 @@ describe('image_registry badge lines', () => {
   });
 
   it('names the hub node env, which is never saved', () => {
-    const lines = imageRegistryBadgeLines({ source: 'node_env', value: 'n.example' }, [
-      'image_registry',
-    ]);
+    const lines = imageRegistryBadgeLines({ source: 'node_env', value: 'n.example' }, []);
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('SCION_IMAGE_REGISTRY on the hub');
     expect(lines[0]).toContain('never saved');
+  });
+
+  it('also explains the startup value the field shows when the node env wins', () => {
+    const lines = imageRegistryBadgeLines({ source: 'node_env', value: 'n.example' }, [
+      'image_registry',
+    ]);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain('SCION_SERVER_IMAGEREGISTRY');
   });
 
   it('lists every broker node env, marking the ones that differ', () => {
@@ -102,6 +108,25 @@ describe('profile inherited hint', () => {
     expect(profileInheritedHint(prov, 'k8s', '')).toBe('Inherited: db.example (saved hub value).');
     expect(profileInheritedHint(prov, 'bare', undefined)).toBe(
       'Inherited: no registry (images are not rewritten).'
+    );
+  });
+
+  it("uses the inherited value, which leaves out the profile's own saved value", () => {
+    const withSaved = {
+      source: 'hub_db',
+      profiles: {
+        k8s: {
+          source: 'hub_db_profile',
+          value: 'saved-k8s.example',
+          inherited_source: 'file_profile',
+          inherited_value: 'k8s-file.example',
+        },
+      },
+    };
+    // The admin cleared the saved value in the editor: the hint shows what
+    // the profile falls back to, not the value about to be removed.
+    expect(profileInheritedHint(withSaved, 'k8s', '')).toBe(
+      'Inherited: k8s-file.example (settings-file profile value).'
     );
   });
 

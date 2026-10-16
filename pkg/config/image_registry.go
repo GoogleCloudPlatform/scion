@@ -263,3 +263,24 @@ func cloneStringMap(m map[string]string) map[string]string {
 	}
 	return out
 }
+
+// RedactImageRegistry returns registry with any userinfo (user:password@)
+// replaced by "***@", keeping the scheme, host and path. An image registry
+// prefix never needs credentials, so a value carrying them is an operator
+// mistake that must not be displayed or logged as is.
+func RedactImageRegistry(registry string) string {
+	rest := registry
+	scheme := ""
+	if i := strings.Index(rest, "://"); i >= 0 {
+		scheme, rest = rest[:i+3], rest[i+3:]
+	}
+	authority := rest
+	if i := strings.Index(rest, "/"); i >= 0 {
+		authority = rest[:i]
+	}
+	at := strings.LastIndex(authority, "@")
+	if at < 0 {
+		return registry
+	}
+	return scheme + "***@" + rest[at+1:]
+}

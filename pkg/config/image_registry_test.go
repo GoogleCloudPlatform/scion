@@ -394,3 +394,20 @@ func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
 		t.Fatalf("SCION_IMAGE_REGISTRY read outside config.ImageRegistryFromEnv: %v", bad)
 	}
 }
+
+func TestRedactImageRegistry(t *testing.T) {
+	tests := map[string]string{
+		"ghcr.io/org":                              "ghcr.io/org",
+		"user:secret@registry.example/team":        "***@registry.example/team",
+		"https://user:secret@registry.example/a/b": "https://***@registry.example/a/b",
+		"token@registry.example":                   "***@registry.example",
+		"registry.example/path@sha256:abc":         "registry.example/path@sha256:abc",
+		"a:b@c:d@registry.example:5000/x":          "***@registry.example:5000/x",
+		"":                                         "",
+	}
+	for in, want := range tests {
+		if got := RedactImageRegistry(in); got != want {
+			t.Errorf("RedactImageRegistry(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

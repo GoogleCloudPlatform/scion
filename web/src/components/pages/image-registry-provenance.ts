@@ -33,6 +33,9 @@ export interface ImageRegistryProfileProvenance {
   source: string;
   value?: string;
   file_value?: string;
+  /** What the profile resolves to without a value saved for it. */
+  inherited_source?: string;
+  inherited_value?: string;
 }
 
 /** Where the image_registry in effect comes from (read-only). */
@@ -77,6 +80,11 @@ export function imageRegistryBadgeLines(
     lines.push(
       'Set by SCION_IMAGE_REGISTRY on the hub for hub-wide reads (setup, image pull, maintenance builds); it is never saved.'
     );
+    if (startupEnv) {
+      lines.push(
+        'The field shows the startup value from SCION_SERVER_IMAGEREGISTRY, which applies where the node env does not.'
+      );
+    }
   } else if (startupEnv && prov?.source === 'hub_db') {
     lines.push(
       'A startup environment value (SCION_SERVER_IMAGEREGISTRY) is superseded by the saved value.'
@@ -129,6 +137,10 @@ export function profileInheritedHint(
   if (savedValue) return null;
   const p = prov?.profiles?.[profile];
   if (!p) return null;
-  if (!p.value) return 'Inherited: no registry (images are not rewritten).';
-  return `Inherited: ${p.value} (${imageRegistrySourceLabel(p.source)}).`;
+  // The inherited value leaves out the profile's own saved value, so the
+  // hint is right while an admin clears it (older hubs report only value).
+  const source = p.inherited_source ?? p.source;
+  const value = p.inherited_source !== undefined ? p.inherited_value : p.value;
+  if (!value) return 'Inherited: no registry (images are not rewritten).';
+  return `Inherited: ${value} (${imageRegistrySourceLabel(source)}).`;
 }
