@@ -173,3 +173,46 @@ func TestCapHubInstanceStats_TinyBudgetDropsAllIntegrationsKeepsDB(t *testing.T)
 		t.Fatalf("raw = %s, want %s", raw, want)
 	}
 }
+
+// TestNormalizeHubInstanceStats_Features pins the Features normalisation
+// (ptone/scion#4669): invalid names dropped, the rest sorted, deduplicated
+// and cut to HubInstanceMaxFeatures; an empty result is nil.
+func TestNormalizeHubInstanceStats_Features(t *testing.T) {
+	got := NormalizeHubInstanceStats(HubInstanceStats{Features: []string{
+		"zeta", HubInstanceFeatureAsyncStartV1, "", "Bad", "has-dash", strings.Repeat("a", HubInstanceMaxFeatureBytes+1), "zeta",
+	}})
+	want := []string{HubInstanceFeatureAsyncStartV1, "zeta"}
+	if !reflect.DeepEqual(got.Features, want) {
+		t.Fatalf("Features = %q, want %q", got.Features, want)
+	}
+
+	var many []string
+	for i := 0; i < HubInstanceMaxFeatures+4; i++ {
+		many = append(many, fmt.Sprintf("f%02d", i))
+	}
+	got = NormalizeHubInstanceStats(HubInstanceStats{Features: many})
+	if len(got.Features) != HubInstanceMaxFeatures || got.Features[0] != "f00" {
+		t.Fatalf("Features = %q, want the first %d sorted", got.Features, HubInstanceMaxFeatures)
+	}
+
+	if got := NormalizeHubInstanceStats(HubInstanceStats{Features: []string{"Bad"}}); got.Features != nil {
+		t.Fatalf("Features = %q, want nil", got.Features)
+	}
+}
+
+// TestCapHubInstanceStats_NeverTrimsFeatures pins that the size cap cuts
+// only Integrations: a dropped feature would read as a hub node without it
+// (ptone/scion#4669).
+func TestCapHubInstanceStats_NeverTrimsFeatures(t *testing.T) {
+	got, raw := CapHubInstanceStats(HubInstanceStats{
+		Integrations: []HubInstanceIntegration{{Name: "chat", Health: "healthy"}},
+		Features:     []string{HubInstanceFeatureAsyncStartV1},
+	}, 10)
+	if got.Integrations != nil || !got.IntegrationsTruncated {
+		t.Fatalf("got %+v, want integrations cut", got)
+	}
+	want := `{"integrations_truncated":true,"features":["async_start_v1"]}`
+	if string(raw) != want {
+		t.Fatalf("raw = %s, want %s", raw, want)
+	}
+}

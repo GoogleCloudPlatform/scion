@@ -782,6 +782,15 @@ type StartExtras struct {
 	// this restart, the same set DispatchAgentStart sends as its
 	// resolvedSecrets parameter. Values are never logged.
 	ResolvedSecrets []ResolvedSecret
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// are a start's asynchronous launch fields (ptone/scion#4669), sent
+	// under the same wire keys as a create's (RemoteCreateAgentRequest).
+	// Zero values send nothing; this release never sets them, so every
+	// start is sent synchronously.
+	AsyncLaunch            bool
+	LaunchID               string
+	LaunchTimeoutSeconds   int
+	LaunchKeepaliveSeconds int
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -861,6 +870,18 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if extras.AsyncLaunch {
+		payload["asyncLaunch"] = true
+	}
+	if extras.LaunchID != "" {
+		payload["launchId"] = extras.LaunchID
+	}
+	if extras.LaunchTimeoutSeconds > 0 {
+		payload["launchTimeoutSeconds"] = extras.LaunchTimeoutSeconds
+	}
+	if extras.LaunchKeepaliveSeconds > 0 {
+		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
 	}
 }
 
