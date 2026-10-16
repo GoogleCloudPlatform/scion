@@ -284,7 +284,7 @@ When the bridge auto-provisions an agent, it asks the Hub for an asynchronous cr
 
 While the agent starts, the bridge holds the first message and reports the task as `working`. Streaming and A2A SDK clients also see the status message `provisioning agent (<step>)` for each launch step (the step is shown as its code, for example `pod_create`); other clients see the `working` state only. Once the agent is running, the bridge sends the message, and the usual response wait starts. If the launch fails, the task ends `failed` and the message is not sent; streaming and SDK clients see `Agent failed to start (<code>): <message>`. A task can therefore stay `working` until the launch times out on the Hub, plus about 30 seconds.
 
-The bridge also waits when it adopts an agent that another client is still starting, and before a follow-up message on an existing task whose agent is still starting; a follow-up sent while the task's first message is still waiting is delivered after that message. It waits in those cases even with `async_create: false`, because that setting controls only the bridge's own request. Set `async_create: false` to always use the synchronous create.
+The bridge also waits when it adopts an agent that another client is still starting, and before a follow-up message on an existing task whose agent is still starting; a follow-up sent while the task's first message is still waiting is delivered after that message when both reach the same bridge instance (a follow-up handled by another replica does not wait for it). It waits in those cases even with `async_create: false`, because that setting controls only the bridge's own request. Set `async_create: false` to always use the synchronous create.
 
 ---
 

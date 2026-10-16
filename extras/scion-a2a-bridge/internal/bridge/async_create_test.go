@@ -96,8 +96,6 @@ type launchHub struct {
 	// records the message texts in the order their sends completed.
 	sendDelay func(msg *messages.StructuredMessage) time.Duration
 	completed []string
-	// refused counts sends refused while held.
-	refused int
 }
 
 func newLaunchHub(created *hubclient.Agent, script ...*hubclient.Agent) *launchHub {
@@ -146,9 +144,6 @@ func (h *launchHub) service() *mockAgentService {
 				select {
 				case <-h.hold:
 				default:
-					h.mu.Lock()
-					h.refused++
-					h.mu.Unlock()
 					return nil, errors.New("agent_not_running: agent is still launching")
 				}
 			}

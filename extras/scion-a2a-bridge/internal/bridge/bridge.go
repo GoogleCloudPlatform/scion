@@ -711,15 +711,17 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
-	_, sendErr := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false)
-	firstSent()
-	if sendErr != nil {
+	// firstSent runs after the failed write on a send failure, so a waiting
+	// follow-up sees the task ended and is not sent.
+	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
 		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
+		firstSent()
 		b.unregisterActiveTask(taskID, aKey)
-		return nil, fmt.Errorf("send message to agent: %w", sendErr)
+		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
+	firstSent()
 
 	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
 		b.log.Error("failed to update task state", "error", err, "task_id", taskID)
