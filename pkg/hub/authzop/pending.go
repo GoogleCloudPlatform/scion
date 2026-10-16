@@ -62,13 +62,8 @@ type PendingEntry struct {
 // "<function>:<detail>", where <function> is declared in pkg/hub.
 var PendingBearerDispositions = []PendingEntry{
 	// --- agents ---
-	{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/cloud-logs/stream", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/groups", Method: "GET", Area: AreaAgents},
-	{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/message-logs/stream", Method: "GET", Area: AreaAgents},
-	{Kind: EntryPointSSE, Pattern: "/api/v1/agents/{id}/messages/stream", Method: "GET", Area: AreaAgents},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET", Area: AreaAgents},
-	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/agents/{agentId}/cloud-logs/stream", Method: "GET", Area: AreaAgents},
-	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/agents/{agentId}/message-logs/stream", Method: "GET", Area: AreaAgents},
 	// --- projects ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/shared/{token}", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST", Area: AreaProjects},
@@ -79,7 +74,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}/verify", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}", Method: "PUT", Area: AreaProjects},
-	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/message-logs/stream", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers/{brokerId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:dispatch_agent", Area: AreaProjects},
@@ -87,7 +81,7 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:dispatch_agent", Area: AreaProjects},
 	{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:message", Area: AreaProjects},
 	// --- messaging ---
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcs/object", Method: "GET", Area: AreaMessaging},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcs/object", Method: "GET", Variant: "direct_or_projectless", Area: AreaMessaging},
 	// --- chat ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET", Variant: "noproject", Area: AreaChat},
 	// --- identity ---

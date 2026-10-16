@@ -239,6 +239,18 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
 	},
+	{OperationID: "agent.messages.read", Method: "GET", Pattern: "/api/v1/agents/{id}/messages/stream"}: {
+		Reason: "the matrix server configures no event publisher, so every caller gets 501 before the agent is looked up",
+		Pin:    "TestMessagesStreamToken_AdmissionByBoundary",
+	},
+	{OperationID: "project.conversation.gcsobject.read", Method: "GET", Pattern: "/api/v1/gcs/object"}: {
+		Reason: "the matrix server enables no gs:// link experiment and configures no token generator, so every caller gets the same 404 before the message is looked up",
+		Pin:    "TestGCSObjectToken_ProjectGroupNeedsProjectRead",
+	},
+	{OperationID: "web.events.stream", Method: "GET", Pattern: "/events"}: {
+		Reason: "the web server serves the event stream, not the hub API handler the matrix drives; the web server admits only a signed-in web session",
+		Pin:    "TestWebEventStream_RefusesUserAccessToken",
+	},
 }
 
 // bearerMatrixKinds are the entry point kinds a request can reach.
@@ -629,6 +641,16 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs/stream"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-from"}: {
 		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},
