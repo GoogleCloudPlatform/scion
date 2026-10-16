@@ -3847,7 +3847,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 	if runID == "" {
 		// Wake any local launch waiting on this agent (design §3.8.1); see
 		// the identical comment in deleteAgent.
-		s.cancelLocalLaunch(key, hubAgentID)
+		woken := s.cancelLocalLaunchRecord(key, hubAgentID, "")
 		if testHookStopBetweenCancels != nil {
 			testHookStopBetweenCancels(key)
 		}
@@ -3859,8 +3859,9 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// the first cancel and handed over to its launch before the tracker
 		// cancel reached it has a launch record by now, since its handler
 		// has returned (design wave 3 §2 D-f, Optional-1 case iv). Same
-		// agent scope as the first cancel.
-		s.cancelLocalLaunch(key, hubAgentID)
+		// agent scope as the first cancel; the record that cancel already
+		// woke is left alone.
+		s.recancelLocalLaunch(key, hubAgentID, "", woken)
 		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
 	} else {
 		// A run-scoped stop resolves first, so a stop for a run that no
@@ -3878,11 +3879,12 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// this run may have finished (creating its container) between the
 		// lookup above and the cancel, which a stale miss would report as
 		// "not found" while that container runs.
-		wokeLaunch := s.cancelLocalLaunchForRun(key, hubAgentID, runID)
+		woken := s.cancelLocalLaunchRecord(key, hubAgentID, runID)
 		cancelledOwn = s.cancelInFlightStartRun(ctx, key, runID)
 		// Again after the tracker wait, as for a legacy stop above
 		// (Optional-1 case iv), with the same agent and run scope.
-		if s.cancelLocalLaunchForRun(key, hubAgentID, runID) {
+		wokeLaunch := woken != nil
+		if s.recancelLocalLaunch(key, hubAgentID, runID, woken) {
 			wokeLaunch = true
 		}
 		if wokeLaunch {

@@ -334,10 +334,11 @@ func TestRunLaunch_LaunchMarkerWriteFailure_FixedText(t *testing.T) {
 	defer cancel()
 	rec := newLaunchRecord("L-"+name, name, store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
 	lc := launchCtx{
-		req:  CreateAgentRequest{ID: name, Name: name, ProjectID: startErrTextProjectID},
-		opts: api.StartOptions{Name: name, ProjectPath: projectPath, RunID: startErrTextRunID},
-		mgr:  mgr,
-		key:  launchKey{Slug: name},
+		req:       CreateAgentRequest{ID: name, Name: name, ProjectID: startErrTextProjectID},
+		projectID: startErrTextProjectID,
+		opts:      api.StartOptions{Name: name, ProjectPath: projectPath, RunID: startErrTextRunID},
+		mgr:       mgr,
+		key:       launchKey{Slug: name},
 	}
 	srv.runLaunch(ctx, rec, lc)
 

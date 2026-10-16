@@ -237,26 +237,36 @@ func (r *launchRegistry) Handoff(key launchKey, from, to *launchRecord, fromCanc
 //
 // It reports whether it woke a launch.
 func (r *launchRegistry) CancelLocalFor(key launchKey, agentID, runID string) bool {
+	return r.cancelLocalForExcept(key, agentID, runID, nil) != nil
+}
+
+// cancelLocalForExcept is CancelLocalFor that leaves skip alone (nil skips
+// nothing) and returns the record it woke, or nil. A stop's second cancel,
+// after its start tracker wait, passes the record its first cancel woke, so
+// it reaches only a record registered in between: an async start that
+// registered after the first cancel and handed over to its launch (design
+// wave 3 §2 D-f, Optional-1 case iv).
+func (r *launchRegistry) cancelLocalForExcept(key launchKey, agentID, runID string, skip *launchRecord) *launchRecord {
 	if r == nil {
 		// A *Server built directly (e.g. by a test that does not go through
 		// New()) has a nil registry; treat it the same as "no launch held
 		// for this key" rather than panicking.
-		return false
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rec := r.records[key]
-	if rec == nil {
-		return false
+	if rec == nil || rec == skip {
+		return nil
 	}
 	if runID != "" && rec.RunID != "" && rec.RunID != runID {
-		return false
+		return nil
 	}
 	if agentID != "" && rec.AgentID != "" && rec.AgentID != agentID {
-		return false
+		return nil
 	}
 	rec.CancelLocal()
-	return true
+	return rec
 }
 
 // OtherRunInFlight reports whether a launch of a run other than runID is

@@ -346,6 +346,29 @@ func (s *Server) cancelLocalLaunchForRun(key launchKey, agentID, runID string) b
 	return s.launchRegistry.CancelLocalFor(key, agentID, runID)
 }
 
+// cancelLocalLaunchRecord is cancelLocalLaunchForRun that returns the
+// record it woke (nil if none), for recancelLocalLaunch.
+func (s *Server) cancelLocalLaunchRecord(key launchKey, agentID, runID string) *launchRecord {
+	if s.launchRegistry == nil {
+		return nil
+	}
+	return s.launchRegistry.cancelLocalForExcept(key, agentID, runID, nil)
+}
+
+// recancelLocalLaunch is a stop's second launch cancel, run after its start
+// tracker wait with the same agent and run scope as its first: it wakes a
+// launch registered since then, leaving alone woken, the record the first
+// cancel already woke. An async start whose registration began after the
+// first cancel, and handed over to its launch before the tracker cancel
+// reached it, is ended here (design wave 3 §2 D-f, Optional-1 case iv). It
+// reports whether it woke a launch.
+func (s *Server) recancelLocalLaunch(key launchKey, agentID, runID string, woken *launchRecord) bool {
+	if s.launchRegistry == nil {
+		return false
+	}
+	return s.launchRegistry.cancelLocalForExcept(key, agentID, runID, woken) != nil
+}
+
 // writeCreateRegistrationError answers a create whose registration under
 // the agent's name failed (beginCreateRegistration, or an async create's
 // handOff): 400 for an invalid slug, a retryable 503 prior_start_in_progress
