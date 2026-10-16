@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 298
+**Operations:** 300
 
 ## Table of Contents
 
@@ -21,12 +21,12 @@
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
-- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries
-- [agent.messages.read](#agentmessagesread) — Read an agent's message history and message logs
+- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read
+- [agent.messages.read](#agentmessagesread) — Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
 - [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
 - [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
 - [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action
-- [agent.attach](#agentattach) — Attach to an agent session via WebSocket
+- [agent.attach](#agentattach) — Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
 - [agent.port.list](#agentportlist) — List an agent's exposed ports
 - [agent.port.register](#agentportregister) — Register, delete or clear an agent's exposed ports
@@ -89,7 +89,7 @@
 - [project.injectedskills.read](#projectinjectedskillsread) — List the skills injected into a project's agents
 - [project.injectedskills.write](#projectinjectedskillswrite) — Add, replace or remove skills injected into a project's agents
 - [project.gcpsa.create](#projectgcpsacreate) — Register a project-scoped GCP service account. Project-route service account writes use project.manage
-- [project.messagelogs.read](#projectmessagelogsread) — Read a project's message log
+- [project.messagelogs.read](#projectmessagelogsread) — Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read
 - [project.broadcast](#projectbroadcast) — Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
 - [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
 - [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
@@ -133,6 +133,8 @@
 - [inbox.notification.template.create](#inboxnotificationtemplatecreate) — Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
 - [inbox.notification.template.read](#inboxnotificationtemplateread) — List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
 - [inbox.notification.template.delete](#inboxnotificationtemplatedelete) — Delete a subscription template the caller created. A token needs inbox:write for the template's project
+- [project.conversation.gcsobject.read](#projectconversationgcsobjectread) — Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary
+- [web.events.stream](#webeventsstream) — Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream
 - [chat.prefs.read](#chatprefsread) — Read the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:read for the agent's project
 - [chat.prefs.update](#chatprefsupdate) — Write the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:write for the agent's project
 - [chat.space.list](#chatspacelist) — List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
@@ -856,7 +858,7 @@
 
 **Domain:** agent
 
-**Description:** Read an agent's runtime logs and Cloud Logging entries
+**Description:** Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read
 
 ### Entry Points
 
@@ -866,6 +868,8 @@
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/logs` |
 | http_route | GET | `/api/v1/agents/{id}/cloud-logs` |
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs` |
+| sse | GET | `/api/v1/agents/{id}/cloud-logs/stream` |
+| sse | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -891,7 +895,7 @@
 
 **Domain:** agent
 
-**Description:** Read an agent's message history and message logs
+**Description:** Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
 
 ### Entry Points
 
@@ -900,6 +904,9 @@
 | http_route | GET | `/api/v1/agents/{id}/messages` |
 | http_route | GET | `/api/v1/agents/{id}/message-logs` |
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs` |
+| sse | GET | `/api/v1/agents/{id}/messages/stream` |
+| sse | GET | `/api/v1/agents/{id}/message-logs/stream` |
+| sse | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -1039,7 +1046,7 @@
 
 **Domain:** agent
 
-**Description:** Attach to an agent session via WebSocket
+**Description:** Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
 
 ### Entry Points
 
@@ -3553,13 +3560,14 @@
 
 **Domain:** project
 
-**Description:** Read a project's message log
+**Description:** Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}/message-logs` |
+| sse | GET | `/api/v1/projects/{id}/message-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -5080,6 +5088,72 @@
 ### Tests
 
 - `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## project.conversation.gcsobject.read
+
+**Domain:** project
+
+**Description:** Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/gcs/object` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** message-conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestGCSObjectToken_ProjectGroupNeedsProjectRead`
+
+---
+
+## web.events.stream
+
+**Domain:** web
+
+**Description:** Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| sse | GET | `/events` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** event-subjects
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestWebEventStream_RefusesUserAccessToken`
+
+### Exemptions
+
+- **authentication_only:** Each requested subject is authorized for the session user when the stream opens; no single resource permission applies (scope: web event stream) — waives: `base_permission`
 
 ---
 
