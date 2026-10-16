@@ -233,10 +233,17 @@ func launchPhase(a *Agent) string {
 }
 
 // failedLaunchEndReason reports whether an ended launch's end reason means
-// it did not bring the agent up, even without an error code.
+// it did not bring the agent up, even without an error code. not_launched
+// is not one of them: the Hub also ends a launch not_launched when a broker
+// without async launch answered the start synchronously
+// (pkg/hub/launch_dispatch.go, endLaunchNotLaunched after a synchronous
+// answer), and that start goes on outside the launch record. The wait then
+// follows the agent's phase: a start that fails moves it to error or
+// stopped, which ends the wait. The CLI's wait (cmd/launch_wait.go) uses
+// the same end reasons.
 func failedLaunchEndReason(reason string) bool {
 	switch reason {
-	case "failed", "timed_out", "lost", "not_launched":
+	case "failed", "timed_out", "lost":
 		return true
 	}
 	return false
@@ -246,7 +253,8 @@ func failedLaunchEndReason(reason string) bool {
 // success. Error and stopped end it with a failure, and so does a launch
 // that has ended with an error code or a failed end reason, whatever the
 // phase (the failure phase differs by launch kind). Everything else keeps
-// waiting. WaitForLaunch holds a failed phase seen while the launch is
+// waiting, including a launch ended not_launched without an error code
+// (see failedLaunchEndReason). WaitForLaunch holds a failed phase seen while the launch is
 // still active for launchFailureSettle, to report the launch error code.
 func launchDone(a *Agent) (done, running bool) {
 	switch launchPhase(a) {
@@ -304,6 +312,11 @@ func launchWaitBudget(a *Agent) time.Duration {
 // never past the budget, so the outcome can carry the launch error code
 // from the write that ends the launch; if that does not arrive, the
 // failure is reported with what was read (Code may be "").
+//
+// A launch that ends not_launched without an error code does not end the
+// wait by itself: the start may go on synchronously on an older broker, so
+// the wait follows the agent's phase until it is running, error or stopped,
+// or the budget runs out.
 //
 // A nil error means the wait saw the end of the launch: the outcome reports
 // whether the agent is running, or how it failed. Otherwise the error is
