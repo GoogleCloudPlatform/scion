@@ -2325,10 +2325,11 @@ func getLocalBrokerID() string {
 // "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
 // miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	// asyncLaunch matches the broker's heartbeat (runtimebroker.StaticCapabilities),
-	// so the Hub knows it from the join on, before the first heartbeat
-	// (ptone/scion#2918).
-	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	// asyncLaunch and asyncStart match the broker's heartbeat
+	// (runtimebroker.StaticCapabilities), so the Hub knows them from the
+	// join on, before the first heartbeat (ptone/scion#2918,
+	// ptone/scion#4669).
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "asyncStart", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.
