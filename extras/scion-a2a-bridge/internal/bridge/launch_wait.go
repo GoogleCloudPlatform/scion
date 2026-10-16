@@ -17,6 +17,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -249,6 +250,65 @@ func (b *Bridge) waitTaskLaunch(ctx context.Context, taskID string, launching *h
 	}
 	if !changed {
 		return errTaskEndedDuringLaunch
+	}
+	return nil
+}
+
+// errTaskEndedBeforeFollowUp is returned by awaitFirstSend when the task's
+// first send failed (or the task otherwise ended) while the follow-up
+// waited for it.
+var errTaskEndedBeforeFollowUp = errors.New("task ended before the follow-up could be sent")
+
+// beginFirstSend marks taskID's first send as pending while it waits for a
+// launching agent, so a follow-up on the task (awaitFirstSend) is not sent
+// before it. The returned function marks the send done; call it once the
+// send has completed or failed. Without an active launch nothing is
+// recorded and the function does nothing. The record is local to this
+// bridge instance.
+func (b *Bridge) beginFirstSend(taskID string, launching *hubclient.Agent) (done func()) {
+	if !hubclient.LaunchActive(launching) {
+		return func() {}
+	}
+	ch := make(chan struct{})
+	b.firstSendMu.Lock()
+	if b.firstSends == nil {
+		b.firstSends = make(map[string]chan struct{})
+	}
+	b.firstSends[taskID] = ch
+	b.firstSendMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.firstSendMu.Lock()
+			if b.firstSends[taskID] == ch {
+				delete(b.firstSends, taskID)
+			}
+			b.firstSendMu.Unlock()
+			close(ch)
+		})
+	}
+}
+
+// awaitFirstSend waits until taskID's pending first send (beginFirstSend)
+// is done, and returns at once when none is pending. It returns
+// errTaskEndedBeforeFollowUp when the task ended meanwhile (the first send
+// failed, or the task was cancelled or reaped), and the context's error
+// when ctx ends first.
+func (b *Bridge) awaitFirstSend(ctx context.Context, taskID string) error {
+	b.firstSendMu.Lock()
+	ch := b.firstSends[taskID]
+	b.firstSendMu.Unlock()
+	if ch == nil {
+		return nil
+	}
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	task, err := b.store.GetTask(ctx, taskID)
+	if err == nil && task != nil && IsTerminalState(task.State) {
+		return errTaskEndedBeforeFollowUp
 	}
 	return nil
 }

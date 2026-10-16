@@ -340,9 +340,11 @@ func (b *Bridge) SendStreamingMessage(ctx context.Context, projectSlug, agentSlu
 		}
 	}
 
+	firstSent := b.beginFirstSend(taskID, launching)
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
+		defer firstSent()
 
 		// An agent still launching is waited for before the send, with a
 		// working event per launch step; the send's own timeout starts

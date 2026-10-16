@@ -123,6 +123,12 @@ type Bridge struct {
 	// legacy task waiting for a launch is touched against the stale-task
 	// reaper. Tests shorten it.
 	launchKeepAlive time.Duration
+	// firstSends holds, per task, a channel closed when the task's first
+	// send has completed or failed, while that send waits for a launching
+	// agent. A follow-up on the task waits for it, so it never reaches the
+	// agent before the original message (see beginFirstSend).
+	firstSendMu sync.Mutex
+	firstSends  map[string]chan struct{}
 
 	// shutdownCtx is cancelled during graceful shutdown.
 	shutdownCtx    context.Context
@@ -657,9 +663,11 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 	if !blocking {
 		aKey := agentKey(agentCtx.ProjectID, agentCtx.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
+		firstSent := b.beginFirstSend(taskID, launching)
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
+			defer firstSent()
 			// An agent still launching is waited for first; the send's
 			// own timeout starts after the wait.
 			if err := b.waitTaskLaunch(b.shutdownCtx, taskID, launching, nil); err != nil {
@@ -696,17 +704,21 @@ func (b *Bridge) SendMessage(ctx context.Context, projectSlug, agentSlug, contex
 
 	// An agent still launching is waited for before the send; the response
 	// wait below starts after the send.
+	firstSent := b.beginFirstSend(taskID, launching)
 	if err := b.waitTaskLaunch(ctx, taskID, launching, nil); err != nil {
+		firstSent()
 		b.unregisterActiveTask(taskID, aKey)
 		return nil, fmt.Errorf("send message to agent: %w", err)
 	}
 
-	if _, err := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false); err != nil {
+	_, sendErr := writeClient.Agents().SendStructuredMessage(ctx, agentCtx.AgentID, scionMsg, false, false, false)
+	firstSent()
+	if sendErr != nil {
 		if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateFailed); err != nil {
 			b.log.Error("failed to update task state", "error", err, "task_id", taskID)
 		}
 		b.unregisterActiveTask(taskID, aKey)
-		return nil, fmt.Errorf("send message to agent: %w", err)
+		return nil, fmt.Errorf("send message to agent: %w", sendErr)
 	}
 
 	if _, err := b.store.UpdateTaskState(ctx, taskID, TaskStateWorking); err != nil {
@@ -799,8 +811,14 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 		aKey := agentKey(task.ProjectID, task.AgentSlug)
 		b.registerActiveTask(taskID, aKey)
 
-		// An agent still launching is waited for before the send; the
-		// response wait below starts after the send.
+		// A follow-up waits for the task's first send when that send is
+		// still waiting for a launching agent, then for a launching agent
+		// itself; the response wait below starts after the send.
+		if err := b.awaitFirstSend(ctx, taskID); err != nil {
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return nil, fmt.Errorf("send follow-up to agent: %w", err)
+		}
 		if err := b.ensureRunningBeforeFollowUp(ctx, agentID, taskID); err != nil {
 			b.failFollowUpTask(taskID)
 			b.unregisterActiveTask(taskID, aKey)
@@ -839,8 +857,15 @@ func (b *Bridge) sendFollowUp(ctx context.Context, projectSlug, agentSlug, taskI
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
-		// An agent still launching is waited for first; the send's own
-		// timeout starts after the wait.
+		// The task's first send, when still waiting for a launching
+		// agent, and then a launching agent are waited for first; the
+		// send's own timeout starts after the wait.
+		if err := b.awaitFirstSend(b.shutdownCtx, taskID); err != nil {
+			b.log.Warn("non-blocking follow-up: not sent", "error", err, "task_id", taskID)
+			b.failFollowUpTask(taskID)
+			b.unregisterActiveTask(taskID, aKey)
+			return
+		}
 		if err := b.ensureRunningBeforeFollowUp(b.shutdownCtx, agentID, taskID); err != nil {
 			b.log.Warn("non-blocking follow-up: agent did not start", "error", err, "task_id", taskID)
 			b.failFollowUpTask(taskID)
@@ -1715,9 +1740,10 @@ func agentBeingDeleted(a *hubclient.Agent) bool {
 	return a.Deletion.State == hubclient.DeletionStateDeleting || a.Deletion.Stage == hubclient.DeletionStageFinalizing
 }
 
-// findAdoptableAgent returns the first listed agent whose name or slug is
-// agentSlug, skipping agents that are being deleted (ptone/scion#3455).
-func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, found bool) {
+// findAdoptableAgent returns (a copy of) the first listed agent whose name
+// or slug is agentSlug, skipping agents that are being deleted
+// (ptone/scion#3455); nil when there is none.
+func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) *hubclient.Agent {
 	for i := range agents {
 		a := &agents[i]
 		if a.Name != agentSlug && a.Slug != agentSlug {
@@ -1726,29 +1752,31 @@ func findAdoptableAgent(agents []hubclient.Agent, agentSlug string) (agentID, pr
 		if agentBeingDeleted(a) {
 			continue
 		}
-		return a.ID, a.ProjectID, true
+		found := *a
+		return &found
 	}
-	return "", "", false
+	return nil
 }
 
-// adoptAgent is findAdoptableAgent that also returns the listed agent when
-// its launch is still active (launched by another client, or by an earlier
-// create of ours), so the caller waits for it before sending.
+// adoptAgent returns the adoptable agent's ID and project (empty when there
+// is none) and, when its launch is still active (launched by another
+// client, or by an earlier create of ours), the agent itself, so the caller
+// waits for it before sending.
 func adoptAgent(agents []hubclient.Agent, agentSlug string) (agentID, projectID string, launching *hubclient.Agent) {
-	agentID, projectID, found := findAdoptableAgent(agents, agentSlug)
-	if !found {
+	a := findAdoptableAgent(agents, agentSlug)
+	if a == nil {
 		return "", "", nil
 	}
-	for i := range agents {
-		if agents[i].ID == agentID && hubclient.LaunchActive(&agents[i]) {
-			a := agents[i]
-			return agentID, projectID, &a
-		}
+	if hubclient.LaunchActive(a) {
+		launching = a
 	}
-	return agentID, projectID, nil
+	return a.ID, a.ProjectID, launching
 }
 
 // resolveContext maps an A2A context to a Scion agent, creating a new context if needed.
+// It is a test convenience: the send paths use resolveContextLaunch, which
+// also returns the agent to wait for. It is kept so the tests that resolve
+// a context without a send stay unchanged.
 func (b *Bridge) resolveContext(ctx context.Context, projectSlug, agentSlug, contextID string) (*state.Context, error) {
 	agentCtx, _, err := b.resolveContextLaunch(ctx, projectSlug, agentSlug, contextID)
 	return agentCtx, err

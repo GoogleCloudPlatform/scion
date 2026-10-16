@@ -82,7 +82,7 @@ type launchHub struct {
 	script  []*hubclient.Agent
 	getErr  error
 	// hold, when set, makes Get answer the first script entry until it is
-	// closed.
+	// closed, and the hub refuse sends until then.
 	hold chan struct{}
 
 	gets       atomic.Int32
@@ -92,6 +92,12 @@ type launchHub struct {
 	sendGets   []int32
 	sent       chan struct{}
 	onSend     func(msg *messages.StructuredMessage)
+	// sendDelay, when set, delays the completion of a send; completed
+	// records the message texts in the order their sends completed.
+	sendDelay func(msg *messages.StructuredMessage) time.Duration
+	completed []string
+	// refused counts sends refused while held.
+	refused int
 }
 
 func newLaunchHub(created *hubclient.Agent, script ...*hubclient.Agent) *launchHub {
@@ -134,12 +140,30 @@ func (h *launchHub) service() *mockAgentService {
 			if interrupt {
 				return nil, nil
 			}
+			if h.hold != nil {
+				// While held the agent is launching: the hub refuses
+				// the message (409 agent_not_running).
+				select {
+				case <-h.hold:
+				default:
+					h.mu.Lock()
+					h.refused++
+					h.mu.Unlock()
+					return nil, errors.New("agent_not_running: agent is still launching")
+				}
+			}
 			h.mu.Lock()
 			h.sendGets = append(h.sendGets, h.gets.Load())
 			h.mu.Unlock()
 			if h.onSend != nil {
 				h.onSend(msg)
 			}
+			if h.sendDelay != nil {
+				time.Sleep(h.sendDelay(msg))
+			}
+			h.mu.Lock()
+			h.completed = append(h.completed, msg.Msg)
+			h.mu.Unlock()
 			h.sent <- struct{}{}
 			return nil, nil
 		},
@@ -201,21 +225,11 @@ func waitTaskState(t *testing.T, b *Bridge, taskID, want string) {
 	}
 }
 
-func waitTaskUnregistered(t *testing.T, b *Bridge, taskID string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		b.tasksMu.RLock()
-		_, ok := b.activeTasks[taskID]
-		b.tasksMu.RUnlock()
-		if !ok {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("task %s still registered", taskID)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+func taskRegistered(b *Bridge, taskID string) bool {
+	b.tasksMu.RLock()
+	defer b.tasksMu.RUnlock()
+	_, ok := b.activeTasks[taskID]
+	return ok
 }
 
 // --- opt-in and configuration ---
@@ -451,7 +465,15 @@ func TestSendMessage_Legacy_TaskEndedDuringWait_NoSend(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 	close(hub.hold)
-	waitTaskUnregistered(t, b, res.ID)
+	// The send goroutine ends either by sending or by unregistering the
+	// task without a send.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(hub.sends()) == 0 && taskRegistered(b, res.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("send goroutine did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if n := len(hub.sends()); n != 0 {
 		t.Errorf("sends = %d, want 0 for a task cancelled during the launch wait", n)
 	}
@@ -646,5 +668,89 @@ func TestSendFollowUp_GetErrorStillSends(t *testing.T) {
 	}
 	if n := len(hub.sends()); n != 1 {
 		t.Errorf("sends = %d, want 1", n)
+	}
+}
+
+// A follow-up sent while the task's first message still waits for the
+// launching agent is delivered after that message, not before it.
+func TestSendFollowUp_WaitsForPendingFirstSend(t *testing.T) {
+	for _, blocking := range []bool{true, false} {
+		name := map[bool]string{true: "blocking follow-up", false: "non-blocking follow-up"}[blocking]
+		t.Run(name, func(t *testing.T) {
+			hub := newLaunchHub(launchingAgent("pod_create"), launchingAgent("pod_create"), runningAgent())
+			hub.hold = make(chan struct{})
+			// The first send takes a while to complete: a follow-up that
+			// does not wait for it completes first.
+			hub.sendDelay = func(msg *messages.StructuredMessage) time.Duration {
+				if msg.Msg == "first" {
+					return 150 * time.Millisecond
+				}
+				return 0
+			}
+			var b *Bridge
+			var firstTask atomic.Value
+			hub.onSend = func(msg *messages.StructuredMessage) {
+				if msg.Msg == "second" {
+					injectResponseEvent(t, b.store, firstTask.Load().(string), "done")
+				}
+			}
+			b = newLaunchBridge(t, hub.service(), nil)
+			res, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", []Part{{Text: "first"}}, false)
+			if err != nil {
+				t.Fatalf("SendMessage: %v", err)
+			}
+			firstTask.Store(res.ID)
+			waitTaskState(t, b, res.ID, TaskStateWorking)
+
+			followUpErr := make(chan error, 1)
+			go func() {
+				_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", res.ID, []Part{{Text: "second"}}, blocking)
+				followUpErr <- err
+			}()
+			time.Sleep(50 * time.Millisecond) // the follow-up is waiting too
+			close(hub.hold)
+			hub.waitSend(t)
+			hub.waitSend(t)
+			if err := <-followUpErr; err != nil {
+				t.Fatalf("follow-up: %v", err)
+			}
+			hub.mu.Lock()
+			order := append([]string(nil), hub.completed...)
+			hub.mu.Unlock()
+			if len(order) != 2 || order[0] != "first" || order[1] != "second" {
+				t.Errorf("send completion order = %v, want [first second]: the follow-up must not overtake the first message", order)
+			}
+		})
+	}
+}
+
+// A follow-up waiting for the task's first send is not sent when that send
+// fails because the launch failed.
+func TestSendFollowUp_FirstSendFailed_NoSend(t *testing.T) {
+	hub := newLaunchHub(launchingAgent("pod_create"), launchingAgent("pod_create"), failedLaunchAgent())
+	hub.hold = make(chan struct{})
+	b := newLaunchBridge(t, hub.service(), nil)
+	res, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", "", []Part{{Text: "first"}}, false)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitTaskState(t, b, res.ID, TaskStateWorking)
+	followUpErr := make(chan error, 1)
+	go func() {
+		_, err := b.SendMessage(context.Background(), "proj-1", resolveTestSlug, "", res.ID, []Part{{Text: "second"}}, true)
+		followUpErr <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(hub.hold)
+	select {
+	case err = <-followUpErr:
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow-up did not return")
+	}
+	if err == nil || !errors.Is(err, errTaskEndedBeforeFollowUp) {
+		t.Errorf("follow-up error = %v, want errTaskEndedBeforeFollowUp", err)
+	}
+	if n := len(hub.sends()); n != 0 {
+		t.Errorf("sends = %d, want 0: the follow-up must not be sent after the first send failed", n)
 	}
 }
