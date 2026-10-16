@@ -81,18 +81,23 @@ function fallbackLabel(key: string): string {
   return key.replace(/_/g, ' ');
 }
 
-/** The display text for a launch step. */
-export function launchStepLabel(step: string): string {
+/** The display text for a launch step; "" when there is none. */
+export function launchStepLabel(step: string | null | undefined): string {
+  if (!step) return '';
   return Object.hasOwn(LAUNCH_STEP_LABELS, step) ? LAUNCH_STEP_LABELS[step] : fallbackLabel(step);
 }
 
-/** The display text for a launch failure code. */
-export function launchCodeLabel(code: string): string {
+/** The display text for a launch failure code; "" when there is none. */
+export function launchCodeLabel(code: string | null | undefined): string {
+  if (!code) return '';
   return Object.hasOwn(LAUNCH_CODE_LABELS, code) ? LAUNCH_CODE_LABELS[code] : fallbackLabel(code);
 }
 
-/** The launch banner title for a launch in flight, by launch kind. */
-export function launchKindTitle(kind: string): string {
+/**
+ * The launch banner title for a launch in flight, by launch kind. A missing
+ * kind reads as a create, the only kind before start launches.
+ */
+export function launchKindTitle(kind: string | null | undefined): string {
   switch (kind) {
     case 'start':
       // A resume is a start launch too: the launch view does not say
@@ -106,7 +111,7 @@ export function launchKindTitle(kind: string): string {
 }
 
 /** The failed-launch banner title, by launch kind. */
-export function launchFailedTitle(kind: string): string {
+export function launchFailedTitle(kind: string | null | undefined): string {
   switch (kind) {
     case 'start':
       return 'Agent start did not complete';

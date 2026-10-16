@@ -117,6 +117,19 @@ describe('launch labels', () => {
     expect(launchStepLabel('constructor')).toBe('constructor');
   });
 
+  // The hub always sends these, but a missing value must not throw.
+  it('shows nothing for a missing step or code', () => {
+    expect(launchStepLabel(undefined)).toBe('');
+    expect(launchStepLabel(null)).toBe('');
+    expect(launchCodeLabel(undefined)).toBe('');
+    expect(launchCodeLabel(null)).toBe('');
+  });
+
+  it('titles a launch without a kind as a create', () => {
+    expect(launchKindTitle(undefined)).toBe('Launching');
+    expect(launchFailedTitle(null)).toBe('Agent create did not complete');
+  });
+
   it.each([
     ['create', 'Launching', 'Agent create did not complete'],
     ['start', 'Starting', 'Agent start did not complete'],

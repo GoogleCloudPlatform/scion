@@ -1432,7 +1432,7 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="agent-launch-banner" data-testid="agent-launch-banner">
           <sl-spinner></sl-spinner>
           <div class="launch-content">
-            <div class="launch-title">${launchKindTitle(agent.launch?.kind ?? '')}</div>
+            <div class="launch-title">${launchKindTitle(agent.launch?.kind)}</div>
             ${stepEl} ${messageEl}
           </div>
         </div>
