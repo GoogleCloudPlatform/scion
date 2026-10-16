@@ -998,3 +998,45 @@ func TestAgentHalted_SignaledThenPreemptedIneligibleRuntimeStaysStopped(t *testi
 		})
 	}
 }
+
+func TestAgentHalted_SignaledKeptOnAnotherRunsRunningReport(t *testing.T) {
+	// A running report from another run is dropped by the run check, so
+	// it does not clear the stored signaled reason.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "signaled-other-run-running", defaultHaltRow())
+	storeSignaled(t, ctx, s, id)
+
+	su := selfReport("running", "working")
+	su.ReportRunID = "run-0"
+	apply(t, ctx, s, id, su)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	assert.Equal(t, "signaled", got.ExitReason, "another run's report does not clear it")
+}
+
+func TestAgentHalted_SignaledStopThenOOMBackfillCleanExitHalts(t *testing.T) {
+	// The runtime reports error + oom_killed with exit code 0 on a row the
+	// agent's signaled report already stopped. The hub's terminal-row
+	// backfill keeps the stored phase (no phase on the store write); a
+	// write that names phase error is covered too.
+	for _, tc := range []struct{ name, phase, haltedFrom string }{
+		{"phase-kept", "", ""},
+		{"phase-error", "error", "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			id := newHaltAgent(t, ctx, s, projectID, "signaled-oom-backfill", defaultHaltRow())
+			storeSignaled(t, ctx, s, id)
+
+			res := apply(t, ctx, s, id, heartbeat(tc.phase, "oom_killed", intp(0)))
+			assert.Equal(t, store.AgentStatusResult{Halted: true, HaltedFrom: tc.haltedFrom}, res)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, "halted", got.Phase)
+			assert.Equal(t, "oom_killed", got.ExitReason, "the runtime reason is recorded")
+		})
+	}
+}
