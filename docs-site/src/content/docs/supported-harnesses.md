@@ -26,7 +26,7 @@ harness-config, pull it with `scion harness-config pull <name>`, repair it, and 
 for details.
 
 `antigravity` and `gemini-cli` are installed by default. `opencode`, `codex`, `copilot`, `hermes`,
-`grok-build`, and `muse-code` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
+`grok-build`, `muse-code`, and `pi` are opt-in bundles you add via a [harness-config](/scion/reference/harness-settings/#managing-harness-configs).
 :::
 
 ## 1. Gemini CLI (`gemini-cli`)
@@ -373,6 +373,25 @@ then capture the credential with the container's `capture_auth.py`
 - **Resume**: Partial — resume is an interactive slash command (`/resume --last`), not a CLI flag.
 - **No project-scoped MCP**.
 - **OAuth/Vertex AI/Auth File**: not supported — Meta API key auth only.
+
+## 10. pi (`pi`)
+
+A harness for the [pi](https://pi.dev) multi-provider terminal coding agent. Opt-in bundle; not yet exercised against a live pi under Scion (see `harnesses/pi/README.md`).
+
+### Authentication
+| Mode | Credential | Setup |
+|---|---|---|
+| API Key (default) | `ANTHROPIC_API_KEY` or another provider key listed in `harnesses/pi/config.yaml` | Set env var |
+| Auth File | `~/.pi/agent/auth.json` (secret `PI_AUTH`) | Written once, never overwritten (pi refreshes tokens in place) |
+
+With no credentials the agent drops to a shell — run `pi` and use `/login`.
+
+### Configuration
+- **Config directory**: `~/.pi/agent/` (`settings.json`, `AGENTS.md`, `APPEND_SYSTEM.md`).
+- **Project trust**: defaults to `never` (`SCION_PI_PROJECT_TRUST=never|ask|always`).
+- **Interrupt key**: `Escape`.
+
+See `harnesses/pi/README.md` for the full settings table and known limits. The capability matrix below does not yet include a pi column.
 
 ---
 

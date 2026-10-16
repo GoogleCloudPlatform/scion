@@ -32,6 +32,7 @@ var harnessImageMap = map[string]string{
 	"hermes":      "scion-hermes:latest",
 	"muse-code":   "scion-muse-code:latest",
 	"opencode":    "scion-opencode:latest",
+	"pi":          "scion-pi:latest",
 }
 
 // HarnessImages returns the fully qualified image names needed for the given harness keys.
