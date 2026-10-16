@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -614,7 +615,44 @@ func (m *panickingStartManager) Start(ctx context.Context, opts api.StartOptions
 // start's Manager.Start ends the launch failed (runtime_error) and cleans
 // up its resources, instead of ending the broker process, as the
 // synchronous start contains it (reportRuntimePanic). Agent files stay.
+//
+// The scenario runs in a child process of the test binary: a panic that
+// escapes the launch goroutine ends the process, so only a parent can
+// report it as this test's failure, with the panic as the pinned cause.
 func TestAsyncStart_PanicInStartFailsLaunch(t *testing.T) {
+	if os.Getenv(asyncStartPanicChildEnv) == "1" {
+		asyncStartPanicScenario(t)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAsyncStart_PanicInStartFailsLaunch$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), asyncStartPanicChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		cause := "unknown"
+		if i := bytes.Index(out, []byte("panic: ")); i >= 0 {
+			cause = string(bytes.SplitN(out[i:], []byte("\n"), 2)[0])
+		}
+		t.Fatalf("the async start scenario process failed (%v); cause: %s\n%s", err, cause, tailBytes(out, 4000))
+	}
+	if !bytes.Contains(out, []byte("--- PASS: TestAsyncStart_PanicInStartFailsLaunch")) {
+		t.Fatalf("the async start scenario process did not pass:\n%s", tailBytes(out, 4000))
+	}
+}
+
+// asyncStartPanicChildEnv marks the child process that runs
+// asyncStartPanicScenario.
+const asyncStartPanicChildEnv = "SCION_TEST_ASYNC_START_PANIC_CHILD"
+
+func tailBytes(b []byte, n int) string {
+	if len(b) > n {
+		b = b[len(b)-n:]
+	}
+	return string(b)
+}
+
+// asyncStartPanicScenario is TestAsyncStart_PanicInStartFailsLaunch's body,
+// run in the child process.
+func asyncStartPanicScenario(t *testing.T) {
 	mgr := &panickingStartManager{asyncManager: newAsyncManager()}
 	srv, rtb := newAsyncTestServer(t, mgr)
 	projectDir, agentDir := asyncStartProject(t, "agent-p")
