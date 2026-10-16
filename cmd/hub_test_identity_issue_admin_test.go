@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -34,13 +35,44 @@ import (
 // hubprofiletest's fake, which accepts an admin delegation only with an ID
 // token of the admin issuer account.
 
-// resetAdminRoleFlags clears the --admin-role values these tests set (on
-// issue-admin, web-code and A4's issue) when the test ends, so a later test
-// that drives rootCmd without resetting flags never inherits them.
+// resetAdminRoleFlags restores, when the test ends, every flag value and
+// pflag Changed state these tests can set: the local flags of the hub
+// test-identity, hub profile and hub status commands (including the
+// variables they share with WS3 and A4: --admin-role, --purpose, --ttl,
+// --lifetime, --json, --out, --purge), the root --hub-profile and the
+// --as and --run flags of the hub and artifact trees. A later test that
+// drives rootCmd without resetting flags then inherits nothing from them.
 func resetAdminRoleFlags(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
+		for _, name := range []string{"hub-profile", "hub", "no-hub", "format", "global"} {
+			if f := rootCmd.PersistentFlags().Lookup(name); f != nil {
+				require.NoError(t, f.Value.Set(f.DefValue))
+				f.Changed = false
+			}
+		}
+		for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
+			for _, name := range []string{"as", "run"} {
+				if f := c.PersistentFlags().Lookup(name); f != nil {
+					require.NoError(t, f.Value.Set(f.DefValue))
+					f.Changed = false
+				}
+			}
+		}
+		var walk func(c *cobra.Command)
+		walk = func(c *cobra.Command) {
+			resetCommandFlags(t, c)
+			for _, sub := range c.Commands() {
+				walk(sub)
+			}
+		}
+		for _, p := range []string{"hub.test-identity", "hub.profile", "hub.status"} {
+			walk(realCommand(t, p))
+		}
+		// Belt and braces: the shared variables themselves.
 		testIdentityIssueAdminRole, testIdentityWebCodeAdminRole, testIdentityAdminRole = "", "", ""
+		testIdentityPurpose, testIdentityOut, testIdentityJSON = "", "", false
+		testIdentityTTL, testIdentityLifetime = 0, 0
 	})
 }
 
