@@ -632,7 +632,9 @@ func (s *Server) clearSupersededQueuedStopFor(ctx context.Context, agent *store.
 }
 
 // publishAgentStatusByID publishes the agent's current row as a status
-// event, best effort; a soft-deleted or unreadable row publishes nothing.
+// event, best effort. A row a delete has won (soft-deleted or held by a
+// live delete claim, deletedOrDeleteHeld) or an unreadable row publishes
+// nothing: the delete owns what clients see.
 func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 	if s.events == nil {
 		return
@@ -640,7 +642,7 @@ func (s *Server) publishAgentStatusByID(ctx context.Context, agentID string) {
 	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(pctx, agentID)
-	if err != nil || !cur.DeletedAt.IsZero() {
+	if err != nil || deletedOrDeleteHeld(cur) {
 		return
 	}
 	s.events.PublishAgentStatus(pctx, cur)

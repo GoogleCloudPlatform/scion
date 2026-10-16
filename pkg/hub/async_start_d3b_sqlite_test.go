@@ -662,6 +662,86 @@ func TestAsyncStart_DeleteWonDuringAcceptedStart(t *testing.T) {
 	}
 }
 
+// statusRecorder records the agent status events published, with the
+// phase and launch state each carried.
+type statusRecorder struct {
+	EventPublisher
+	mu     sync.Mutex
+	events []store.Agent
+}
+
+func (r *statusRecorder) PublishAgentStatus(ctx context.Context, a *store.Agent) {
+	r.mu.Lock()
+	r.events = append(r.events, *a)
+	r.mu.Unlock()
+	r.EventPublisher.PublishAgentStatus(ctx, a)
+}
+
+func (r *statusRecorder) forAgent(id string) []store.Agent {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []store.Agent
+	for _, a := range r.events {
+		if a.ID == id {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// recordStatusEvents installs a statusRecorder on srv.
+func recordStatusEvents(t *testing.T, srv *Server) *statusRecorder {
+	t.Helper()
+	bus := NewChannelEventPublisher()
+	t.Cleanup(bus.Close)
+	r := &statusRecorder{EventPublisher: bus}
+	srv.events = r
+	return r
+}
+
+// TestAsyncStart_AcceptedPublishesLaunchingAgent pins review r1 O4: an
+// accepted start publishes the re-read row (phase starting, its active
+// launch) at once, so watchers do not wait for the launch's first report;
+// and review r2 item 3: a row a delete has claimed meanwhile publishes
+// nothing.
+func TestAsyncStart_AcceptedPublishesLaunchingAgent(t *testing.T) {
+	f, d := newAsyncStartFixture(t)
+	rec := recordStatusEvents(t, f.srv)
+	a := f.addAgent("as-pub", string(state.PhaseStopped), "")
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	events := rec.forAgent(a.ID)
+	require.NotEmpty(t, events, "the acceptance publishes the agent")
+	last := events[len(events)-1]
+	assert.Equal(t, string(state.PhaseStarting), last.Phase, "the published row is the launching one")
+	assert.Equal(t, store.LaunchStateActive, last.LaunchState)
+
+	held := f.addAgent("as-pub-held", string(state.PhaseStopped), "")
+	d.onAccept = func(_ context.Context, a *store.Agent) {
+		claimForTest(t, f.s, a.ID, store.DeletionStateDeleting, time.Minute)
+	}
+	code, body = lifecycleWithBody(t, f, held.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusConflict, code, body)
+	assert.Empty(t, rec.forAgent(held.ID), "a delete-held row publishes nothing on acceptance")
+}
+
+// TestAsyncStart_HandoffLeavesContainerStatus pins review r1 N1: a start
+// that supersedes a queued stop and is handed off to an asynchronous
+// launch clears the queued-stop notice but leaves the container status,
+// since the container is still launching.
+func TestAsyncStart_HandoffLeavesContainerStatus(t *testing.T) {
+	f, _ := newAsyncStartFixture(t)
+	a := f.addAgent("as-queued", string(state.PhaseStopped), "", func(a *store.Agent) {
+		a.ContainerStatus = containerStatusStopQueued
+		a.Message = offlineStopMessage
+	})
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := requireHandedOff(t, f.s, a.ID, store.LaunchKindStart, string(state.PhaseStopped))
+	assert.Empty(t, row.Message, "the queued-stop notice is cleared")
+	assert.Equal(t, containerStatusStopQueued, row.ContainerStatus, "the container status is left to the launch, not set to running")
+}
+
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase
 // rule on the create endpoint: the first start of a created agent (a
 // counted phase) is synchronous even when opted in.
