@@ -154,9 +154,10 @@ type Agent struct {
 	// UpdateAgent (the whole-row CAS writer) never sets any of these from the
 	// caller's struct: they are absent from its Ent builder chain entirely.
 	// The only writers are BeginLaunch, BeginStartLaunch, MarkLaunchAccepted,
-	// EndLaunch, ApplyLaunchReport and RunLaunchReaperTick, plus the narrow "clear
-	// launch_error / end an active launch" rule inside UpdateAgent and
-	// UpdateAgentStatus when the written phase is "running" (§3.3).
+	// EndLaunch, EndLaunchWithCode, ApplyLaunchReport and RunLaunchReaperTick,
+	// plus the narrow "clear launch_error / end an active launch" rule inside
+	// UpdateAgent and UpdateAgentStatus when the written phase is "running"
+	// (§3.3).
 	LaunchAsyncOptIn   bool      `json:"-"`
 	LaunchID           string    `json:"-"`
 	LaunchState        string    `json:"-"` // "" | "active" | "ended"

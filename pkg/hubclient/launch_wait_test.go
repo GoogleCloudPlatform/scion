@@ -234,15 +234,18 @@ func TestWaitForLaunch_NotLaunchedFailedPhaseEndsPromptly(t *testing.T) {
 }
 
 // A not_launched launch that carries an error code still ends the wait,
-// whatever the phase. Mutant: drop the error code clause in launchDone.
+// whatever the phase: the Hub's failed dispatch keeps the row in
+// provisioning and ends the launch with dispatch_failed.
+// Mutant: drop the error code clause in launchDone.
 func TestWaitForLaunch_NotLaunchedWithCodeEnds(t *testing.T) {
 	fastLaunchTimings(t)
-	svc := script(ok(notLaunchedAgent("starting", "image_pull_failed")))
+	svc := script(ok(notLaunchedAgent("provisioning", "dispatch_failed")))
 
 	out, err := WaitForLaunch(context.Background(), svc, "a1", launchingAgent(""), LaunchWaitOptions{})
 	require.NoError(t, err)
 	assert.False(t, out.Running)
-	assert.Equal(t, "image_pull_failed", out.Code)
+	assert.Equal(t, "provisioning", out.Phase)
+	assert.Equal(t, "dispatch_failed", out.Code)
 	assert.Equal(t, "not_launched", out.EndReason)
 	assert.Equal(t, 1, svc.Calls())
 }

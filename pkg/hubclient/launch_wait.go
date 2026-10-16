@@ -234,13 +234,14 @@ func launchPhase(a *Agent) string {
 
 // failedLaunchEndReason reports whether an ended launch's end reason means
 // it did not bring the agent up, even without an error code. not_launched
-// is not one of them: the Hub also ends a launch not_launched when a broker
-// without async launch answered the start synchronously
-// (pkg/hub/launch_dispatch.go, endLaunchNotLaunched after a synchronous
-// answer), and that start goes on outside the launch record. The wait then
-// follows the agent's phase: a start that fails moves it to error or
-// stopped, which ends the wait. The CLI's wait (cmd/launch_wait.go) uses
-// the same end reasons.
+// is not one of them: the Hub ends a launch not_launched without a code when
+// a broker without async launch answered the start synchronously (the start
+// goes on outside the launch record, and the Hub applies the broker's
+// phase), and when the start waits for env to be submitted. The Hub's
+// not_launched failures carry a code (dispatch_failed), which ends the wait
+// through launchDone's code rule (pkg/hub/launch_dispatch.go,
+// dispatchLaunching). Without a code the wait follows the agent: running,
+// error or stopped, not found, or the budget (ErrLaunchWaitTimeout).
 func failedLaunchEndReason(reason string) bool {
 	switch reason {
 	case "failed", "timed_out", "lost":
@@ -254,8 +255,9 @@ func failedLaunchEndReason(reason string) bool {
 // that has ended with an error code or a failed end reason, whatever the
 // phase (the failure phase differs by launch kind). Everything else keeps
 // waiting, including a launch ended not_launched without an error code
-// (see failedLaunchEndReason). WaitForLaunch holds a failed phase seen while the launch is
-// still active for launchFailureSettle, to report the launch error code.
+// (see failedLaunchEndReason). WaitForLaunch holds a failed phase seen
+// while the launch is still active for launchFailureSettle, to report the
+// launch error code.
 func launchDone(a *Agent) (done, running bool) {
 	switch launchPhase(a) {
 	case string(state.PhaseRunning):
@@ -314,9 +316,11 @@ func launchWaitBudget(a *Agent) time.Duration {
 // failure is reported with what was read (Code may be "").
 //
 // A launch that ends not_launched without an error code does not end the
-// wait by itself: the start may go on synchronously on an older broker, so
-// the wait follows the agent's phase until it is running, error or stopped,
-// or the budget runs out.
+// wait by itself, because the start may go on synchronously on an older
+// broker, or wait for env (see failedLaunchEndReason). The wait follows the
+// agent until it is running, error or stopped, or not found, or the budget
+// runs out. A not_launched launch with a code (dispatch_failed) ends the
+// wait as a failed launch.
 //
 // A nil error means the wait saw the end of the launch: the outcome reports
 // whether the agent is running, or how it failed. Otherwise the error is
