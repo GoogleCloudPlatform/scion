@@ -407,7 +407,15 @@ func TestRedactImageRegistry(t *testing.T) {
 		"https://u:p/w@registry.example/x": "https://***@registry.example/x",
 		"registry.example/team/sub":        "registry.example/team/sub",
 		"a:b@c:d@registry.example:5000/x":  "***@registry.example:5000/x",
-		"":                                 "",
+		// A "://" inside a password is not a scheme.
+		"user:p://x@host.example/r": "***@host.example/r",
+		// A digest-like host with no repository path is not a digest.
+		"u:p@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":        "***@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"user:pa/ss@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "***@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		// A short hex is not a digest: over-redacted, never shown.
+		"registry.example/path@sha256:abc": "***@sha256:abc",
+		"[::1]:5000/x@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "[::1]:5000/x@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"": "",
 	}
 	for in, want := range tests {
 		if got := RedactImageRegistry(in); got != want {

@@ -269,16 +269,19 @@ func cloneStringMap(m map[string]string) map[string]string {
 // replaced by "***@", keeping the scheme, host and path. An image registry
 // prefix never needs credentials, so a value carrying them is an operator
 // mistake that must not be displayed or logged as is. The userinfo ends at
-// the last "@" outside a trailing image digest ("@sha256:<hex>"), so a "/"
-// inside a password is redacted too.
+// the last "@" outside a trailing image digest, so a "/" inside a password
+// is redacted too. A prefix is a scheme only when it is a valid scheme name
+// followed by "://", and a trailing "@<alg>:<hex>" is a digest only when it
+// follows a repository path (host[:port]/...); anything else is treated as
+// userinfo, so an ambiguous value is over-redacted, never shown.
 func RedactImageRegistry(registry string) string {
 	rest := registry
 	scheme := ""
-	if i := strings.Index(rest, "://"); i >= 0 {
-		scheme, rest = rest[:i+3], rest[i+3:]
+	if m := imageRegistryScheme.FindString(rest); m != "" {
+		scheme, rest = m, rest[len(m):]
 	}
 	digest := ""
-	if m := imageDigestSuffix.FindStringIndex(rest); m != nil {
+	if m := imageDigestSuffix.FindStringIndex(rest); m != nil && followsRepositoryPath(rest[:m[0]]) {
 		rest, digest = rest[:m[0]], rest[m[0]:]
 	}
 	at := strings.LastIndex(rest, "@")
@@ -288,5 +291,18 @@ func RedactImageRegistry(registry string) string {
 	return scheme + "***@" + rest[at+1:] + digest
 }
 
-// imageDigestSuffix matches a trailing image digest ("@sha256:<hex>").
+// followsRepositoryPath reports whether ref, the part before a digest, ends
+// in a repository path: after its last "@", a host[:port] segment and a "/".
+func followsRepositoryPath(ref string) bool {
+	ref = ref[strings.LastIndex(ref, "@")+1:]
+	host, _, ok := strings.Cut(ref, "/")
+	return ok && imageRegistryHost.MatchString(host)
+}
+
+// imageRegistryScheme matches a leading URL scheme ("https://").
+var imageRegistryScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://`)
+
+// imageRegistryHost matches a registry host with an optional numeric port.
+var imageRegistryHost = regexp.MustCompile(`^(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]+)?$`)
+
 var imageDigestSuffix = regexp.MustCompile(`@[a-z0-9]+(?:[.+_-][a-z0-9]+)*:[0-9a-fA-F]{32,}$`)
