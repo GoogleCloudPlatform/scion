@@ -725,11 +725,11 @@ func TestAsyncStart_AcceptedPublishesLaunchingAgent(t *testing.T) {
 	assert.Empty(t, rec.forAgent(held.ID), "a delete-held row publishes nothing on acceptance")
 }
 
-// TestAsyncStart_HandoffLeavesContainerStatus pins review r1 N1: a start
-// that supersedes a queued stop and is handed off to an asynchronous
-// launch clears the queued-stop notice but leaves the container status,
-// since the container is still launching.
-func TestAsyncStart_HandoffLeavesContainerStatus(t *testing.T) {
+// TestAsyncStart_HandoffSetsContainerStarting pins review r1 N1 and r3
+// (ptone/scion#5266): a start that supersedes a queued stop and is handed
+// off to an asynchronous launch clears the queued-stop notice and marks the
+// container starting (not running, and not stop_queued).
+func TestAsyncStart_HandoffSetsContainerStarting(t *testing.T) {
 	f, _ := newAsyncStartFixture(t)
 	a := f.addAgent("as-queued", string(state.PhaseStopped), "", func(a *store.Agent) {
 		a.ContainerStatus = containerStatusStopQueued
@@ -739,7 +739,40 @@ func TestAsyncStart_HandoffLeavesContainerStatus(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, body)
 	row := requireHandedOff(t, f.s, a.ID, store.LaunchKindStart, string(state.PhaseStopped))
 	assert.Empty(t, row.Message, "the queued-stop notice is cleared")
-	assert.Equal(t, containerStatusStopQueued, row.ContainerStatus, "the container status is left to the launch, not set to running")
+	assert.Equal(t, containerStatusStarting, row.ContainerStatus, "the handed-off container is marked starting")
+}
+
+// TestAsyncStart_FailedHandoffReleasesSlot pins ptone/scion#5266: after a
+// start that superseded a queued stop is handed off and its launch fails,
+// the agent no longer holds broker capacity and its slot is released, also
+// after the reservation sweep. While the launch is live it holds the slot
+// through its phase (starting).
+func TestAsyncStart_FailedHandoffReleasesSlot(t *testing.T) {
+	f, _ := newAsyncStartFixture(t)
+	setBrokerAgentCeiling(t, f.s, 5)
+	a := f.addAgent("as-queued-fail", string(state.PhaseStopped), "", func(a *store.Agent) {
+		a.ContainerStatus = containerStatusStopQueued
+		a.Message = offlineStopMessage
+	})
+	code, body := lifecycleWithBody(t, f, a.ID, "start", map[string]bool{"acceptAsyncLaunch": true})
+	require.Equal(t, http.StatusOK, code, body)
+	row := requireHandedOff(t, f.s, a.ID, store.LaunchKindStart, string(state.PhaseStopped))
+	assert.True(t, agentHoldsBrokerCapacity(row), "a live launch holds capacity through its phase")
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the slot is held while the launch is live")
+
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: row.LaunchID, InstanceID: "inst-1", State: "failed", ErrorCode: "boom",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), store.LaunchReportResultApplied)
+	got := getAgent(t, f.s, a.ID)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the failed start returns to its prior phase")
+	assert.NotEqual(t, containerStatusStopQueued, got.ContainerStatus)
+	assert.False(t, agentHoldsBrokerCapacity(got), "a failed hand-off no longer holds broker capacity")
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the failed launch released the slot")
+
+	f.srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the sweep does not restore it")
 }
 
 // TestAsyncStart_CreateEndpointCreatedStaysSync pins design D-b's phase

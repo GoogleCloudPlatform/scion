@@ -573,8 +573,9 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 	}
 	if supersedesQueuedStop && (err == nil || errors.Is(err, errStartedStatusWrite)) {
 		// A handed-off start's container is still launching: clear the
-		// queued stop but leave the container status to the launch.
-		s.clearSupersededQueuedStopFor(ctx, agent, !accepted)
+		// queued stop and mark the container starting, not running
+		// (ptone/scion#5266).
+		s.clearSupersededQueuedStopFor(ctx, agent, accepted)
 	}
 	if err == nil && accepted {
 		// Watchers see the launching agent (phase starting, its launch)
@@ -603,14 +604,22 @@ const provisionedRestingNote = "The agent is still provisioned and can be starte
 // would repaint a deleting row running (ptone/scion#3696). The container
 // status becomes running unless the broker reported one.
 func (s *Server) clearSupersededQueuedStop(ctx context.Context, agent *store.Agent) {
-	s.clearSupersededQueuedStopFor(ctx, agent, true)
+	s.clearSupersededQueuedStopFor(ctx, agent, false)
 }
 
+// containerStatusStarting is the container status of a start handed off to
+// an asynchronous launch whose container is still launching
+// (ptone/scion#4669). It is neutral for capacity: the agent holds its slot
+// through its phase (starting) while the launch is live, and once the
+// launch ends a failed start's slot is released with it. A queued stop's
+// status (containerStatusStopQueued) left in place would instead keep the
+// agent holding capacity after a failed launch (ptone/scion#5266).
+const containerStatusStarting = "starting"
+
 // clearSupersededQueuedStopFor is clearSupersededQueuedStop; with
-// setRunning false (a start handed off to an asynchronous launch, whose
-// container is still launching) it clears the queued-stop notice and
-// leaves the container status alone.
-func (s *Server) clearSupersededQueuedStopFor(ctx context.Context, agent *store.Agent, setRunning bool) {
+// handedOff (a start handed off to an asynchronous launch) a queued stop's
+// container status becomes containerStatusStarting instead of running.
+func (s *Server) clearSupersededQueuedStopFor(ctx context.Context, agent *store.Agent, handedOff bool) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	cur, err := s.store.GetAgent(cctx, agent.ID)
@@ -619,8 +628,11 @@ func (s *Server) clearSupersededQueuedStopFor(ctx context.Context, agent *store.
 		return
 	}
 	upd := store.AgentStatusUpdate{ClearMessageIf: offlineStopMessage}
-	if setRunning && cur.ContainerStatus == containerStatusStopQueued {
+	if cur.ContainerStatus == containerStatusStopQueued {
 		upd.ContainerStatus = "running"
+		if handedOff {
+			upd.ContainerStatus = containerStatusStarting
+		}
 	}
 	if err := s.store.UpdateAgentStatus(cctx, agent.ID, upd); err != nil {
 		slog.Warn("Start: clearing the superseded queued stop failed", "agent_id", agent.ID, "error", err)
