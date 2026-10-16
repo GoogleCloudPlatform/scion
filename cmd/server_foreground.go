@@ -1723,7 +1723,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// such rows, so this cannot move into runBootDataMigrations. It uses raw
 	// SQL only, snapshots the database before writing, and is a no-op on
 	// Postgres and on a store with nothing to repair.
-	tsRepair := repairUnreadableTimestamps(ctx, s)
+	snaps := &startupSnapshots{tsRepair: repairUnreadableTimestamps(ctx, s)}
 
 	// On Postgres, refuse to migrate when the search_path would build a
 	// fresh table set that shadows existing hub tables in a later schema,
@@ -1734,16 +1734,20 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// On SQLite, snapshot the database when the migration (after
 	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
 	// rows. A snapshot that is needed but fails stops startup before the
-	// reconcile changes any rows.
-	s.SetBeforeFKReconcile(snapshotBeforeFKReconcile)
+	// reconcile changes any rows. The snapshot's path is recorded so the
+	// prune below keeps it.
+	s.SetBeforeFKReconcile(func(ctx context.Context, db *sql.DB, groups []entc.FKRepairGroup) error {
+		return snapshotBeforeFKReconcileRecord(ctx, db, groups, snaps.recordFK)
+	})
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
-	// operations (parity with the former raw-SQL store).
-	if err := migrateStore(ctx, s); err != nil {
+	// operations (parity with the former raw-SQL store). After it succeeds,
+	// the repair snapshots unused for 7 days are removed; see
+	// migrateThenPrune.
+	if err := migrateThenPrune(ctx, s, func(ctx context.Context) error { return migrateStore(ctx, s) }, snaps); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
-	markUTCTimestampRepairComplete(ctx, s, tsRepair)
 
 	runBootDataMigrations(ctx, s)
 
