@@ -117,16 +117,25 @@ func shouldCleanupAfterSucceededReport(result *hubclient.AgentLaunchReportResult
 	return true // 403, 404 agent_launch_unknown, every other 409 reason (notably timed_out)
 }
 
-// launchCtx bundles what runLaunch needs beyond ctx and rec: the original
-// create request (for the optional GCS download and ProvisionOnly/Reprovision
-// gating, never read for its *http.Request — there is none here), the
-// resolved start options, the manager to launch with, the registry key, and
-// whether this project uses the shared-workspace layout (for the marker
-// path). It is built entirely from values already resolved by the admission
-// phase, before the goroutine starts (design §7 P1b-1 B-6: the goroutine
-// never touches *http.Request).
+// launchCtx bundles what runLaunch needs beyond ctx and rec: the resolved
+// start options, the manager to launch with, the registry key, whether this
+// project uses the shared-workspace layout (for the marker path), the
+// Hub's project ID and keepalive interval, and, for a create launch only,
+// the original create request (the optional GCS download's input, never
+// read for its *http.Request — there is none here). It is built entirely
+// from values already resolved by the admission phase, before the
+// goroutine starts (design §7 P1b-1 B-6: the goroutine never touches
+// *http.Request). A start launch (design wave 3 §2 D-f) leaves req zero.
 type launchCtx struct {
-	req             CreateAgentRequest
+	// req is the create request of a create launch (beginAsyncLaunch); the
+	// GCS workspace download reads it, and runs for create launches only.
+	// Zero for a start launch.
+	req CreateAgentRequest
+	// projectID is the Hub project ID the request was scoped to, for logs.
+	projectID string
+	// keepalive is the Hub's keepalive interval (LaunchKeepaliveSeconds);
+	// zero uses the sender's default.
+	keepalive       time.Duration
 	opts            api.StartOptions
 	mgr             agent.Manager
 	key             launchKey
@@ -148,10 +157,11 @@ type launchCtx struct {
 	afterStartSelected func(*launchSender)
 }
 
-// runLaunch is the async-create launch goroutine (design §3.8.2 step 5). It
-// runs with ctx' = WithDeadline(WithoutCancel(the admission context),
+// runLaunch is the async launch goroutine of a create (design §3.8.2 step
+// 5) or of a start of an existing agent (design wave 3 §2 D-f). It runs
+// with ctx' = WithDeadline(WithoutCancel(the admission context),
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
-// (beginAsyncLaunch) before this goroutine starts.
+// (acceptAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
 	// A flat instance's ownership mirror, handed over when the launch was
 	// accepted, is released when the launch ends, on every return before
@@ -177,7 +187,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		}
 	}()
 
-	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, time.Duration(lc.req.LaunchKeepaliveSeconds)*time.Second)
+	sender := newLaunchSender(s, rec, rec.AgentID, s.launchInstanceID, lc.keepalive)
 	rec.journal.setSender(sender)
 	// The keepalive runs throughout, including while the claim itself is
 	// still blocked on backoff (design §3.8.5), so it starts before
@@ -259,7 +269,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// The report carries fixed text (ptone/scion#3113): the os error
 			// names broker filesystem paths. The full error is logged here.
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
-				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+				"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
 			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
 			return
@@ -270,11 +280,18 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 
-	// Step 3: optional GCS workspace download, identical to the synchronous
-	// path's admission step (§3.1), just run here instead.
+	// Step 3: optional GCS workspace download (create launches only),
+	// identical to the synchronous create's admission step (§3.1), just run
+	// here instead. A start launch has no create request and downloads
+	// nothing, as a synchronous start does not.
 	download := s.downloadWorkspaceFromGCS
 	if lc.downloadWorkspaceFromGCS != nil {
 		download = lc.downloadWorkspaceFromGCS
+	}
+	if rec.Kind != store.LaunchKindCreate {
+		download = func(_ context.Context, _ CreateAgentRequest, opts api.StartOptions) (api.StartOptions, string, string, error) {
+			return opts, "", "", nil
+		}
 	}
 	opts, _, dlMessage, dlErr := download(ctx, lc.req, lc.opts)
 	if dlErr != nil {
@@ -422,12 +439,12 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// skill_resolution_failed.
 		launchSkill := skillFailureFrom(sr.err, lc.opts.RunID)
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
-			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+			"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID,
 			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
 			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
 		if launchSkill != nil {
 			s.logSkillResolutionFailure(launchSkill,
-				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
+				"agent_id", rec.AgentID, "project_id", lc.projectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
 			if code == ErrCodeSkillResolution {
 				message = launchSkill.publicText()
 			}
@@ -482,7 +499,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// failed report, design §3.8.2 step 7).
 		s.agentLifecycleLog.Warn("runLaunch: succeeded report did not get a definitive answer within the TTL",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-		s.forceHeartbeatAll("create", rec.AgentID)
+		s.forceHeartbeatAll(rec.Kind, rec.AgentID)
 		return
 	}
 	if shouldCleanupAfterSucceededReport(result) {
@@ -494,7 +511,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		s.cleanupAbortedLaunch(lc.mgr, rec, lc)
 		return
 	}
-	s.forceHeartbeatAll("create", rec.AgentID)
+	s.forceHeartbeatAll(rec.Kind, rec.AgentID)
 }
 
 // locallyCancelled reports whether ctx' was cancelled rather than having

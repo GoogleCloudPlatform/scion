@@ -113,7 +113,94 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		return false
 	}
 
+	lc := launchCtx{
+		projectID:       req.ProjectID,
+		keepalive:       time.Duration(req.LaunchKeepaliveSeconds) * time.Second,
+		opts:            opts,
+		mgr:             mgr,
+		key:             ss.key,
+		sharedWorkspace: opts.SharedWorkspace,
+		owned:           owned,
+		req:             req,
+	}
+	return s.acceptAsyncLaunch(w, r, ctx, ss, asyncAdmission{
+		op:             "create",
+		launchID:       req.LaunchID,
+		agentID:        req.ID,
+		kind:           store.LaunchKindCreate,
+		runID:          req.RunID,
+		receivedAt:     receivedAt,
+		timeoutSeconds: req.LaunchTimeoutSeconds,
+		status:         http.StatusCreated,
+		runtimeName:    runtimeName,
+		lc:             lc,
+		onDrainRefused: func() {
+			markAttemptFailed(http.StatusServiceUnavailable, api.BrokerErrCodeBrokerDraining)
+		},
+		writeCancelled: func() {
+			s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+		},
+		onAccepted: func(resp *CreateAgentResponse) {
+			// Complete the dispatch attempt as succeeded with the accepted
+			// response, so a same-replica RequestID replay returns it
+			// without launching twice (design §3.8.2 step 2; B-1).
+			if attempt != nil {
+				s.dispatchAttemptsMu.Lock()
+				s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusCreated, resp, nil, "")
+				s.dispatchAttemptsMu.Unlock()
+			}
+		},
+	})
+}
+
+// asyncAdmission is what acceptAsyncLaunch needs from its caller, an async
+// create (beginAsyncLaunch) or an async start (beginAsyncStart): the
+// launch's identity and budget, the launch context runLaunch continues
+// with, and the caller's own way to answer each refusal.
+type asyncAdmission struct {
+	// op names the operation in the broker_draining refusal ("create" or
+	// "start").
+	op string
+	// launchID, agentID and runID are the Hub's launch, agent and run IDs.
+	launchID, agentID, runID string
+	// kind is the launch kind recorded locally and journalled. Broker-side
+	// it decides only whether the launch may delete agent files (create
+	// only); the Hub's launch row holds the authoritative kind.
+	kind string
+	// receivedAt and timeoutSeconds give the launch's deadline (design
+	// §3.8.2 step 4).
+	receivedAt     time.Time
+	timeoutSeconds int
+	// status is the accepted response's HTTP status: 201 for a create, 202
+	// for a start (the synchronous start's status).
+	status      int
+	runtimeName string
+	lc          launchCtx
+	// onDrainRefused, when set, runs before the broker_draining 503 is
+	// written.
+	onDrainRefused func()
+	// writeCancelled writes the refusal for a registration that a stop,
+	// delete or newer start cancelled before the transfer.
+	writeCancelled func()
+	// onAccepted, when set, runs with the accepted response just before it
+	// is written.
+	onAccepted func(resp *CreateAgentResponse)
+}
+
+// acceptAsyncLaunch is the kind-agnostic tail of an async launch's
+// admission (design wave 3 §2 D-f): it builds the launch record and its
+// deadline, tracks it for the shutdown drain, hands the caller's
+// registration under the agent's name (ss) over to it, journals it, writes
+// the accepted response (LaunchPending with the launch ID echo) and starts
+// runLaunch. It reports whether it accepted the launch; every refusal
+// writes its response and returns false.
+//
+// Nothing captured in a.lc, nor runLaunch itself, retains r or any value
+// derived from *http.Request; r is read here only for the hub connection
+// the launch reports to.
+func (s *Server) acceptAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx context.Context, ss *syncStart, a asyncAdmission) bool {
 	key := ss.key
+	opts := a.lc.opts
 
 	// design §3.8.2 step 4: the broker's deadline is 20s before the Hub's
 	// launch_deadline, measured from receivedAt so admission time counts
@@ -121,13 +208,13 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 	// own cancellation (the response is about to be written and r's
 	// lifecycle ends), while WithDeadline still bounds the goroutine.
 	//
-	// Deliberately derived from ctx (the admission context createAgent
+	// Deliberately derived from ctx (the admission context the caller
 	// built), not r.Context() as design §3.8.2 step 4's text literally
 	// reads: ctx carries the values attachSkillResolver and
 	// withHubAgentDefaults attached after r.Context() was read, which
 	// Manager.Start needs just as much on the async path as on the
 	// synchronous one.
-	deadline := receivedAt.Add(time.Duration(req.LaunchTimeoutSeconds) * time.Second)
+	deadline := a.receivedAt.Add(time.Duration(a.timeoutSeconds) * time.Second)
 	// The cause-carrying parent lets a shutdown cancel ctx' with
 	// errBrokerShutdown, which runLaunch tells apart from a local stop or
 	// delete (rec.cancel, cause context.Canceled; design wave 3 §1 C-e).
@@ -138,27 +225,32 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		cancelCause(context.Canceled)
 	}
 
-	rec := newLaunchRecord(req.LaunchID, req.ID, store.LaunchKindCreate, s.resolveHubNameForLaunch(r), deadline, cancel)
-	rec.RunID = req.RunID
+	rec := newLaunchRecord(a.launchID, a.agentID, a.kind, s.resolveHubNameForLaunch(r), deadline, cancel)
+	rec.RunID = a.runID
 	rec.shutdown = func() { cancelCause(errBrokerShutdown) }
 	// A drain that began after the handler's own check refuses here, before
 	// the launch is accepted; once tracked, the drain cancels it instead.
 	if !s.trackAsyncLaunch(rec) {
 		cancel()
-		markAttemptFailed(http.StatusServiceUnavailable, api.BrokerErrCodeBrokerDraining)
-		writeBrokerDraining(w, "create")
+		if a.onDrainRefused != nil {
+			a.onDrainRefused()
+		}
+		writeBrokerDraining(w, a.op)
 		return false
 	}
-	// The create already registered under the name and waited for any
-	// earlier start of it before buildStartContext (createAgent,
-	// beginCreateRegistration), so the launch takes that registration over
+	// The caller already registered under the name and waited for any
+	// earlier start of it before buildStartContext
+	// (beginNameRegistration), so the launch takes that registration over
 	// instead of beginning a new one: there is nothing left to wait for. If
 	// a stop, delete or newer start took the name in the meantime, refuse
 	// with the 409 the wait itself gives, before accepting anything.
+	if testHookAsyncLaunchBeforeHandOff != nil {
+		testHookAsyncLaunchBeforeHandOff(ctx, key)
+	}
 	if !ss.handOff(rec) {
 		s.untrackAsyncLaunch(rec)
 		cancel()
-		s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+		a.writeCancelled()
 		return false
 	}
 	// Journal the launch before it is accepted (design wave 3 §1 C-a write
@@ -170,34 +262,64 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		ProjectPath:     opts.ProjectPath,
 		HubProjectID:    opts.HubProjectID,
 		SharedWorkspace: opts.SharedWorkspace,
-		RuntimeName:     runtimeName,
-		RuntimeIdentity: s.launchRuntimeIdentity(mgr),
+		RuntimeName:     a.runtimeName,
+		RuntimeIdentity: s.launchRuntimeIdentity(a.lc.mgr),
 		Profile:         opts.Profile,
 	})
 
 	resp := CreateAgentResponse{
 		LaunchPending:    true,
-		LaunchID:         req.LaunchID,
+		LaunchID:         a.launchID,
 		LaunchInstanceID: s.launchInstanceID,
 	}
-	// Complete the dispatch attempt as succeeded with the accepted response,
-	// so a same-replica RequestID replay returns it without launching twice
-	// (design §3.8.2 step 2; B-1).
-	if attempt != nil {
-		s.dispatchAttemptsMu.Lock()
-		s.completeAttempt(attempt, dispatchAttemptSucceeded, http.StatusCreated, &resp, nil, "")
-		s.dispatchAttemptsMu.Unlock()
+	if a.onAccepted != nil {
+		a.onAccepted(&resp)
 	}
-	writeJSON(w, http.StatusCreated, resp)
+	writeJSON(w, a.status, resp)
 
-	lc := launchCtx{
-		req:             req,
-		opts:            opts,
-		mgr:             mgr,
-		key:             key,
-		sharedWorkspace: opts.SharedWorkspace,
-		owned:           owned,
-	}
-	go s.runLaunch(runCtx, rec, lc)
+	go s.runLaunch(runCtx, rec, a.lc)
 	return true
+}
+
+// testHookAsyncLaunchBeforeHandOff, when set (tests only), runs in
+// acceptAsyncLaunch immediately before the registration is handed over to
+// the launch, with the admission context.
+var testHookAsyncLaunchBeforeHandOff func(ctx context.Context, key launchKey)
+
+// beginAsyncStart is an async start of an existing agent (design wave 3 §2
+// D-f; ptone/scion#4669): startAgent has already registered the start under
+// the agent's name (ss), run buildStartContext, the runtime checks, the
+// harness-config policy gate and the inline config update, and decided
+// resume. This hands the registration over to a launch whose runLaunch
+// runs Manager.Start, and answers 202 with the launch echo. There is no
+// Preflight (create only) and no GCS download (create only).
+//
+// The launch is recorded as kind start for a restart's start leg too: the
+// start request carries no kind, and broker-side the kind decides only that
+// a start launch never deletes agent files. The Hub's launch row holds the
+// real kind.
+func (s *Server) beginAsyncStart(w http.ResponseWriter, r *http.Request, ctx context.Context, ss *syncStart, span trace.Span, id, projectID, agentID string, launchID string, timeoutSeconds, keepaliveSeconds int, opts api.StartOptions, mgr agent.Manager, runtimeName string, owned *ownedStart, receivedAt time.Time) bool {
+	return s.acceptAsyncLaunch(w, r, ctx, ss, asyncAdmission{
+		op:             "start",
+		launchID:       launchID,
+		agentID:        agentID,
+		kind:           store.LaunchKindStart,
+		runID:          opts.RunID,
+		receivedAt:     receivedAt,
+		timeoutSeconds: timeoutSeconds,
+		status:         http.StatusAccepted,
+		runtimeName:    runtimeName,
+		lc: launchCtx{
+			projectID:       projectID,
+			keepalive:       time.Duration(keepaliveSeconds) * time.Second,
+			opts:            opts,
+			mgr:             mgr,
+			key:             ss.key,
+			sharedWorkspace: opts.SharedWorkspace,
+			owned:           owned,
+		},
+		writeCancelled: func() {
+			s.writeStartRegistrationError(w, span, id, projectID, opts.RunID, errCreateStartCancelled)
+		},
+	})
 }
