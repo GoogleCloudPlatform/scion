@@ -35,3 +35,7 @@ Date: 2026-10-14. Branch: scion/mmr-fed-p1-6b (ptone/scion#4868, tracked in pton
 
 ## Later merge of upstream main (cb0fb2006, with GoogleCloudPlatform/scion#3779)
 - One textual conflict in `federation_visitor.go`: `federationHubUserTokensEnabled` is kept ahead of upstream's rewritten visitor link code (`visitorTokenEmail`, `linkPendingVisitor`, `applyVisitorRules`), both unchanged. The principal check runs when the federation credential is verified, before visitor resolution, with the same transport identity predicate and inputs, so visitor rules never see a principal it refuses.
+
+## Tests for the merged transport identity configuration
+- The two visitor rule transport identity tests now configure the hub as `New` does (Server fields and `authConfig`, through `setTransportIdentities`) and expect the auth middleware's 401, with no account, rule binding or visitor_linked audit, and the same-domain controls still linked. Two direct `resolveFederatedVisitor` tests keep the visitor path's own transport identity checks (first contact and later rule application) covered for callers that do not go through the middleware.
+- Two peer hub user access credential tests cover a visitor rule naming a hub issuer: linked and bound with accept_user_tokens and allow_visitor_grants on, refused with 401 and nothing written with accept_user_tokens off. Test-only change.

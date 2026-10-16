@@ -470,3 +470,91 @@ func TestFederationPeerUserToken_UserIssuerUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// addPeerVisitorRule creates a project and a visitor rule on it for the
+// peer hub issuer and domain, and returns the project ID and the rule.
+func (f *peerTokFixture) addPeerVisitorRule(t *testing.T, domain string) (string, *store.ProjectVisitorRule) {
+	t.Helper()
+	projectID := tid(t.Name() + "-project")
+	ownerID := tid(t.Name() + "-owner")
+	createRS1Project(t, f.st, projectID, ownerID)
+	rule := &store.ProjectVisitorRule{ProjectID: projectID, Issuer: testOIDCIssuerURL, Domain: domain, CreatedBy: ownerID}
+	require.NoError(t, f.st.CreateProjectVisitorRule(context.Background(), rule))
+	return projectID, rule
+}
+
+// peerRuleBindings returns the visitor bindings on projectID created by
+// ruleID.
+func (f *peerTokFixture) peerRuleBindings(t *testing.T, projectID, ruleID string) []*store.RoleBinding {
+	t.Helper()
+	all, err := f.st.ListVisitorRoleBindings(context.Background(), projectID)
+	require.NoError(t, err)
+	var out []*store.RoleBinding
+	for _, b := range all {
+		if b.SourceRuleID != nil && *b.SourceRuleID == ruleID {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// peerVisitorLinkedAudits returns the visitor_linked audit records.
+func (f *peerTokFixture) peerVisitorLinkedAudits(t *testing.T) []*store.MutationAuditRecord {
+	t.Helper()
+	recs, _, err := f.st.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: mutationTypeVisitorLinked})
+	require.NoError(t, err)
+	return recs
+}
+
+// A user access credential minted by the peer, from an issuer with
+// accept_user_tokens and allow_visitor_grants, whose email matches a
+// visitor rule naming that issuer, links a new active federated account on
+// first contact: the request is served as that account's visitor identity
+// and the rule binds it on the rule's project.
+func TestFederationPeerUserToken_VisitorRuleLinksPeerUser(t *testing.T) {
+	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) { c.AllowVisitorGrants = true })
+	ctx := context.Background()
+	projectID, rule := f.addPeerVisitorRule(t, "example.com")
+	token, u := f.mintUserToken(t)
+
+	identity, credential, rec := f.through(t, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	v, ok := identity.(*VisitorIdentity)
+	require.True(t, ok, "identity = %T, want *VisitorIdentity", identity)
+	assert.Equal(t, testOIDCIssuerURL, v.IssuerURL())
+	assert.Equal(t, u.ID, v.Subject())
+	assert.Equal(t, CredentialKindFederation, credential.Kind)
+
+	acct, err := f.st.GetFederatedUserBySubject(ctx, testOIDCIssuerURL, u.ID)
+	require.NoError(t, err, "the peer user is linked to a federated account")
+	assert.Equal(t, v.ID(), acct.ID)
+	assert.Equal(t, store.UserStatusActive, acct.Status)
+	require.NotNil(t, acct.FederatedEmail)
+	assert.Equal(t, store.NormalizeFederatedEmail(u.Email), *acct.FederatedEmail)
+
+	bindings := f.peerRuleBindings(t, projectID, rule.ID)
+	require.Len(t, bindings, 1, "the rule binds the account")
+	assert.Equal(t, acct.ID, bindings[0].PrincipalID)
+	assert.NotEmpty(t, f.peerVisitorLinkedAudits(t), "visitor_linked audit written")
+}
+
+// The same visitor rule with accept_user_tokens off on the peer issuer: the
+// user access credential is refused with 401, and no federated account, no
+// rule binding and no visitor_linked audit is written.
+func TestFederationPeerUserToken_VisitorRuleRefusedWithoutAcceptUserTokens(t *testing.T) {
+	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) {
+		c.AllowVisitorGrants = true
+		c.AcceptUserTokens = false
+	})
+	ctx := context.Background()
+	projectID, rule := f.addPeerVisitorRule(t, "example.com")
+	token, u := f.mintUserToken(t)
+
+	assertPeerTokRefused(t, f, token)
+	_, err := f.st.GetFederatedUserBySubject(ctx, testOIDCIssuerURL, u.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no account linked to the peer user")
+	_, err = f.st.GetFederatedUserByEmail(ctx, store.NormalizeFederatedIssuer(testOIDCIssuerURL), store.NormalizeFederatedEmail(u.Email))
+	assert.ErrorIs(t, err, store.ErrNotFound, "no federated account for the peer user's email")
+	assert.Empty(t, f.peerRuleBindings(t, projectID, rule.ID), "no rule binding")
+	assert.Empty(t, f.peerVisitorLinkedAudits(t), "no visitor_linked audit")
+}
