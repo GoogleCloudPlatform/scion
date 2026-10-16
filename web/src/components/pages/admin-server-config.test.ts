@@ -2370,6 +2370,82 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  // ── image_registry: one badge from the server's provenance (ptone/scion#3916) ──
+
+  describe('image_registry provenance badge and inherited hint', () => {
+    const generic = 'Overridden by environment on this node';
+    function texts(el: HTMLElement, sel: string): string[] {
+      return queryAll(el, sel).map((b) => (b.textContent ?? '').replace(/\s+/g, ' ').trim());
+    }
+
+    it('names the startup env instead of the generic badge', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['image_registry'],
+            image_registry_provenance: { source: 'file', value: 's.example' },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('SCION_SERVER_IMAGEREGISTRY at startup');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('lists a broker that reports a node env', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              node_env_overrides: [
+                { broker_id: 'b1', broker_name: 'gpu-pool', value: 'n.example', differs: true },
+              ],
+            },
+          })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('Runtime Broker gpu-pool sets SCION_IMAGE_REGISTRY=n.example');
+    });
+
+    it('describes a profile image_registry env value as a startup value', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profiles.k8s.image_registry'] })
+        )
+      );
+      const badges = texts(element, '.image-registry-badge');
+      expect(badges).toHaveLength(1);
+      expect(badges[0]).toContain('a saved profile value replaces it');
+      expect(texts(element, '.env-badge').some((t) => t.includes(generic))).toBe(false);
+    });
+
+    it('shows what a profile without a saved registry inherits', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            profiles: { k8s: { runtime: 'docker' } },
+            image_registry_provenance: {
+              source: 'hub_db',
+              value: 'db.example',
+              profiles: { k8s: { source: 'hub_db', value: 'db.example' } },
+            },
+          })
+        )
+      );
+      expect(texts(element, '.image-registry-inherited')).toEqual([
+        'Inherited: db.example (saved hub value).',
+      ]);
+    });
+  });
+
   // ── Experiments tab (ptone/scion#2217) ──
 
   describe('Experiments tab', () => {
