@@ -56,9 +56,15 @@ var errDeferredQueueFull = errors.New("too many messages are already waiting for
 
 // deferredWork is one piece of work waiting for an agent's launch to end.
 type deferredWork struct {
-	// spaceID and threadID are where the failure is posted.
+	// spaceID and threadID are where the failure is posted; place, when
+	// set, replaces them and is called after ready.
 	spaceID  string
 	threadID string
+	place    func() (spaceID, threadID string)
+	// ready, when set, is closed by the command once the work can run: an
+	// item is registered early (so later work queues behind it) and its
+	// run, failed and place are not used before ready is closed.
+	ready <-chan struct{}
 	// message is true when the work delivers a user message; the failure
 	// post counts the messages that were not delivered.
 	message bool
@@ -92,7 +98,11 @@ func (r *CommandRouter) initLaunchWatch() {
 // may be called more than once.
 func (r *CommandRouter) Shutdown(ctx context.Context) error {
 	r.initLaunchWatch()
+	// Cancel under launchMu, so no watcher is added (bg.Add in
+	// deferUntilRunning, after its bgCtx check) once Wait may have started.
+	r.launchMu.Lock()
 	r.bgCancel()
+	r.launchMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		r.bg.Wait()
@@ -111,11 +121,13 @@ func launchQueueKey(projectID, agent string) string {
 	return projectID + "/" + agent
 }
 
-// agentQueueKey returns the queue key for a, falling back to ref (the slug
-// or ID the user gave) when a is nil or has no slug.
+// agentQueueKey returns the queue key for a: its ID, so an agent deleted
+// while launching and re-created with the same name gets its own queue. It
+// falls back to ref (the slug or ID the user gave) when a is nil or has no
+// ID.
 func agentQueueKey(projectID, ref string, a *hubclient.Agent) string {
-	if a != nil && a.Slug != "" {
-		return launchQueueKey(projectID, a.Slug)
+	if a != nil && a.ID != "" {
+		return launchQueueKey(projectID, a.ID)
 	}
 	return launchQueueKey(projectID, ref)
 }
@@ -199,6 +211,13 @@ func (r *CommandRouter) drainLaunchQueue(ctx context.Context, key string, fn fun
 		w := q.items[0]
 		q.items = q.items[1:]
 		r.launchMu.Unlock()
+		if w.ready != nil {
+			select {
+			case <-w.ready:
+			case <-ctx.Done():
+				continue // the next pass drops the rest
+			}
+		}
 		fn(w)
 	}
 }
@@ -224,6 +243,9 @@ func (r *CommandRouter) postLaunchFailure(ctx context.Context, items []deferredW
 			w.failed(ctx, text)
 		}
 		p := place{w.spaceID, w.threadID}
+		if w.place != nil {
+			p.space, p.thread = w.place()
+		}
 		if _, seen := dropped[p]; !seen {
 			order = append(order, p)
 			dropped[p] = 0

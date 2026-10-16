@@ -96,6 +96,11 @@ type syncMessenger struct {
 	updates []SendMessageRequest
 	names   []string
 	failAll bool
+	// holdEnter and holdLeave, when set, block the first SendMessage
+	// (closing holdEnter) until holdLeave is closed.
+	holdEnter chan struct{}
+	holdLeave chan struct{}
+	held      bool
 }
 
 func (m *syncMessenger) SendMessage(ctx context.Context, req SendMessageRequest) (string, error) {
@@ -103,6 +108,13 @@ func (m *syncMessenger) SendMessage(ctx context.Context, req SendMessageRequest)
 		return "", ctx.Err()
 	}
 	m.mu.Lock()
+	if m.holdEnter != nil && !m.held {
+		m.held = true
+		m.mu.Unlock()
+		close(m.holdEnter)
+		<-m.holdLeave
+		m.mu.Lock()
+	}
 	defer m.mu.Unlock()
 	if m.failAll {
 		return "", errors.New("chat api down")
@@ -783,5 +795,124 @@ func TestShutdown_StopsWatchersWithoutPosting(t *testing.T) {
 	}
 	if n := hub.sendCount(); n != 0 {
 		t.Errorf("%d sends after Shutdown, want 0", n)
+	}
+}
+
+// TestCmdThread_RelayDuringPostsQueuesBehindInstruction checks that /thread
+// registers its instruction before posting the kickoff and the card: a
+// message relayed while those posts are in flight, whose own read already
+// shows the agent running, is sent after the instruction.
+func TestCmdThread_RelayDuringPostsQueuesBehindInstruction(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, launchingAgent("a1"), runningAgent("a1"))
+	router, m := newAsyncRouter(t, hub.client(), rec)
+	m.holdEnter = make(chan struct{})
+	m.holdLeave = make(chan struct{})
+	threadDone := make(chan error, 1)
+	go func() {
+		_, err := router.cmdThread(context.Background(), threadEvent(), []string{"a1", "first"})
+		threadDone <- err
+	}()
+	select {
+	case <-m.holdEnter: // the kickoff post is in flight
+	case <-time.After(5 * time.Second):
+		t.Fatal("kickoff not posted")
+	}
+	resp, err := router.cmdMessage(context.Background(), threadEvent(), []string{"a1", "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(m.holdLeave)
+	if err := <-threadDone; err != nil {
+		t.Fatal(err)
+	}
+	waitWatchers(t, router)
+	first, second := rec.index("send a1|first"), rec.index("send a1|second")
+	if first < 0 || second < 0 || second < first {
+		t.Errorf("a relay during the /thread posts overtook the instruction (relay reply %q): %v", resp.Message.Text, rec.snapshot())
+	}
+}
+
+// TestCmdCreate_RecreatedAgentGetsOwnQueue checks that queues are keyed by
+// agent ID: an agent re-created with the same name while the old one's
+// launch is still followed gets its own watcher and outcome.
+func TestCmdCreate_RecreatedAgentGetsOwnQueue(t *testing.T) {
+	rec := &recorder{}
+	oldA, newA := launchingAgent("a1"), launchingAgent("a1")
+	oldA.ID, newA.ID = "id-old", "id-new"
+	oldFailed := failedAgent("a1")
+	oldFailed.ID = "id-old"
+	newRunning := runningAgent("a1")
+	newRunning.ID = "id-new"
+	release := make(chan struct{})
+	hub := newAsyncHub(rec, oldA)
+	c := hub.client()
+	c.agents.getFunc = func(ctx context.Context, id string) (*hubclient.Agent, error) {
+		if id == "id-old" {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			cp := *oldFailed
+			return &cp, nil
+		}
+		cp := *newRunning
+		return &cp, nil
+	}
+	router, m := newAsyncRouter(t, c, rec)
+	if _, err := router.cmdCreate(context.Background(), threadEvent(), []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	hub.createResp = newA
+	hub.mu.Unlock()
+	if _, err := router.cmdCreate(context.Background(), threadEvent(), []string{"a1"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(fmt.Sprint(rec.snapshot()), "is running") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	waitWatchers(t, router)
+	var running, failed int
+	for _, p := range m.posts() {
+		if strings.Contains(p.Text, "is running (ID: `id-new`)") {
+			running++
+		}
+		if strings.Contains(p.Text, "failed to start") {
+			failed++
+		}
+	}
+	if running != 1 || failed != 1 {
+		t.Errorf("want one running post for the new agent and one failure for the old, got running=%d failed=%d: %+v", running, failed, m.posts())
+	}
+}
+
+// TestCmdThread_AfterShutdown_NoStaleCard checks that /thread after Shutdown
+// starts no watcher and posts nothing (no "Starting…" card left behind).
+func TestCmdThread_AfterShutdown_NoStaleCard(t *testing.T) {
+	rec := &recorder{}
+	hub := newAsyncHub(rec, launchingAgent("a1"), runningAgent("a1"))
+	router, m := newAsyncRouter(t, hub.client(), rec)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := router.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := router.cmdThread(context.Background(), threadEvent(), []string{"a1", "do", "X"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitWatchers(t, router)
+	if resp == nil || resp.Message == nil || !strings.Contains(resp.Message.Text, "not following its launch") {
+		t.Errorf("want the not-following reply, got %+v", resp)
+	}
+	if p := m.posts(); len(p) != 0 {
+		t.Errorf("after Shutdown: %d posts (kickoff or Starting… card), want 0: %v", len(p), rec.snapshot())
+	}
+	if n := hub.sendCount(); n != 0 {
+		t.Errorf("after Shutdown: %d sends, want 0", n)
 	}
 }

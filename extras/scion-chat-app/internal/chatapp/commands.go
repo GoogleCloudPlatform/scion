@@ -1845,49 +1845,24 @@ func threadCard(a *hubclient.Agent, status, instruction string) Card {
 // client, the identity that made the create) then sends the instruction
 // and updates the card to "Running", or, if the launch fails, updates the
 // card, posts the failure in the agent's thread and sends nothing.
+//
+// The work is registered before the kickoff and card posts, so a message
+// relayed to the agent meanwhile queues behind the instruction; the
+// watcher does not use it before ready is closed, once the posts are done.
 func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link *state.SpaceLink, client hubclient.Client, a *hubclient.Agent, instruction string) *EventResponse {
 	agents := client.ProjectAgents(link.ProjectID)
 	slug := a.Slug
-
-	threadMsg := fmt.Sprintf("Agent `%s` created; starting…", slug)
-	if instruction != "" {
-		threadMsg += fmt.Sprintf("\n\n*Instruction:* %s", instruction)
-	}
-	kickoffMsgName, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
-		SpaceID:   event.SpaceID,
-		ThreadKey: fmt.Sprintf("scion-agent-%s", slug),
-		Text:      threadMsg,
-	})
-	if msgErr != nil {
-		r.log.Warn("failed to post thread kickoff message", "error", msgErr)
-	}
-	// The agent replies in the new thread, as on the synchronous path.
-	agentThread := event.ThreadID
-	if msgErr == nil && kickoffMsgName != "" {
-		agentThread = strings.Replace(kickoffMsgName, "/messages/", "/threads/", 1)
-	}
-
-	var msg *messages.StructuredMessage
-	if instruction != "" {
-		msg = messages.NewInstruction("user:"+r.senderEmailForUser(ctx, event), slug, instruction)
-		if r.broker != nil {
-			msg.Channel = r.broker.ChannelName()
-		}
-		msg.ThreadID = agentThread
-	}
-
-	// Post the card ourselves so it can be updated when the launch ends.
-	card := threadCard(a, "Starting…", instruction)
-	cardName, cardErr := r.messenger.SendMessage(ctx, SendMessageRequest{
-		SpaceID:  event.SpaceID,
-		ThreadID: event.ThreadID,
-		Card:     &card,
-	})
-	if cardErr != nil {
-		r.log.Warn("failed to post thread card", "error", cardErr)
-		cardName = ""
-	}
 	spaceID, eventThread := event.SpaceID, event.ThreadID
+
+	// Set before ready is closed; read by the watcher only after it.
+	var (
+		agentThread string
+		cardName    string
+		msg         *messages.StructuredMessage
+		card        Card
+	)
+	ready := make(chan struct{})
+
 	setStatus := func(wctx context.Context, status string) {
 		if wctx.Err() != nil {
 			return
@@ -1907,9 +1882,10 @@ func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link 
 	}
 
 	deferred, deferErr := r.deferUntilRunning(agentQueueKey(link.ProjectID, slug, a), agents, a, deferredWork{
-		spaceID:  spaceID,
-		threadID: agentThread,
-		message:  msg != nil,
+		spaceID: spaceID,
+		place:   func() (string, string) { return spaceID, agentThread },
+		ready:   ready,
+		message: instruction != "",
 		run: func(wctx context.Context) {
 			if msg != nil {
 				sendCtx, cancel := deferredContext(wctx)
@@ -1926,6 +1902,7 @@ func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link 
 		},
 	})
 	if !deferred {
+		// Nothing has been posted yet, so no "Starting…" card is left behind.
 		r.log.Warn("thread: not following the launch", "error", deferErr, "agent", slug)
 		text := fmt.Sprintf("Agent `%s` created and still starting; I am not following its launch.", slug)
 		if instruction != "" {
@@ -1933,9 +1910,46 @@ func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link 
 		}
 		return textResponse(event, text)
 	}
-	if cardName == "" {
+	defer close(ready)
+
+	threadMsg := fmt.Sprintf("Agent `%s` created; starting…", slug)
+	if instruction != "" {
+		threadMsg += fmt.Sprintf("\n\n*Instruction:* %s", instruction)
+	}
+	kickoffMsgName, msgErr := r.messenger.SendMessage(ctx, SendMessageRequest{
+		SpaceID:   spaceID,
+		ThreadKey: fmt.Sprintf("scion-agent-%s", slug),
+		Text:      threadMsg,
+	})
+	if msgErr != nil {
+		r.log.Warn("failed to post thread kickoff message", "error", msgErr)
+	}
+	// The agent replies in the new thread, as on the synchronous path.
+	agentThread = eventThread
+	if msgErr == nil && kickoffMsgName != "" {
+		agentThread = strings.Replace(kickoffMsgName, "/messages/", "/threads/", 1)
+	}
+
+	if instruction != "" {
+		msg = messages.NewInstruction("user:"+r.senderEmailForUser(ctx, event), slug, instruction)
+		if r.broker != nil {
+			msg.Channel = r.broker.ChannelName()
+		}
+		msg.ThreadID = agentThread
+	}
+
+	// Post the card ourselves so it can be updated when the launch ends.
+	card = threadCard(a, "Starting…", instruction)
+	name, cardErr := r.messenger.SendMessage(ctx, SendMessageRequest{
+		SpaceID:  spaceID,
+		ThreadID: eventThread,
+		Card:     &card,
+	})
+	if cardErr != nil {
+		r.log.Warn("failed to post thread card", "error", cardErr)
 		return cardResponse(event, &card)
 	}
+	cardName = name
 	return nil
 }
 
