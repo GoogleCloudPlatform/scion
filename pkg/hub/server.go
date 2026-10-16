@@ -2215,6 +2215,10 @@ type Server struct {
 	// sweeper (ptone/scion#4424) so CleanupResources can join it.
 	threadGroupMigration threadGroupMigrationRuntime
 
+	// timestampAutoRun tracks the background stored-timestamp check and its
+	// run of utc-timestamp-normalize at start (see startStoredTimestampCheck).
+	timestampAutoRun timestampAutoRunner
+
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
@@ -6366,7 +6370,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
-	// Report non-canonical stored timestamps (SQLite). It runs in the
+	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
+	// run utc-timestamp-normalize once, after a snapshot. It runs in the
 	// background: on a large store the check is a full scan per time column,
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
@@ -6612,6 +6617,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.
 		s.stopThreadGroupMigrationSweeper()
+
+		// Stop the stored-timestamp check and its run at start, and wait for
+		// it (bounded by its own grace) so that a snapshot being copied is
+		// interrupted and its temporary file removed before the process exits.
+		s.stopStoredTimestampCheck()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
