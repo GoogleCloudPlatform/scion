@@ -172,6 +172,7 @@ type Target struct {
 	webCodes  []WebCode
 	health    []Request
 	hubID     string
+	healthFn  http.HandlerFunc
 	// AudienceOverride, when set, replaces the issuer audience the
 	// target publishes (set before use).
 	AudienceOverride *string
@@ -217,6 +218,14 @@ func (f *Target) SetHubID(id string) {
 	f.hubID = id
 }
 
+// SetHealthHandler makes h answer the target's GET /healthz instead of the
+// default JSON (after the IAP check); nil restores the default.
+func (f *Target) SetHealthHandler(h http.HandlerFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.healthFn = h
+}
+
 // HealthProbes returns the GET /healthz requests the target received
 // (kept apart from Recorded, which lists the other requests).
 func (f *Target) HealthProbes() []Request {
@@ -229,7 +238,7 @@ func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/healthz" {
 		f.mu.Lock()
 		f.health = append(f.health, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
-		id := f.hubID
+		id, fn := f.hubID, f.healthFn
 		f.mu.Unlock()
 		if f.iap {
 			c, err := transportauth.DecodeIDTokenClaims(strings.TrimPrefix(r.Header.Get("Proxy-Authorization"), "Bearer "))
@@ -237,6 +246,10 @@ func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "IAP: forbidden", http.StatusUnauthorized)
 				return
 			}
+		}
+		if fn != nil {
+			fn(w, r)
+			return
 		}
 		body := map[string]any{"status": "healthy"}
 		if id != "" {

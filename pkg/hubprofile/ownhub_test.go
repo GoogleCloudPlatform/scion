@@ -22,11 +22,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubprofile/hubprofiletest"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // The own-hub check by hub identity (ptone/scion#4240, X5). The target and
@@ -157,22 +159,40 @@ func TestOwnHubByID_CombinedHealthShape(t *testing.T) {
 // D1/D2: when either id is unavailable the name check (already passed) is
 // the only check; this is said in debug output only.
 func TestOwnHubByID_UnavailableFallsBackToNames(t *testing.T) {
+	targetFails := func(h http.HandlerFunc) func(*hubprofiletest.Target, *hubprofiletest.HealthHub) {
+		return func(tg *hubprofiletest.Target, _ *hubprofiletest.HealthHub) { tg.SetHealthHandler(h) }
+	}
 	cases := []struct {
 		name     string
 		targetID string
 		own      func(*hubprofiletest.HealthHub)
 		want     string
+		target   func(*hubprofiletest.Target, *hubprofiletest.HealthHub)
 	}{
-		{"target reports no id", "", nil, "the target hub's id is unavailable"},
+		{"target reports no id", "", nil, "the target hub's id is unavailable", nil},
+		{"target 503", "hub-own", nil, "returned 503", targetFails(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"hub_id":"hub-own"}`))
+		})},
+		{"target not JSON", "hub-own", nil, "not JSON", targetFails(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("<html>hub-own</html>"))
+		})},
+		// Following the redirect would read the own hub's id and refuse.
+		{"target redirect", "hub-own", nil, "returned 302", func(tg *hubprofiletest.Target, own *hubprofiletest.HealthHub) {
+			tg.SetHealthHandler(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, own.Srv.URL+"/healthz", http.StatusFound)
+			})
+		}},
 		{"own reports no id", "hub-own", func(o *hubprofiletest.HealthHub) {
 			o.SetResponse(http.StatusOK, map[string]any{"status": "healthy"})
-		}, "this agent's own hub id is unavailable"},
+		}, "this agent's own hub id is unavailable", nil},
 		{"own fails", "hub-own", func(o *hubprofiletest.HealthHub) {
 			o.SetResponse(http.StatusServiceUnavailable, map[string]any{"hub_id": "hub-own"})
-		}, "this agent's own hub id is unavailable"},
+		}, "this agent's own hub id is unavailable", nil},
 		{"own id malformed", "hub-own", func(o *hubprofiletest.HealthHub) {
 			o.SetResponse(http.StatusOK, map[string]any{"hub_id": "hub own"})
-		}, "this agent's own hub id is unavailable"},
+		}, "this agent's own hub id is unavailable", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,10 +202,19 @@ func TestOwnHubByID_UnavailableFallsBackToNames(t *testing.T) {
 			if tc.own != nil {
 				tc.own(own)
 			}
+			if tc.target != nil {
+				tc.target(h.target, own)
+			}
 			s, log := h.openWithOwn(t, own, "", "r1")
 			require.NoError(t, listAsIssuer(s))
 			assert.Contains(t, log.joined(), tc.want)
 			assert.Contains(t, log.joined(), "name check only")
+			if tc.target != nil {
+				assert.Empty(t, own.Recorded(), "the own hub is not probed when the target id is unavailable")
+			}
+			outcome, err := s.OwnHubCheck(context.Background())
+			require.NoError(t, err)
+			assert.True(t, strings.HasPrefix(outcome, "by name only: "), outcome)
 		})
 	}
 
@@ -217,9 +246,15 @@ func TestOwnHubByID_NameMatchStillRefused(t *testing.T) {
 
 // D2: the target lookup carries only the profile's transport token, and
 // the own-hub lookup carries no credential, although ambient tokens are in
-// the environment.
+// the session's environment (SCION_AUTH_TOKEN and SCION_HUB_TOKEN from
+// the fakes' environment, plus SCION_DEV_TOKEN here).
 func TestOwnHubByID_LookupsSendNoExtraCredential(t *testing.T) {
 	h := newHarness(t, true)
+	h.env["SCION_DEV_TOKEN"] = "AMBIENT-SCION-DEV-TOKEN"
+	env := testDeps(h.gcp, h.clk, h.env).Getenv
+	for _, k := range []string{"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN"} {
+		require.Contains(t, env(k), "AMBIENT", k)
+	}
 	h.target.SetHubID("hub-t1")
 	own := hubprofiletest.NewHealthHub(t, "hub-own")
 	s, _ := h.openWithOwn(t, own, "", "r1")
@@ -235,6 +270,13 @@ func TestOwnHubByID_LookupsSendNoExtraCredential(t *testing.T) {
 	assert.Equal(t, "/healthz", ownReqs[0].Path)
 	assert.Equal(t, http.MethodGet, ownReqs[0].Method)
 	assert.Empty(t, credentialHeaderNames(ownReqs[0].Header), "no credential to the agent's own hub")
+	for _, r := range append(probes, ownReqs...) {
+		for k, vs := range r.Header {
+			for _, v := range vs {
+				assert.NotContains(t, v, "AMBIENT", "header %s", k)
+			}
+		}
+	}
 }
 
 // D2: a redirect from the own hub is not followed (no request to the
@@ -288,4 +330,102 @@ func TestHealthHubID(t *testing.T) {
 		require.NoError(t, err, tc.body)
 		assert.Equal(t, tc.want, got)
 	}
+}
+
+// hub status reports the outcome of the id check when it passes or falls
+// back to the name check, not only when it refuses.
+func TestOwnHubByID_StatusReportsEveryOutcome(t *testing.T) {
+	cases := []struct{ name, targetID, ownID, want string }{
+		{"passed", "hub-t1", "hub-own", OwnHubByIDPassed},
+		{"target id unavailable", "", "hub-own", OwnHubByIDNoTargetID},
+		{"own id unavailable", "hub-t1", "", OwnHubByIDNoOwnID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, true)
+			h.target.SetHubID(tc.targetID)
+			own := hubprofiletest.NewHealthHub(t, tc.ownID)
+			s, _ := h.openWithOwn(t, own, "", "r1")
+			r := s.Status(context.Background())
+			assert.True(t, r.OK, "%+v", r.Checks)
+			require.NotEmpty(t, r.Checks)
+			assert.Equal(t, CheckNotOwnHubName, r.Checks[0].Name)
+			assert.True(t, r.Checks[0].OK)
+			assert.Equal(t, tc.want, r.Checks[0].Detail)
+		})
+	}
+	t.Run("no own hub endpoint", func(t *testing.T) {
+		h := newHarness(t, true)
+		r := h.mustOpen(testProfile(h.target, TransportIAP), "", "r1").Status(context.Background())
+		require.NotEmpty(t, r.Checks)
+		assert.Equal(t, OwnHubByIDNoOwnEndpoint, r.Checks[0].Detail)
+	})
+}
+
+// A refused session reads no issuer audience and mints no issuer token:
+// the id check runs before the bearer.
+func TestOwnHubByID_RefusedBeforeAnyBearerMint(t *testing.T) {
+	h := newHarness(t, true)
+	h.target.SetHubID("hub-own")
+	own := hubprofiletest.NewHealthHub(t, "hub-own")
+	s, _ := h.openWithOwn(t, own, "", "r1")
+	require.ErrorIs(t, listAsIssuer(s), ErrOwnHub)
+	assert.Empty(t, h.target.Recorded(), "no issuer audience read and no request")
+	for _, tok := range h.gcp.MintedTokens() {
+		c, err := transportauth.DecodeIDTokenClaims(tok)
+		if err != nil {
+			continue
+		}
+		assert.NotEqual(t, testIssuerSA, c.Email, "no issuer ID token was minted")
+	}
+}
+
+// Concurrent requests on a same-id session are all refused, with one
+// lookup on each side and no bearer on the wire.
+func TestOwnHubByID_ConcurrentRequestsAllRefused(t *testing.T) {
+	h := newHarness(t, true)
+	h.target.SetHubID("hub-own")
+	own := hubprofiletest.NewHealthHub(t, "hub-own")
+	s, _ := h.openWithOwn(t, own, "", "r1")
+	const n = 8
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = listAsIssuer(s)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		assert.ErrorIs(t, err, ErrOwnHub, "request %d", i)
+	}
+	assert.Len(t, h.target.HealthProbes(), 1)
+	assert.Len(t, own.Recorded(), 1)
+	assertNoBearerReachedTarget(t, h.target)
+	assert.Empty(t, h.target.Recorded())
+}
+
+// A slow own hub falls back to the name check within the lookup bound.
+func TestOwnHubByID_SlowOwnHubFallsBack(t *testing.T) {
+	prev := hubIDLookupTimeout
+	hubIDLookupTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { hubIDLookupTimeout = prev })
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(release) })
+	h := newHarness(t, true)
+	h.target.SetHubID("hub-own")
+	s, log := h.openWithOwnURL(t, slow.URL, "", "r1")
+	start := time.Now()
+	require.NoError(t, listAsIssuer(s))
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Contains(t, log.joined(), "this agent's own hub id is unavailable")
 }

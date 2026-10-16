@@ -29,25 +29,29 @@ import (
 // The own-hub check by hub identity (ptone/scion#4240, X5).
 //
 // CheckNotOwnHub compares endpoint names. A session additionally compares
-// hub identities before it sends the first profile credential: the target
+// hub identities before it mints or sends a profile bearer (the issuer ID
+// token or a cached test identity token; the IAP transport token reaches
+// the target by design, on the lookup itself): the target
 // hub's persistent hub id against the agent's own hub id, both read from
 // the hub's public health route (GET /healthz, "hub_id", or "hub.hub_id"
 // on a combined web server). Equal ids are refused with ErrOwnHub. When
 // either id is unavailable the name check, which Open has already applied,
-// is the only check, and this is said in debug output only. The lookups
+// is the only check; debug output and hub status say so. The lookups
 // can only add a refusal: the name check always runs first and a failed
 // lookup never allows what it refused.
 //
-// The target lookup carries only the profile's transport credential (the
-// IAP token, for transport iap) and no Authorization; the own-hub lookup
-// carries no credential at all. Neither follows redirects.
+// The target lookup carries at most the profile's transport credential (the
+// IAP token, for transport iap; none for transport none) and no bearer;
+// the own-hub lookup carries no credential at all. Neither follows redirects.
 
 const (
 	healthPath          = "/healthz"
-	hubIDLookupTimeout  = 5 * time.Second
 	maxHubIDLen         = 256
 	healthResponseLimit = 64 << 10
 )
+
+// hubIDLookupTimeout bounds each hub id lookup (a variable for tests).
+var hubIDLookupTimeout = 5 * time.Second
 
 // errNoHubID is returned when a health response carries no hub id.
 var errNoHubID = errors.New("the health response has no hub id")
@@ -125,46 +129,63 @@ func ownHubBases(getenv func(string) string) []string {
 	return out
 }
 
+// Outcomes of the own-hub check by hub identity (OwnHubCheck).
+const (
+	OwnHubByIDPassed        = "passed by hub id"
+	OwnHubByIDRefused       = "refused: the target reports this agent's own hub id"
+	OwnHubByIDNoOwnEndpoint = "by name only: this agent's own hub endpoint is not set"
+	OwnHubByIDNoTargetID    = "by name only: the target hub's id is unavailable"
+	OwnHubByIDNoOwnID       = "by name only: this agent's own hub id is unavailable"
+)
+
 // CheckNotOwnHubByID compares the target hub's id with the agent's own hub
 // id and returns an error wrapping ErrOwnHub when they are equal. It runs
 // once per session (later calls return the first result) and is applied
-// before the session sends its first profile credential. An unavailable id
+// before the session sends its first profile bearer. An unavailable id
 // leaves the name check, already applied by Open, as the only check.
 func (s *Session) CheckNotOwnHubByID(ctx context.Context) error {
-	s.ownHubOnce.Do(func() { s.ownHubErr = s.compareHubIDs(ctx) })
+	s.ownHubOnce.Do(func() { s.ownHubOutcome, s.ownHubErr = s.compareHubIDs(ctx) })
 	return s.ownHubErr
 }
 
-func (s *Session) compareHubIDs(ctx context.Context) error {
+// OwnHubCheck runs CheckNotOwnHubByID and returns its outcome (one of the
+// OwnHubByID* values) with its error.
+func (s *Session) OwnHubCheck(ctx context.Context) (string, error) {
+	err := s.CheckNotOwnHubByID(ctx)
+	return s.ownHubOutcome, err
+}
+
+func (s *Session) compareHubIDs(ctx context.Context) (string, error) {
 	debugf := s.deps.Debugf
+	name := s.opts.Profile.Name
 	owns := ownHubBases(s.deps.Getenv)
 	if len(owns) == 0 {
-		debugf("hub profile %q: own-hub check by hub id skipped: this agent's own hub endpoint is not set; name check only", s.opts.Profile.Name)
-		return nil
+		debugf("hub profile %q: own-hub check by hub id skipped: this agent's own hub endpoint is not set; name check only", name)
+		return OwnHubByIDNoOwnEndpoint, nil
 	}
 	targetClient := &http.Client{Transport: &profileTransport{s: s, base: s.deps.BaseTransport}, CheckRedirect: noRedirect}
 	targetID, err := fetchHubID(ctx, targetClient, s.Endpoint())
 	if err != nil {
-		debugf("hub profile %q: own-hub check by hub id skipped: the target hub's id is unavailable (%v); name check only", s.opts.Profile.Name, err)
-		return nil
+		debugf("hub profile %q: own-hub check by hub id skipped: the target hub's id is unavailable (%v); name check only", name, err)
+		return OwnHubByIDNoTargetID, nil
 	}
 	ownClient := &http.Client{Transport: s.deps.BaseTransport, CheckRedirect: noRedirect}
 	compared := false
 	for _, base := range owns {
 		ownID, err := fetchHubID(ctx, ownClient, base)
 		if err != nil {
-			debugf("hub profile %q: this agent's own hub id is unavailable from one endpoint (%v)", s.opts.Profile.Name, err)
+			debugf("hub profile %q: this agent's own hub id is unavailable from one endpoint (%v)", name, err)
 			continue
 		}
 		compared = true
 		if ownID == targetID {
-			return fmt.Errorf("hub profile %q: %w (the target reports this agent's own hub id)", s.opts.Profile.Name, ErrOwnHub)
+			return OwnHubByIDRefused, fmt.Errorf("hub profile %q: %w (the target reports this agent's own hub id)", name, ErrOwnHub)
 		}
 	}
 	if !compared {
-		debugf("hub profile %q: own-hub check by hub id skipped: this agent's own hub id is unavailable; name check only", s.opts.Profile.Name)
-		return nil
+		debugf("hub profile %q: own-hub check by hub id skipped: this agent's own hub id is unavailable; name check only", name)
+		return OwnHubByIDNoOwnID, nil
 	}
-	debugf("hub profile %q: own-hub check by hub id passed", s.opts.Profile.Name)
-	return nil
+	debugf("hub profile %q: own-hub check by hub id passed", name)
+	return OwnHubByIDPassed, nil
 }

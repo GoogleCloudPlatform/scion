@@ -45,6 +45,9 @@ type StatusTransport struct {
 	Audience       string `json:"audience,omitempty"`
 }
 
+// CheckNotOwnHubName names the status check of the own-hub check by hub id.
+const CheckNotOwnHubName = "not this agent's own hub"
+
 // StatusCheck is one gate check.
 type StatusCheck struct {
 	Name   string `json:"name"`
@@ -87,12 +90,14 @@ func (s *Session) Status(ctx context.Context) *StatusReport {
 		r.Checks = append(r.Checks, StatusCheck{Name: name, OK: ok, Detail: detail})
 	}
 
-	// The own-hub check by hub id runs before any profile credential is
-	// sent; a refusal ends the probe.
-	if err := s.CheckNotOwnHubByID(ctx); err != nil {
-		add("not this agent's own hub", false, err.Error())
+	// The own-hub check by hub id runs before any profile bearer is minted
+	// or sent; its outcome is always reported, and a refusal ends the probe.
+	outcome, ownErr := s.OwnHubCheck(ctx)
+	if ownErr != nil {
+		add(CheckNotOwnHubName, false, ownErr.Error())
 		return r
 	}
+	add(CheckNotOwnHubName, true, outcome)
 
 	alias := s.opts.Alias != ""
 	path := "/api/v1/test-identities?limit=1"

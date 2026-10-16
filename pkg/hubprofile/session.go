@@ -149,14 +149,15 @@ type Session struct {
 	recorder *wireRecorder
 	hc       *http.Client
 
-	ownHubOnce sync.Once
-	ownHubErr  error
+	ownHubOnce    sync.Once
+	ownHubOutcome string
+	ownHubErr     error
 }
 
 // Open validates the profile and options and prepares a session. It does
 // not contact the target hub or mint any token yet. It applies the name
 // check (CheckNotOwnHub); the hub id check (CheckNotOwnHubByID) runs before
-// the first profile credential is sent.
+// a profile bearer is minted or sent.
 func Open(opts Options, deps Deps) (*Session, error) {
 	deps.fill()
 	p := opts.Profile
@@ -509,12 +510,13 @@ func (a *bearerAuth) ApplyAuth(req *http.Request) error {
 	if !a.s.isTarget(req.URL) {
 		return nil
 	}
-	tok, extra, err := a.s.bearer(req.Context(), a.alias)
-	if err != nil {
+	// The own-hub check by hub id runs before a profile bearer is minted or
+	// read: a refused session reads no issuer audience and mints no token.
+	if err := a.s.CheckNotOwnHubByID(req.Context()); err != nil {
 		return err
 	}
-	// No profile credential leaves before the own-hub check by hub id.
-	if err := a.s.CheckNotOwnHubByID(req.Context()); err != nil {
+	tok, extra, err := a.s.bearer(req.Context(), a.alias)
+	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
