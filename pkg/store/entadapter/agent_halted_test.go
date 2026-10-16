@@ -905,3 +905,96 @@ func TestAgentHalted_AgentReportedHaltEvidenceDroppedWhileSignaledStored(t *test
 	assert.False(t, res.Halted)
 	assert.Equal(t, "signaled", exitReasonOf(t, ctx, s, id), "an agent report never records a halt-evidence reason")
 }
+
+func TestAgentHalted_SignaledStopThenPreemptedCleanExitHalts(t *testing.T) {
+	// The usual graceful preemption: the agent's signaled stop report lands
+	// first, then the runtime reports preempted with exit code 0.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "signaled-preempted", defaultHaltRow())
+
+	apply(t, ctx, s, id, signaledReport("stopped"))
+	res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(0)))
+	assert.Equal(t, store.AgentStatusResult{Halted: true, HaltedFrom: ""}, res, "a same-phase upgrade has no HaltedFrom")
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "halted", got.Phase)
+	assert.Equal(t, "preempted", got.ExitReason, "the stored reason becomes the runtime's")
+
+	res = apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(0)))
+	assert.False(t, res.Halted, "the halt is reported once")
+}
+
+func TestAgentHalted_PlainStopThenPreemptedCleanExitStaysStopped(t *testing.T) {
+	// Without the signaled reason, exit code 0 cannot tell a disruption
+	// from a clean finish: no upgrade.
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "plain-preempted", defaultHaltRow())
+
+	apply(t, ctx, s, id, selfReport("stopped", ""))
+	res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(0)))
+	assert.False(t, res.Halted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+}
+
+func TestAgentHalted_SignaledStopThenOOMCleanExitHalts(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "signaled-oom", defaultHaltRow())
+
+	apply(t, ctx, s, id, signaledReport("stopped"))
+	res := apply(t, ctx, s, id, heartbeat("stopped", "oom_killed", intp(0)))
+	assert.True(t, res.Halted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "halted", got.Phase)
+	assert.Equal(t, "oom_killed", got.ExitReason)
+}
+
+func TestAgentHalted_SignaledThenEvictedCleanExitNoHalt(t *testing.T) {
+	// Intent stopped or a start claim held: the signaled reason does not
+	// lift those guards.
+	for name, mod := range map[string]func(*haltRow){
+		"intent-stopped": func(r *haltRow) { r.intent = store.RunIntentStopped },
+		"claim-held":     func(r *haltRow) { r.claimID = "claim-1" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			r := defaultHaltRow()
+			mod(&r)
+			id := newHaltAgent(t, ctx, s, projectID, "signaled-guarded", r)
+
+			apply(t, ctx, s, id, signaledReport("stopped"))
+			res := apply(t, ctx, s, id, heartbeat("stopped", "evicted", intp(0)))
+			assert.False(t, res.Halted)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, "stopped", got.Phase)
+		})
+	}
+}
+
+func TestAgentHalted_SignaledThenPreemptedIneligibleRuntimeStaysStopped(t *testing.T) {
+	// The stop report first, then the runtime's reason, on a runtime whose
+	// evidence the halt rule does not use.
+	for _, rt := range []string{"", "cloudrun-sandbox"} {
+		t.Run("runtime="+rt, func(t *testing.T) {
+			ctx := context.Background()
+			s, projectID := newTestAgentStore(t)
+			r := defaultHaltRow()
+			r.runtime = rt
+			id := newHaltAgent(t, ctx, s, projectID, "signaled-ineligible", r)
+
+			apply(t, ctx, s, id, signaledReport("stopped"))
+			res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(0)))
+			assert.False(t, res.Halted)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, "stopped", got.Phase)
+		})
+	}
+}

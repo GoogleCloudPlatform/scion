@@ -1826,8 +1826,11 @@ func haltedStickyDrop(current *ent.Agent, su store.AgentStatusUpdate) bool {
 //   - the row is already stopped or error with no halt-evidence reason
 //     recorded, and the report (with no phase, or a stopped/error phase)
 //     brings one: a later report of the same run saying why it ended. Such
-//     an upgrade is blocked only when the report itself carries exit code
-//     0: the runtime saw a clean exit.
+//     an upgrade is blocked when the report itself carries exit code 0 (the
+//     runtime saw a clean exit), unless the row's reason is the
+//     agent-reported signaled: the agent stopped after a termination
+//     signal, so the clean exit is the graceful end of a disruption. The
+//     signaled reason is never evidence by itself.
 func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string) {
 	if current.RunIntent == nil || store.RunIntent(*current.RunIntent) != store.RunIntentRunning {
 		return false, ""
@@ -1852,7 +1855,7 @@ func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string)
 		if store.IsHaltEvidence(current.ExitReason) {
 			return false, ""
 		}
-		if su.ExitCode != nil && *su.ExitCode == 0 {
+		if su.ExitCode != nil && *su.ExitCode == 0 && current.ExitReason != string(state.ExitReasonSignaled) {
 			return false, ""
 		}
 		if newPhase == "" {
