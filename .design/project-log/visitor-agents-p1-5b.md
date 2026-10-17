@@ -117,3 +117,16 @@
   the project and agent segments cut from it are only compared and used
   for store lookups; they are not logged, returned in a response or
   stored. Test-only change.
+
+## Authority read census entry (2026-10-17)
+
+- The test identity authority read census (pkg/hub,
+  TestTestAdminAuthorityReadCensus) lists visitorGrantBindings' read of
+  ListRoleBindingsForPrincipal. It reads the caller's own project-visitor
+  grants and is reached only with a VisitorIdentity, which
+  resolveFederatedVisitor builds only for a kind federated account
+  (federation_visitor.go:98). A user's kind never changes and federated
+  is not a test identity kind, so the test identity clamps would remove
+  nothing. Test-only change.
+- The other census and registry tests that scan pkg/hub were checked by
+  reading against this item's lines; none flags another site.
