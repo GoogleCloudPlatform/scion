@@ -175,6 +175,7 @@ var identityOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority"},
 			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_SystemBindingsOnClosureDenied"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
 		},
 		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
@@ -702,7 +703,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.update",
 		Domain:      "group",
-		Description: "Update group metadata",
+		Description: "Update group metadata. A user access token changes the owner only when it may add the new owner as a member of the group",
 		EntryPoints: []EntryPoint{
 			// handleGroupRoutes (handlers_groups.go) dispatches on
 			// r.Method: PATCH, not PUT.
@@ -719,6 +720,7 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+			{Package: "pkg/hub", Function: "TestGroupOwnerChangeToken_RequiresDelegationForNewOwner"},
 		},
 		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},

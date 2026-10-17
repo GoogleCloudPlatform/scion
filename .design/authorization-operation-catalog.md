@@ -200,7 +200,7 @@
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
-- [group.update](#groupupdate) — Update group metadata
+- [group.update](#groupupdate) — Update group metadata. A user access token changes the owner only when it may add the new owner as a member of the group
 - [user.read](#userread) — Read user profile or list users
 - [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
 - [role.read](#roleread) — Read role definitions and permission registry
@@ -6767,6 +6767,7 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority`
 - `pkg/hub:TestGroupMemberAddToken_SystemBindingsOnClosureDenied`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7495,7 +7496,7 @@
 
 **Domain:** group
 
-**Description:** Update group metadata
+**Description:** Update group metadata. A user access token changes the owner only when it may add the new owner as a member of the group
 
 ### Entry Points
 
@@ -7521,6 +7522,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestGroupOwnerChangeToken_RequiresDelegationForNewOwner`
 
 ---
 

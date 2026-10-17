@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -162,6 +163,9 @@ func withSelectors(sets ...[]string) []string {
 	return out
 }
 
+// noBody is the request body of a route that takes none.
+func noBody(string) interface{} { return nil }
+
 func addUserBody(userID string) map[string]interface{} {
 	return map[string]interface{}{"memberType": store.GroupMemberTypeUser, "memberId": userID, "role": store.GroupMemberRoleMember}
 }
@@ -205,8 +209,8 @@ func TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority(t *t
 	}
 
 	// The holder's live authority bounds the token: with the binding that
-	// gives the caller the project role removed, the same selectors no
-	// longer admit the add.
+	// gives the caller the project role removed, the same selectors do not
+	// admit the add.
 	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: f.callerID}}, []string{store.RoleScopeProject}, []string{f.projectID})
 	require.NoError(t, err)
 	require.Len(t, bindings, 1)
@@ -394,36 +398,47 @@ func TestExplicitGroupToken_ResolvesHubTarget(t *testing.T) {
 }
 
 // TestGroupChangeToken_SelectorAndBoundaryPerRoute pins, for update,
-// delete and member removal on an explicit group, that a user access token
-// is admitted with the route's group selector on a hub boundary, refused
-// without it, and refused on a project boundary, and that a session makes
-// the same change.
+// delete, member add and member removal on an explicit group, that a user
+// access token is admitted with the route's group selector on a hub
+// boundary, refused without it, and refused on a project boundary, and
+// that a session makes the same change. Member add runs as the group's
+// owner on a group with no role binding, so the group role hierarchy and
+// the delegation check both pass.
 func TestGroupChangeToken_SelectorAndBoundaryPerRoute(t *testing.T) {
 	type route struct {
 		name     string
 		selector string
 		method   string
 		path     func(g *store.Group, member string) string
-		body     interface{}
+		body     func(member string) interface{}
+		// existing is whether the route acts on a user who is already a
+		// member of the group.
+		existing bool
 		done     func(t *testing.T, f *groupTokenFixture, g *store.Group, member string) bool
 	}
 	routes := []route{
 		{"update", "group:update", http.MethodPatch,
 			func(g *store.Group, _ string) string { return "/api/v1/groups/" + g.ID },
-			map[string]interface{}{"description": "changed"},
+			func(string) interface{} { return map[string]interface{}{"description": "changed"} }, true,
 			func(t *testing.T, f *groupTokenFixture, g *store.Group, _ string) bool {
 				got, err := f.s.GetGroup(context.Background(), g.ID)
 				require.NoError(t, err)
 				return got.Description == "changed"
 			}},
 		{"delete", "group:delete", http.MethodDelete,
-			func(g *store.Group, _ string) string { return "/api/v1/groups/" + g.ID }, nil,
+			func(g *store.Group, _ string) string { return "/api/v1/groups/" + g.ID }, noBody, true,
 			func(t *testing.T, f *groupTokenFixture, g *store.Group, _ string) bool {
 				_, err := f.s.GetGroup(context.Background(), g.ID)
 				return err != nil
 			}},
+		{"add member", "group:addMember", http.MethodPost,
+			func(g *store.Group, _ string) string { return "/api/v1/groups/" + g.ID + "/members" },
+			func(m string) interface{} { return addUserBody(m) }, false,
+			func(t *testing.T, f *groupTokenFixture, g *store.Group, m string) bool {
+				return f.isMember(t, g, store.GroupMemberTypeUser, m)
+			}},
 		{"remove member", "group:removeMember", http.MethodDelete,
-			func(g *store.Group, m string) string { return "/api/v1/groups/" + g.ID + "/members/user/" + m }, nil,
+			func(g *store.Group, m string) string { return "/api/v1/groups/" + g.ID + "/members/user/" + m }, noBody, true,
 			func(t *testing.T, f *groupTokenFixture, g *store.Group, m string) bool {
 				return !f.isMember(t, g, store.GroupMemberTypeUser, m)
 			}},
@@ -434,7 +449,9 @@ func TestGroupChangeToken_SelectorAndBoundaryPerRoute(t *testing.T) {
 			setup := func(name string) (*store.Group, string) {
 				g := f.group(t, name)
 				m := f.user(t, name+"-member")
-				require.NoError(t, f.s.AddGroupMember(context.Background(), &store.GroupMember{GroupID: g.ID, MemberType: store.GroupMemberTypeUser, MemberID: m, Role: store.GroupMemberRoleMember}))
+				if rt.existing {
+					require.NoError(t, f.s.AddGroupMember(context.Background(), &store.GroupMember{GroupID: g.ID, MemberType: store.GroupMemberTypeUser, MemberID: m, Role: store.GroupMemberRoleMember}))
+				}
 				return g, m
 			}
 			var others []string
@@ -445,7 +462,7 @@ func TestGroupChangeToken_SelectorAndBoundaryPerRoute(t *testing.T) {
 			}
 
 			g, m := setup("gsr-refused")
-			rec := doRequestWithUAT(t, f.srv, f.mint(t, hubBoundary(), others...), rt.method, rt.path(g, m), rt.body)
+			rec := doRequestWithUAT(t, f.srv, f.mint(t, hubBoundary(), others...), rt.method, rt.path(g, m), rt.body(m))
 			assert.Equal(t, http.StatusForbidden, rec.Code, "without %s: %s", rt.selector, rec.Body.String())
 			assert.False(t, rt.done(t, f, g, m), "the refused change does not happen")
 
@@ -454,16 +471,16 @@ func TestGroupChangeToken_SelectorAndBoundaryPerRoute(t *testing.T) {
 			})
 			assert.Error(t, err, "%s is not mintable on a project boundary", rt.selector)
 			legacy := uatpInsertLegacyToken(t, f.s, f.callerID, f.projectID, []string{rt.selector})
-			rec = doRequestWithUAT(t, f.srv, legacy, rt.method, rt.path(g, m), rt.body)
+			rec = doRequestWithUAT(t, f.srv, legacy, rt.method, rt.path(g, m), rt.body(m))
 			assert.Equal(t, http.StatusForbidden, rec.Code, "a project-boundary row carrying %s: %s", rt.selector, rec.Body.String())
 			assert.False(t, rt.done(t, f, g, m), "the refused change does not happen")
 
-			rec = doRequestWithUAT(t, f.srv, f.mint(t, hubBoundary(), rt.selector), rt.method, rt.path(g, m), rt.body)
+			rec = doRequestWithUAT(t, f.srv, f.mint(t, hubBoundary(), rt.selector), rt.method, rt.path(g, m), rt.body(m))
 			assert.Less(t, rec.Code, 300, "with %s on a hub boundary: %d %s", rt.selector, rec.Code, rec.Body.String())
 			assert.True(t, rt.done(t, f, g, m), "the admitted change happens")
 
 			g2, m2 := setup("gsr-session")
-			assert.Less(t, f.session(t, rt.method, rt.path(g2, m2), rt.body), 300, "a session makes the change")
+			assert.Less(t, f.session(t, rt.method, rt.path(g2, m2), rt.body(m2)), 300, "a session makes the change")
 			assert.True(t, rt.done(t, f, g2, m2))
 		})
 	}
@@ -688,4 +705,263 @@ func TestGroupMembershipToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
 	code := f.session(t, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", addUserBody(target))
 	f.srv.store = orig
 	assert.Equal(t, http.StatusCreated, code, "a session's add is governed by group roles and not re-checked")
+}
+
+// groupOwnerTokenRefusalBody is the response body of the one refusal a
+// user access token gets when it may not set a group's owner.
+func groupOwnerTokenRefusalBody() string {
+	rec := httptest.NewRecorder()
+	writeForbidden(rec, groupOwnerTokenRefusal)
+	return rec.Body.String()
+}
+
+func (f *groupTokenFixture) ownerOf(t *testing.T, g *store.Group) string {
+	t.Helper()
+	got, err := f.s.GetGroup(context.Background(), g.ID)
+	require.NoError(t, err)
+	return got.OwnerID
+}
+
+// TestGroupOwnerChangeToken_RequiresDelegationForNewOwner pins that a user
+// access token changes a group's owner only when it could add the new owner
+// as a member of the group: the token needs the holder's live update
+// authority on the group, and the delegation check runs against the
+// group's closure for the new owner. Every refusal is the same 403 with the
+// same body: for a token without the closure's authority, for an unknown
+// group, for a token without group:update, and for a token whose holder
+// lost the update authority after the token was issued. Other fields are
+// updated as for any update. A session changes the owner.
+func TestGroupOwnerChangeToken_RequiresDelegationForNewOwner(t *testing.T) {
+	f := newGroupTokenFixture(t, "goc")
+	ctx := context.Background()
+	refusal := groupOwnerTokenRefusalBody()
+	patch := func(key string, g string, body map[string]interface{}) (int, string) {
+		rec := doRequestWithUAT(t, f.srv, key, http.MethodPatch, "/api/v1/groups/"+g, body)
+		return rec.Code, rec.Body.String()
+	}
+	setOwner := func(id string) map[string]interface{} { return map[string]interface{}{"ownerId": id} }
+
+	bound := f.group(t, "goc-bound")
+	f.bindGroup(t, bound, f.roleID, store.RoleScopeProject, f.projectID)
+	newOwner := f.user(t, "goc-new-owner")
+
+	without := f.mint(t, hubBoundary(), "group:update")
+	code, body := patch(without, bound.ID, setOwner(newOwner))
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.Equal(t, refusal, body, "a token without the closure's project authority gets the fixed refusal")
+	assert.Equal(t, f.callerID, f.ownerOf(t, bound), "the refused change writes no owner")
+
+	code, body = patch(without, bound.ID, map[string]interface{}{"description": "goc-described"})
+	assert.Equal(t, http.StatusOK, code, "the same token updates other fields: %s", body)
+
+	code, body = patch(without, tid("goc-unknown"), setOwner(newOwner))
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.Equal(t, refusal, body, "an unknown group gets the same refusal")
+
+	readOnly := f.mint(t, hubBoundary(), "group:read")
+	code, body = patch(readOnly, bound.ID, setOwner(newOwner))
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.Equal(t, refusal, body, "a token without group:update gets the same refusal")
+	assert.Equal(t, f.callerID, f.ownerOf(t, bound))
+
+	with := f.mint(t, hubBoundary(), withSelectors([]string{"group:update"}, groupTokenRoleSelectors)...)
+	code, body = patch(with, bound.ID, setOwner(newOwner))
+	require.Equal(t, http.StatusOK, code, "a token holding the closure's project authority: %s", body)
+	assert.Equal(t, newOwner, f.ownerOf(t, bound))
+
+	sessionOwner := f.user(t, "goc-session-owner")
+	assert.Equal(t, http.StatusOK, f.session(t, http.MethodPatch, "/api/v1/groups/"+bound.ID, setOwner(sessionOwner)),
+		"a session changes the owner of a group with a project-scoped binding")
+	assert.Equal(t, sessionOwner, f.ownerOf(t, bound))
+
+	// Current authority decides: a token whose holder does not hold
+	// group.update gets the same refusal. The groups are owned by another
+	// user, so the update authority comes only from the holder's role.
+	elsewhereOwner := f.user(t, "goc-other")
+	before := f.group(t, "goc-before")
+	after := f.group(t, "goc-after")
+	for _, g := range []*store.Group{before, after} {
+		g.OwnerID = elsewhereOwner
+		require.NoError(t, f.s.UpdateGroup(ctx, g))
+	}
+	demoted := f.mint(t, hubBoundary(), "group:update")
+	code, body = patch(demoted, before.ID, setOwner(newOwner))
+	require.Equal(t, http.StatusOK, code, "the holder's role admits the change: %s", body)
+	groupRole, err := f.s.GetRoleDefinitionByName(ctx, "goc-groups", store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: f.callerID}}, []string{store.RoleScopeSystem}, nil)
+	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.RoleDefinitionID == groupRole.ID {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "the holder's group role binding is removed")
+	code, body = patch(demoted, after.ID, setOwner(newOwner))
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.Equal(t, refusal, body, "a token whose holder lost group.update gets the same refusal")
+	assert.Equal(t, elsewhereOwner, f.ownerOf(t, after))
+}
+
+// TestGroupOwnerChangeToken_ClosureChangeBeforeWriteRefused pins that a
+// token's owner change is written only under the closure its delegation
+// check evaluated: when the group's role bindings change between the check
+// and the write, the request is refused with 409 and nothing is written.
+func TestGroupOwnerChangeToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
+	f := newGroupTokenFixture(t, "got")
+	ctx := context.Background()
+	g := f.group(t, "got-group")
+	newOwner := f.user(t, "got-new-owner")
+	key := f.mint(t, hubBoundary(), withSelectors([]string{"group:update"}, groupTokenRoleSelectors)...)
+
+	orig := f.srv.store
+	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: g.ID, roleID: f.roleID, projectID: f.projectID}
+	rec := doRequestWithUAT(t, f.srv, key, http.MethodPatch, "/api/v1/groups/"+g.ID, map[string]interface{}{"ownerId": newOwner})
+	f.srv.store = orig
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Equal(t, f.callerID, f.ownerOf(t, g), "nothing is written")
+	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalGroup, ID: g.ID}}, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "the transaction rolled back as a whole")
+}
+
+// TestGroupCreateToken_ChildWrittenUnderCheckedParentClosure pins that a
+// user access token creates a group under a parent whose closure it may
+// delegate (201, the child under the parent, one membership audit record),
+// and that the child is written only under the parent closure the
+// delegation check evaluated: when the parent's role bindings change
+// between the check and the write, the request is refused with 409 and no
+// group, child edge, binding or audit record is written.
+func TestGroupCreateToken_ChildWrittenUnderCheckedParentClosure(t *testing.T) {
+	f := newGroupTokenFixture(t, "gcc")
+	ctx := context.Background()
+	key := f.mint(t, hubBoundary(), withSelectors(groupTokenGroupSelectors, groupTokenRoleSelectors)...)
+	create := func(slug, parentID string) *httptest.ResponseRecorder {
+		return doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/groups", map[string]interface{}{"name": slug, "slug": slug, "parentId": parentID})
+	}
+	children := func(parentID string) []store.Group {
+		list, err := f.s.ListGroups(ctx, store.GroupFilter{ParentID: parentID}, store.ListOptions{})
+		require.NoError(t, err)
+		return list.Items
+	}
+
+	plain := f.group(t, "gcc-plain")
+	rec := create("gcc-plain-child", plain.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var child store.Group
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&child))
+	assert.Equal(t, plain.ID, child.ParentID)
+	got := children(plain.ID)
+	require.Len(t, got, 1)
+	assert.Equal(t, child.ID, got[0].ID)
+	audits := grantAudits(t, f.s, "group_member_add", plain.ID)
+	require.Len(t, audits, 1)
+	assert.Equal(t, "allow", audits[0].CanDelegateResult)
+	assert.Equal(t, f.callerID, audits[0].ActorPrincipalID)
+
+	parent := f.group(t, "gcc-parent")
+	orig := f.srv.store
+	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: parent.ID, roleID: f.roleID, projectID: f.projectID}
+	rec = create("gcc-changed-child", parent.ID)
+	f.srv.store = orig
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	_, err := f.s.GetGroupBySlug(ctx, "gcc-changed-child")
+	assert.ErrorIs(t, err, store.ErrNotFound, "no group is written")
+	assert.Empty(t, children(parent.ID), "no child edge is written")
+	assert.Empty(t, grantAudits(t, f.s, "group_member_add", parent.ID))
+	bindings, err := f.s.ListRoleBindingsForPrincipals(ctx, []store.PrincipalRef{{Type: store.RoleBindingPrincipalGroup, ID: parent.ID}}, nil, nil)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "the transaction rolled back as a whole")
+}
+
+// unresolvedRoleStore reports one role definition as not resolving, either
+// as store.ErrNotFound or as a nil definition.
+type unresolvedRoleStore struct {
+	store.Store
+	roleID string
+	asNil  bool
+}
+
+func (s *unresolvedRoleStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
+	if id == s.roleID {
+		if s.asNil {
+			return nil, nil
+		}
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetRoleDefinition(ctx, id)
+}
+
+// unresolvedRoleTxStore runs each transaction on an unresolvedRoleStore, so
+// only reads inside the transaction see the role as not resolving.
+type unresolvedRoleTxStore struct {
+	store.Store
+	roleID string
+	asNil  bool
+}
+
+func (s *unresolvedRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&unresolvedRoleStore{Store: tx, roleID: s.roleID, asNil: s.asNil})
+	})
+}
+
+// TestGroupMemberAddToken_UnresolvedClosureRoleIsInternalError pins that a
+// closure role binding whose role definition does not resolve when the
+// membership transaction re-reads the closure refuses the token's add with
+// 500, not 404, and writes nothing.
+func TestGroupMemberAddToken_UnresolvedClosureRoleIsInternalError(t *testing.T) {
+	for _, asNil := range []bool{false, true} {
+		f := newGroupTokenFixture(t, "gur")
+		g := f.group(t, "gur-group")
+		f.bindGroup(t, g, f.roleID, store.RoleScopeProject, f.projectID)
+		target := f.user(t, "gur-target")
+		key := f.mint(t, hubBoundary(), withSelectors([]string{"group:addMember"}, groupTokenRoleSelectors)...)
+
+		orig := f.srv.store
+		f.srv.store = &unresolvedRoleTxStore{Store: orig, roleID: f.roleID, asNil: asNil}
+		rec := doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", addUserBody(target))
+		f.srv.store = orig
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, "nil definition %v: %s", asNil, rec.Body.String())
+		assert.False(t, f.isMember(t, g, store.GroupMemberTypeUser, target), "nothing is written")
+		assert.Empty(t, grantAudits(t, f.s, "group_member_add", g.ID))
+	}
+}
+
+// TestCanDelegate_GroupMembershipToken_UnresolvedClosureRoleDenied pins
+// that the delegation check of a user access token refuses a group
+// membership when a project-scoped binding on the group's closure names a
+// role definition that does not resolve, and admits the same membership
+// when it resolves.
+func TestCanDelegate_GroupMembershipToken_UnresolvedClosureRoleDenied(t *testing.T) {
+	f := newGroupTokenFixture(t, "gud")
+	ctx := context.Background()
+	closureRole, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "gud-closure", Description: "project read", ScopeType: store.RoleScopeProject,
+		Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+	g := f.group(t, "gud-group")
+	f.bindGroup(t, g, closureRole.ID, store.RoleScopeProject, f.projectID)
+
+	holder := NewAuthenticatedUser(f.callerID, f.caller.Email, f.caller.DisplayName, "member", "api")
+	token := NewScopedUserIdentityWithBoundaryAndDecoration(holder, hubBoundary(), groupTokenRoleSelectors, tid("gud-cred"), bearerCeiling(t, groupTokenRoleSelectors...), nil)
+	grant := GrantDescriptor{Type: GrantTypeGroupMembership, GroupID: g.ID, GranteeType: store.GroupMemberTypeUser, GranteeID: f.user(t, "gud-target")}
+
+	authz := f.srv.authzService
+	decision := authz.CanDelegate(ctx, token, grant)
+	require.True(t, decision.Allowed, "the resolving role is delegated: %s", decision.Reason)
+
+	orig := authz.store
+	defer func() { authz.store = orig }()
+	for _, asNil := range []bool{false, true} {
+		authz.store = &unresolvedRoleStore{Store: orig, roleID: closureRole.ID, asNil: asNil}
+		decision = authz.CanDelegate(ctx, token, grant)
+		assert.False(t, decision.Allowed, "nil definition %v", asNil)
+		assert.Equal(t, "cannot resolve role definition for group binding", decision.Reason)
+	}
 }
