@@ -67,6 +67,28 @@ func decodeCreatedID(t *testing.T, body []byte) string {
 	return created.ID
 }
 
+// ownerOfOtherProjectOnly creates a hub member who owns a new project and
+// holds no role in the fixture project, and returns the user's ID.
+func (f scheduleTokenFixture) ownerOfOtherProjectOnly(t *testing.T, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	projectID := tid(name)
+	require.NoError(t, f.store.CreateProject(ctx, &store.Project{ID: projectID, Name: name, Slug: projectID}))
+	user := setupScopedDispatchAgentOwner(t, f.srv, f.store, projectID, tid(name+"-user"))
+	ensureHubMembership(ctx, f.store, user.ID())
+	return user.ID()
+}
+
+// mintFor returns a real token of userID, minted through the token service.
+func (f scheduleTokenFixture) mintFor(t *testing.T, userID string, boundary TokenBoundary, scopes ...string) string {
+	t.Helper()
+	key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(userID), CreateTokenParams{
+		UserID: userID, Name: "sched-" + tid("tok"), Boundary: boundary, Scopes: scopes,
+	})
+	require.NoError(t, err, "mint %s token of %s with %v", boundary.Kind, userID, scopes)
+	return key
+}
+
 // TestScheduleAuthoringToken_RequiresCreateSelector requires creating a
 // message or dispatch_agent schedule or one-shot event with a token to need
 // scheduled_event:create on a boundary that contains the project:
@@ -76,6 +98,8 @@ func decodeCreatedID(t *testing.T, body []byte) string {
 //   - a token without the selector, holding every other schedule and agent
 //     selector, is refused with 403 on both boundaries;
 //   - a project token for another project the owner owns is refused;
+//   - a hub token with the selectors is refused when its user holds no
+//     authority in the project (the user owns only another project);
 //   - the event type's target checks still apply: without agent:message the
 //     token may not schedule a message to an agent it can read, and without
 //     agent:create it may not schedule a dispatch_agent run.
@@ -85,6 +109,7 @@ func decodeCreatedID(t *testing.T, body []byte) string {
 func TestScheduleAuthoringToken_RequiresCreateSelector(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-auth-create")
 	other := f.otherOwnedProject(t, "sched-auth-create-other")
+	outsider := f.ownerOfOtherProjectOnly(t, "sched-auth-create-outsider")
 
 	type createCase struct{ name, path, body string }
 	creates := func(tag string) []createCase {
@@ -112,6 +137,8 @@ func TestScheduleAuthoringToken_RequiresCreateSelector(t *testing.T) {
 	refuseAll("hub token without the selector", f.mint(t, hubBoundary(), withoutCreate...))
 	// On the wrong boundary.
 	refuseAll("project token for another project", f.mint(t, projectBoundary(other), scheduleTokenAuthoringSelectors...))
+	// Without live authority in the project.
+	refuseAll("hub token of a user who owns only another project", f.mintFor(t, outsider, hubBoundary(), scheduleTokenAuthoringSelectors...))
 
 	// The event type's target checks.
 	noMessage := f.mint(t, projectBoundary(f.project), "scheduled_event:create", "agent:read")
@@ -182,7 +209,10 @@ func TestScheduleAuthoringToken_RequiresCreateSelector(t *testing.T) {
 //     checked when the schedule was created;
 //   - a dispatch_agent schedule is refused for a token without agent:create;
 //   - a token without scheduled_event:update, or a project token for
-//     another project, is refused.
+//     another project, is refused;
+//   - a hub token with the resuming selectors is refused when its user
+//     holds no authority in the project (the user owns only another
+//     project).
 //
 // A refused resume leaves the schedule paused with its revision as it was.
 // A token with the selectors resumes the schedule, and the new revision
@@ -191,6 +221,7 @@ func TestScheduleAuthoringToken_RequiresCreateSelector(t *testing.T) {
 func TestScheduleResumeToken_RechecksTarget(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-resume-target")
 	other := f.otherOwnedProject(t, "sched-resume-target-other")
+	outsider := f.ownerOfOtherProjectOnly(t, "sched-resume-target-outsider")
 
 	type resumeCheck struct {
 		eventType string
@@ -205,6 +236,7 @@ func TestScheduleResumeToken_RechecksTarget(t *testing.T) {
 				"hub token without agent:message":              f.mint(t, hubBoundary(), "scheduled_event:update", "agent:read"),
 				"project token without scheduled_event:update": f.mint(t, projectBoundary(f.project), "scheduled_event:create", "agent:read", "agent:message"),
 				"project token for another project":            f.mint(t, projectBoundary(other), "scheduled_event:update", "agent:read", "agent:message"),
+				"hub token of a user outside the project":      f.mintFor(t, outsider, hubBoundary(), "scheduled_event:update", "agent:message"),
 			},
 			admitting: []string{"scheduled_event:update", "agent:message"},
 		},
@@ -215,6 +247,7 @@ func TestScheduleResumeToken_RechecksTarget(t *testing.T) {
 				"hub token without agent:create":               f.mint(t, hubBoundary(), "scheduled_event:update", "agent:read"),
 				"project token without scheduled_event:update": f.mint(t, projectBoundary(f.project), "scheduled_event:create", "agent:create"),
 				"project token for another project":            f.mint(t, projectBoundary(other), "scheduled_event:update", "agent:create"),
+				"hub token of a user outside the project":      f.mintFor(t, outsider, hubBoundary(), "scheduled_event:update", "agent:create"),
 			},
 			admitting: []string{"scheduled_event:update", "agent:create"},
 		},
@@ -374,7 +407,10 @@ func TestScheduledFire_UsesRecordedTokenCeiling(t *testing.T) {
 // event to fire under the boundary recorded when the token authored it, for
 // a project token and a hub token alike: the fire resolves a token identity
 // with that boundary, a dispatch_agent child's delegation edge carries the
-// recorded boundary, and a message is delivered under it.
+// recorded boundary, and a message is delivered under it. A revision that
+// records a project token for another project fires under that token's
+// boundary, which does not contain the event's project: the fire fails with
+// no child created and nothing delivered.
 func TestScheduledFire_UsesRecordedTokenBoundary(t *testing.T) {
 	t.Run("dispatch_agent", func(t *testing.T) {
 		f := newSchedFire(t, "fire-tok-bnd")
@@ -425,5 +461,56 @@ func TestScheduledFire_UsesRecordedTokenBoundary(t *testing.T) {
 			require.Equal(t, store.ScheduledEventFired, got.Status, "%s: %s", label, got.Error)
 			f.assertDelivered(t, i+1)
 		}
+	})
+
+	t.Run("boundary without the event's project", func(t *testing.T) {
+		f := newSchedMsg(t, "fire-tok-bnd-out")
+		withFireScheduler(f.srv, f.store)
+		ctx := context.Background()
+		other := tid("fire-tok-bnd-out-p")
+		require.NoError(t, f.store.CreateProject(ctx, &store.Project{ID: other, Name: "fire-tok-bnd-out-p", Slug: other}))
+		require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, other, f.creator.ID))
+
+		// rerecord returns evt with its revision recording elsewhere: the
+		// credential and the ceiling's boundary.
+		rerecord := func(evt store.ScheduledEvent, elsewhere *store.UserAccessToken) store.ScheduledEvent {
+			evt.InitiatorCredentialID = elsewhere.ID
+			evt.AuthorityCeiling.PermissionIDs = append([]string(nil), elsewhere.CeilingPermissionIDs...)
+			evt.AuthorityCeiling.BoundaryKind = elsewhere.BoundaryKind
+			evt.AuthorityCeiling.BoundaryProjectID = elsewhere.ProjectID
+			return evt
+		}
+		assertOutsideBoundary := func(label string, evt store.ScheduledEvent, wantErr string) {
+			t.Helper()
+			require.Equal(t, other, evt.AuthorityCeiling.BoundaryProjectID, label)
+			_, identity, err := f.srv.resolveScheduledAuthority(ctx, evt)
+			require.NoError(t, err, label)
+			scoped, ok := identity.(*ScopedUserIdentity)
+			require.True(t, ok, "%s: the fire runs as a token identity, got %T", label, identity)
+			assert.Equal(t, projectBoundary(other), scoped.Boundary(), label)
+			got := fireStoredEvent(t, f.srv, f.store, evt)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status, label)
+			assert.Contains(t, got.Error, wantErr, label)
+		}
+
+		dispatch := append(minimalSelectors(t), "scheduled_event:create")
+		key, _ := schedFireMint(t, f.schedFire, projectBoundary(f.proj.ID), dispatch...)
+		_, elsewhere := schedFireMint(t, f.schedFire, projectBoundary(other), dispatch...)
+		evt := createTokenEvent(t, f.srv, f.store, key, f.proj.ID,
+			CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", AgentName: "fire-tok-bnd-out-c"})
+		assertOutsideBoundary("dispatch_agent event", rerecord(evt, elsewhere), "not authorized to create agents in project")
+		f.assertNoChild(t, "fire-tok-bnd-out-c")
+
+		message := []string{"scheduled_event:create", "agent:read", "agent:message"}
+		key, _ = schedFireMint(t, f.schedFire, projectBoundary(f.proj.ID), message...)
+		_, elsewhere = schedFireMint(t, f.schedFire, projectBoundary(other), message...)
+		evt = createTokenEvent(t, f.srv, f.store, key, f.proj.ID,
+			CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentID: f.target.ID, Message: "scheduled hello"})
+		evt = rerecord(evt, elsewhere)
+		err := authorizeScheduledMessageFireFor(f.srv, evt, f.target)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "agent.message permission denied")
+		assertOutsideBoundary("message event", evt, errScheduledMessageRefused.Error())
+		f.assertDelivered(t, 0)
 	})
 }

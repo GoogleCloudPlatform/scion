@@ -249,19 +249,19 @@ func TestScheduleUpdateToken_RequiresUpdateSelector(t *testing.T) {
 		}
 
 		for label, key := range f.tokens(t, scheduleTokenAllSelectors...) {
-			name := "update-" + eventType + "-" + label
-			id := createOwnerSchedule(t, f.srv, f.owner, f.project, name, eventType)
-			before := loadScheduleRevision(t, f.store, id)
+			tokName := "update-" + eventType + "-" + label
+			tokID := createOwnerSchedule(t, f.srv, f.owner, f.project, tokName, eventType)
+			tokBefore := loadScheduleRevision(t, f.store, tokID)
 
-			rec := doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+id), UpdateScheduleRequest{Name: name + "-renamed"})
+			rec := doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+tokID), UpdateScheduleRequest{Name: tokName + "-renamed"})
 			require.Equal(t, http.StatusOK, rec.Code, "%s, %s: rename: %s", eventType, label, rec.Body.String())
-			assert.Equal(t, before, loadScheduleRevision(t, f.store, id), "%s, %s: a rename writes no new revision", eventType, label)
+			assert.Equal(t, tokBefore, loadScheduleRevision(t, f.store, tokID), "%s, %s: a rename writes no new revision", eventType, label)
 
-			rec = doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+id), UpdateScheduleRequest{Payload: payload})
+			rec = doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+tokID), UpdateScheduleRequest{Payload: payload})
 			require.Equal(t, http.StatusOK, rec.Code, "%s, %s: payload: %s", eventType, label, rec.Body.String())
-			after := loadScheduleRevision(t, f.store, id)
+			after := loadScheduleRevision(t, f.store, tokID)
 			assert.Equal(t, store.InitiatorCredentialKindUAT, after.Attribution.InitiatorCredentialKind, "%s, %s", eventType, label)
-			assert.Equal(t, before.Attribution.AuthorizationRevision+1, after.Attribution.AuthorizationRevision, "%s, %s", eventType, label)
+			assert.Equal(t, tokBefore.Attribution.AuthorizationRevision+1, after.Attribution.AuthorizationRevision, "%s, %s", eventType, label)
 			assert.Equal(t, store.EffectCeilingBounded, after.Ceiling.Kind, "%s, %s", eventType, label)
 		}
 

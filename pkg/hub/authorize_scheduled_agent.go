@@ -44,7 +44,7 @@ const scheduleAuthoringCredentialRefusedMessage = "this credential kind cannot c
 func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil || isNilIdentity(identity) {
+	if isNilIdentity(identity) {
 		return false
 	}
 	credential := GetCredentialContextFromContext(ctx)
