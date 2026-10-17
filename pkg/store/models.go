@@ -1551,8 +1551,8 @@ type User struct {
 
 	// Timestamps
 	Created   time.Time `json:"created"`
-	LastLogin time.Time `json:"lastLogin,omitempty"`
-	LastSeen  time.Time `json:"lastSeen,omitempty"`
+	LastLogin time.Time `json:"lastLogin,omitzero"`
+	LastSeen  time.Time `json:"lastSeen,omitzero"`
 }
 
 // IsTestFixture reports whether u is a hub-issued member-tier test fixture
