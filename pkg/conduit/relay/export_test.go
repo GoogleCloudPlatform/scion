@@ -24,6 +24,13 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// DeleteBackoffForTest and MaxDeleteBackoffForTest are deleteRow's first
+// retry delay and its cap, so tests can wait for the exact backoff timer.
+const (
+	DeleteBackoffForTest    = defaultDeleteBackoff
+	MaxDeleteBackoffForTest = maxDeleteBackoff
+)
+
 // Test-only access to internals for the external test package.
 
 // localEntryForTest waits (bounded) for sessionID to be registered, as

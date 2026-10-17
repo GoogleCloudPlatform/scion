@@ -15,14 +15,17 @@
 package transportauth
 
 import (
+	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 const (
@@ -52,45 +55,81 @@ const (
 // refuse anything that is not a regular file.
 type FileReadFunc func(path string) (string, error)
 
-// DefaultTransportTokenFilePath returns $HOME/.scion/transport-token for
-// the current user, or "" when the home directory cannot be resolved.
+// DefaultTransportTokenFilePath returns $HOME/.scion/transport-token, or
+// "" when HOME is unset. It takes HOME from the environment, the same
+// source ReadTransportTokenFile uses to decide what lies under HOME.
 func DefaultTransportTokenFilePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
+	home := os.Getenv("HOME")
+	if home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".scion", TransportTokenFileName)
 }
 
-// ReadTransportTokenFile is the default FileReadFunc. It refuses symlinks
-// and anything that is not a regular file, and bounds the read size.
-// Callers running with elevated privileges should supply a stricter reader
-// (sciontool uses its fd-relative, no-follow reader).
+// ReadTransportTokenFile is the default FileReadFunc. For a path under the
+// current user's home directory, the home directory is trusted and opened
+// normally (it may be reached through a linked prefix such as
+// /home -> /var/home) and every component below it is opened without
+// following a symbolic link. For any other path, its parent directory is
+// trusted and the file itself is opened without following a link. Either
+// way the file must be a single-link regular file no larger than the size
+// limit; anything else is refused with an error. Callers running with
+// elevated privileges should supply a stricter reader (sciontool uses its
+// fd-relative, no-follow reader from the root directory).
 func ReadTransportTokenFile(path string) (string, error) {
-	// O_NOFOLLOW refuses a symlink at the leaf atomically with the open;
+	base, rel, err := splitUnderHome(os.Getenv("HOME"), path)
+	if err != nil {
+		return "", err
+	}
+	// O_NOFOLLOW (below base) refuses a symlink atomically with each open;
 	// O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
-	// The regular-file check then runs on the opened descriptor, so there
-	// is no window between the check and the read.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	// The regular-file and link-count checks then run on the opened
+	// descriptor, so there is no window between the check and the read.
+	//
+	// Trusts HOME as set by the launching environment (the user on a host,
+	// the launcher in an agent). The directories above HOME must not be
+	// writable by this user or any less-trusted user, so HOME itself cannot be
+	// replaced; HOME may be writable. Entries below HOME are opened without
+	// following links. For a path outside HOME, its parent directory is
+	// trusted the same way.
+	dirFd, leaf, err := dirfd.OpenParentNoFollowUnder(base, rel)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+	defer func() { _ = syscall.Close(dirFd) }()
+	data, err := dirfd.ReadAtNoFollow(dirFd, leaf, transportTokenFileMaxBytes)
 	if err != nil {
-		return "", err
-	}
-	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("transport token file %s is not a regular file", path)
-	}
-	data, err := io.ReadAll(io.LimitReader(f, transportTokenFileMaxBytes+1))
-	if err != nil {
-		return "", err
-	}
-	if len(data) > transportTokenFileMaxBytes {
-		return "", fmt.Errorf("transport token file %s is too large", path)
+		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// splitUnderHome splits path into a trusted base directory and the
+// relative path below it that ReadTransportTokenFile walks without
+// following links. path is made absolute and cleaned lexically, so a ".."
+// in it is resolved by name, not through any link it follows (stricter
+// than the kernel's resolution). When the cleaned path lies strictly
+// below home, on a path-separator boundary, base is home; otherwise base
+// is path's own parent directory and rel is its final component.
+func splitUnderHome(home, path string) (base, rel string, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", fmt.Errorf("transport token file %s: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
+	if home != "" {
+		if h, herr := filepath.Abs(home); herr == nil {
+			h = filepath.Clean(h)
+			prefix := h
+			if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+				prefix += string(filepath.Separator)
+			}
+			if strings.HasPrefix(abs, prefix) && len(abs) > len(prefix) {
+				return h, abs[len(prefix):], nil
+			}
+		}
+	}
+	return filepath.Dir(abs), filepath.Base(abs), nil
 }
 
 // FileSource is a TokenSource backed by the transport token file that the
@@ -228,48 +267,74 @@ func (s *FileSource) Status() FileSourceStatus {
 		FileExpiry:  s.fileExpiry,
 		FileModTime: s.fileModTime,
 	}
-	if s.fileErr != nil && !os.IsNotExist(s.fileErr) {
+	if s.fileErr != nil && !errors.Is(s.fileErr, fs.ErrNotExist) {
 		st.FileError = s.fileErr
 	}
 	return st
 }
 
+// reloadAttempts bounds how many times reloadLocked reads the file in one
+// call when the file keeps being replaced during the read.
+const reloadAttempts = 3
+
 // reloadLocked re-reads the file when it has been replaced or its
 // modification time or size has changed since the last read.
+//
+// Each write replaces the file by rename. A read that opens the file just
+// before it is replaced sees the old file with no link left, and the reader
+// refuses it. When a read fails and the path now names a different file, the
+// new file is read through the same reader, up to reloadAttempts reads in
+// total. A read that fails on a file that was not replaced, or the last
+// allowed read failing, clears the file value and records the error.
 func (s *FileSource) reloadLocked() {
 	if s.path == "" {
 		return
 	}
-	fi, err := os.Lstat(s.path)
-	if err != nil {
-		s.fileToken, s.fileExpiry = "", time.Time{}
-		s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
-		s.fileErr = err
-		return
-	}
-	if s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
-		fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
-		return
-	}
-	s.fileInfo = fi
-	s.fileModTime = fi.ModTime()
-	s.fileSize = fi.Size()
+	// Iterates only via the continue below (a read that failed because the
+	// file was replaced).
+	for attempt := 1; attempt <= reloadAttempts; attempt++ {
+		fi, err := os.Lstat(s.path)
+		if err != nil {
+			s.fileToken, s.fileExpiry = "", time.Time{}
+			s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
+			s.fileErr = err
+			return
+		}
+		// Only reuse successful reads: a failure can be caused by properties
+		// such as the link count that are not part of this metadata check.
+		if s.fileErr == nil && s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
+			fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
+			return
+		}
+		s.fileInfo = fi
+		s.fileModTime = fi.ModTime()
+		s.fileSize = fi.Size()
 
-	data, err := s.read(s.path)
-	if err != nil {
-		s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
+		data, err := s.read(s.path)
+		if err != nil {
+			s.fileToken, s.fileExpiry, s.fileErr = "", time.Time{}, err
+			// Retry only when the path was replaced during the read. Both
+			// identities come from Lstat, which does not follow a link at the
+			// final path component.
+			if attempt < reloadAttempts {
+				if now, lerr := os.Lstat(s.path); lerr == nil && !os.SameFile(fi, now) {
+					continue
+				}
+			}
+			return
+		}
+		s.fileErr = nil
+		s.fileToken = strings.TrimSpace(data)
+		s.fileExpiry = time.Time{}
+		if s.fileToken == "" {
+			return
+		}
+		// An unparseable value keeps a zero expiry: it is used only when no
+		// candidate with a known expiry exists.
+		if exp, err := ParseTokenExpiry(s.fileToken); err == nil {
+			s.fileExpiry = exp
+		}
 		return
-	}
-	s.fileErr = nil
-	s.fileToken = strings.TrimSpace(data)
-	s.fileExpiry = time.Time{}
-	if s.fileToken == "" {
-		return
-	}
-	// An unparseable value keeps a zero expiry: it is used only when no
-	// candidate with a known expiry exists.
-	if exp, err := ParseTokenExpiry(s.fileToken); err == nil {
-		s.fileExpiry = exp
 	}
 }
 

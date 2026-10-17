@@ -21,12 +21,12 @@ The Hub is part of the main `scion` binary. You can start it using the `server s
 ```bash
 # Start the Hub, Web Dashboard, and a local Runtime Broker
 
-SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
+SCION_SERVER_SESSION_SECRET=\${SCION_SERVER_SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 
 ```
 
 :::caution[Session Secret Security]
-Pass the session secret via the `SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
+Pass the session secret via the `SCION_SERVER_SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
 :::
 
 :::note[Debug logging]
@@ -275,9 +275,9 @@ The Hub stores agent templates and other artifacts.
 - **Local File System**: Default. Stores files in `~/.scion/storage`.
 - **Google Cloud Storage (GCS)**: Recommended for cloud deployments. Set the `SCION_SERVER_STORAGE_BUCKET` environment variable.
 
-Template files are stored by content: each file is stored once under `<template path>.blobs/<sha256>` and never overwritten, and uploads are staged under `<template path>.staging/` until the push is committed. A Runtime Broker that downloads a template in this layout while a new version is pushed gets either the old version or the new one, never a mix. A commit does not delete the files a new version dropped. The Hub deletes stored template files that no template references, and abandoned staged uploads, once they are older than 24 hours (the grace period can be raised but not set below 1 hour). It does this every hour, and an admin can run it at any time as the **Template Blob Garbage Collection** maintenance operation, with an optional `grace` parameter (for example `48h`).
+Template and harness-config files are stored by content: each file is stored once under `<template or harness-config path>.blobs/<sha256>` and never overwritten, and uploads are staged under `<path>.staging/` until the push is committed. A Runtime Broker that downloads a template or harness-config in this layout while a new version is pushed gets either the old version or the new one, never a mix. A commit does not delete the files a new version dropped. The Hub deletes stored files that no template or harness-config references, and abandoned staged uploads, once they are older than 24 hours (the grace period can be raised but not set below 1 hour). It does this every hour, and an admin can run it at any time as the **Template Blob Garbage Collection** maintenance operation, which covers harness-configs too, with an optional `grace` parameter (for example `48h`).
 
-Templates stored before this layout keep their old layout (one object per file path) until their next commit (a push, a file edit, or a re-import), which moves them to the new layout. That commit then removes the old copy, unless another template still uses the same path or a path inside it. If a file in the old copy no longer matches its recorded hash (for example, two templates once shared the path), the commit keeps the content that is actually stored and records its real hash. A Runtime Broker that is downloading the old copy at that moment can fail once; it retries and gets the new version.
+Templates and harness-configs stored before this layout keep their old layout (one object per file path) until their next commit (a push, a file edit, or a re-import), which moves them to the new layout. That commit then removes the old copy, unless another template or harness-config of the same kind still uses the same path or a path inside it. If a file in the old copy no longer matches its recorded hash (for example, two rows once shared the path), the commit keeps the content that is actually stored and records its real hash. A Runtime Broker that is downloading the old copy at that moment can fail once; it retries and gets the new version.
 
 For Hub-managed workspaces, the Hub uploads the workspace to its GCS bucket and sends that bucket name to the Runtime Broker in the agent create request, so the Runtime Broker downloads from the same bucket (the bucket is also kept across reincarnation). A Runtime Broker that receives no bucket falls back to its own GCS storage bucket setting. With neither, the create request fails up front with `422 workspace_storage_unconfigured` instead of a generic gateway error.
 

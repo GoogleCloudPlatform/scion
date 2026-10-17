@@ -42,6 +42,8 @@ type HarnessConfig struct {
 	StorageBucket string `json:"storage_bucket,omitempty"`
 	// StoragePath holds the value of the "storage_path" field.
 	StoragePath string `json:"storage_path,omitempty"`
+	// Layout holds the value of the "layout" field.
+	Layout string `json:"layout,omitempty"`
 	// Files holds the value of the "files" field.
 	Files string `json:"files,omitempty"`
 	// Status holds the value of the "status" field.
@@ -50,6 +52,8 @@ type HarnessConfig struct {
 	ImageStatus harnessconfig.ImageStatus `json:"image_status,omitempty"`
 	// ImageStatusCheckedAt holds the value of the "image_status_checked_at" field.
 	ImageStatusCheckedAt *time.Time `json:"image_status_checked_at,omitempty"`
+	// BuiltImage holds the value of the "built_image" field.
+	BuiltImage string `json:"built_image,omitempty"`
 	// OwnerID holds the value of the "owner_id" field.
 	OwnerID string `json:"owner_id,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
@@ -70,7 +74,7 @@ func (*HarnessConfig) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL:
+		case harnessconfig.FieldName, harnessconfig.FieldSlug, harnessconfig.FieldDisplayName, harnessconfig.FieldDescription, harnessconfig.FieldHarness, harnessconfig.FieldConfig, harnessconfig.FieldContentHash, harnessconfig.FieldScope, harnessconfig.FieldScopeID, harnessconfig.FieldStorageURI, harnessconfig.FieldStorageBucket, harnessconfig.FieldStoragePath, harnessconfig.FieldLayout, harnessconfig.FieldFiles, harnessconfig.FieldStatus, harnessconfig.FieldImageStatus, harnessconfig.FieldBuiltImage, harnessconfig.FieldOwnerID, harnessconfig.FieldCreatedBy, harnessconfig.FieldUpdatedBy, harnessconfig.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case harnessconfig.FieldImageStatusCheckedAt, harnessconfig.FieldCreated, harnessconfig.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -169,6 +173,12 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.StoragePath = value.String
 			}
+		case harnessconfig.FieldLayout:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field layout", values[i])
+			} else if value.Valid {
+				_m.Layout = value.String
+			}
 		case harnessconfig.FieldFiles:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field files", values[i])
@@ -193,6 +203,12 @@ func (_m *HarnessConfig) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ImageStatusCheckedAt = new(time.Time)
 				*_m.ImageStatusCheckedAt = value.Time
+			}
+		case harnessconfig.FieldBuiltImage:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field built_image", values[i])
+			} else if value.Valid {
+				_m.BuiltImage = value.String
 			}
 		case harnessconfig.FieldOwnerID:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -302,6 +318,9 @@ func (_m *HarnessConfig) String() string {
 	builder.WriteString("storage_path=")
 	builder.WriteString(_m.StoragePath)
 	builder.WriteString(", ")
+	builder.WriteString("layout=")
+	builder.WriteString(_m.Layout)
+	builder.WriteString(", ")
 	builder.WriteString("files=")
 	builder.WriteString(_m.Files)
 	builder.WriteString(", ")
@@ -315,6 +334,9 @@ func (_m *HarnessConfig) String() string {
 		builder.WriteString("image_status_checked_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
+	builder.WriteString(", ")
+	builder.WriteString("built_image=")
+	builder.WriteString(_m.BuiltImage)
 	builder.WriteString(", ")
 	builder.WriteString("owner_id=")
 	builder.WriteString(_m.OwnerID)

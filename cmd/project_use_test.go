@@ -65,17 +65,47 @@ func useFakeHub(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	return srv, &calls
 }
 
-// setupUseTest is setupContextTest plus a fake hub configured as the global
-// hub.endpoint, with dev auth available so the CLI counts as logged in.
+// setupUseTest is setupContextTest plus a fake hub in the hub list (named
+// "local", not current), with dev auth available so the CLI counts as
+// logged in.
 func setupUseTest(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
 	setupContextTest(t)
 	restoreAllSilenceUsage(t)
 	t.Cleanup(func() { rootCmd.SetArgs(nil) })
+	// No terminal: 'scion use' never prompts in these tests.
+	withTerminal(t, false)
 	srv, calls := useFakeHub(t)
+	// The fake hub is in the hub list, not current, as an existing user's
+	// global hub.endpoint is before its one-time import. The global
+	// hub.endpoint is still written: the CLI must not read it.
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+srv.URL+"\n")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("local", srv.URL)
+	}))
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 	return srv, calls
+}
+
+// clearUseTestHub undoes the hub setup of setupUseTest: no hub in the hub
+// list and no global hub.endpoint, as for a user with no hub configured.
+func clearUseTestHub(t *testing.T) {
+	t.Helper()
+	writeHomeGlobalSettings(t, "")
+	require.NoError(t, os.Remove(contextFilePath()))
+}
+
+// assertNothingSelected checks that a failed 'scion use' selected nothing:
+// no hub is current and no hub has a current project. (A lookup on a
+// registered hub still remembers the projects it saw; tests that care check
+// the known-project list themselves.)
+func assertNothingSelected(t *testing.T) {
+	t.Helper()
+	c := readTestContext(t)
+	assert.Empty(t, c.CurrentHub, "no hub is selected")
+	for name, h := range c.Hubs {
+		assert.Nil(t, h.CurrentProject, "hub %s has no project", name)
+	}
 }
 
 // runScion runs the root command with args and returns stdout, stderr and
@@ -91,7 +121,7 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 	}
 	outputFormat = ""
 	for _, c := range []*cobra.Command{useCmd, projectUseCmd} {
-		for _, name := range []string{"clear", "force"} {
+		for _, name := range []string{"clear", "force", "refresh"} {
 			if f := c.Flags().Lookup(name); f != nil {
 				f.Changed = false
 				_ = f.Value.Set(f.DefValue)
@@ -101,7 +131,13 @@ func runScion(t *testing.T, args ...string) (string, string, error) {
 	if f := rootCmd.PersistentFlags().Lookup("format"); f != nil {
 		f.Changed = false
 	}
-	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd} {
+	for _, name := range []string{"yes", "non-interactive"} {
+		if f := rootCmd.PersistentFlags().Lookup(name); f != nil {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+	}
+	for _, c := range []*cobra.Command{hubAddCmd, hubListCmd, hubRenameCmd, hubRemoveCmd, hubAuthLoginCmd, projectListCmd} {
 		c.Flags().VisitAll(func(f *pflag.Flag) {
 			f.Changed = false
 			_ = f.Value.Set(f.DefValue)
@@ -169,12 +205,11 @@ func TestUseSelectProject_JSON(t *testing.T) {
 }
 
 func TestUseSelectProject_NotFound(t *testing.T) {
-	srv, _ := setupUseTest(t)
+	setupUseTest(t)
 	_, _, err := runScion(t, "use", "nope")
 	require.Error(t, err)
-	assert.Equal(t, "project 'nope' not found on the hub at "+srv.URL, err.Error())
-	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
-	assert.True(t, os.IsNotExist(statErr), "nothing is saved on a failed lookup")
+	assert.Equal(t, "project 'nope' not found on hubs: local", err.Error())
+	assertNothingSelected(t)
 }
 
 func TestUseSelectProject_Ambiguous(t *testing.T) {
@@ -191,33 +226,39 @@ func TestUseSelectProject_Ambiguous(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
 	assert.Equal(t, "ambiguous", got["error"])
 	assert.Equal(t, []interface{}{
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
-		map[string]interface{}{"endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
+		map[string]interface{}{"hub": "local", "endpoint": srv.URL, "id": "id-1", "slug": "dupe-1"},
+		map[string]interface{}{"hub": "local", "endpoint": srv.URL, "id": "id-2", "slug": "dupe-2"},
 	}, got["candidates"])
-	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
-	assert.True(t, os.IsNotExist(statErr))
+	assertNothingSelected(t)
+	// The lookup on the registered hub remembers both candidates; neither is
+	// selected.
+	var seen []string
+	for _, p := range readTestContext(t).Projects {
+		seen = append(seen, p.Hub+"/"+p.ID)
+	}
+	assert.ElementsMatch(t, []string{"local/id-1", "local/id-2"}, seen)
 }
 
 func TestUseSelectProject_NotLoggedIn(t *testing.T) {
-	srv, calls := setupUseTest(t)
+	_, calls := setupUseTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "")
 	_, _, err := runScion(t, "use", "foo")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Log in with: scion hub auth login --hub "+srv.URL)
+	assert.Contains(t, err.Error(), "Log in with: scion hub auth login --hub local")
 	assert.Zero(t, calls.Load(), "no hub call without a credential")
 }
 
 func TestUseSelectProject_NoHub(t *testing.T) {
 	setupUseTest(t)
-	writeHomeGlobalSettings(t, "")
+	clearUseTestHub(t)
 	_, _, err := runScion(t, "use", "foo")
 	require.ErrorIs(t, err, errHubNotConfigured)
 	assert.Equal(t, "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.", err.Error())
 }
 
 func TestUseSelectProject_InDirectoryProjectNotes(t *testing.T) {
-	// The directory project has no endpoint of its own, so the merged
-	// global endpoint (the fake hub) is the effective hub.
+	// The directory project is not linked, so its hub is the current hub:
+	// the one just selected.
 	setupUseTest(t)
 	root := makeDirProject(t, "")
 	shownRoot, err := filepath.EvalSymlinks(root)
@@ -230,23 +271,24 @@ func TestUseSelectProject_InDirectoryProjectNotes(t *testing.T) {
 }
 
 func TestUseSelectProject_CorruptContextNeedsForce(t *testing.T) {
-	setupUseTest(t)
+	srv, _ := setupUseTest(t)
 	path := filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml")
 	require.NoError(t, os.WriteFile(path, []byte("version: [1\n"), 0o600))
 
-	_, _, err := runScion(t, "use", "foo")
+	// An unreadable hub list has no hubs: the hub is given with --hub.
+	_, _, err := runScion(t, "use", "foo", "--hub", srv.URL)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, config.ErrCLIContextCorrupt)
 	assert.Contains(t, err.Error(), "--force")
 
-	_, _, err = runScion(t, "use", "foo", "--force")
+	_, _, err = runScion(t, "use", "foo", "--hub", srv.URL, "--force")
 	require.NoError(t, err)
 	assert.Equal(t, "local", readTestContext(t).CurrentHub)
 }
 
 func TestUseShow_NothingConfigured(t *testing.T) {
 	setupUseTest(t)
-	writeHomeGlobalSettings(t, "")
+	clearUseTestHub(t)
 	stdout, _, err := runScion(t, "use")
 	require.NoError(t, err)
 	assert.Equal(t, noHubSelectedMessage+"\n", stdout)
@@ -292,19 +334,21 @@ func TestUseShow_ContextJSON(t *testing.T) {
 	require.Len(t, lines, 3, stdout)
 	assert.Regexp(t, `^Hub:\s+local\s+`+srv.URL+`\s+\(current context\)$`, lines[0])
 	assert.Regexp(t, `^Project:\s+foo\s+`+ctxTestProjectID+`\s+\(current context\)$`, lines[1])
-	assert.True(t, strings.HasPrefix(lines[2], "Auth:     Dev auth ("), lines[2])
+	assert.Equal(t, "Auth:     Dev auth (SCION_DEV_TOKEN env var), not verified; run 'scion hub status' to check", lines[2])
 }
 
 func TestUseShow_DirectoryOverridesContext(t *testing.T) {
 	setupUseTest(t)
 	saveTestContext(t, ctxTestHub, ctxTestProjectID)
-	root := makeDirProject(t, "http://dir.example.com")
-	root, err := filepath.EvalSymlinks(root)
+	dotScion := makeLinkedDirProject(t, "http://ignored.example.com")
+	saveLinkEntry(t, dotScion, "http://dir.example.com", "dir")
+	root, err := filepath.EvalSymlinks(filepath.Dir(dotScion))
 	require.NoError(t, err)
 
 	stdout, _, err := runScion(t, "use")
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "(project settings: "+root+")")
+	assert.Contains(t, stdout, "http://dir.example.com")
+	assert.Contains(t, stdout, "(directory link)")
 	assert.Contains(t, stdout, "(directory: "+root+")")
 	assert.Contains(t, stdout, "Saved context (applies outside scion project directories): prod / foo")
 
@@ -313,9 +357,10 @@ func TestUseShow_DirectoryOverridesContext(t *testing.T) {
 	var got useShowJSON
 	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
 	assert.True(t, got.Overridden)
-	assert.Equal(t, "project_settings", got.Effective.Hub.Source)
+	assert.Equal(t, "directory", got.Effective.Hub.Source)
+	assert.Equal(t, "http://dir.example.com", got.Effective.Hub.Endpoint)
 	assert.Equal(t, "directory", got.Effective.Project.Source)
-	assert.Equal(t, "dir-project-id", got.Effective.Project.ID)
+	assert.Equal(t, linkEntryTestHubID, got.Effective.Project.ID)
 }
 
 func TestUseShow_EnvOverridesContext(t *testing.T) {
@@ -326,7 +371,7 @@ func TestUseShow_EnvOverridesContext(t *testing.T) {
 	stdout, _, err := runScion(t, "use")
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "(SCION_HUB_ENDPOINT)")
-	assert.Contains(t, stdout, "Note: SCION_HUB_ENDPOINT is set and overrides the current hub in this shell.")
+	assert.Contains(t, stdout, "Note: SCION_HUB_ENDPOINT=https://env.example.com overrides the current hub in this shell; 'scion hub add <name> <url>' saves it.")
 	assert.Contains(t, stdout, "Saved context (applies outside scion project directories): prod / foo")
 
 	stdout, _, err = runScion(t, "use", "--format", "json")
@@ -336,6 +381,25 @@ func TestUseShow_EnvOverridesContext(t *testing.T) {
 	assert.Equal(t, "env", got.Effective.Hub.Source)
 	assert.Equal(t, "none", got.Effective.Project.Source, "the context project is not applied to another hub")
 	assert.True(t, got.Overridden)
+}
+
+// TestUseShow_EnvHubNoteRedactsPassword: the note about a
+// SCION_HUB_ENDPOINT hub that is not in the hub list never prints a
+// password from the URL.
+func TestUseShow_EnvHubNoteRedactsPassword(t *testing.T) {
+	setupUseTest(t)
+	t.Setenv("SCION_HUB_ENDPOINT", "https://user:s3cret@env.example.com")
+	stdout, stderr, err := runScion(t, "use")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Note: SCION_HUB_ENDPOINT=https://user:xxxxx@env.example.com overrides the current hub in this shell")
+	assert.Contains(t, stdout, "https://user:xxxxx@env.example.com  (SCION_HUB_ENDPOINT)", "the Hub line is redacted")
+	assert.Contains(t, stdout, "scion hub auth login --hub https://user:xxxxx@env.example.com'", "the login hint is redacted")
+	assert.NotContains(t, stdout+stderr, "s3cret")
+
+	stdout, stderr, err = runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, `"endpoint": "https://user:xxxxx@env.example.com"`)
+	assert.NotContains(t, stdout+stderr, "s3cret")
 }
 
 func TestUseClear(t *testing.T) {
@@ -360,11 +424,11 @@ func TestUseClear(t *testing.T) {
 
 func TestUseClear_NoContext(t *testing.T) {
 	setupUseTest(t)
+	before := readFileT(t, contextFilePath())
 	stdout, _, err := runScion(t, "use", "--clear")
 	require.NoError(t, err)
 	assert.Equal(t, "No hub selected; nothing to clear.\n", stdout)
-	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
-	assert.True(t, os.IsNotExist(statErr), "--clear with nothing to clear writes nothing")
+	assert.Equal(t, before, readFileT(t, contextFilePath()), "--clear with nothing to clear writes nothing")
 }
 
 // TestUseThenHubAvailability runs 'scion use foo', then the root hook and
@@ -382,7 +446,7 @@ func TestUseThenHubAvailability(t *testing.T) {
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	require.Equal(t, ctxTestProjectID, projectPath)
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	require.NoError(t, err)
 	require.NotNil(t, hubCtx)
 	assert.Equal(t, ctxTestProjectID, hubCtx.ProjectID)
@@ -417,7 +481,7 @@ func TestUseShow_CorruptContextWarnsOnce(t *testing.T) {
 // says so.
 func TestUseSelectProject_EnvHubNote(t *testing.T) {
 	srv, _ := setupUseTest(t)
-	writeHomeGlobalSettings(t, "")
+	clearUseTestHub(t)
 	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
 	stdout, stderr, err := runScion(t, "use", "foo")
 	require.NoError(t, err)
@@ -452,7 +516,7 @@ func TestUseShow_RepeatedRunsKeepContextSource(t *testing.T) {
 // the command's stdout and its warnings to the command's stderr.
 func TestUseShow_WritesToCommandWriters(t *testing.T) {
 	setupUseTest(t)
-	writeHomeGlobalSettings(t, "")
+	clearUseTestHub(t)
 	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"), []byte("version: [1\n"), 0o600))
 	var out, errOut strings.Builder
 	useCmd.SetOut(&out)
@@ -474,9 +538,13 @@ func TestUseSelectProject_UsesCommandContext(t *testing.T) {
 	setupUseTest(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := runUseSelect(ctx, io.Discard, io.Discard, "foo")
+	c := &cobra.Command{}
+	c.SetContext(ctx)
+	c.SetOut(io.Discard)
+	c.SetErr(io.Discard)
+	err := runUseSelect(c, "foo")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
-	_, statErr := os.Stat(filepath.Join(os.Getenv("HOME"), ".scion", "context.yaml"))
-	assert.True(t, os.IsNotExist(statErr), "nothing is saved")
+	assertNothingSelected(t)
+	assert.Empty(t, readTestContext(t).Projects, "nothing is saved")
 }

@@ -40,7 +40,7 @@ import (
 // SHA-256 of a random token. The token itself is returned once, when the
 // link is created, and is never stored, logged or echoed afterwards.
 //
-//	POST   /api/v1/artifacts/{id}/links            create a link (owner or admin grant, users only)
+//	POST   /api/v1/artifacts/{id}/links            create a link (owner, admin grant or steward; users only)
 //	GET    /api/v1/artifacts/{id}/links            the unexpired links, without tokens
 //	DELETE /api/v1/artifacts/{id}/links/{linkId}   revoke a link
 //	GET    /api/v1/artifacts/shared/{token}[/files/{path}]
@@ -106,6 +106,12 @@ type CreateLinkResponse struct {
 // LinkListResponse answers GET /{id}/links.
 type LinkListResponse struct {
 	Links []LinkInfo `json:"links"`
+	// DefaultTTLHours is the lifetime, in hours, of a link created without
+	// ttlHours.
+	DefaultTTLHours int64 `json:"defaultTtlHours"`
+	// MaxTTLHours is the longest lifetime, in hours, a link can be created
+	// with; a longer ttlHours is refused with ttl_too_long.
+	MaxTTLHours int64 `json:"maxTtlHours"`
 }
 
 // newLinkToken returns a fresh link token: linkTokenBytes from
@@ -161,31 +167,69 @@ func (l Limits) linkLifetimes() (def, maxTTL time.Duration) {
 	return min(def, maxTTL), maxTTL
 }
 
-// canAdminister reports whether the caller may administer a, an artifact
-// it can read (so a is live and unexpired: readableArtifact checked it):
-// manage its share links and grants, and change its expiry or home. It
-// must be a user (sharing is user-only, design D15) whose credential
-// permits artifact.manage in the home scope, and it must own the artifact
-// or hold an unexpired admin grant (a principal grant for it, or a scope
-// grant for a scope the host authorizes it to manage in).
+// canAdministerWith reports whether the caller has full administration of
+// a, an artifact it can read (so a is live and unexpired: readableArtifact
+// checked it): manage its share links and grants, and change its expiry or
+// home. It must be a user (sharing is user-only, design D15) whose
+// credential permits artifact.manage in the home scope, and it must own
+// the artifact or hold an unexpired admin grant (a principal grant for it,
+// or a scope grant for a scope the host authorizes it to manage in).
 //
 // A failed grant read is an error, never a refusal, so the caller answers
-// 500 rather than a 403 that a working read would not give.
-func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bool, error) {
-	return s.canAdministerWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
-}
-
-// canAdministerWith is canAdminister with a's grants read through grants,
-// which is called only when the decision needs them.
+// 500 rather than a 403 that a working read would not give. a's grants are
+// read through grants, which is called only when the decision needs them.
+// Stewards do not count: this is full administration (CanManage), which a
+// steward does not have (no admin grant, no move); adminAuthorityWith
+// admits them.
 func (s *Service) canAdministerWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (bool, error) {
-	authority, err := s.adminAuthorityWith(ctx, a, grants)
+	authority, err := s.managerAuthorityWith(ctx, a, grants)
 	return authority != "", err
 }
 
-// adminAuthorityWith is canAdministerWith reporting the authority the
-// caller administers a by: AuthorityOwner, AuthorityAdminGrant, or ""
-// when it may not. Events record it.
+// adminAuthorityWith reports the authority the caller administers a by:
+// managerAuthorityWith's AuthorityOwner or AuthorityAdminGrant, then,
+// only for an artifact owned by an agent, a steward clause
+// (stewardAuthority), or "" when it may not. Events record it. A steward
+// authority is bounded: the routes refuse it an admin grant and a move
+// (steward_action_not_allowed), and its store writes carry the state it
+// was decided against (callerActor).
 func (s *Service) adminAuthorityWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (string, error) {
+	authority, err := s.managerAuthorityWith(ctx, a, grants)
+	if err != nil || authority != "" {
+		return authority, err
+	}
+	return s.stewardAuthority(ctx, a), nil
+}
+
+// stewardAuthority reports the steward clause the caller holds on a, as
+// an authority (AuthorityStewardProjectOwner, AuthorityStewardDelegator),
+// or "". Only an artifact owned by an agent has stewards, and only a user
+// whose credential permits artifact.manage in the home project can be one;
+// a host without Stewardship has none.
+func (s *Service) stewardAuthority(ctx context.Context, a *Artifact) string {
+	if a.OwnerKind != PrincipalKindAgent {
+		return ""
+	}
+	kind, _, _, ok := s.host.Principal(ctx)
+	if !ok || kind != PrincipalKindUser || !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
+		return ""
+	}
+	st, ok := s.host.(Stewardship)
+	if !ok {
+		return ""
+	}
+	switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, "", a.OrphanedAt != nil) {
+	case StewardClauseProjectOwner:
+		return AuthorityStewardProjectOwner
+	case StewardClauseDelegator:
+		return AuthorityStewardDelegator
+	}
+	return ""
+}
+
+// managerAuthorityWith reports the authority by which the caller has full
+// administration of a: AuthorityOwner, AuthorityAdminGrant, or "".
+func (s *Service) managerAuthorityWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (string, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
 		return "", nil
@@ -206,17 +250,24 @@ func (s *Service) adminAuthorityWith(ctx context.Context, a *Artifact, grants fu
 	return "", nil
 }
 
-// callerActor is the event actor for the caller of ctx acting by
-// authority.
-func (s *Service) callerActor(ctx context.Context, authority string) *Actor {
+// callerActor is the event actor for the caller of ctx acting on a by
+// authority. For a steward authority it carries a's home and owner as
+// they were when the authority was decided (Actor.Expect), so the store
+// refuses the write if a move or an ownership transfer committed since
+// (design 4.5). Every steward write gets its actor here.
+func (s *Service) callerActor(ctx context.Context, a *Artifact, authority string) *Actor {
 	kind, ref, _, _ := s.host.Principal(ctx)
-	return &Actor{Kind: kind, Ref: ref, Authority: authority}
+	actor := &Actor{Kind: kind, Ref: ref, Authority: authority}
+	if isSteward(authority) {
+		actor.Expect = expectFor(a)
+	}
+	return actor
 }
 
-// adminArtifact loads an artifact the caller may administer (see
-// canAdminister). An artifact the caller cannot read answers 404 like a
-// missing one (the read check runs first); one it can read but not
-// administer answers 403.
+// adminArtifact loads an artifact the caller may administer
+// (adminAuthorityWith: the owner, an admin grantee or a steward). An
+// artifact the caller cannot read answers 404 like a missing one (the read
+// check runs first); one it can read but not administer answers 403.
 //
 // actor is the caller, with the authority it administers the artifact by,
 // for the events the change records.
@@ -232,48 +283,88 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, nil, false
 	}
 	if authority == "" {
-		writeAdminForbidden(w)
+		s.logAdminRefusal(r, logActionAdminister, a)
+		s.writeAdminForbidden(w, r)
 		return b, nil, nil, false
 	}
-	return b, a, s.callerActor(r.Context(), authority), true
+	return b, a, s.callerActor(r.Context(), a, authority), true
 }
 
-// adminForbiddenMessage is the text of every 403 for a caller that may read
+// adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
-// artifact and every refusal, and never why this caller was refused.
+// artifact and every refusal, and never why this caller was refused. One
+// narrow exception (ptone/scion#5119): a caller that holds review-grant
+// authority on an artifact owned by an agent, asking for a well-formed
+// review grant, learns when the user cannot read the artifact
+// (CodeReviewSubjectCannotRead) or already holds a read, write or admin
+// grant (CodeReviewReplacesAccess); see putReviewGrant.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
-	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
+	"and an admin of the artifact's home project may grant review access"
+
+// agentAdminForbiddenMessage is the same 403's text for an agent, which may
+// never administer an artifact, its own included (sharing is user-only), so
+// the user text would read as if it were not the owner (ptone/scion#4576).
+// It too is the same for every artifact and every refusal.
+const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
+	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
+	"on an artifact owned by an agent, the agent's delegating user and the owners of its home project may also share it, " +
+	"and an admin of the artifact's home project may grant review access"
 
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
-// but not administer it.
-func writeAdminForbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, "forbidden", adminForbiddenMessage)
+// but not administer it: the agent text for an agent, the user text
+// otherwise. Its callers run it only after the read check, so a caller that
+// cannot read the artifact still gets the 404 of a missing one.
+func (s *Service) writeAdminForbidden(w http.ResponseWriter, r *http.Request) {
+	msg := adminForbiddenMessage
+	if kind, _, _, ok := s.host.Principal(r.Context()); ok && kind == PrincipalKindAgent {
+		msg = agentAdminForbiddenMessage
+	}
+	writeError(w, http.StatusForbidden, "forbidden", msg)
 }
 
-// manageable reports whether the caller may administer a, which it can
-// read, for a response that offers sharing and changing it. A failed grants
-// read answers 500 and returns ok false.
-func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) (canManage, ok bool) {
-	allowed, err := s.canAdminister(r.Context(), b, a)
+// manageable reports the authority by which the caller may administer a,
+// which it can read, for a response that offers sharing and changing it
+// (adminAuthorityWith: "" when it may not). A failed grants read answers
+// 500 and returns ok false.
+func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) (authority string, ok bool) {
+	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
-		return false, false
+		return "", false
 	}
-	return allowed, true
+	return authority, true
+}
+
+// shareAuthorityOf is ArtifactResponse.ShareAuthority for a steward
+// authority: the steward clause, or "" for any other authority.
+func shareAuthorityOf(authority string) string {
+	switch authority {
+	case AuthorityStewardProjectOwner:
+		return StewardClauseProjectOwner
+	case AuthorityStewardDelegator:
+		return StewardClauseDelegator
+	}
+	return ""
 }
 
 // capabilities fills the caller's rights on a, an artifact it can read
-// (readableArtifact checked it), into resp: CanManage from canAdminister,
+// (readableArtifact checked it), into resp: CanManage (owner or admin
+// grant), CanShare (CanManage or a steward) and ShareAuthority (the steward
+// clause) from adminAuthorityWith,
 // CanPublish and CanReview from canWriteErr (reviewCapability), and
 // CanGrantReview from mayGrantReview (only when CanManage is false), the
 // decisions the management, write and grant routes make for the same
 // request. A failed grants read answers 500 and returns false.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
-	var ok bool
-	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
+	authority, ok := s.manageable(w, r, b, a)
+	if !ok {
 		return false
 	}
+	resp.CanManage = authority == AuthorityOwner || authority == AuthorityAdminGrant
+	resp.CanShare = authority != ""
+	resp.ShareAuthority = shareAuthorityOf(authority)
 	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
@@ -307,7 +398,7 @@ func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, _, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -345,17 +436,20 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not create the link")
 		return
 	}
-	kind, ref, _, _ := s.host.Principal(r.Context())
 	g := &Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectLink, SubjectRef: LinkTokenHash(token),
-		Permission: GrantRead, ExpiresAt: &exp, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: now,
+		Permission: GrantRead, ExpiresAt: &exp, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: now,
 	}
-	switch err := b.store.CreateLink(r.Context(), g, MaxLinksPerArtifact, now); {
+	switch err := b.store.CreateLink(r.Context(), g, MaxLinksPerArtifact, now, actor); {
+	case errors.Is(err, ErrAttachmentNotShareable):
+		writeAttachmentNotShareable(w)
+		return
 	case errors.Is(err, ErrTooManyLinks):
 		writeError(w, http.StatusConflict, "too_many_links",
 			"the artifact already has "+strconv.Itoa(MaxLinksPerArtifact)+" active share links; revoke one first")
 		return
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionShare, a, err)
 		writeNotFound(w)
 		return
 	case err != nil:
@@ -363,6 +457,7 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not create the link")
 		return
 	}
+	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
 		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
@@ -395,7 +490,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 }
 
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
-// first.
+// first, and the link lifetimes POST /{id}/links applies.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
@@ -408,7 +503,12 @@ func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	now := time.Now()
-	out := LinkListResponse{Links: []LinkInfo{}}
+	def, maxTTL := b.currentLimits(r.Context()).linkLifetimes()
+	out := LinkListResponse{
+		Links:           []LinkInfo{},
+		DefaultTTLHours: int64(def / time.Hour),
+		MaxTTLHours:     int64(maxTTL / time.Hour),
+	}
 	for i := range grants {
 		g := &grants[i]
 		if g.SubjectKind != SubjectLink || g.ExpiresAt == nil || !now.Before(*g.ExpiresAt) {
@@ -432,11 +532,13 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 	}
 	switch err := b.store.RevokeLink(r.Context(), a.ID, linkID, actor); {
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionAdminister, a, err)
 		writeNotFound(w)
 	case err != nil:
 		slog.ErrorContext(r.Context(), "artifacts: revoke link failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not revoke the link")
 	default:
+		s.logLink(r, a, logActionLinkRevoked, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

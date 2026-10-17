@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 	"testing"
 
@@ -418,25 +419,25 @@ func TestApplySnapshot_EnforceBrokerQuotasAppliedTracking(t *testing.T) {
 
 	result := ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
 	applied, _ := result["applied"].([]string)
-	if !containsString(applied, "enforce_broker_quotas") {
+	if !slices.Contains(applied, "enforce_broker_quotas") {
 		t.Errorf("nil -> false should be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &off})
 	applied, _ = result["applied"].([]string)
-	if containsString(applied, "enforce_broker_quotas") {
+	if slices.Contains(applied, "enforce_broker_quotas") {
 		t.Errorf("false -> false (idempotent re-apply) should not be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: &on})
 	applied, _ = result["applied"].([]string)
-	if !containsString(applied, "enforce_broker_quotas") {
+	if !slices.Contains(applied, "enforce_broker_quotas") {
 		t.Errorf("false -> true should be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{EnforceBrokerQuotas: nil})
 	applied, _ = result["applied"].([]string)
-	if !containsString(applied, "enforce_broker_quotas") {
+	if !slices.Contains(applied, "enforce_broker_quotas") {
 		t.Errorf("true -> nil (cleared) should be reported as applied, got %v", applied)
 	}
 }
@@ -478,25 +479,25 @@ func TestApplySnapshot_AgentSecretsUserScopeOnlyAppliedTracking(t *testing.T) {
 
 	result := ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
 	applied, _ := result["applied"].([]string)
-	if !containsString(applied, "agent_secrets_user_scope_only") {
+	if !slices.Contains(applied, "agent_secrets_user_scope_only") {
 		t.Errorf("nil -> true should be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &on})
 	applied, _ = result["applied"].([]string)
-	if containsString(applied, "agent_secrets_user_scope_only") {
+	if slices.Contains(applied, "agent_secrets_user_scope_only") {
 		t.Errorf("true -> true (idempotent re-apply) should not be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: &off})
 	applied, _ = result["applied"].([]string)
-	if !containsString(applied, "agent_secrets_user_scope_only") {
+	if !slices.Contains(applied, "agent_secrets_user_scope_only") {
 		t.Errorf("true -> false should be reported as applied, got %v", applied)
 	}
 
 	result = ApplySnapshot(srv, Layer1Snapshot{AgentSecretsUserScopeOnly: nil})
 	applied, _ = result["applied"].([]string)
-	if !containsString(applied, "agent_secrets_user_scope_only") {
+	if !slices.Contains(applied, "agent_secrets_user_scope_only") {
 		t.Errorf("false -> nil (cleared) should be reported as applied, got %v", applied)
 	}
 }

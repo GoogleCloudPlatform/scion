@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -136,6 +137,49 @@ func TestFileSource_MissingFileAndNoEnv(t *testing.T) {
 	assert.Equal(t, "", st.InUse)
 	assert.False(t, st.FilePresent)
 	assert.NoError(t, st.FileError, "a missing file is not a read error")
+}
+
+func TestFileSource_RetriesReadAfterHardlinkRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	writeTokenFile(t, path, first)
+	src := NewFileSource(path, nil)
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	// A replacement with an extra hard link must be rejected, and the
+	// previously cached token must not survive the failed read.
+	second := makeTestJWT(time.Now().Add(time.Hour))
+	writeTokenFile(t, path, second)
+	link := path + ".link"
+	require.NoError(t, os.Link(path, link))
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	got, err = src.Token()
+	require.Error(t, err)
+	assert.Empty(t, got)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+
+	// Removing only the extra link makes the file safe to read without
+	// changing any of the fields used to skip an unchanged file.
+	require.NoError(t, os.Remove(link))
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(before, after))
+	require.Equal(t, before.ModTime(), after.ModTime())
+	require.Equal(t, before.Size(), after.Size())
+
+	got, err = src.Token()
+	require.NoError(t, err, "a failed read must be retried even without a file replacement")
+	assert.Equal(t, second, got)
+	st = src.Status()
+	assert.True(t, st.FilePresent)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+	assert.NoError(t, st.FileError)
 }
 
 func TestFileSource_SetTokenUsedUntilFileCatchesUp(t *testing.T) {
@@ -321,6 +365,103 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 	assert.Equal(t, values[writes-1], got)
 }
 
+// A read that opens the file just before a refresh renames a new file over
+// it fails, because the old file has no link left. The source must read the
+// new file instead of dropping the value. The injected reader forces that
+// interleaving deterministically: it replaces the file, then fails the way
+// the default reader does on the unlinked old file. ptone/scion#5038.
+func TestFileSource_ReadRacingReplaceRereadsNewFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	second := makeTestJWT(time.Now().Add(20 * time.Minute))
+	third := makeTestJWT(time.Now().Add(30 * time.Minute))
+	writeTokenFile(t, path, first)
+
+	armed := false
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		if armed {
+			armed = false
+			writeTokenFile(t, p, third)
+			return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+		}
+		return ReadTransportTokenFile(p)
+	})
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	writeTokenFile(t, path, second)
+	armed = true
+	reads = 0
+	got, err = src.Token()
+	require.NoError(t, err, "a read racing a replacement must not drop the credential")
+	assert.Equal(t, third, got)
+	assert.Equal(t, 2, reads)
+	st := src.Status()
+	assert.NoError(t, st.FileError)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+}
+
+// A read that fails on a file that was not replaced is a genuine refusal:
+// it is not retried within the call, and the file value is cleared.
+func TestFileSource_ReadFailureWithoutReplaceNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
+// A read that fails and leaves the path gone is not retried: there is no
+// new file to read, and the read error is the one recorded.
+func TestFileSource_ReadFailureThenPathGoneNotRetried(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		require.NoError(t, os.Remove(p))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, reads)
+	// Status re-checks the path and reports a missing file without an
+	// error, so inspect the error recorded by the Token call directly.
+	assert.ErrorIs(t, src.fileErr, dirfd.ErrNotSingleLinkRegular)
+	assert.Empty(t, src.fileToken)
+}
+
+// A file replaced during every read is read at most three times in
+// one call; then the failure is reported and no value is kept.
+func TestFileSource_ReadRetryIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	reads := 0
+	src := NewFileSource(path, func(p string) (string, error) {
+		reads++
+		writeTokenFile(t, p, makeTestJWT(time.Now().Add(time.Duration(reads+10)*time.Minute)))
+		return "", fmt.Errorf("credential file %s: %w", p, dirfd.ErrNotSingleLinkRegular)
+	})
+	got, err := src.Token()
+	assert.Error(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 3, reads)
+	assert.ErrorIs(t, src.Status().FileError, dirfd.ErrNotSingleLinkRegular)
+}
+
 // TestReadTransportTokenFile_RefusesNonRegular verifies the default reader
 // refuses a symlink at the leaf (at open time, not via a separate check), a
 // FIFO (without blocking), and a directory, and reads a regular file.
@@ -356,6 +497,113 @@ func TestReadTransportTokenFile_RefusesNonRegular(t *testing.T) {
 	require.NoError(t, os.Mkdir(sub, 0700))
 	_, err = ReadTransportTokenFile(sub)
 	assert.Error(t, err, "directory must be refused")
+}
+
+// TestReadTransportTokenFile_UnderHome covers the default reader's rule
+// for a path under the user's home directory: the home directory itself
+// is trusted (it may be reached through a linked prefix), and links,
+// multi-link files and oversized files below it are refused.
+func TestReadTransportTokenFile_UnderHome(t *testing.T) {
+	setup := func(t *testing.T) (home, scionDir string) {
+		t.Helper()
+		home = t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir = filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0700))
+		return home, scionDir
+	}
+
+	t.Run("reads a regular file", func(t *testing.T) {
+		_, scionDir := setup(t)
+		path := filepath.Join(scionDir, TransportTokenFileName)
+		require.NoError(t, os.WriteFile(path, []byte("tok"), 0600))
+		got, err := ReadTransportTokenFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, "tok", got)
+	})
+
+	t.Run("reads through a home reached via a linked prefix", func(t *testing.T) {
+		root := t.TempDir()
+		realHome := filepath.Join(root, "var", "home", "user")
+		require.NoError(t, os.MkdirAll(filepath.Join(realHome, ".scion"), 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(realHome, ".scion", TransportTokenFileName), []byte("linked"), 0600))
+		require.NoError(t, os.Symlink(filepath.Join(root, "var", "home"), filepath.Join(root, "home")))
+		home := filepath.Join(root, "home", "user")
+		t.Setenv("HOME", home)
+
+		got, err := ReadTransportTokenFile(filepath.Join(home, ".scion", TransportTokenFileName))
+		require.NoError(t, err)
+		assert.Equal(t, "linked", got)
+	})
+
+	t.Run("refuses a linked directory below home", func(t *testing.T) {
+		home, _ := setup(t)
+		other := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(other, TransportTokenFileName), []byte("other"), 0600))
+		require.NoError(t, os.Symlink(other, filepath.Join(home, "linked")))
+
+		_, err := ReadTransportTokenFile(filepath.Join(home, "linked", TransportTokenFileName))
+		assert.Error(t, err)
+	})
+
+	t.Run("refuses a hard link", func(t *testing.T) {
+		_, scionDir := setup(t)
+		target := filepath.Join(scionDir, "target")
+		require.NoError(t, os.WriteFile(target, []byte("tok"), 0600))
+		path := filepath.Join(scionDir, TransportTokenFileName)
+		require.NoError(t, os.Link(target, path))
+
+		_, err := ReadTransportTokenFile(path)
+		assert.ErrorIs(t, err, dirfd.ErrNotSingleLinkRegular)
+	})
+
+	t.Run("refuses an oversized file", func(t *testing.T) {
+		_, scionDir := setup(t)
+		path := filepath.Join(scionDir, TransportTokenFileName)
+		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("a", transportTokenFileMaxBytes+1)), 0600))
+
+		got, err := ReadTransportTokenFile(path)
+		assert.ErrorIs(t, err, dirfd.ErrTooLarge)
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("outside home: parent trusted, leaf link refused", func(t *testing.T) {
+		setup(t)
+		outside := t.TempDir()
+		regular := filepath.Join(outside, "regular")
+		require.NoError(t, os.WriteFile(regular, []byte("tok"), 0600))
+		got, err := ReadTransportTokenFile(regular)
+		require.NoError(t, err)
+		assert.Equal(t, "tok", got)
+
+		link := filepath.Join(outside, "link")
+		require.NoError(t, os.Symlink(regular, link))
+		_, err = ReadTransportTokenFile(link)
+		assert.Error(t, err)
+	})
+}
+
+func TestSplitUnderHome(t *testing.T) {
+	tests := []struct {
+		name, home, path, wantBase, wantRel string
+	}{
+		{"under home", "/home/user", "/home/user/.scion/transport-token", "/home/user", ".scion/transport-token"},
+		{"home with trailing slash", "/home/user/", "/home/user/.scion/t", "/home/user", ".scion/t"},
+		{"uncleaned path", "/home/user", "/home/user/a/../.scion/./t", "/home/user", ".scion/t"},
+		{"sibling sharing a prefix is not under home", "/home/user", "/home/userX/.scion/t", "/home/userX/.scion", "t"},
+		{"home itself is not under home", "/home/user", "/home/user", "/home", "user"},
+		{"dot-dot out of home", "/home/user", "/home/user/../other/t", "/home/other", "t"},
+		{"no home", "", "/home/user/.scion/t", "/home/user/.scion", "t"},
+		{"root home", "/", "/a/b", "/", "a/b"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, rel, err := splitUnderHome(tt.home, tt.path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBase, base)
+			assert.Equal(t, tt.wantRel, filepath.ToSlash(rel))
+		})
+	}
 }
 
 // isolateLateFileSource models an agent that started without an injected

@@ -419,6 +419,11 @@ func (s *Server) reissueOneForBulk(ctx context.Context, a *store.Agent, depth in
 // reissueBulkCause is the cause reported for a refused agent.
 func reissueBulkCause(ctx context.Context, err error, agentID, batchOpID string) string {
 	var issueErr *agentTokenIssueError
+	if refusal, ok := placementRefusalOf(err); ok {
+		// Refused before the commit: the agent's saved placement is
+		// inconsistent.
+		return refusal.Code
+	}
 	switch {
 	case errors.As(err, &issueErr):
 		if issueErr.Lookup {

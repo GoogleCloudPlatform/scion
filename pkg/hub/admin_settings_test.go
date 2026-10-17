@@ -112,7 +112,7 @@ func TestApplySettingsUpdates_PreservesServerKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applySettingsUpdatesFromBody(raw, &req, rawServerObject(body))
+	applySettingsUpdatesFromBody(raw, &req, body)
 
 	serverMap, ok := raw["server"].(map[string]interface{})
 	if !ok {

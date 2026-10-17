@@ -175,13 +175,23 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// between the read above and that write, the store's Guard 0b drops
 		// the phase, so a reservation can be released for a phase that is
 		// never persisted. The periodic quota reconciler corrects the drift,
-		// as it does for the deletion guard's equivalent window.
-		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+		// as it does for the deletion guard's equivalent window. A report of
+		// another run changes nothing (the store's run check), so it is
+		// skipped here too.
+		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
+			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+		}
 	}
 
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	// The report is the agent's own (set here, never from the body): it is
+	// subject to the run check and halted's stickiness, and never halts.
+	status.ReportSource = store.StatusReportSourceAgent
+	// The run of the token that sent this report: the store drops a report
+	// of another run (ptone/scion#4853).
+	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -252,9 +262,12 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // Every field counts, including the internal json:"-" ones a decoded status
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfPhase, IfRunID, StartWrite and
-// GuardReincarnation: they only condition the write (StartWrite selects the
-// delete guard; GuardReincarnation turns on the store's reincarnation guard)
+// The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
+// GuardReincarnation, ReportSource, ReportRunID and Restore, and the output
+// Result: they only condition the write (StartWrite selects the delete
+// guard; GuardReincarnation turns on the store's reincarnation guard;
+// ReportSource and ReportRunID select the report rules; Restore only
+// qualifies a Phase) or report on it,
 // and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
@@ -331,6 +344,26 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	if currentPhase == state.PhaseSuspended {
 		status.Phase = ""
 		status.Activity = ""
+		return
+	}
+
+	// Guard 0e: halted is sticky against the agent's own reports
+	// (ptone/scion#4853). The platform ended the run; only a start or a stop
+	// leaves halted. The one exception is a starting/running report (with
+	// its activity) while a start claim is held: that is the new run of a
+	// start whose outcome was in doubt, restored to halted by its rollback.
+	// The store applies the same rule on the locked row. The agent's own
+	// report never changes why the run ended either: its exit reason and
+	// code are dropped (only the agent runtime's report may refine them).
+	if currentPhase == state.PhaseHalted {
+		p := state.Phase(status.Phase)
+		if agent.StartClaimID != "" && (p == state.PhaseStarting || p == state.PhaseRunning) {
+			return
+		}
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitReason = ""
+		status.ExitCode = nil
 		return
 	}
 
@@ -604,6 +637,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Flat placement pre-check for stop and suspend (requirePinnedPlacement),
+	// before the stop intent, the offline-stop queue (queueOfflineStop) and
+	// any dispatch: a refused stop writes nothing, so no stop_queued state
+	// is recorded and the agent's capacity is untouched.
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
+		if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+	}
+
 	// The start claim a stop supersedes: the one held when the stop is
 	// recorded. It is released once the stop's dispatch succeeds.
 	stopSupersedes := agent.StartClaimID
@@ -677,8 +723,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// (mirrors resumeInPlaceDecision's forcedRecovery case for the
 			// create-agent resume path). This never applies to any other
 			// phase: a running agent must not be recreated out from under
-			// itself, and a stopped agent restarts fresh even if asked to
-			// resume, matching the create-agent path's behavior.
+			// itself, and a stopped or halted agent restarts fresh even if
+			// asked to resume, matching the create-agent path's behavior.
 			var startReq AgentLifecycleStartRequest
 			if r.ContentLength > 0 {
 				if err := readJSON(r, &startReq); err != nil {
@@ -1275,11 +1321,15 @@ func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
 		}
 	}
 	if s.controlChannel != nil && s.controlChannel.IsConnected(brokerID) {
-		go func() {
+		// Tracked broker work: shutdown joins it before the store closes,
+		// and it is skipped once shutdown has started (ptone/scion#4869).
+		s.brokerWork.goTracked(func(workCtx context.Context) {
 			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerDrainWakeTimeout)
 			defer cancel()
+			stop := context.AfterFunc(workCtx, cancel)
+			defer stop()
 			s.reconcileBroker(dctx, brokerID)
-		}()
+		})
 	}
 }
 
@@ -1398,6 +1448,10 @@ func startInFlightPhase(phase string) bool {
 // allows any project member: holders of agent.stop_all on the project
 // (project owners/admins, hub admins) stop all agents; other members, by
 // active direct or group-derived role binding, stop only their own.
+//
+// A user access token is admitted with the agent:stop_all selector: the
+// global form on a hub boundary only, the project form on a hub boundary
+// or a boundary for that project.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -1428,7 +1482,9 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// against the project-scoped agent collection for a project, so
 	// project-owner and project-admin role bindings count. This is the
 	// same resource the project's stop_all scope capability is computed on.
-	resource := Resource{Type: "agent", ID: "hub"}
+	// The hub target carries an explicit system parent, so it resolves to
+	// the hub for a token's boundary check.
+	resource := hubScopedResource("agent", "hub")
 	if projectID != "" {
 		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
 	}
@@ -1575,6 +1631,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			res := stopAllResult{
 				ID:   agent.ID,
 				Name: agent.Name,
+			}
+
+			// Flat placement pre-check, as for a single stop: before the
+			// stop intent, so a refused agent is left exactly as it is.
+			if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+				res.Status = "error"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
 			}
 
 			supersedes := agent.StartClaimID

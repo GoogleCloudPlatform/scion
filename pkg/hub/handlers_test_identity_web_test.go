@@ -554,11 +554,12 @@ func TestTestIdentityWeb_Mint(t *testing.T) {
 	e.clock.Advance(2 * time.Minute)
 	assert.Equal(t, http.StatusConflict, e.mintRec(e.issuerTok, short.Identity.ID).Code)
 
-	// The admin kinds (phase A1) are not admitted.
+	// The admin kinds (phase A1) are not admitted while admin web sessions
+	// are off (WS4: test_admin_web_sessions.go), nor is any other kind.
 	for _, kind := range []string{"test_hub_admin", "test_super_admin", store.UserKindHuman, ""} {
-		assert.False(t, testIdentityWebKindAdmitted(&store.User{Kind: kind}), kind)
+		assert.False(t, e.srv.testIdentityWebKindAdmitted(&store.User{Kind: kind}), kind)
 	}
-	assert.True(t, testIdentityWebKindAdmitted(&store.User{Kind: store.UserKindTestFixture}))
+	assert.True(t, e.srv.testIdentityWebKindAdmitted(&store.User{Kind: store.UserKindTestFixture}))
 
 	// Audit: one issue row, no code anywhere in it; no code in the logs.
 	audits := tiWebAudits(t, e.st, testIdentityWebCodeIssueMutation)
@@ -871,14 +872,20 @@ func TestTestIdentityWeb_ProxyModeRefused(t *testing.T) {
 	rec = e.page(jar)
 	assert.True(t, tiWebCleared(rec, webSessionName))
 
-	// The hub side reports proxy mode as unavailable too.
+	// The hub side reports a proxy hub without driver principals as
+	// unavailable too (WS2: no proxy authenticator, then no drivers).
 	e.srv.config.AuthMode = "proxy"
 	ok, cause := e.srv.testIdentityWebSessionGate()
 	assert.False(t, ok)
-	assert.Equal(t, testIdentityWebCauseProxyMode, cause)
+	assert.Equal(t, testIdentityWebCauseNoProxyAuthenticator, cause)
+	e.srv.config.ProxyAuth = &fakeProxyAuthenticator{}
+	ok, cause = e.srv.testIdentityWebSessionGate()
+	assert.False(t, ok)
+	assert.Equal(t, testIdentityWebCauseNoDriverPrincipals, cause)
 	assert.Equal(t, http.StatusNotFound, e.mintRec(e.issuerTok, fx.Identity.ID).Code)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	assert.Contains(t, status.Body.String(), `"testIdentityWebSessions":false`)
+	assert.Contains(t, status.Body.String(), `"testIdentityWebSessionsUnavailableReason":"`+testIdentityWebCauseNoDriverPrincipals+`"`)
 }
 
 // --- AC6: fixation ------------------------------------------------------------
@@ -1013,7 +1020,9 @@ func TestTestIdentityWeb_FidelityThroughCookie(t *testing.T) {
 	rec = api(http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/start", nil)
 	require.True(t, rec.Code >= 200 && rec.Code < 300, "start: %d %s", rec.Code, rec.Body.String())
 	rec = api(http.MethodDelete, "/api/v1/agents/"+created.Agent.ID, nil)
-	require.True(t, rec.Code >= 200 && rec.Code < 300, "delete agent: %d %s", rec.Code, rec.Body.String())
+	// Exactly 204: a 202 leaves the agent live, and the project delete
+	// below would then be refused with 409 (ptone/scion#4811).
+	require.Equal(t, http.StatusNoContent, rec.Code, "delete agent must finish before the project delete: %s", rec.Body.String())
 	rec = api(http.MethodDelete, "/api/v1/projects/"+p.ID, nil)
 	require.True(t, rec.Code >= 200 && rec.Code < 300, "delete project: %d %s", rec.Code, rec.Body.String())
 
@@ -1566,7 +1575,7 @@ func TestTestIdentityWeb_LogoutClears(t *testing.T) {
 func TestTestIdentityWeb_Indicator(t *testing.T) {
 	e := newTIWebEnv(t)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIssuerAudience":""}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIdentityWebSessionsUnavailableReason":"","testAdminWebSessions":false,"testIssuerAudience":""}`, status.Body.String())
 
 	rec := doRequest(t, e.srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

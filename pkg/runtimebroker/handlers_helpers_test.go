@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -413,6 +414,41 @@ runtimes:
 	}
 }
 
+// asyncLaunchCleanupWait bounds how long a test server's cleanup waits for
+// its async launches to end (endAsyncLaunchesAtCleanup).
+const asyncLaunchCleanupWait = 10 * time.Second
+
+// endAsyncLaunchesAtCleanup ends srv's async launches before the test's
+// temp dirs are removed (ptone/scion#5142). A launch accepted by a test can
+// still be running when the test body returns (for example after a
+// deferred close of a blocked Start), and it writes its launch journal and
+// markers under the test's HOME. If t.TempDir's RemoveAll runs at the same
+// moment, it fails with "directory not empty". Registered after the
+// caller's temp dirs, so it runs before their removal (cleanups run last
+// registered, first). It drains srv as a shutdown would: a launch still
+// running is cancelled and reports broker_restarted to the test hub (the
+// test has already returned, so no assertion sees it), and the drain waits,
+// bounded, for every accepted launch to finish (its done channel closes
+// only after its last journal and marker write). Only accepted launches
+// (the drain's set) are waited for, not every launch registry record: some
+// tests register records directly that no launch ever finishes. It then
+// closes the journal.
+func endAsyncLaunchesAtCleanup(t *testing.T, srv *Server) {
+	t.Helper()
+	t.Cleanup(func() {
+		srv.DrainLaunches(context.Background(), asyncLaunchCleanupWait)
+		srv.launchDrain.mu.Lock()
+		n := len(srv.launchDrain.active)
+		srv.launchDrain.mu.Unlock()
+		if n > 0 {
+			t.Errorf("%d async launch(es) still running %v after the test; its temp dirs may not be removable", n, asyncLaunchCleanupWait)
+		}
+		if srv.launchJournal != nil {
+			srv.launchJournal.Close()
+		}
+	})
+}
+
 // newTestServerWithManager wires up a Server with the given agent.Manager
 // (e.g. a *filteringMockManager for tests that need List to honor the filter
 // map) plus the same isolated .scion environment newTestServer uses, so
@@ -430,7 +466,9 @@ func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
 	// returns the mock manager directly instead of creating a real one.
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	return New(cfg, mgr, rt)
+	srv := New(cfg, mgr, rt)
+	endAsyncLaunchesAtCleanup(t, srv)
+	return srv
 }
 
 func newTestServer(t *testing.T) *Server {
@@ -509,6 +547,9 @@ type provisionCapturingManager struct {
 	lastProvisionCtx context.Context
 	// lastReprovisionCtx captures the context passed to Reprovision.
 	lastReprovisionCtx context.Context
+	// onStart, when set, runs at the start of Start, so a test can observe
+	// what the agent's start would read.
+	onStart func(ctx context.Context, opts api.StartOptions)
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -539,6 +580,9 @@ func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.St
 func (m *provisionCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.startCalled = true
 	m.lastOpts = opts
+	if m.onStart != nil {
+		m.onStart(ctx, opts)
+	}
 	return m.mockManager.Start(ctx, opts)
 }
 

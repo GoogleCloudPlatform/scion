@@ -1,0 +1,32 @@
+{
+  "profile_map": {},
+  "findings": [
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com",
+      "profiles": [
+        "a",
+        "b"
+      ],
+      "message_contains": [
+        "a: ksa-a from profiles.a.kubernetes_service_account_mappings.agent@proj.iam.gserviceaccount.com",
+        "b: ksa-b from",
+        "declare a second instance"
+      ]
+    },
+    {
+      "code": "profile_conflict",
+      "severity": "blocking",
+      "path": "profiles.*.shared_dir_storage_backends.data",
+      "profiles": [
+        "a",
+        "b"
+      ],
+      "message_contains": [
+        "a: nfs from profiles.a.shared_dir_storage_backends.data",
+        "b: local from profiles.b.shared_dir_storage_backends.data"
+      ]
+    }
+  ]
+}

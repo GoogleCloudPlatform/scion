@@ -21,7 +21,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
@@ -114,11 +116,46 @@ func brokerFailureCategory(bf brokerFailure) string {
 		return "workspace storage is not configured for the runtime broker"
 	case "conflict":
 		return "the agent is in a conflicting state on the runtime broker"
+	case api.BrokerErrCodeLocalWorktreeRefused:
+		// The broker's reason is built from fixed templates that name the
+		// cause and the fix, filled in with paths, remotes (shown without
+		// credentials) and, for the git-version cause, the git version
+		// check's own text. It is still bounded to one printable line here.
+		if reason := boundedBrokerText(detail(api.BrokerErrDetailReason)); reason != "" {
+			return reason
+		}
+		return "the runtime broker could not create a local worktree of the project's checkout for this agent"
 	case "":
 		return fmt.Sprintf("the runtime broker returned an unrecognized error (status %d)", bf.Status)
 	default:
 		return fmt.Sprintf("the runtime broker reported %s", bf.Code)
 	}
+}
+
+// maxBrokerTextRunes caps broker-supplied text shown to the user.
+const maxBrokerTextRunes = 1024
+
+// boundedBrokerText returns s as a single printable line of at most
+// maxBrokerTextRunes runes. Only graphic characters and ASCII space are
+// kept: control characters (including newlines and terminal escape
+// introducers), format characters (including bidirectional overrides and
+// zero-width characters) and line and paragraph separators are dropped.
+// Surrounding space is trimmed.
+func boundedBrokerText(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if !unicode.IsGraphic(r) && r != ' ' {
+			continue
+		}
+		if n == maxBrokerTextRunes {
+			b.WriteString("...")
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // renderBrokerFailure returns err's message with the relayed broker error

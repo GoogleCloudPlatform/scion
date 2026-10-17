@@ -50,7 +50,7 @@ Project-level sync (requires Hub):
   scion sync push              Push local workspace to hub
   scion sync pull              Pull hub workspace to local
 
-Agent-level sync (existing behavior):
+Agent-level sync (the direction is required):
   scion sync to <agent-name>   Push to a running agent's workspace
   scion sync from <agent-name> Pull from a running agent's workspace
 
@@ -75,7 +75,7 @@ Examples:
   # Sync with specific project
   scion sync -g /path/to/project push
 
-  # Agent-level sync (unchanged)
+  # Agent-level sync
   scion sync from my-agent
   scion sync to my-agent --exclude "*.log"`,
 	Args: cobra.MaximumNArgs(2),
@@ -117,24 +117,23 @@ func runSync(cmd *cobra.Command, args []string) error {
 		if len(args) < 2 {
 			return newUsageError("agent-level sync requires an agent name: scion sync %s <agent-name>", direction)
 		}
-		return runAgentSync(args)
+		return runAgentSync(runtime.SyncDirection(direction), api.Slugify(args[1]))
 	}
 
-	// Single arg that isn't a direction → treat as agent name (legacy compat)
-	return runAgentSync(args)
+	if len(args) == 2 {
+		return newUsageError("invalid direction '%s', must be 'to' or 'from'", direction)
+	}
+	// A bare agent name: agent-level sync needs a direction.
+	return newUsageError("agent-level sync requires a direction: scion sync to|from %s", api.Slugify(direction))
 }
 
 // runProjectSync performs project-level workspace sync against the Hub's WebDAV endpoint.
 func runProjectSync(direction projectsync.Direction) error {
 	// Check Hub availability (project-level sync requires a hub)
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("project-level sync requires a Hub connection.\nUse 'scion sync to/from <agent>' for agent-level sync in solo mode")
-	}
-
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID
@@ -226,39 +225,12 @@ func resolveProjectWorkspacePath() (string, error) {
 }
 
 // runAgentSync handles agent-level sync (to/from a specific agent).
-func runAgentSync(args []string) error {
-	var agentName string
-	var direction = runtime.SyncUnspecified
-
-	if len(args) == 2 {
-		dirStr := args[0]
-		if dirStr != "to" && dirStr != "from" {
-			return newUsageError("invalid direction '%s', must be 'to' or 'from'", dirStr)
-		}
-		direction = runtime.SyncDirection(dirStr)
-		agentName = api.Slugify(args[1])
-	} else {
-		agentName = api.Slugify(args[0])
-	}
-
-	// Check if Hub should be used
-	hubCtx, err := CheckHubAvailability(projectPath)
+func runAgentSync(direction runtime.SyncDirection, agentName string) error {
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
-
-	if hubCtx != nil {
-		// Hosted mode requires direction
-		if direction == runtime.SyncUnspecified {
-			return fmt.Errorf("hosted mode requires sync direction: scion sync [to|from] %s", agentName)
-		}
-		return syncViaHub(hubCtx, agentName, direction)
-	}
-
-	// Solo mode: use existing local sync
-	rt := runtime.GetRuntime(projectPath, profile)
-
-	return rt.Sync(context.Background(), agentName, direction)
+	return syncViaHub(hubCtx, agentName, direction)
 }
 
 // syncViaHub performs workspace sync using Hub API.

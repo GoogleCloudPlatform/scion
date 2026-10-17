@@ -79,6 +79,11 @@ func NewProjectDeletionService(
 type ProjectDeleteRequest struct {
 	ProjectID string
 	Actor     UserIdentity
+	// Force deletes the project even while it has agents whose runtime
+	// deletion is not confirmed (see checkProjectAgentsDeletedTx): their
+	// records are removed with the project and their runtime deletes are
+	// dispatched best-effort afterwards.
+	Force bool
 }
 
 // ProjectDeleteDecision captures the authorization/governance outcome.
@@ -88,8 +93,9 @@ type ProjectDeleteDecision struct {
 	Reason     string
 	HTTPStatus int
 	// Details carries structured denial context. The credential refusal
-	// sets the session-only reason fields (session_only_gate.go); every
-	// other denial leaves it nil.
+	// sets the session-only reason fields (session_only_gate.go), and the
+	// 409 refusal while agents remain sets agents and truncated
+	// (project_delete_agents_guard.go); every other denial leaves it nil.
 	Details map[string]interface{}
 }
 
@@ -117,6 +123,9 @@ type CascadeSummary struct {
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
 	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// ProjectVisitorRules is the number of project visitor rules deleted;
+	// their bindings and exclusions are deleted with them.
+	ProjectVisitorRules int `json:"project_visitor_rules_deleted"`
 	// DelegationEdgeOpID is the operation ID stamped on every edge
 	// deactivated by the delete; empty when no edge was deactivated.
 	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
@@ -156,7 +165,9 @@ const (
 //  5. Checks credential ceiling (session JWT only, no scoped UAT/agent).
 //  6. Acquires the project membership lock for serialization.
 //  7. Re-evaluates authority under lock (TOCTOU closure).
-//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID).
+//  8. Locks the project's agent rows (PostgreSQL: FOR UPDATE, by ID) and,
+//     unless req.Force, refuses with 409 while any agent's runtime
+//     deletion is not confirmed.
 //  9. Performs security-relevant cascading deletes within the transaction.
 //  10. Deletes the project row.
 //  11. Writes the atomic audit record.
@@ -291,6 +302,13 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		if err := tx.LockProjectAgents(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project agents for deletion: %w", err)
 		}
+		// 8b. Refuse while agents remain whose runtime deletion is not
+		// confirmed, unless forced (ptone/scion#4811).
+		if !req.Force {
+			if err := checkProjectAgentsDeletedTx(ctx, tx, req.ProjectID); err != nil {
+				return err
+			}
+		}
 
 		// 9. Cascade security-relevant state within the transaction.
 		cascadeSummary, err := svc.cascadeSecurityState(ctx, tx, req.ProjectID)
@@ -329,6 +347,10 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	})
 
 	if txErr != nil {
+		var agentsErr *projectHasAgentsDeleteError
+		if errors.As(txErr, &agentsErr) {
+			return nil, agentsErr.decision()
+		}
 		// Governance denial re-evaluated under lock.
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
@@ -596,6 +618,20 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		}
 	}
 
+	// 1b. Project visitor rules — each rule, with the bindings it created
+	// and its exclusions. The rule rows have no foreign key to the project;
+	// a rule left behind would bind matching visitors at the deleted
+	// project's ID again on their next request. Bindings are deleted here
+	// before the rules are locked, while removing or changing one rule
+	// locks the rule before its bindings; both take the project row lock
+	// first (Delete step 6, purgeFixtureProject), so they do not run
+	// interleaved.
+	if n, err := tx.DeleteProjectVisitorRulesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project visitor rules: %w", err)
+	} else {
+		cs.ProjectVisitorRules = n
+	}
+
 	// 2. Groups — project-scoped groups (which may carry role bindings).
 	// Paginate to ensure completeness for projects with many groups.
 	for {
@@ -745,6 +781,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | Table                  | Mechanism                                              | Security |
 	// |------------------------|---------------------------------------------------------|----------|
 	// | role_bindings          | Transactional: DeleteRoleBindingsForScope (step 1)      | Auth     |
+	// | project_visitor_rules  | Transactional: DeleteProjectVisitorRulesByProject (1b)   | Auth     |
+	// |   (+ project_visitor_exclusions and the rules' role_bindings)                       |          |
 	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
 	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
 	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |

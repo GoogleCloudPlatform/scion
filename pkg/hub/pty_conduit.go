@@ -143,6 +143,29 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 	if isManagedAgentRuntime(agent.Runtime) {
 		return s.managedPTYPath(ctx, identity, agent)
 	}
+	// Flat placement check (requirePinnedPlacement), before either path is
+	// chosen: a pinned agent whose saved placement is inconsistent is
+	// refused with its own 409 before any upgrade, on the preflight and the
+	// WebSocket alike, whether the attach would take the broker path or the
+	// agent's conduit session. An unpinned agent with no Runtime Broker
+	// keeps the 422 below, and one whose row cannot be read keeps today's
+	// decision.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		var refusal *RuntimeTargetRefusal
+		if errors.As(err, &refusal) {
+			return ptyRefusal(refusal.Status, refusal.Code, refusal.Message, "")
+		}
+		if agent.IsPinned() {
+			// The check could not read the pinned agent's Runtime Broker: a
+			// temporary failure, so retryable (503 registry_unavailable),
+			// not a 500.
+			slog.Warn("PTY: agent placement check failed", "agent_id", agent.ID, "error", err)
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Conduit routing is unavailable", ptyReasonRegistryUnavailable)
+		}
+		// An unpinned agent whose Runtime Broker row cannot be read keeps
+		// today's decision below, which fails open for an unreadable row.
+	}
 	if agent.RuntimeBrokerID == "" {
 		return ptyRefusal(http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
 			"Agent has no runtime broker", "")
@@ -166,8 +189,8 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 // otherwise the control channel directly. Both answer the same question.
 func (s *Server) brokerPTYPath(ctx context.Context, agent *store.Agent, viaRouter bool) ptyPathDecision {
 	connected := false
-	if rt := s.conduit.Load(); viaRouter && rt != nil && rt.router != nil {
-		_, err := rt.router.Resolve(ctx, brokerPTYRequest(agent), nil)
+	if rtr := s.conduitRouter(); viaRouter && rtr != nil {
+		_, err := rtr.Resolve(ctx, brokerPTYRequest(agent), nil)
 		connected = err == nil
 	} else {
 		connected = s.controlChannel != nil && s.controlChannel.IsConnected(agent.RuntimeBrokerID)
@@ -211,8 +234,8 @@ func (s *Server) managedPTYPath(ctx context.Context, identity Identity, agent *s
 // agentPTYPath is the agent path when the agent has a conduit session
 // advertising pty that this node can reach, else a 503 with the reason.
 func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
-	rt := s.conduit.Load()
-	if rt == nil || rt.router == nil {
+	rtr := s.conduitRouter()
+	if rtr == nil {
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and conduit is not serving on this hub node", ptyReasonConduitNotServing)
 	}
@@ -220,7 +243,7 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and stream authorization checks are not running", ptyReasonStreamAuthzDown)
 	}
-	_, err := rt.router.Resolve(ctx, agentPTYRequest(agent), nil)
+	_, err := rtr.Resolve(ctx, agentPTYRequest(agent), nil)
 	switch {
 	case err == nil:
 		return ptyPathDecision{Path: ptyPathAgent}
@@ -354,13 +377,13 @@ func agentPTYRequest(agent *store.Agent) router.Request {
 // router's budget if it is replaced); otherwise nil, the broker's current
 // control channel. Both open the same control channel stream.
 func (s *Server) brokerPTYOpener(agent *store.Agent) func(ctx context.Context, cols, rows int) (*StreamProxy, error) {
-	rt := s.conduit.Load()
-	if rt == nil || rt.router == nil || !s.experimentEnabled(conduitExperiment) {
+	rtr := s.conduitRouter()
+	if rtr == nil || !s.experimentEnabled(conduitExperiment) {
 		return nil
 	}
 	return func(ctx context.Context, cols, rows int) (*StreamProxy, error) {
 		var st *StreamProxy
-		err := rt.router.Do(ctx, brokerPTYRequest(agent), func(ctx context.Context, res router.Resolved) error {
+		err := rtr.Do(ctx, brokerPTYRequest(agent), func(ctx context.Context, res router.Resolved) error {
 			ls, ok := res.Legacy.(*legacyBrokerSession)
 			if !ok {
 				return errors.New("pty: broker resolution is not a control channel")
@@ -442,15 +465,15 @@ type agentPTYUpstream struct {
 // exactly that session, opens the stream with the same params, and
 // registers it for re-checks.
 func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
-	rt := u.s.conduit.Load()
-	if rt == nil || rt.router == nil {
+	rtr := u.s.conduitRouter()
+	if rtr == nil {
 		return errConduitNoRoute
 	}
 	if !u.s.ptyStreamTrackable(u.identity) {
 		return errConduitNoRoute
 	}
 	params := ptyStreamParams(cols, rows)
-	err := rt.router.Do(ctx, agentPTYRequest(u.agent), func(ctx context.Context, res router.Resolved) error {
+	err := rtr.Do(ctx, agentPTYRequest(u.agent), func(ctx context.Context, res router.Resolved) error {
 		tok, _, err := u.s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: u.identity,
 			Agent:    u.agent,
@@ -476,14 +499,16 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
+		target := conduitTargetOf(res, st)
 		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
 			AgentID:   u.agent.ID,
 			ProjectID: u.agent.ProjectID,
-			SessionID: res.Record.SessionID,
-			StreamID:  st.ID(),
+			SessionID: target.SessionID,
+			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
+			Renew:     conduitStreamRenewal(res, st.ID()),
 		})
 		return nil
 	})

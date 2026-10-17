@@ -23,7 +23,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -64,25 +63,12 @@ var lookCmd = &cobra.Command{
 
 		execCmd := buildLookCmd(lookPlain, lookFull, lookNumLines)
 
-		// Check if Hub is enabled
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		if hubCtx != nil {
-			return lookViaHub(hubCtx, agentName, execCmd)
-		}
-
-		rt := runtime.GetRuntime(projectPath, profile)
-
-		output, err := rt.Exec(context.Background(), agentName, execCmd)
-		if err != nil {
-			return fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err)
-		}
-
-		printLookOutput(output)
-		return nil
+		return lookViaHub(hubCtx, agentName, execCmd)
 	},
 }
 

@@ -8,7 +8,7 @@ description: A guided, browser-based walkthrough that sets up your workstation t
 The onboarding wizard is the fastest way to get the hosted experience running locally. When you start the Workstation combo server for the first time, Scion opens a guided setup in your browser that walks through machine configuration, environment checks, runtime selection, harness images, and creating your first project.
 
 :::note[Which mode is this?]
-The wizard sets up **Workstation mode** — a single-tenant Scion server (Hub + Runtime Broker + Web dashboard) running on your own machine over loopback. If you only want to run agents from the CLI with no server, see [Local mode](/scion/choosing-a-mode/) and the [Installation guide](/scion/getting-started/install/) instead.
+The wizard sets up **Workstation mode** — a single-tenant Scion server (Hub + Runtime Broker + Web dashboard) running on your own machine over loopback. This server is the hub that every `scion` command on this machine uses, from the web UI and from the CLI alike. To use a shared hub instead, see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 :::
 
 ## Prerequisites
@@ -62,11 +62,13 @@ The wizard runs diagnostics against your environment and shows each result as **
 Scion detects the runtimes available on your machine and preselects the best one. Pick from **Docker**, **Podman**, or **Container (Apple Virtualization)**; runtimes that were not detected are shown but disabled.
 
 :::caution[Apple Container needs DNS setup]
-If you select **Container** (Apple Virtualization), the wizard attempts to configure container DNS, which requires `sudo`. If it cannot do so automatically, it shows the exact command to run manually, for example:
+If you select **Container** (Apple Virtualization), agents need a container DNS rule to reach the Hub. The wizard shows the command; run it yourself (it needs `sudo`), and again after each reboot:
 
 ```bash
-sudo container system dns create <hostname> --localhost <ip>
+sudo container system dns create host.containers.internal --localhost 203.0.113.1
 ```
+
+To avoid re-running it, install it as a LaunchDaemon; see [Apple Container DNS](/scion/local/apple-container/#automating-after-reboot).
 :::
 
 ### 4. Image registry
@@ -91,7 +93,7 @@ Create your first **project**. The wizard offers three ways to start:
 - **Link a git repo** — connect an existing git repository for source-controlled workspaces.
 - **Add local directory** — link a local directory that stays where it is and is operated on in place. The wizard validates the path and warns if it is already a git repo or already linked.
 
-This step is optional — choose **Skip for now** to create projects later from the dashboard.
+This step is optional — choose **Skip for now** to create projects later from the dashboard. A repository you work on from the CLI does not need this step: run `scion init` in it, and it links to this hub without a prompt (see the [Tutorial](/scion/getting-started/tutorial/)).
 
 ### You're all set
 
@@ -99,12 +101,13 @@ The final screen confirms your workstation is configured. Click **Go to Dashboar
 
 ## After onboarding
 
+- Start your first agent from the CLI: follow the [Tutorial](/scion/getting-started/tutorial/).
 - Manage the running server with `scion server status`, `scion server restart`, and `scion server stop`. See [Workstation Server Mode](/scion/workstation/workstation-server/) for the combo server, network bridges, and lifecycle details.
 - Learn your way around the [Web Dashboard](/scion/workstation/dashboard/).
 - Understand the pieces you just configured in [Core Concepts](/scion/concepts/).
 
 ## See also
 
-- [Choosing a Mode](/scion/choosing-a-mode/) — where Workstation mode fits among Local and the hosted tiers.
+- [Choosing a Mode](/scion/choosing-a-mode/) — where Workstation mode fits next to the hosted tiers.
 - [Installation](/scion/getting-started/install/) — prerequisites and install methods.
 - [Workstation Server Mode](/scion/workstation/workstation-server/) — the server the wizard starts.

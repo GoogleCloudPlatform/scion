@@ -70,6 +70,19 @@ function meta(seq: number, mediaType = 'text/markdown', size = 12) {
   };
 }
 
+const VIEW_URL = 'https://view.example.test/v/tok/index.html';
+
+function htmlMeta(seq: number, size = 120) {
+  const m = meta(seq);
+  m.artifact.title = 'Site';
+  m.version.entryPath = 'index.html';
+  m.version.files = [
+    { path: 'index.html', size, sha256: 'x', mediaType: 'text/html' },
+    { path: 'style.css', size: 10, sha256: 'y', mediaType: 'text/css' },
+  ];
+  return m;
+}
+
 function json(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) };
 }
@@ -260,6 +273,123 @@ describe('scion-chat-file-preview artifact target', () => {
       'Open it in the artifact viewer'
     );
     expect(buttons(el)).toContain('Open in artifact viewer');
+  });
+
+  it("renders an HTML bundle through a minted view in the artifact page's sandboxed frame, never its source", async () => {
+    const big = 10 * 1024 * 1024; // over the text preview cap: HTML is not capped
+    apiFetchMock.mockImplementation((path: string, options?: RequestInit) =>
+      Promise.resolve(
+        path.endsWith('/view') && options?.method === 'POST'
+          ? json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z' })
+          : json(htmlMeta(3, big))
+      )
+    );
+    const el = await open();
+
+    // The view is minted under the viewer's session; the entry's bytes are never fetched.
+    expect(artifactCalls()).toEqual([
+      `/api/v1/artifacts/${ID}`,
+      `/api/v1/artifacts/${ID}/versions/3/view`,
+    ]);
+    expect(
+      apiFetchMock.mock.calls.find((c) => (c[0] as string).endsWith('/view'))?.[1]?.method
+    ).toBe('POST');
+    expect(q(el, 'scion-code-editor')).toBeNull();
+    expect(q(el, 'scion-artifact-markdown-frame')).toBeNull();
+    const frames = el.shadowRoot?.querySelectorAll('iframe') ?? [];
+    expect(frames).toHaveLength(1);
+    const frame = frames[0];
+    // Exactly the artifact page's frame: scripts on the view's own origin, never with allow-same-origin.
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(frame.getAttribute('sandbox')).not.toContain('allow-same-origin');
+    expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
+    expect(frame.getAttribute('src')).toBe(VIEW_URL);
+    expect(frame.hasAttribute('srcdoc')).toBe(false);
+    expect(frame.getAttribute('title')).toBe('Site (sandboxed)');
+    const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(bar).toBe('Content published by agent-1 (agent) · runs sandboxed, isolated from Scion');
+    expect(q(el, 'sl-alert')).toBeNull();
+    expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v3 · current');
+    expect(buttons(el)).toEqual(['Copy link', 'Open in artifact viewer']);
+  });
+
+  it('shows the same bar for a single-file HTML entry with a remote file', async () => {
+    const m = htmlMeta(3);
+    m.version.files = [
+      { path: 'index.html', size: 120, sha256: 'x', mediaType: 'text/html' },
+      {
+        path: '_remote/abc',
+        size: 10,
+        sha256: 'y',
+        mediaType: 'image/png',
+        origin: 'remote',
+        fetchStatus: 'ok',
+      } as (typeof m.version.files)[number],
+    ];
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.endsWith('/view')
+          ? json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z' })
+          : json(m)
+      )
+    );
+    const el = await open();
+    const bar = (q(el, '.untrusted-bar')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    expect(bar).toBe('Content published by agent-1 (agent) · runs sandboxed, isolated from Scion');
+    expect(q(el, 'iframe')?.getAttribute('src')).toBe(VIEW_URL);
+  });
+
+  it('warns about remote images in an HTML view, as the artifact page does', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.endsWith('/view')
+          ? json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z', remoteImages: true })
+          : json(htmlMeta(3))
+      )
+    );
+    const el = await open();
+    expect(q(el, 'sl-alert')?.textContent).toContain('Remote images are not loaded');
+    expect(q(el, 'iframe')?.getAttribute('src')).toBe(VIEW_URL);
+  });
+
+  it('shows the unavailable state when the view is refused', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(path.endsWith('/view') ? json({}, 403) : json(htmlMeta(3)))
+    );
+    const el = await open();
+    expect(q(el, 'iframe')).toBeNull();
+    expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('Artifact unavailable');
+    expect(q(el, '.file-preview-placeholder')?.textContent).toContain(ARTIFACT_UNAVAILABLE_MESSAGE);
+    expect(buttons(el)).toEqual(['Copy link', 'Close']);
+  });
+
+  it('offers Retry when minting the view fails, and renders the view after a retry', async () => {
+    let fail = true;
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.endsWith('/view')
+          ? fail
+            ? json({}, 500)
+            : json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z' })
+          : json(htmlMeta(3))
+      )
+    );
+    const el = await open();
+    expect(q(el, 'iframe')).toBeNull();
+    expect(q(el, '.file-preview-placeholder.error')?.textContent).toContain(
+      'Could not open the view'
+    );
+    const retry = Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
+      (b.textContent ?? '').includes('Retry')
+    ) as HTMLElement | undefined;
+    expect(retry).toBeTruthy();
+    fail = false;
+    retry!.click();
+    for (let i = 0; i < 8; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(q(el, 'iframe')?.getAttribute('src')).toBe(VIEW_URL);
   });
 
   it('revokes the previous image URL when the target changes and on disconnect', async () => {

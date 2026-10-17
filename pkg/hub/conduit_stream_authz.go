@@ -159,8 +159,12 @@ type conduitUserStream struct {
 	ProjectID string
 	// Port is the agent-local port of a TCP stream.
 	Port int
-	// SessionID and StreamID identify the stream on its conduit session
-	// (for logs).
+	// ViaTunnel marks a stream opened through the tunnel path; its
+	// re-checks also require ActionTunnel, as its open did.
+	ViaTunnel bool
+	// SessionID and StreamID identify the stream on the target's own
+	// session (relay.TargetOf: through another relay, the ids the owner
+	// relay reported), for logs.
 	SessionID string
 	StreamID  uint32
 	// Admitted is when the stream was opened.

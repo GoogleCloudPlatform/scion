@@ -1,5 +1,7 @@
 # Injected Skills: Design Doc
 
+> **Note (local-only mode removed):** this document describes the CLI-only mode with no Hub ("solo" or "local" mode) as current. That mode was removed; every agent now runs through a Hub (the workstation server on a single machine). See `docs-site/src/content/docs/reference/local-mode-removal.md`.
+
 **Feature:** Project-scoped (and hub/user-scoped) automatic skill injection into agents  
 **Issue:** [ptone/scion #542](https://github.com/ptone/scion/issues/542)  
 **Author:** ps-arch  

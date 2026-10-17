@@ -80,3 +80,25 @@
   delegated-credential admission in agent_delegation_routes.go, rather than
   the per-pattern method list alone).
 - A `GET` of the visitor's own grants.
+
+## Merge forward
+
+- 2026-10-15: merged upstream main forward; the visitor grant code now comes from upstream, and this item's changes are unchanged.
+- 2026-10-17: merged the visitor rule and federation principal check work, then upstream main, forward; visitors added by a domain rule get the same per-route admission as visitors granted by email, and this item's changes are unchanged.
+
+## Startup refusal tests
+
+- 2026-10-15: `startNewWithRouteTable` (used by `TestNewRefusesInvalidVisitorRoute`
+  and `TestNewRefusesVisitorMethodNotServedByPattern`) now requires New to
+  refuse with exactly the `validateVisitorRoutes` error for the table, and
+  turns a panic in New into a test failure. Without this, removing the
+  visitor route check from New let New run on and panic on the nil store,
+  which no assertion reported. Test-only change.
+- 2026-10-17: two full-handler tests on `/api/v1/auth/me` for visitors that
+  the email grant tests do not cover: a visitor whose account a domain rule
+  created (`TestVisitorRoute_AuthMeAdmitsRuleVisitorOnReadMethodsOnly`) and
+  a peer hub user access credential bound by a rule
+  (`TestFederationPeerUserToken_RuleVisitorAuthMeAdmitsReadMethodsOnly`).
+  Each checks the request identity is the visitor's federated account, that
+  GET and HEAD answer 200, and that POST and a route with no
+  VisitorMethods answer 403 with the uniform refusal. Test-only change.

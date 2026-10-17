@@ -154,3 +154,22 @@
 - Agent visitors (home hub, project, root user in the metadata).
 - Managed-runtime agents receive the message body only, with no envelope,
   so they do not see the visitor metadata (true for every sender today).
+
+## Merge forward (2026-10-17)
+
+- Merged the visitor route item and upstream main forward. One doc
+  conflict in api.md (both sides edited the visitor grant line); both
+  edits kept. The chat routes now pass a credential check after the route
+  guard; a visitor reaches it only on its own DM sub-routes, so the
+  visitor's admission is unchanged.
+
+## Chat route visitor check (2026-10-17)
+
+- chatRoute now refuses a visitor with the uniform visitor refusal unless
+  the request matches a chat sub-route that admits visitors, using the
+  same entries the route guard checks (matchVisitorSubRoute). The chat
+  credential check no longer admits a visitor on its own. Other callers
+  are unchanged.
+- Tests: chatRoute called directly as a visitor and as a member, and a
+  visitor created by a domain rule through send and DM read, refused after
+  the rule is removed or the visitor is revoked.

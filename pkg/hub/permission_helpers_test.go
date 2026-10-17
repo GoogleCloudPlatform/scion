@@ -54,15 +54,30 @@ func loadNonRouteEvidence(t *testing.T) nonRouteEvidence {
 }
 
 // loadReferenceConstants reads the package-level string constants of
-// pkg/hub, pkg/hub/permissions and pkg/store from their non-test sources.
+// pkg/hub, pkg/hub/permissions, pkg/store and each existing guardScanSubdirs
+// package (prefixed with its package name, as pkg/hub code refers to them)
+// from their non-test sources.
 func loadReferenceConstants(t *testing.T) referenceConstants {
 	t.Helper()
 	out := referenceConstants{}
-	for _, dir := range []struct{ path, prefix string }{
+	dirs := []struct{ path, prefix string }{
 		{".", ""},
 		{"permissions", "permissions."},
 		{filepath.Join("..", "store"), "store."},
-	} {
+	}
+	// pkgmove:scan-covers pkg/hub/apierr
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks, once the directory exists.
+	for _, rel := range mustGuardScanDirs(t, ".") {
+		if rel == "." {
+			continue
+		}
+		dirs = append(dirs, struct{ path, prefix string }{rel, guardScanPackage(rel) + "."})
+	}
+	for _, dir := range dirs {
 		files, err := parseNonTestGoFiles(dir.path)
 		if err != nil {
 			t.Fatal(err)
@@ -106,10 +121,6 @@ var pendingNonRouteRows = map[string]string{
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
 func parseNonTestGoFiles(dir string) ([]*ast.File, error) {
-	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards permission ID references, which errors.go and json_response.go do not contain.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards permission ID references (no permission call site resolves through the moved AuthType string constants), which identity.go and identity_credential.go do not contain.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", dir, err)

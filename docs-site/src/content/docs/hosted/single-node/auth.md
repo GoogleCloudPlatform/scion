@@ -324,7 +324,7 @@ server:
 - **JWKS Caching**: Public verification keys are cached locally with RS256-signature pinning and automatic refresh to eliminate per-request latency.
 - **Federation Access Middleware**: Requests carrying external OIDC tokens pass through the `RequireFederationAccess` scope-gated middleware, validating token authenticity, issuer rules, and matching scopes.
 - **Identity Types**:
-  - `hub`: Identifies requests originating from federated partner Hubs.
+  - `hub`: Identifies requests originating from federated partner Hubs. A partner Hub marks each credential it signs with `scion_token_kind`: `agent` for agent identity tokens, `user` for user access credentials. Agent identity tokens, and credentials without the claim from Hubs that predate it, are read as agents, as before. A user access credential is accepted only when the issuer has `accept_user_tokens: true` and the `federation.project_visitors` experiment is on; it must carry a verified email and no agent claims, and must pass `allowed_emails` and `allowed_domains`. Any other `scion_token_kind` value is refused. A refused credential gets the same `401` as any other credential that fails verification.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`; this is separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
 - **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted, but the Hub refuses its writes to profile and other non-agent resources: user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project. Federated callers also cannot redeem invites.
@@ -398,7 +398,7 @@ A domain-scoped GCP project ID such as `example.com:proj` produces service-accou
 
 To minimize friction during local setup, Scion includes a "Dev Auth" mode. When enabled, the Hub auto-generates a token and creates a "Development User" identity.
 
-Dev auth is single-user local mode. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
+Dev auth is for a single-user workstation Hub. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
 
 ### Enabling Dev Auth
 Start the server with the `--dev-auth` flag or set it in your `server.yaml`:
@@ -458,7 +458,7 @@ Scion provides a native mechanism to assign Google Cloud Platform (GCP) identiti
 
 When creating an agent, you can configure its **GCP Identity Mode**:
 
-- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with an explicit Block is rejected. An agent with no GCP identity mode configured gets Passthrough on Kubernetes instead. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). On the Kubernetes runtime, Block is accepted but works differently: the agent pod runs as the runtime profile's block Kubernetes ServiceAccount, or the namespace's default ServiceAccount when none is configured, with no GCP credentials mounted. On Workload Identity nodes that ServiceAccount still receives a federated token, so the agent's GCP access is whatever IAM grants that ServiceAccount holds. An agent with no GCP identity mode configured gets Passthrough on Kubernetes. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).

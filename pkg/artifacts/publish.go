@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -55,6 +56,16 @@ const maxTitleRunes = 512
 // version and artifact with the same bytes.
 func BlobPath(hubID, digest string) string {
 	return "hubs/" + hubID + "/artifacts/blobs/sha256/" + digest[0:2] + "/" + digest[2:4] + "/" + digest
+}
+
+// canCreateIn reports whether the caller may publish artifacts in scope:
+// its credential permits artifact.create there and the host authorizes it.
+// It is the create decision: handlePublish and handleCreate refuse with 403
+// when it is false (explaining a missing credential scope first), a move
+// refuses a target project it is false for, and the list reports it as
+// canCreate.
+func canCreateIn(ctx context.Context, host Host, scope string) bool {
+	return host.Permits(ctx, scope, PermissionCreate) && host.Authorize(ctx, scope, PermissionCreate)
 }
 
 // handlePublish implements the single-file fast path: the raw request body
@@ -111,11 +122,13 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	permitted := s.host.Permits(ctx, scope, PermissionCreate)
-	if !permitted && s.writeMissingScope(w, r) {
-		return
-	}
-	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !canCreateIn(ctx, s.host, scope) {
+		// A credential that does not permit artifact.create may be
+		// explained; the decision itself is canCreateIn's.
+		s.logCreateRefusal(r, scope)
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}
@@ -196,35 +209,72 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// content-addressed, so a retry reuses it and the blob sweep reclaims it.
 	if err := b.store.CreatePublished(ctx, a, v, files, []Grant{g}); err != nil {
 		slog.ErrorContext(ctx, "artifacts: publish failed", "error", err)
+		s.logVersionError(r, a, 1, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
+	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 
 // CodeMissingScope is the error code of a 403 answered to a publish whose
-// credential lacks a scope publishing needs. The error's details carry the
-// scope's name under "scope".
+// credential lacks a scope publishing needs. The error's details carry
+// every missing scope under "scopes" and the first of them under "scope"
+// (the only key older hubs send).
 const CodeMissingScope = "missing_scope"
 
+// ScopesExplainer is an optional extension of Host, preferred over
+// ScopeExplainer when the host implements both: it names every scope the
+// caller lacks rather than only the first (ptone/scion#4571). The same
+// rules apply: consulted only on the publish path, and a pure description
+// that never grants anything.
+type ScopesExplainer interface {
+	// MissingScopes reports the names of the credential scopes the caller
+	// of ctx lacks for permission (one of the Permission constants), or
+	// none under the conditions where ScopeExplainer.MissingScope reports
+	// "".
+	MissingScopes(ctx context.Context, permission string) []string
+}
+
+// missingScopes asks the host which scopes the caller lacks for
+// permission, through ScopesExplainer when the host implements it and
+// ScopeExplainer otherwise.
+func (s *Service) missingScopes(ctx context.Context, permission string) []string {
+	if ex, ok := s.host.(ScopesExplainer); ok {
+		var out []string
+		for _, scope := range ex.MissingScopes(ctx, permission) {
+			if scope != "" && !slices.Contains(out, scope) {
+				out = append(out, scope)
+			}
+		}
+		return out
+	}
+	if ex, ok := s.host.(ScopeExplainer); ok {
+		if scope := ex.MissingScope(ctx, permission); scope != "" {
+			return []string{scope}
+		}
+	}
+	return nil
+}
+
 // writeMissingScope answers 403 missing_scope when the host reports that
-// the caller's credential lacks a scope for publishing. It reports whether
+// the caller's credential lacks scopes for publishing. It reports whether
 // it wrote the response. Only the publish path calls it: publishing names
 // no existing artifact, so the answer describes the caller's own
 // credential and nothing else.
 func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool {
-	ex, ok := s.host.(ScopeExplainer)
-	if !ok {
+	scopes := s.missingScopes(r.Context(), PermissionCreate)
+	if len(scopes) == 0 {
 		return false
 	}
-	scope := ex.MissingScope(r.Context(), PermissionCreate)
-	if scope == "" {
-		return false
+	noun := "scope"
+	if len(scopes) > 1 {
+		noun = "scopes"
 	}
 	writeJSON(w, http.StatusForbidden, errorResponse{Error: errorBody{
 		Code:    CodeMissingScope,
-		Message: "the credential does not carry the " + scope + " scope needed to publish artifacts",
-		Details: map[string]any{"scope": scope},
+		Message: "the credential does not carry the " + strings.Join(scopes, " and ") + " " + noun + " needed to publish artifacts",
+		Details: map[string]any{"scope": scopes[0], "scopes": scopes},
 	}})
 	return true
 }

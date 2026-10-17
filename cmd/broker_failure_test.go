@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -75,6 +76,24 @@ func TestWrapHubError_BrokerFailureCategories(t *testing.T) {
 			status: 500,
 			body:   `<html>proxy error</html>`,
 			want:   []string{"unrecognized error (status 500)"},
+		},
+		{
+			name:   "local worktree refused shows the reason",
+			status: 409,
+			body: `{"error":{"code":"local_worktree_refused","message":"m","details":{"reason":"cannot create a local worktree for this agent: ` +
+				`the project's checkout at /home/u/r has origin https://example.com/acme/other.git, but the hub project's repository is ` +
+				`https://example.com/acme/widgets.git; point origin at the hub project's repository, or link this checkout as its own project"}}}`,
+			want: []string{
+				"runtime broker failure: cannot create a local worktree for this agent: the project's checkout at /home/u/r has origin https://example.com/acme/other.git",
+				"point origin at the hub project's repository",
+				"broker code: local_worktree_refused", "broker status: 409",
+			},
+		},
+		{
+			name:   "local worktree refused without a reason",
+			status: 409,
+			body:   `{"error":{"code":"local_worktree_refused","message":"m"}}`,
+			want:   []string{"could not create a local worktree of the project's checkout"},
 		},
 		{
 			name:   "unknown code",
@@ -187,4 +206,69 @@ func TestStartAgentViaHub_BrokerFailureCategory(t *testing.T) {
 	assert.Contains(t, msg, "broker code: template_error")
 	assert.NotContains(t, msg, "scion hub status")
 	assert.NotContains(t, msg, "runtime broker returned error")
+}
+
+// TestStartAgentViaHub_LocalWorktreeRefusedShowsReason drives scion start's
+// hub path against a Hub that relays the broker's 409
+// local_worktree_refused error the way the Hub's generic dispatch relay
+// does (a 502 runtime_error whose message embeds the broker body
+// verbatim, details included): the CLI shows the per-cause reason.
+func TestStartAgentViaHub_LocalWorktreeRefusedShowsReason(t *testing.T) {
+	const reason = "cannot create a local worktree for this agent: git >= 2.48.0 required for worktree-per-agent mode (--relative-paths), found 2.47.3; upgrade git on this machine"
+	body := `{"error":{"code":"local_worktree_refused","message":"` + reason + `","details":{"reason":"` + reason + `"}}}`
+	hub := &launchMockHub{t: t, createStatus: http.StatusBadGateway, createBody: map[string]interface{}{
+		"error": map[string]interface{}{
+			"code":    "runtime_error",
+			"message": hubRelayedBrokerMessage(409, body),
+		},
+	}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	var err error
+	_ = captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "failed to start agent via Hub: runtime broker failure: "+reason)
+	assert.Contains(t, msg, "broker code: local_worktree_refused")
+	assert.Contains(t, msg, "broker status: 409")
+	assert.NotContains(t, msg, "runtime broker returned error")
+}
+
+// TestWrapHubError_LocalWorktreeRefusedReasonBounded pins that the broker's
+// local-worktree refusal reason is shown as one printable, bounded line:
+// control characters are dropped and an overlong reason is cut.
+func TestWrapHubError_LocalWorktreeRefusedReasonBounded(t *testing.T) {
+	reasons := map[string]string{
+		"escape sequence": `cannot create\u001b]0;owned\u0007 a local worktree`,
+		"newline":         `cannot create a local worktree\nTo fix this, run: rm -rf ~`,
+		"c1 control":      `cannot create\u009b31m a local worktree`,
+		"bidi override":   `cannot create \u202eedirrevo\u202c a local worktree`,
+		"bidi isolate":    `cannot create \u2066x\u2069 a local worktree`,
+		"line separator":  `cannot create a local worktree\u2028second line\u2029third`,
+		"zero width":      `cannot\u200b create\ufeff a local worktree`,
+		"overlong":        strings.Repeat("x", 3000),
+	}
+	for name, reason := range reasons {
+		t.Run(name, func(t *testing.T) {
+			base := &apiclient.APIError{
+				StatusCode: http.StatusBadGateway,
+				Code:       "runtime_error",
+				Message:    hubRelayedBrokerMessage(409, `{"error":{"code":"local_worktree_refused","message":"m","details":{"reason":"`+reason+`"}}}`),
+			}
+			msg := wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", base)).Error()
+			assert.Contains(t, msg, "broker code: local_worktree_refused")
+			for _, r := range msg {
+				assert.False(t, r < 0x20 || (r >= 0x7f && r <= 0x9f), "control character %q in %q", r, msg)
+				assert.False(t, unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp), "format or separator character %q in %q", r, msg)
+			}
+			assert.Less(t, len([]rune(msg)), maxBrokerTextRunes+300, "reason must be bounded")
+			if name == "overlong" {
+				assert.Contains(t, msg, "runtime broker failure: "+strings.Repeat("x", maxBrokerTextRunes)+"...")
+				assert.NotContains(t, msg, strings.Repeat("x", maxBrokerTextRunes+1))
+			} else {
+				assert.Contains(t, msg, "runtime broker failure: cannot")
+			}
+		})
+	}
 }

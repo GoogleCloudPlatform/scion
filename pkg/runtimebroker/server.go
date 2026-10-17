@@ -129,6 +129,11 @@ type ServerConfig struct {
 	// use_host_credentials setting, re-read per start
 	// (colocatedHostCredentials).
 	HostCredentials bool
+	// WorkstationMode is set when this broker runs inside a workstation-mode
+	// server (not hosted mode). Only then may a worktree-per-agent dispatch
+	// for a linked checkout use a local worktree of that checkout
+	// (resolveLinkedCheckout).
+	WorkstationMode bool
 
 	// Template cache settings
 	// TemplateCacheDir is the directory for caching templates fetched from the Hub.
@@ -343,10 +348,22 @@ type Server struct {
 	// synchronous create handlers (start_tracker.go). The heartbeat reports
 	// them, stop waits for its agent's, and Shutdown waits for all.
 	startsInFlight *startTracker
+	// retainedPurges keeps a purge of an agent's retained files and a
+	// start, restart or create of the same agent from overlapping
+	// (retained_purge_guard.go, ptone/scion#4744).
+	retainedPurges *retainedPurgeGuard
 	// launchInstanceID identifies this broker process as a launch owner
 	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
 	// startup.
 	launchInstanceID string
+	// launchJournal persists this process's in-flight async launches so a
+	// restarted process can report and clean them up (launch_journal.go,
+	// launch_recovery.go; design wave 3 §1 C-a). Nil (disabled) without a
+	// state dir.
+	launchJournal *launchJournal
+	// launchDrain is the shutdown drain and recovery state
+	// (launch_drain.go; design wave 3 §1 C-c, C-e).
+	launchDrain launchDrainState
 
 	// launchTimingOverride replaces the launch sender's default retry
 	// backoffs (and, when its keepaliveInterval is positive, the per-launch
@@ -354,9 +371,22 @@ type Server struct {
 	// newLaunchSender). Nil in production; only tests set it.
 	launchTimingOverride *launchTimings
 
-	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
-	// positive (see beginSyncStart). Zero in production.
-	syncStartSupersedeWait time.Duration
+	// launchRecoveryTTL, when positive, replaces recoveryTerminalTTL for
+	// boot recovery's sends. Zero in production; only tests set it.
+	launchRecoveryTTL time.Duration
+
+	// agentFilesLockWait, when positive, replaces the 60s a launch's file
+	// clean-up waits for the agent's workspace lock. Zero in production;
+	// only tests set it.
+	agentFilesLockWait time.Duration
+
+	// createSupersedeWait overrides defaultCreateSupersedeWait when
+	// positive (see beginCreateRegistration). Zero in production.
+	createSupersedeWait time.Duration
+
+	// syncStartMaxDuration overrides defaultSyncStartMaxDuration when
+	// positive (see syncStart.bind). Zero in production.
+	syncStartMaxDuration time.Duration
 
 	stateDir string
 
@@ -376,6 +406,9 @@ type Server struct {
 	// ownershipSetupErr refuses a flat instance whose manager could not be
 	// owner-scoped (startServices).
 	ownershipSetupErr error
+	// stateDirSetupErr refuses to start a server whose broker ID cannot
+	// name its default state directory (DefaultStateDir; startServices).
+	stateDirSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -433,9 +466,19 @@ type Server struct {
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
 	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
-	// one key into a single call. Failed resolutions are not stored.
+	// one key into a single call. Failed runtime resolutions are not stored.
 	agentOwnRuntimes     sync.Map
 	agentOwnRuntimeGroup singleflight.Group
+	// savedProfileFailures memoises a saved profile that does not resolve in
+	// the loaded profile catalog, keyed by project dir and profile, and
+	// savedProfileWarned records, per project dir, agent and profile, the
+	// catalog whose failure was last logged at warn level (see
+	// ensureAgentOwnRuntime).
+	savedProfileFailures sync.Map
+	savedProfileWarned   sync.Map
+	// resolveProfileRuntime, when set, replaces VersionedSettings.ResolveRuntime
+	// in ensureAgentOwnRuntime. Tests set it to count resolutions.
+	resolveProfileRuntime func(vs *config.VersionedSettings, profile string) (config.V1RuntimeConfig, string, error)
 
 	// workspaceLocks serializes operations on shared local paths (worktree
 	// provisioning, project and agent file cleanup) with every server of
@@ -446,6 +489,11 @@ type Server struct {
 	// flatK8sIdentity is a flat instance's own Kubernetes GCP identity
 	// policy, snapshotted when the server is built (flat_k8s_identity.go).
 	flatK8sIdentity flatKubernetesIdentityPolicy
+
+	// flatPolicy is a flat instance's settings policy (its runtime_target
+	// defaults), snapshotted when the server is built and attached to
+	// every request it serves (flat_instance.go).
+	flatPolicy *config.FlatInstancePolicy
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
@@ -526,6 +574,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		resolveAuxiliaryRuntime: agent.ResolveRuntime,
 		launchRegistry:          newLaunchRegistry(),
 		startsInFlight:          newStartTracker(),
+		retainedPurges:          newRetainedPurgeGuard(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
@@ -549,7 +598,10 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	srv.stateDir = cfg.StateDir
 	if srv.stateDir == "" {
-		if dir, err := DefaultStateDir(cfg.BrokerID); err != nil {
+		if dir, err := DefaultStateDir(cfg.BrokerID); errors.Is(err, brokercredentials.ErrBrokerIDNotPathElement) {
+			srv.stateDirSetupErr = fmt.Errorf("runtime broker state directory: %w", err)
+			slog.Error("Runtime Broker will not start", "error", srv.stateDirSetupErr)
+		} else if err != nil {
 			slog.Warn("Failed to resolve user home directory for state dir", "error", err)
 		} else {
 			srv.stateDir = dir
@@ -557,6 +609,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
+		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		// Fail closed: without an exact absence check a deleted agent's
@@ -594,6 +647,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 				WorkspaceLock: srv.locks().Lock})
 		}
 	}
+	srv.launchJournal = newLaunchJournal(srv.stateDir, srv.launchInstanceID, srv.agentLifecycleLog)
 	if srv.stateDir != "" {
 		if err := srv.initStateStore(); err != nil {
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
@@ -675,14 +729,18 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 
 // DefaultStateDir is a Runtime Broker's state root when ServerConfig.StateDir
 // is not set: ~/.scion/runtime-broker-state/<brokerID> ("default" when the
-// ID is empty).
+// ID is empty). An ID that is not a single path element is an error
+// (brokercredentials.ErrBrokerIDNotPathElement).
 func DefaultStateDir(brokerID string) (string, error) {
+	if brokerID == "" {
+		brokerID = "default"
+	}
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", err
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
-	}
-	if brokerID == "" {
-		brokerID = "default"
 	}
 	return filepath.Join(homeDir, ".scion", "runtime-broker-state", brokerID), nil
 }
@@ -1358,6 +1416,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.ownershipSetupErr != nil {
 		return s.ownershipSetupErr
 	}
+	if s.stateDirSetupErr != nil {
+		return s.stateDirSetupErr
+	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
 	}
@@ -1449,6 +1510,12 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.config.HubEnabled && s.multiCredStore != nil {
 		s.startCredentialWatcher(ctx)
 	}
+
+	// Report and clean up the async launches a previous process of this
+	// broker left in its journal (design wave 3 §1 C-c). After the hub
+	// connections start, which the reports go out on, and after auxiliary
+	// runtime discovery, which resolves their managers.
+	s.recoverLaunches()
 
 	return nil
 }
@@ -1549,6 +1616,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// One deadline covers both this wait and the HTTP drain below.
 	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
 	defer cancel()
+	// First refuse new creates, starts and restarts and report the async
+	// launches in flight as broker_restarted, within launchDrainMax of the
+	// same deadline (design wave 3 §1 C-e). What is not delivered by then
+	// stays in the launch journal for the next boot.
+	s.DrainLaunches(ctx, launchDrainMax)
+	defer s.launchJournal.Close()
 	if !s.startsInFlight.cancelAllAndWait(ctx) {
 		s.agentLifecycleLog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}

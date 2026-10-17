@@ -744,3 +744,139 @@ func TestVisitorMessaging_ExperimentOffNoVisitorSend(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Len(t, f.dispatcher.getCalls(), 1)
 }
+
+// serveChatRouteAs calls s.chatRoute directly, without routeGuard, with a
+// handler that records whether it ran.
+func serveChatRouteAs(srv *Server, method, path string, identity Identity, cred CredentialContext) (*httptest.ResponseRecorder, bool) {
+	called := false
+	handler := srv.chatRoute(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(method, path, nil)
+	ctx := contextWithIdentity(req.Context(), identity)
+	ctx = contextWithCredentialContext(ctx, cred)
+	rec := httptest.NewRecorder()
+	handler(rec, req.WithContext(ctx))
+	return rec, called
+}
+
+// chatRoute refuses a visitor on its own, without routeGuard, on every
+// chat request that is not a sub-route open to visitors, with the uniform
+// refusal and before the handler runs; the visitor's own DM history and
+// read marker reach the handler.
+func TestChatRoute_VisitorRefusedOutsideAdmittedSubRoutes(t *testing.T) {
+	srv, _ := testServer(t)
+	visitorID := tid("chat-route-visitor")
+	visitor := NewVisitorIdentity(visitorID, visitorTestUserIssuer, "sub", "v@corp.com", "V")
+	cred := credentialContextForIdentity(visitor)
+	dmKey, err := messages.DMConversationKey("agent", tid("chat-route-agent"), "user", visitorID)
+	require.NoError(t, err)
+
+	for _, c := range []struct{ label, method, path string }{
+		{"chat DM list", http.MethodGet, "/api/v1/chat/dms"},
+		{"chat typing", http.MethodPost, chatDMPath(dmKey, "typing")},
+		{"chat send", http.MethodPost, chatDMPath(dmKey, "messages")},
+		{"chat unread count", http.MethodGet, "/api/v1/chat/unread-count"},
+	} {
+		rec, called := serveChatRouteAs(srv, c.method, c.path, visitor, cred)
+		assert.False(t, called, "%s: the handler must not run", c.label)
+		assertVisitorRefusal(t, rec, c.label)
+	}
+
+	for _, c := range []struct{ label, method, path string }{
+		{"own DM history", http.MethodGet, chatDMPath(dmKey, "messages")},
+		{"own read marker", http.MethodGet, chatDMPath(dmKey, "read")},
+		{"set own read marker", http.MethodPost, chatDMPath(dmKey, "read")},
+	} {
+		rec, called := serveChatRouteAs(srv, c.method, c.path, visitor, cred)
+		assert.True(t, called, "%s: the handler runs", c.label)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s", c.label)
+	}
+}
+
+// A project member's chat requests through chatRoute are unchanged by the
+// visitor check: every request above reaches the handler.
+func TestChatRoute_MemberRequestsUnchanged(t *testing.T) {
+	srv, _ := testServer(t)
+	memberID := tid("chat-route-member")
+	member := NewAuthenticatedUser(memberID, memberID+"@test.com", "Member", "member", string(ClientTypeWeb))
+	cred := CredentialContext{Kind: CredentialKindInteractive}
+	dmKey, err := messages.DMConversationKey("agent", tid("chat-route-agent"), "user", memberID)
+	require.NoError(t, err)
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/chat/dms"},
+		{http.MethodPost, chatDMPath(dmKey, "typing")},
+		{http.MethodPost, chatDMPath(dmKey, "messages")},
+		{http.MethodGet, "/api/v1/chat/unread-count"},
+		{http.MethodGet, chatDMPath(dmKey, "messages")},
+		{http.MethodGet, chatDMPath(dmKey, "read")},
+		{http.MethodPost, chatDMPath(dmKey, "read")},
+	} {
+		rec, called := serveChatRouteAs(srv, c.method, c.path, member, cred)
+		assert.True(t, called, "%s %s: the handler runs", c.method, c.path)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s %s", c.method, c.path)
+	}
+}
+
+// ruleVisitor adds a domain rule on the fixture's project and returns the
+// rule, the account ID of a visitor the rule binds, and that visitor's
+// issuer token.
+func (f *visitorMessagingFixture) ruleVisitor(t *testing.T, subject, email string) (ProjectVisitorRuleView, string, string) {
+	t.Helper()
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	token := f.token(t, grantTestOtherIssuer, subject, email, boolPtr(true))
+	v := f.visitorThrough(t, token)
+	require.NotNil(t, v, "the rule makes a visitor")
+	require.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1)
+	return rule, v.ID(), token
+}
+
+// A visitor created by a domain rule sends to an agent and reads its own
+// DM like a visitor granted by email; removing the rule refuses both on the
+// next request.
+func TestVisitorMessaging_RuleVisitorAdmittedUntilRuleRemoved(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	rule, visitorID, token := f.ruleVisitor(t, "sub-rua", "rua@any.example")
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
+	require.NoError(t, err)
+
+	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("from a rule visitor"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.do(t, token, http.MethodGet, chatDMPath(dmKey, "messages"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.rulesPath()+"/"+rule.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	rec = f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("after rule removal"))
+	assertVisitorRefusal(t, rec, "send after rule removal")
+	rec = f.do(t, token, http.MethodGet, chatDMPath(dmKey, "messages"), nil)
+	assertVisitorRefusal(t, rec, "DM read after rule removal")
+	assert.Len(t, f.dispatcher.getCalls(), 1, "no refused request is dispatched")
+}
+
+// Revoking one rule visitor refuses its next send and next DM read, and
+// the rule does not bind it again on those requests.
+func TestVisitorMessaging_RuleVisitorRevokedStaysRefused(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	rule, visitorID, token := f.ruleVisitor(t, "sub-rho", "rho@any.example")
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
+	require.NoError(t, err)
+
+	rec := f.do(t, token, http.MethodPost, agentMessagePath(f.agent.ID), visitorTextBody("before"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.do(t, token, http.MethodGet, chatDMPath(dmKey, "messages"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+visitorID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	rec = f.do(t, token, http.MethodPost, agentMessagePath(f.agent.ID), visitorTextBody("after"))
+	assertVisitorRefusal(t, rec, "send after revocation")
+	rec = f.do(t, token, http.MethodGet, chatDMPath(dmKey, "messages"), nil)
+	assertVisitorRefusal(t, rec, "DM read after revocation")
+	assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the rule does not bind the revoked visitor again")
+	assert.Len(t, f.dispatcher.getCalls(), 1, "no refused request is dispatched")
+}

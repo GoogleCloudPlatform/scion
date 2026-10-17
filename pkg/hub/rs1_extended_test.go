@@ -123,10 +123,12 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards Create/DeleteRoleBinding call sites, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards Create/DeleteRoleBinding call sites, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(hubDir)
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards Create/DeleteRoleBinding call sites.
+	entries, err := readGuardScanDirs(hubDir)
 	require.NoError(t, err)
 
 	fset := token.NewFileSet()

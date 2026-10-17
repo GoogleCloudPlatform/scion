@@ -92,6 +92,10 @@ type TelegramBrokerV2 struct {
 
 	subs map[string]bool
 
+	// pollCancel stops the running poll loop; nil when none runs. pollDone
+	// is closed when the most recent poll loop has exited. It is kept after
+	// that loop is stopped: the next loop waits for it before polling, so
+	// two loops never run at once.
 	pollCancel context.CancelFunc
 	pollDone   chan struct{}
 	lastOffset int64
@@ -170,6 +174,9 @@ type retiredConfig struct {
 	gen           *configGen
 	sendQueue     *SendQueue
 	store         Store
+	// pollDone is closed when the poll loop a switch to webhook mode
+	// stopped has exited. Configure waits for it after releasing b.mu.
+	pollDone <-chan struct{}
 	// prev is closed when the previous retirement has finished; done is
 	// closed when this one has.
 	prev <-chan struct{}
@@ -308,6 +315,10 @@ func (b *TelegramBrokerV2) Configure(config map[string]string) error {
 	}
 	b.mu.Unlock()
 
+	// The poll loop's handlers take b.mu, so wait for it only now.
+	if retired != nil && retired.pollDone != nil {
+		<-retired.pollDone
+	}
 	if retired != nil {
 		go func() {
 			defer b.retiring.Done()
@@ -445,6 +456,25 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 		}
 	}
 
+	// Leaving webhook mode: remove the webhook registration, or getUpdates
+	// fails with a conflict and polling cannot start.
+	//
+	// For the same bot (also when its credential was rotated, which revokes
+	// the old one), delete through the new client; a failure fails the
+	// reconfigure. When the new configuration uses a different bot, the
+	// old bot's webhook does not block this bot's polling, so remove it
+	// through the old client on a best-effort basis.
+	if inboundMode != "webhook" && b.inboundMode == "webhook" {
+		if b.botInfo != nil && b.botInfo.ID != bot.ID {
+			if err := b.api.DeleteWebhook(ctx); err != nil {
+				b.log.Warn("Failed to delete the previous bot's webhook", "error", err)
+			}
+		} else if err := api.DeleteWebhook(ctx); err != nil {
+			store.Close()
+			return nil, fmt.Errorf("failed to delete webhook: %w", err)
+		}
+	}
+
 	if v, ok := config["hub_url"]; ok {
 		b.hubURL = v
 	}
@@ -525,6 +555,19 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	} else if b.webhookServer != nil {
 		retired.webhookServer = b.webhookServer
 		b.webhookServer = nil
+	}
+
+	// Switch inbound delivery: stop the running poll loop, which polls with
+	// the previous client. Webhook mode waits for it to exit (Configure
+	// does so after releasing b.mu). Poll mode starts a new loop with the
+	// new client for the existing subscriptions; the new loop waits for the
+	// old one to exit before it polls, so Configure need not wait for a
+	// running handler.
+	pollDone := b.stopPollingLocked()
+	if inboundMode == "webhook" {
+		retired.pollDone = pollDone
+	} else if len(b.subs) > 0 {
+		b.startPolling()
 	}
 
 	// Resolve transport auth for IAP-protected hub endpoints.
@@ -614,11 +657,15 @@ var openSQLiteStore = NewSQLiteStore
 // it to supply a token source.
 var resolveBrokerTransport = transportauth.ResolveBrokerTransport
 
+// callbackHandleTimeout bounds the handling of one callback query, received
+// by webhook or by long polling.
+const callbackHandleTimeout = 10 * time.Second
+
 // handleWebhookUpdate dispatches an update received by the webhook server.
 func (b *TelegramBrokerV2) handleWebhookUpdate(update Update) {
 	defer b.acquireGen()()
 	if update.CallbackQuery != nil {
-		cbCtx, cbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		cbCtx, cbCancel := context.WithTimeout(context.Background(), callbackHandleTimeout)
 		defer cbCancel()
 		b.handleCallbackQuery(cbCtx, update.CallbackQuery)
 	}
@@ -1857,7 +1904,8 @@ func (b *TelegramBrokerV2) Close() error {
 	// Let earlier configurations finish shutting down first.
 	b.retiring.Wait()
 
-	// Shut down inbound transport.
+	// Shut down inbound transport. The poll loop is stopped in either mode.
+	b.stopPolling()
 	if inboundMode == "webhook" {
 		// Remove the webhook registration from Telegram.
 		if api != nil {
@@ -1875,8 +1923,6 @@ func (b *TelegramBrokerV2) Close() error {
 			}
 			stopCancel()
 		}
-	} else {
-		b.stopPolling()
 	}
 
 	// Handlers still running must finish before the store is closed.
@@ -1941,6 +1987,8 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
+// startPolling starts the poll loop with the current API client unless one
+// runs or the broker is in webhook mode. Must be called with b.mu held.
 func (b *TelegramBrokerV2) startPolling() {
 	if b.inboundMode == "webhook" {
 		return // webhook mode handles inbound via HTTP
@@ -1950,36 +1998,48 @@ func (b *TelegramBrokerV2) startPolling() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	prev := b.pollDone
+	done := make(chan struct{})
 	b.pollCancel = cancel
-	b.pollDone = make(chan struct{})
+	b.pollDone = done
 
-	go b.pollLoop(ctx)
+	go b.pollLoop(ctx, b.api, prev, done)
 	b.log.Info("Telegram v2 polling started")
 }
 
-func (b *TelegramBrokerV2) stopPolling() {
-	b.mu.RLock()
-	cancel := b.pollCancel
-	done := b.pollDone
-	b.mu.RUnlock()
-
-	if cancel == nil {
-		return
+// stopPollingLocked cancels the running poll loop, if any, and returns a
+// channel that is closed once the most recent loop has exited (nil if none
+// was ever started). Must be called with b.mu held; the caller waits on the
+// channel after releasing b.mu, because the loop's handlers take b.mu.
+func (b *TelegramBrokerV2) stopPollingLocked() <-chan struct{} {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
 	}
+	return b.pollDone
+}
 
-	cancel()
+// stopPolling stops the poll loop and waits for it to exit. Callers must not
+// hold b.mu.
+func (b *TelegramBrokerV2) stopPolling() {
+	b.mu.Lock()
+	done := b.stopPollingLocked()
+	b.mu.Unlock()
+
 	if done != nil {
 		<-done
 	}
-
-	b.mu.Lock()
-	b.pollCancel = nil
-	b.pollDone = nil
-	b.mu.Unlock()
 }
 
-func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
-	defer close(b.pollDone)
+// pollLoop long-polls Telegram through api until ctx is cancelled, then
+// closes done. It first waits for the previous loop (prev) to exit. The loop
+// keeps the client it was started with: a reconfigure replaces b.api under
+// b.mu and restarts the loop.
+func (b *TelegramBrokerV2) pollLoop(ctx context.Context, api *TelegramAPIClient, prev <-chan struct{}, done chan struct{}) {
+	defer close(done)
+	if prev != nil {
+		<-prev
+	}
 
 	for {
 		select {
@@ -1988,7 +2048,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
 		default:
 		}
 
-		updates, err := b.getUpdatesV2(ctx, b.lastOffset+1, longPollTimeout)
+		updates, err := b.getUpdatesV2(ctx, api, b.lastOffset+1, longPollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -2002,18 +2062,31 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context) {
 			continue
 		}
 
+		// Stop between updates once cancelled: the next loop fetches the
+		// rest of the batch again, as lastOffset has not passed them. An
+		// update being handled when the loop is stopped (for example by a
+		// reconfigure) still finishes; see handlePolledUpdate.
 		for _, update := range updates {
+			if ctx.Err() != nil {
+				return
+			}
 			b.lastOffset = update.UpdateID
 			b.handlePolledUpdate(ctx, update)
 		}
 	}
 }
 
-// handlePolledUpdate dispatches an update received by long polling.
+// handlePolledUpdate dispatches an update received by long polling. ctx is
+// the poll loop's context. A callback is handled with a context that
+// stopping the loop does not cancel, so it finishes, but that is bounded by
+// callbackHandleTimeout like the webhook path, so Close and a switch to
+// webhook mode, which wait for the loop, stay bounded.
 func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, update Update) {
 	defer b.acquireGen()()
 	if update.CallbackQuery != nil {
-		b.handleCallbackQuery(ctx, update.CallbackQuery)
+		cbCtx, cbCancel := context.WithTimeout(context.WithoutCancel(ctx), callbackHandleTimeout)
+		defer cbCancel()
+		b.handleCallbackQuery(cbCtx, update.CallbackQuery)
 	}
 	if update.Message != nil {
 		b.handleIncomingMessageV2(update.Message)
@@ -2022,7 +2095,7 @@ func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, update Update
 
 // getUpdatesV2 calls GetUpdates with both "message" and "callback_query"
 // in allowed_updates, extending the v1 behavior.
-func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, api *TelegramAPIClient, offset int64, timeout int) ([]Update, error) {
 	body := getUpdatesRequest{
 		Offset:         offset,
 		Timeout:        timeout,
@@ -2034,15 +2107,15 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 		return nil, fmt.Errorf("marshal getUpdates request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", b.api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create getUpdates request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := b.api.pollClient.Do(req)
+	resp, err := api.pollClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getUpdates request failed: %w", b.api.redactToken(err))
+		return nil, fmt.Errorf("getUpdates request failed: %w", api.redactToken(err))
 	}
 	defer resp.Body.Close()
 

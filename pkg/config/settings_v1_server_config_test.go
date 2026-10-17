@@ -715,6 +715,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					IssuerType:       "hub",
 					DefaultRole:      "",
 					AllowedEmails:    nil,
+					AcceptUserTokens: true,
 					// AllowVisitorGrants applies to hub and user issuers.
 					AllowVisitorGrants: true,
 				},
@@ -761,6 +762,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, ti0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, ti0.DefaultScopes)
 	assert.Equal(t, "hub", ti0.IssuerType)
+	assert.True(t, ti0.AcceptUserTokens)
+	assert.False(t, gc.Federation.TrustedIssuers[1].AcceptUserTokens)
 	assert.True(t, ti0.AllowVisitorGrants)
 
 	ti1 := gc.Federation.TrustedIssuers[1]
@@ -796,6 +799,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, vi0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, vi0.DefaultScopes)
 	assert.Equal(t, "hub", vi0.IssuerType)
+	assert.True(t, vi0.AcceptUserTokens)
+	assert.False(t, v1Back.Federation.TrustedIssuers[1].AcceptUserTokens)
 	assert.True(t, vi0.AllowVisitorGrants)
 
 	vi1 := v1Back.Federation.TrustedIssuers[1]

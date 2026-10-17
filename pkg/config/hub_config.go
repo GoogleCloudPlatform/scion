@@ -17,6 +17,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -29,12 +30,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // HubServerConfig holds configuration for the Hub API server.
@@ -153,10 +157,10 @@ type HubServerConfig struct {
 	// (minimum 11m).
 	StartMaxDuration time.Duration `json:"startMaxDuration" yaml:"startMaxDuration" koanf:"startMaxDuration"`
 	// StartUnconfirmedHold bounds how long a start with an unknown outcome
-	// blocks other starts. Default 13m (minimum 12m40s).
+	// blocks other starts. Default 17m (minimum 16m).
 	StartUnconfirmedHold time.Duration `json:"startUnconfirmedHold" yaml:"startUnconfirmedHold" koanf:"startUnconfirmedHold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start. Default 5m (3m up to StartUnconfirmedHold).
+	// create-and-start. Default 16m (16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold time.Duration `json:"startCreateUnconfirmedHold" yaml:"startCreateUnconfirmedHold" koanf:"startCreateUnconfirmedHold"`
 
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
@@ -166,12 +170,6 @@ type HubServerConfig struct {
 	DisableLegacyStorageFallback bool `json:"disableLegacyStorageFallback" yaml:"disableLegacyStorageFallback" koanf:"disableLegacyStorageFallback"`
 
 	// --- Async agent create (design §3.7) ---
-
-	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
-	// by default; even when on, a launch is only non-blocking for a request
-	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
-	// stay synchronous permanently, regardless of this flag.
-	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
 
 	// PerfTrace turns on per-request performance tracing (phase timings,
 	// authorization store-call and decision-audit counts, DB pool waits).
@@ -204,6 +202,10 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -314,7 +316,7 @@ func ResolveHubIDFromEnv() string {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
-		if kService := os.Getenv("K_SERVICE"); kService != "" {
+		if kService := cloudrunenv.ServiceName(); kService != "" {
 			slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
 				"k_service", kService)
 			h := sha256.Sum256([]byte(kService))
@@ -353,7 +355,7 @@ func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
 		return v, true
 	}
-	if kService := os.Getenv("K_SERVICE"); kService != "" {
+	if kService := cloudrunenv.ServiceName(); kService != "" {
 		h := sha256.Sum256([]byte(kService))
 		return hex.EncodeToString(h[:6]), true
 	}
@@ -572,6 +574,20 @@ type RuntimeBrokerInstanceConfig struct {
 	Key           string               `json:"key" yaml:"key" koanf:"key"`
 	Name          string               `json:"name" yaml:"name" koanf:"name"`
 	RuntimeTarget *RuntimeTargetConfig `json:"runtimeTarget,omitempty" yaml:"runtimeTarget,omitempty" koanf:"runtimeTarget"`
+	// AgentDefaults mirrors V1RuntimeBrokerInstanceConfig.AgentDefaults.
+	AgentDefaults *InstanceAgentDefaultsConfig `json:"agentDefaults,omitempty" yaml:"agentDefaults,omitempty" koanf:"agentDefaults"`
+}
+
+// InstanceAgentDefaultsConfig is the server-config form of
+// V1InstanceAgentDefaults.
+type InstanceAgentDefaultsConfig struct {
+	DefaultHarnessConfig string                       `json:"defaultHarnessConfig,omitempty" yaml:"defaultHarnessConfig,omitempty" koanf:"defaultHarnessConfig"`
+	ImageRegistry        string                       `json:"imageRegistry,omitempty" yaml:"imageRegistry,omitempty" koanf:"imageRegistry"`
+	Volumes              []api.VolumeMount            `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
+	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
+	HarnessOverrides     map[string]V1HarnessOverride `json:"harnessOverrides,omitempty" yaml:"harnessOverrides,omitempty" koanf:"harnessOverrides"`
+	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	CloneDepth           api.CloneDepth               `json:"cloneDepth,omitempty" yaml:"cloneDepth,omitempty" koanf:"cloneDepth"`
 }
 
 // RuntimeTargetConfig is the server-config form of V1RuntimeTargetConfig.
@@ -584,6 +600,15 @@ type RuntimeTargetConfig struct {
 	// See V1RuntimeTargetConfig.
 	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -717,6 +742,14 @@ type ProxyAuthConfig struct {
 	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driverPrincipals,omitempty" yaml:"driverPrincipals,omitempty" koanf:"driverPrincipals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driverTokenAudience,omitempty" yaml:"driverTokenAudience,omitempty" koanf:"driverTokenAudience"`
 }
 
 // IAPAuthConfig holds Google IAP-specific settings.
@@ -845,6 +878,97 @@ type OIDCProviderConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
 	// TokenLifetime is the validity duration of issued identity tokens. Default: 15m.
 	TokenLifetime time.Duration `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" koanf:"token_lifetime"`
+	// UserTokenAudiences lists the peer hub issuer URLs for which this hub
+	// issues user access credentials to its own users (POST
+	// /api/v1/auth/federation-token). Empty, the default, means none are
+	// issued. Read at startup; a change needs a restart.
+	UserTokenAudiences []string `json:"user_token_audiences,omitempty" yaml:"user_token_audiences,omitempty" koanf:"user_token_audiences"`
+	// UserTokenLifetime is the validity of those credentials. Zero means
+	// DefaultUserTokenLifetime; otherwise it must be a whole number of
+	// seconds and may not exceed MaxUserTokenLifetime.
+	UserTokenLifetime time.Duration `json:"user_token_lifetime,omitempty" yaml:"user_token_lifetime,omitempty" koanf:"user_token_lifetime"`
+}
+
+const (
+	// DefaultUserTokenLifetime is the validity of an issued user access
+	// credential for a peer hub when UserTokenLifetime is zero.
+	DefaultUserTokenLifetime = 15 * time.Minute
+	// MaxUserTokenLifetime is the longest UserTokenLifetime accepted.
+	MaxUserTokenLifetime = time.Hour
+)
+
+// EffectiveUserTokenLifetime returns UserTokenLifetime, or
+// DefaultUserTokenLifetime when it is zero.
+func (c OIDCProviderConfig) EffectiveUserTokenLifetime() time.Duration {
+	if c.UserTokenLifetime == 0 {
+		return DefaultUserTokenLifetime
+	}
+	return c.UserTokenLifetime
+}
+
+// NormalizeUserTokenAudience returns aud without surrounding whitespace or
+// trailing slashes, the form in which audiences are compared.
+func NormalizeUserTokenAudience(aud string) string {
+	return strings.TrimRight(strings.TrimSpace(aud), "/")
+}
+
+// ValidateUserTokens checks UserTokenAudiences and UserTokenLifetime: the
+// lifetime must be a whole number of seconds between zero and
+// MaxUserTokenLifetime (credential times are whole seconds), and each audience
+// must be a distinct http(s) URL with a host and no user info, query or
+// fragment.
+func (c OIDCProviderConfig) ValidateUserTokens() error {
+	var errs []error
+	if c.UserTokenLifetime < 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must not be negative", c.UserTokenLifetime))
+	} else if c.UserTokenLifetime > MaxUserTokenLifetime {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s exceeds the maximum of %s", c.UserTokenLifetime, MaxUserTokenLifetime))
+	} else if c.UserTokenLifetime%time.Second != 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must be a whole number of seconds", c.UserTokenLifetime))
+	}
+	seen := make(map[string]bool)
+	for i, aud := range c.UserTokenAudiences {
+		norm := NormalizeUserTokenAudience(aud)
+		if norm == "" {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: must not be empty", i))
+			continue
+		}
+		u, err := url.Parse(norm)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: invalid URL %q: %v", i, aud, err))
+			continue
+		case u.Scheme != "https" && u.Scheme != "http":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must use https or http scheme", i, aud))
+			continue
+		case u.Host == "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q has no host", i, aud))
+			continue
+		case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must be an issuer URL without user info, query or fragment", i, aud))
+			continue
+		}
+		if seen[norm] {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: duplicate audience %q", i, aud))
+		}
+		seen[norm] = true
+	}
+	return errors.Join(errs...)
+}
+
+// AllowsUserTokenAudience reports whether aud, normalized, is one of
+// UserTokenAudiences. It is false for an empty aud or an empty list.
+func (c OIDCProviderConfig) AllowsUserTokenAudience(aud string) bool {
+	norm := NormalizeUserTokenAudience(aud)
+	if norm == "" {
+		return false
+	}
+	for _, allowed := range c.UserTokenAudiences {
+		if NormalizeUserTokenAudience(allowed) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 // GlobalConfig holds the complete server configuration.
@@ -857,6 +981,10 @@ type GlobalConfig struct {
 
 	// Hub API server settings
 	Hub HubServerConfig `json:"hub" yaml:"hub" koanf:"hub"`
+
+	// Relay holds the settings of a separate relay process (scion server
+	// --role relay; server.relay).
+	Relay RelayServerConfig `json:"relay,omitzero" yaml:"relay,omitempty" koanf:"relay"`
 
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
@@ -1530,6 +1658,8 @@ var snakeCaseFields = map[string]string{
 	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
+	"certfile":                   "cert_file",
+	"keyfile":                    "key_file",
 	"defaultharnessconfig":       "default_harness_config",
 	"defaultmaxduration":         "default_max_duration",
 	"defaultuserrole":            "default_user_role",
@@ -1553,6 +1683,8 @@ var snakeCaseFields = map[string]string{
 	"missingagentgrace":          "missing_agent_grace",
 	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
+	"metricsenabled":             "metrics_enabled",
+	"tracingenabled":             "tracing_enabled",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1635,7 +1767,6 @@ var camelCaseFields = map[string]string{
 	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
-	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
 	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
@@ -1656,6 +1787,8 @@ var camelCaseFields = map[string]string{
 	"devtokenfile":                  "devTokenFile",
 	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
 	"displayname":                   "displayName",
+	"driverprincipals":              "driverPrincipals",
+	"drivertokenaudience":           "driverTokenAudience",
 	"gcpcredentials":                "gcpCredentials",
 	"gcpiamdenyunknownpolicy":       "gcpIamDenyUnknownPolicy",
 	"gcpiamcheckmode":               "gcpIamCheckMode",
@@ -1671,6 +1804,8 @@ var camelCaseFields = map[string]string{
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"monitoringdashboardurl":        "monitoringDashboardUrl",
+	"metricsenabled":                "metricsEnabled",
+	"tracingenabled":                "tracingEnabled",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
@@ -1715,6 +1850,9 @@ var camelCaseFields = map[string]string{
 // Handles camelCase conversion for known fields like clientId, clientSecret.
 // Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
 func envKeyToConfigKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.GlobalConfig
+	}
 	// Split by underscore, convert each part
 	parts := strings.Split(strings.ToLower(envKey), "_")
 	for i, part := range parts {
@@ -1753,6 +1891,7 @@ var serverSubKeys = map[string]bool{
 	"mode": true, "env": true, "federation": true,
 	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
 	"scheduler": true, "oidc_login": true, "oidc": true,
+	"relay": true,
 }
 
 // serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
@@ -1761,6 +1900,9 @@ var serverSubKeys = map[string]bool{
 // so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
 // Non-server keys (e.g. telemetry, default_template) pass through unchanged.
 func serverEnvToOpsettingsKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.Path
+	}
 	key := envKeyToOpsettingsKey(envKey)
 	firstSeg := key
 	if dot := strings.Index(key, "."); dot >= 0 {
@@ -1891,42 +2033,43 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, true, true)
+}
+
+// LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
+// without the SCION_SEED_* layer: coded defaults, settings.yaml (and the
+// --config location) and SCION_SERVER_*. These are the layers the hub's
+// endpoint resolution at startup reads; it ignores seed values, so the admin
+// view takes the public URL it shows when none is saved from this merge
+// (ptone/scion#4826).
+func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false, true)
+}
+
+// LoadAboveSeedBootstrapKoanfWithConfigPath is the bootstrap merge with only
+// the layers above SCION_SEED_*: settings.yaml (and the --config location)
+// and SCION_SERVER_*, without the coded defaults. A key it has gets its
+// bootstrap value from one of these layers, so the admin view can tell a
+// value from them apart from a coded default or a seed value equal to the
+// default (ptone/scion#4983).
+func LoadAboveSeedBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false, false)
+}
+
+// loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
+// layer when withSeed is true and the coded defaults when withDefaults is
+// true.
+func loadBootstrapKoanf(configPath string, withSeed, withDefaults bool) *koanf.Koanf {
 	k := koanf.New(".")
-
-	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
-	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
-	// If new defaulted keys are added to GlobalConfig (or its nested structs),
-	// they must be added here too, otherwise bootstrap material will be
-	// incomplete for sections that rely on them during initial seeding.
-	defaults := DefaultGlobalConfig()
-	_ = k.Load(confmap.Provider(map[string]interface{}{
-		"server.hub.port":         defaults.Hub.Port,
-		"server.hub.host":         defaults.Hub.Host,
-		"server.hub.admin_emails": defaults.Hub.AdminEmails,
-		"server.database.driver":  defaults.Database.Driver,
-		"server.database.url":     defaults.Database.URL,
-		"server.auth.dev_mode":    defaults.Auth.Enabled,
-		"server.auth.dev_token":   defaults.Auth.Token,
-		"server.storage.provider": defaults.Storage.Provider,
-		"server.secrets.backend":  defaults.Secrets.Backend,
-		"server.log_level":        defaults.LogLevel,
-	}, "."), nil)
-
-	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
-	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
-	// "coded defaults" layer for default_template/default_harness_config:
-	// without it, an un-seeded instance (no settings.yaml on disk, no
-	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
-	// from bootstrap material, so agent-create requests that omit
-	// harnessConfig resolve to an empty name instead of the product default
-	// (ptone/scion#1306).
-	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
-		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	if withDefaults {
+		loadBootstrapDefaults(k)
 	}
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
-	seedK := LoadSeedEnvKoanf()
-	_ = k.Merge(seedK)
+	if withSeed {
+		seedK := LoadSeedEnvKoanf()
+		_ = k.Merge(seedK)
+	}
 
 	// 3. settings.yaml (+ legacy server.yaml).
 	globalDir, err := GetGlobalDir()
@@ -1962,6 +2105,40 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// loadBootstrapDefaults loads the coded defaults of the bootstrap merge into k.
+func loadBootstrapDefaults(k *koanf.Koanf) {
+	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
+	// NOTE: This is a manually maintained subset of GlobalConfig defaults.
+	// If new defaulted keys are added to GlobalConfig (or its nested structs),
+	// they must be added here too, otherwise bootstrap material will be
+	// incomplete for sections that rely on them during initial seeding.
+	defaults := DefaultGlobalConfig()
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.port":         defaults.Hub.Port,
+		"server.hub.host":         defaults.Hub.Host,
+		"server.hub.admin_emails": defaults.Hub.AdminEmails,
+		"server.database.driver":  defaults.Database.Driver,
+		"server.database.url":     defaults.Database.URL,
+		"server.auth.dev_mode":    defaults.Auth.Enabled,
+		"server.auth.dev_token":   defaults.Auth.Token,
+		"server.storage.provider": defaults.Storage.Provider,
+		"server.secrets.backend":  defaults.Secrets.Backend,
+		"server.log_level":        defaults.LogLevel,
+	}, "."), nil)
+
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
 }
 
 // loadConfigPathFiles layers the --config location over k using the same

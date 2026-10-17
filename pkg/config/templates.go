@@ -163,6 +163,10 @@ func (t *Template) LoadConfig() (*api.ScionConfig, error) {
 		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
 	}
 
+	if err := api.ValidateMessageMode(cfg.MessageMode); err != nil {
+		return nil, fmt.Errorf("invalid config in %s: %w", configPath, err)
+	}
+
 	return &cfg, nil
 }
 
@@ -908,6 +912,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.Model != "" {
 		result.Model = override.Model
 	}
+	if override.MessageMode != "" {
+		result.MessageMode = override.MessageMode
+	}
 	// ThinkingLevel is a *int: nil means "unset", so a nil override never
 	// clobbers a base value. Copy the pointee rather than the pointer — the
 	// merge's shallow copy above already aliases base's fields, and adding a
@@ -1051,7 +1058,45 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 		result.Skills = append(result.Skills, annotated...)
 	}
 
+	// AgentPlugins: append, annotate "template" scope, then dedupe by path
+	// (last one wins). GetAgent re-merges the persisted scion-agent.json over
+	// the template chain, so a plain append would grow the persisted list on
+	// every re-provision. The merged list is informational, not the
+	// effective set: the persisted copy of an entry keeps its old fields
+	// after a template edits them, and entries a template dropped stay in
+	// it. Provisioning resolves each template's own entries against its own
+	// directory.
+	if len(override.AgentPlugins) > 0 {
+		merged := make([]api.AgentPluginReference, 0, len(base.AgentPlugins)+len(override.AgentPlugins))
+		merged = append(merged, base.AgentPlugins...)
+		for _, ref := range override.AgentPlugins {
+			if ref.Scope == "" {
+				ref.Scope = "template"
+			}
+			merged = append(merged, ref)
+		}
+		result.AgentPlugins = dedupeAgentPluginRefs(merged)
+	}
+
 	return &result
+}
+
+// dedupeAgentPluginRefs drops every entry whose path (ignoring a leading
+// "./" and redundant separators) recurs later in refs, so the last
+// declaration of a path wins and keeps its position.
+func dedupeAgentPluginRefs(refs []api.AgentPluginReference) []api.AgentPluginReference {
+	key := func(p string) string { return filepath.Clean(strings.TrimPrefix(p, "./")) }
+	last := make(map[string]int, len(refs))
+	for i, r := range refs {
+		last[key(r.Path)] = i
+	}
+	out := make([]api.AgentPluginReference, 0, len(last))
+	for i, r := range refs {
+		if last[key(r.Path)] == i {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.KubernetesConfig {
@@ -1158,6 +1203,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			}
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
+			}
+			if override.Cloud.TLS.CertFile != "" {
+				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
+			}
+			if override.Cloud.TLS.KeyFile != "" {
+				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}
 		if override.Cloud.Batch != nil {

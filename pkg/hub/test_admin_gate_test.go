@@ -68,6 +68,7 @@ func tiaGateServerConfig() ServerConfig {
 		MarkerClass:     config.HubClassTest,
 		MarkerCreatedAt: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
 	}
+	cfg.TestMode = TestModeConfig{Level: TestModeAdmin, HubID: tiaHubID, HubClass: config.HubClassTest, MarkerHubID: tiaHubID, MarkerClass: config.HubClassTest}
 	return cfg
 }
 
@@ -114,7 +115,37 @@ func TestTestAdminGate_NewCapturesImmutableGate(t *testing.T) {
 	// The phase-W status route reads the same gate (unauthenticated).
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+}
+
+// Admin tier A2: with a complete test-admin policy classification, New
+// admits --test-mode=super-admin (G3) and captures both kinds; the status
+// route and the startup banner show the super-admin kind. With an
+// incomplete classification New refuses with the G3 error.
+func TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy(t *testing.T) {
+	buf := tiaCaptureAudit(t)
+	cfg := tiaGateServerConfig()
+	cfg.TestAdminGate.SuperAdmin = true
+	cfg.TestMode.Level = TestModeSuperAdmin
+	srv, _, err := tiaNewServer(t, cfg)
+	require.NoError(t, err)
+	assert.True(t, srv.testAdminTierEnabled(testAdminKindHubAdmin))
+	assert.True(t, srv.testAdminTierEnabled(testAdminKindSuperAdmin))
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":true,"testIdentityWebSessions":false,"testIdentityWebSessionsUnavailableReason":"web_session_key_unavailable","testAdminWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
+	require.NoError(t, srv.emitTestAdminGateStart())
+	assert.Contains(t, buf.String(), "hub-admin and super-admin authority")
+	assert.Contains(t, buf.String(), `"test_super_admin"`)
+
+	// An incomplete classification refuses the super-admin kind.
+	prev := testAdminPermissionPolicy["hub.config.update"]
+	delete(testAdminPermissionPolicy, "hub.config.update")
+	t.Cleanup(func() { testAdminPermissionPolicy["hub.config.update"] = prev })
+	srv, _, err = tiaNewServer(t, cfg)
+	require.Error(t, err)
+	assert.Nil(t, srv)
+	assert.True(t, errors.Is(err, ErrTestSuperAdminRequiresPolicyRegistry), "got %v", err)
 }
 
 func TestTestAdminGate_OffByDefault(t *testing.T) {
@@ -130,7 +161,10 @@ func TestTestAdminGate_NewRefusesEachConditionWithNamedError(t *testing.T) {
 		mutate func(*ServerConfig)
 		want   error
 	}{
-		{"G3 super-admin flag", func(c *ServerConfig) { c.TestAdminGate.SuperAdmin = true }, ErrTestSuperAdminRequiresPolicyRegistry},
+		{"G3 super-admin without the hub-admin kind", func(c *ServerConfig) {
+			c.TestAdminGate.SuperAdmin = true
+			c.TestAdminGate.HubAdmin = false
+		}, ErrTestAdminInconsistent},
 		{"G1 test identities off", func(c *ServerConfig) { c.EnableTestIdentities = false }, ErrTestAdminRequiresTestIdentities},
 		{"G2 hub id mismatch", func(c *ServerConfig) { c.TestAdminGate.HubID = "other-hub" }, ErrTestAdminHubIDMismatch},
 		{"G2 empty hub id", func(c *ServerConfig) { c.TestAdminGate.HubID = "" }, ErrTestAdminHubIDMismatch},
@@ -306,7 +340,13 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 	// In production code the gate field is assigned exactly once, in New.
 	assignments := 0
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards testAdminGate assignments.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -361,6 +401,8 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	// writer, so no handler can reach it. The hub never reads it either: cmd
 	// reads it once at startup and passes the result in ServerConfig.
 	for _, dir := range []string{".", "../store"} {
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -851,6 +893,8 @@ var tiaKeyMaterialSites = map[string]string{
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
+	"conduit_admission.go:conduitAdmissionAEAD:crypto/aes.NewCipher":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
+	"conduit_admission.go:conduitAdmissionAEAD:crypto/cipher.NewGCM":                                "exempt: admission token key, derived only from the shared signing secret, which the test admin tier refuses (G7), so it is never live there; it seals relay admission tokens, never a credential a test identity could carry",
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
@@ -878,6 +922,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -978,6 +1024,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 // definition names it.
 func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

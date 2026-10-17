@@ -28,6 +28,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
@@ -90,7 +91,7 @@ func runSSHCommand(cmd *cobra.Command, args []string) error {
 // reportSSHError writes a failed scion ssh invocation's error as one plain
 // line and returns 255.
 func reportSSHError(w io.Writer, err error) int {
-	_, _ = fmt.Fprintf(w, "scion ssh: %s\n", plainErrorLine(err.Error()))
+	_, _ = fmt.Fprintf(w, "scion ssh: %s\n", plainErrorLine(config.RedactURLsIn(err.Error())))
 	return sshExitFailure
 }
 
@@ -155,7 +156,7 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	}
 	rctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
 	defer cancel()
-	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.settingsProjectID)
+	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.project)
 	if err != nil {
 		return nil, nil, err
 	}

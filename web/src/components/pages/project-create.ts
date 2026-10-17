@@ -17,8 +17,9 @@
 /**
  * Project creation page component
  *
- * Form for creating a new project. "Start from" picks either Blank (configure
- * the workspace here, POST /api/v1/projects) or a project template (POST
+ * Form for creating a new project. Name comes first and takes initial focus;
+ * "Start from" below it picks either Blank (configure the workspace here,
+ * POST /api/v1/projects) or a project template (POST
  * /api/v1/projects/{id}/clone). With a template, everything except name, slug
  * and — for git templates — the git remote comes from the template and is
  * shown read-only. See ptone/scion#2702.
@@ -500,6 +501,11 @@ export class ScionPageProjectCreate extends LitElement {
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    // The form renders once project.create is confirmed; Name is its first
+    // field, so it takes initial focus.
+    if (changedProperties.has('createAccess') && this.createAccess === 'allowed') {
+      this.focusNameField();
+    }
     // Mark the inner native input invalid too, so assistive tech reports it
     // (the host's aria-invalid does not reach into sl-input's shadow DOM).
     if (changedProperties.has('slugError')) {
@@ -508,6 +514,15 @@ export class ScionPageProjectCreate extends LitElement {
     if (changedProperties.has('templateGitRemoteError')) {
       this.setInputValidity('#templateGitRemote', this.templateGitRemoteError);
     }
+  }
+
+  private focusNameField(): void {
+    const input = this.shadowRoot?.querySelector('#name') as
+      | (HTMLElement & { updateComplete?: Promise<unknown> })
+      | null;
+    if (!input) return;
+    // Wait for sl-input's own render so its inner native input exists.
+    void Promise.resolve(input.updateComplete).then(() => input.focus());
   }
 
   private setInputValidity(selector: string, message: string | null): void {
@@ -1818,8 +1833,6 @@ export class ScionPageProjectCreate extends LitElement {
           : nothing}
 
         <div>
-          ${this.renderStartFrom(template)}
-
           <div class="form-field">
             <label for="name">Name</label>
             <sl-input
@@ -1831,6 +1844,7 @@ export class ScionPageProjectCreate extends LitElement {
             ></sl-input>
           </div>
 
+          ${this.renderStartFrom(template)}
           ${template
             ? html`
                 ${this.renderTemplateSummary(template)}

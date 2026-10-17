@@ -129,6 +129,16 @@ func (c *ContainerScriptHarness) GetInterruptSequence() []string {
 	return nil
 }
 
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
+	return c.entry.ResolvedDelivery()
+}
+
+// ReadySpec returns the config's ready block with defaults applied.
+func (c *ContainerScriptHarness) ReadySpec() api.ReadySpec {
+	return c.entry.ResolvedReady()
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
@@ -147,13 +157,16 @@ func (c *ContainerScriptHarness) HasSystemPrompt(agentHome string) bool {
 	return err == nil
 }
 
-// AdvancedCapabilities returns the configured capability matrix from config.yaml.
+// AdvancedCapabilities returns the configured capability matrix from
+// config.yaml, with agent_plugins from the bundle's agent-plugins.yaml
+// sidecar when present (config.HarnessConfigEntry.AgentPluginsCapability).
 func (c *ContainerScriptHarness) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
-	if c.entry.Capabilities == nil {
-		return api.HarnessAdvancedCapabilities{Harness: c.entry.Harness}
+	var caps api.HarnessAdvancedCapabilities
+	if c.entry.Capabilities != nil {
+		caps = *c.entry.Capabilities
 	}
-	caps := *c.entry.Capabilities
 	caps.Harness = c.entry.Harness
+	caps.AgentPlugins = c.entry.AgentPluginsCapability()
 	return caps
 }
 
@@ -473,6 +486,9 @@ type ProvisionInputs struct {
 	AuthCandidates string `json:"auth_candidates,omitempty"`
 	MCPServers     string `json:"mcp_servers,omitempty"`
 	ResolvedSkills string `json:"resolved_skills,omitempty"`
+	// AgentPlugins is the staged Agent Plugins index (inputs/plugins.json),
+	// present only when the control plane staged plugins for this start.
+	AgentPlugins string `json:"agent_plugins,omitempty"`
 }
 
 type ProvisionOutputs struct {
@@ -579,6 +595,9 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 	if fileExistsHelper(filepath.Join(bundleHostPath, "inputs", "resolved-skills.json")) {
 		manifest.Inputs.ResolvedSkills = filepath.Join(bundleContainerPath, "inputs", "resolved-skills.json")
 	}
+	if fileExistsHelper(filepath.Join(bundleHostPath, "inputs", "plugins.json")) {
+		manifest.Inputs.AgentPlugins = filepath.Join(bundleContainerPath, "inputs", "plugins.json")
+	}
 
 	manifestPath := filepath.Join(bundleHostPath, "manifest.json")
 	manifestData, err := json.MarshalIndent(manifest, "", "  ")
@@ -591,6 +610,37 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 
 	if err := writeHookWrapper(agentHome, bundleContainerPath); err != nil {
 		return fmt.Errorf("stage lifecycle hook wrapper: %w", err)
+	}
+	return nil
+}
+
+// SetManifestAgentWorkspace records containerWorkspace as agent_workspace in
+// the manifest staged under agentHome. The provisioner runs inside the
+// container, where the workspace is mounted at a container path (for example
+// /repo-root/<relative path> for a worktree under the repo root) rather than
+// at the host path Provision receives, so Start calls this once the
+// container-side workspace is known. A missing manifest (no container-script
+// bundle staged) is not an error.
+func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
+	manifestPath := filepath.Join(agentHome, ".scion", "harness", "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read manifest.json: %w", err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest.json: %w", err)
+	}
+	manifest.AgentWorkspace = containerWorkspace
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil
 }

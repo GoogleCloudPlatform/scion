@@ -17,7 +17,6 @@ package cmd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -25,7 +24,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcache"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -34,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -52,13 +49,13 @@ var (
 	filterLabels   []string
 	listCount      int
 
-	// Attribute filters (Hub mode only — combine with each other and with
+	// Attribute filters (combine with each other and with
 	// --phase/--activity/--template/--label using AND). ptone/scion#2146.
 	filterOwner   string
 	filterBroker  string
 	filterHarness string
 
-	// Relationship filters (Hub mode only, mutually exclusive with each
+	// Relationship filters (mutually exclusive with each
 	// other). Empty means unset; scopeInferSentinel (via cobra's
 	// NoOptDefVal) means "infer the reference" — see
 	// resolveRelationshipReference. ptone/scion#2146.
@@ -97,94 +94,22 @@ var listCmd = &cobra.Command{
 		if err := validateListFlags(); err != nil {
 			return err
 		}
-
-		// Check if Hub should be used
-		hubCtx, err := CheckHubAvailability(projectPath)
-		if err != nil {
-			// Check if this is because Hub is enabled but project not
-			// linked. A project the user unlinked is not offered the link
-			// prompt: it refuses with the pointer to 'scion hub link'.
-			if !errors.Is(err, hubsync.ErrProjectUnlinked) && handleUnlinkedProjectPrompt(cmd, args) {
-				// User chose to link - retry
-				hubCtx, err = CheckHubAvailability(projectPath)
-				if err != nil {
-					return err
-				}
-			} else {
-				return err
-			}
-		}
-
-		if hubCtx != nil {
-			return listAgentsViaHub(hubCtx)
-		}
-
-		// Local mode
-		if err := rejectHubOnlyFiltersInLocalMode(); err != nil {
+		// A target-hub profile refuses the flags that need local state
+		// or this agent's own identity (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
 			return err
 		}
-		return listAgentsLocal()
+
+		// No link prompt here: on the local hub the project is linked
+		// automatically, a remote hub asks in EnsureHubReady, and a
+		// target-hub profile never links a local project.
+		hubCtx, err := requireHub(projectPath)
+		if err != nil {
+			return err
+		}
+
+		return listAgentsViaHub(hubCtx)
 	},
-}
-
-// rejectHubOnlyFiltersInLocalMode returns a clear error if any Hub-only
-// filter flag is set while listing locally (ptone/scion#2146).
-//
-// Local listing has no store.AgentFilter to push these into — it filters an
-// in-memory runtime.List() result by name/label only. Before this check,
-// setting e.g. --owner or --ancestors in local mode was silently a no-op:
-// the flag was simply never read outside listAgentsViaHub, so the command
-// printed every agent as though it were the filtered set. A narrowing filter
-// that silently narrows nothing makes the output *wider* than what was
-// asked for, with no indication anything was ignored — dangerous when the
-// output feeds a script (e.g. piped into a bulk stop or delete). Erroring
-// is the only response that can't be misread as "no matches."
-func rejectHubOnlyFiltersInLocalMode() error {
-	type hubOnlyFlag struct {
-		name string
-		set  bool
-	}
-	for _, f := range []hubOnlyFlag{
-		{"owner", filterOwner != ""},
-		{"broker", filterBroker != ""},
-		{"harness", filterHarness != ""},
-		{"descendants", filterDescendants != ""},
-		{"ancestors", filterAncestors != ""},
-		{"lineage", filterLineage != ""},
-	} {
-		if f.set {
-			return fmt.Errorf("--%s requires Hub mode (no Hub is configured for this project)", f.name)
-		}
-	}
-	return nil
-}
-
-// listAgentsLocal lists agents using the local runtime
-func listAgentsLocal() error {
-	rt := runtime.GetRuntime(projectPath, profile)
-	mgr := agent.NewManager(rt)
-
-	filters := map[string]string{
-		"scion.agent": "true",
-	}
-
-	if listAll {
-		// Cross-project listing might need a way to find all projects.
-		// For now, mgr.List handles current project and what's provided in filters.
-	} else {
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		if projectDir != "" {
-			filters["scion.project_path"] = projectDir
-			filters["scion.project"] = config.GetProjectName(projectDir)
-		}
-	}
-
-	agents, err := mgr.List(context.Background(), filters)
-	if err != nil {
-		return err
-	}
-
-	return displayAgents(agents, listAll, false)
 }
 
 // listAgentsViaHub lists agents using the Hub API
@@ -289,7 +214,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		}
 		if userID != "" {
 			// A user has no Ancestry chain of its own — nothing to list.
-			return displayAgents(nil, listAll, true)
+			return displayAgents(nil, listAll)
 		}
 		refAgent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 		if err != nil {
@@ -305,7 +230,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 			// on the wire from "no id restriction at all", which would
 			// silently widen the result to every authorized agent instead
 			// of none.
-			return displayAgents(nil, listAll, true)
+			return displayAgents(nil, listAll)
 		}
 		opts.IDs = refAgent.Ancestry
 
@@ -361,8 +286,11 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		agents[i] = hubAgentToAgentInfo(a)
 	}
 
-	// Update agent name cache for completion
-	updateAgentNameCache(resp.Agents)
+	// Update agent name cache for completion. A target-hub profile writes
+	// no local state, so its listing does not update the cache.
+	if !hubCtx.profileLocalOnly() {
+		updateAgentNameCache(resp.Agents)
+	}
 
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
@@ -373,7 +301,7 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
 	}
 
-	return displayAgents(agents, listAll, true)
+	return displayAgents(agents, listAll)
 }
 
 // resolveOwnerID resolves --owner's value — a user's display name, email,
@@ -762,6 +690,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		OwnerID:           a.OwnerID,
 		StateVersion:      a.StateVersion,
 		ProvisionedOnly:   a.ProvisionedOnly,
+		ExitCode:          a.ExitCode,
+		ExitReason:        a.ExitReason,
 	}
 
 	// Fall back to AppliedConfig fields if top-level fields are empty
@@ -788,19 +718,28 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 	return info
 }
 
-// displayAgents displays agents in the requested format
-// hubMode indicates if the listing is from Hub (shows BROKER column)
-// filterRunningAgents returns only agents whose phase is not stopped or error.
+// filterRunningAgents returns only agents whose phase is not stopped, error
+// or halted.
 func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
 		p := state.Phase(a.Phase)
-		if p == state.PhaseStopped || p == state.PhaseError {
+		if p == state.PhaseStopped || p == state.PhaseError || p == state.PhaseHalted {
 			continue
 		}
 		filtered = append(filtered, a)
 	}
 	return filtered
+}
+
+// haltedPhaseLabel shows why a halted agent was halted next to its phase,
+// e.g. "halted (preempted)", using the reason's fixed display label
+// ("unknown" when none is recorded); any other phase is returned unchanged.
+func haltedPhaseLabel(phase, exitReason string) string {
+	if phase == string(state.PhaseHalted) {
+		return phase + " (" + state.ExitReason(exitReason).Label() + ")"
+	}
+	return phase
 }
 
 // validateListFlags checks that filter and sort flag values are valid.
@@ -901,7 +840,8 @@ func sortAgentsByField(agents []api.AgentInfo) {
 	})
 }
 
-func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
+// displayAgents displays agents in the requested format.
+func displayAgents(agents []api.AgentInfo, all bool) error {
 	if listRunning {
 		agents = filterRunningAgents(agents)
 	}
@@ -951,11 +891,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	if hubMode {
-		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
-	} else {
-		_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tPHASE\tCONTAINER\tLAST ACTIVITY")
-	}
+	_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
 	for _, a := range agents {
 		phase := a.Phase
 		if phase == "" {
@@ -964,6 +900,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
 			phase = a.Activity
 		}
+		phase = haltedPhaseLabel(phase, a.ExitReason)
 		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		containerStatus := a.ContainerStatus
 		if containerStatus == "created" && a.ID == "" {
@@ -983,11 +920,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		if broker == "" {
 			broker = a.RuntimeBrokerID
 		}
-		if hubMode {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
-		} else {
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, phase, containerStatus, lastActivity)
-		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
 	}
 	_ = w.Flush()
 	if hint := provisionedOnlyListHint(agents, all); hint != "" {
@@ -1059,111 +992,6 @@ func formatLastActivity(status string, t time.Time) string {
 		return status
 	}
 	return fmt.Sprintf("%s, %s", status, timePart)
-}
-
-// handleUnlinkedProjectPrompt checks if the error is due to an unlinked project and prompts the user.
-// Returns true if the user chose to link and the link succeeded. On cancel it
-// returns false, so the caller returns the original error.
-func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
-	// Resolve project path to check settings
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return false
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return false
-	}
-
-	// Only handle this case if Hub is enabled but project is not linked
-	if !settings.IsHubEnabled() {
-		return false
-	}
-
-	// Check if project is actually registered on the Hub
-	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
-		return false
-	}
-
-	client, err := getHubClient(settings)
-	if err != nil {
-		return false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Check Hub connectivity first
-	if _, err := client.Health(ctx); err != nil {
-		return false // Hub not reachable, different error
-	}
-
-	// Check if project is registered — prefer hub.projectId over project_id
-	projectID := settings.GetHubProjectID()
-	if projectID == "" {
-		projectID = settings.ProjectID
-	}
-	if projectID == "" {
-		projectID = config.GenerateProjectID()
-	}
-
-	linked, err := isProjectLinkedToHub(ctx, client, projectID)
-	if err != nil || linked {
-		return false // Error checking or project is already linked
-	}
-
-	// Get project name for display
-	var projectName string
-	if isGlobal {
-		projectName = "global"
-	} else {
-		projectName = config.GetProjectName(resolvedPath)
-	}
-
-	// Show prompt
-	choice := hubsync.ShowProjectLinkOrDisablePrompt(projectName, autoConfirm)
-
-	switch choice {
-	case hubsync.LinkOrDisableLink:
-		// Run the link command
-		if err := runHubLink(cmd, args); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to link project: %v\n", err)
-			return false
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-// isProjectLinkedToHub checks if a project is linked to the Hub.
-func isProjectLinkedToHub(ctx context.Context, client hubclient.Client, projectID string) (bool, error) {
-	if projectID == "" {
-		return false, nil
-	}
-
-	_, err := client.Projects().Get(ctx, projectID)
-	if err != nil {
-		errStr := err.Error()
-		if containsStr(errStr, "404") || containsStr(errStr, "not found") {
-			return false, nil
-		}
-		return false, err
-	}
-
-	return true, nil
-}
-
-// containsStr is a simple case-sensitive substring check.
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // provisionedPhaseLabel shows phase "created" as "created (not started)"
@@ -1252,20 +1080,20 @@ func init() {
 	listCmd.Flags().StringArrayVar(&filterLabels, "label", nil, "Filter by label in key=value format (repeatable)")
 	listCmd.Flags().IntVar(&listCount, "count", 0, "Maximum number of agents to return (default: server limit)")
 
-	// Attribute filters (Hub mode only).
-	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user ID, name, email, or the reserved value \"me\" (Hub mode only)")
-	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID (Hub mode only)")
-	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name (Hub mode only)")
+	// Attribute filters.
+	listCmd.Flags().StringVar(&filterOwner, "owner", "", "Filter by owner: a user ID, name, email, or the reserved value \"me\"")
+	listCmd.Flags().StringVar(&filterBroker, "broker", "", "Filter by runtime broker name or ID")
+	listCmd.Flags().StringVar(&filterHarness, "harness", "", "Filter by harness-config name")
 
-	// Relationship filters (Hub mode only). NoOptDefVal lets both
+	// Relationship filters. NoOptDefVal lets both
 	// `--descendants` and `--descendants=<agent>` parse: the bare form
 	// infers the reference (calling agent in agent mode, calling user
 	// otherwise) — see resolveRelationshipReference.
-	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterDescendants, "descendants", "", "List every agent descended from the reference (default: self)")
 	listCmd.Flags().Lookup("descendants").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterAncestors, "ancestors", "", "List the agents in the reference's ancestry chain (default: self)")
 	listCmd.Flags().Lookup("ancestors").NoOptDefVal = scopeInferSentinel
-	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self) (Hub mode only)")
+	listCmd.Flags().StringVar(&filterLineage, "lineage", "", "List the reference's creation-tree neighborhood: its direct parent agent plus all of that parent's descendants, bounded to the reference's project. A reference whose parent is a user, or whose only recorded parent is an agent you cannot see, is its own root (default: self)")
 	listCmd.Flags().Lookup("lineage").NoOptDefVal = scopeInferSentinel
 	listCmd.MarkFlagsMutuallyExclusive("descendants", "ancestors", "lineage")
 }
