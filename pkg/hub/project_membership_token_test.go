@@ -602,6 +602,11 @@ func TestMembershipToken_ChangeAndAuditCommitTogether(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{auditErrFor: c.mutation})
+			// The membership service writes through its own store, so it
+			// gets the same switch-gated wrapper.
+			svcStore := srv.membershipService.store
+			srv.membershipService.store = &grantAuditFaultStore{Store: svcStore, fault: fault, heal: heal, auditErrFor: c.mutation}
+			t.Cleanup(func() { srv.membershipService.store = svcStore })
 			ctx := context.Background()
 			projectID, ownerID := tid(t.Name()+"-p"), tid(t.Name()+"-o")
 			createRS1Project(t, real, projectID, ownerID)
