@@ -1697,6 +1697,10 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitBrokerRPCMetrics counts routed broker requests that fell back
+	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
+	// until SetConduitBrokerRPCMetrics.
+	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu     sync.Mutex
@@ -4698,6 +4702,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.controlChannel != nil {
 		hbc := NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
 		hbc.SetAffinityLookup(StoreAffinityLookup(s.store, 0))
+		// Transient broker operations go through the conduit Router when
+		// hub.conduit is on and the broker's session lists them.
+		hbc.SetConduitRouting(s.newRoutedBrokerTunnel())
 		if statelessBrokerID := s.GetStatelessEmbeddedBrokerID(); statelessBrokerID != "" {
 			hbc.SetStatelessLocalBrokers([]string{statelessBrokerID})
 		}
