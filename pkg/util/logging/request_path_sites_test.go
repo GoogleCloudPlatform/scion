@@ -83,6 +83,8 @@ var requestPathSites = []requestPathSite{
 	{"devauth.go", "DevAuthMiddlewareWithDebug", "URL.Path", 2, "comparison: health endpoint checks"},
 	{"download_signing.go", "Server.signSkillFileDownloadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
 	{"download_signing.go", "isSignedSkillFileRequest", "URL.Path", 3, "comparison: shape check of a signed skill file read"},
+	{"federation_visitor_messaging.go", "matchVisitorAgentSubRoute", "URL.EscapedPath", 1, "routing: resolves the agent sub-route a visitor may use from the percent-encoded path; compared only, never logged"},
+	{"federation_visitor_messaging.go", "matchVisitorDMSubRoute", "URL.Path", 1, "routing: matches the visitor DM sub-route and cuts its conversation key; compared only, never logged"},
 	{"google_credential_validator.go", "NewGoogleCredentialValidator", "URL(bare)", 1, "not the served request: an outbound redirect to a pinned Google endpoint"},
 	{"handlers_access_constraints.go", "Server.handleAdminAccessConstraintByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_access_constraints.go", "Server.handleAdminAccessConstraintPreviews", "URL.Path", 1, "routing: extracts ids and sub-routes"},

@@ -173,3 +173,11 @@
 - Tests: chatRoute called directly as a visitor and as a member, and a
   visitor created by a domain rule through send and DM read, refused after
   the rule is removed or the visitor is revoked.
+
+## Request path census entries (2026-10-17)
+
+- The request path census test (pkg/util/logging) lists the two visitor
+  sub-route matchers: matchVisitorAgentSubRoute reads URL.EscapedPath() and
+  matchVisitorDMSubRoute reads URL.Path. Both only compare the path to
+  pick the sub-route and its agent or DM key; neither path is logged,
+  returned in a response or stored. Test-only change.
