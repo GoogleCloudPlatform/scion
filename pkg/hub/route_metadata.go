@@ -976,8 +976,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// RouteAuthenticated: authorization is method-aware and handled
 		// inline, matching the collection endpoint's pattern.
 		// GET /user/{userID} checks role_binding.read inline.
-		// DELETE /{id} checks role_binding.delete inline via
-		// requireWritePermissionForRoleBinding.
+		// DELETE /{id} of a project-scoped binding checks project.manage on
+		// the binding's project first and defers to the membership
+		// service; otherwise it checks role_binding.delete at hub scope
+		// (authorizeRoleBindingDelete).
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {

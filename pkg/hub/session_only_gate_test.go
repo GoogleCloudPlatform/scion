@@ -57,10 +57,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"token create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"agent:read"}}, authzop.ReasonCredentialManagement},
 		{"token revoke", http.MethodPost, "/api/v1/auth/tokens/" + f.uatRevokePost + "/revoke", map[string]interface{}{}, authzop.ReasonCredentialManagement},
 		{"token delete", http.MethodDelete, "/api/v1/auth/tokens/" + f.uatRevokeDelete, nil, authzop.ReasonCredentialManagement},
-		{"project member add", http.MethodPost, "/api/v1/projects/" + f.project + "/members", map[string]interface{}{
-			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
-		}, authzop.ReasonGovernancePending},
-		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
 		{"scheduled event create", http.MethodPost, "/api/v1/projects/" + f.project + "/scheduled-events", map[string]interface{}{"eventType": "dispatch_agent", "fireIn": "1h", "agentName": "x"}, authzop.ReasonGovernancePending},
 		{"schedule create", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules", map[string]interface{}{"name": "x", "cronExpr": "0 * * * *", "eventType": "message", "agentName": "x", "message": "x"}, authzop.ReasonGovernancePending},
 		{"schedule update", http.MethodPatch, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule, map[string]interface{}{"name": "x"}, authzop.ReasonGovernancePending},
