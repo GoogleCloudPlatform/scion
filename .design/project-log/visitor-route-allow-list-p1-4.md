@@ -94,3 +94,11 @@
   turns a panic in New into a test failure. Without this, removing the
   visitor route check from New let New run on and panic on the nil store,
   which no assertion reported. Test-only change.
+- 2026-10-17: two full-handler tests on `/api/v1/auth/me` for visitors that
+  the email grant tests do not cover: a visitor whose account a domain rule
+  created (`TestVisitorRoute_AuthMeAdmitsRuleVisitorOnReadMethodsOnly`) and
+  a peer hub user access credential bound by a rule
+  (`TestFederationPeerUserToken_RuleVisitorAuthMeAdmitsReadMethodsOnly`).
+  Each checks the request identity is the visitor's federated account, that
+  GET and HEAD answer 200, and that POST and a route with no
+  VisitorMethods answer 403 with the uniform refusal. Test-only change.
