@@ -100,9 +100,11 @@ project is a hub-level resource; a project's own groups belong to that project.
   (system-scoped) role binding, a token cannot add members to it. If it has project role
   bindings, the token must hold every permission of those roles in each of those projects: you
   hold them through your own roles, and the token's scopes cover them.
-- Changing a group's owner (`ownerId`) with a token needs `group:update` and the same check as
-  adding the new owner as a member. A refused change always returns the same 403, including for
-  a group that does not exist.
+- Changing a group's owner (`ownerId`) with a token needs `group:update` and your current update
+  access on the group. For the new owner, the token must also pass the delegation check of a
+  member add against the group's role bindings (the previous item); `group:addMember` and the
+  group's role hierarchy do not apply. A refused change always returns the same 403, including
+  for a group that does not exist.
 - A token is held to the group's own role hierarchy: only the group's owner, or an owner or admin
   member of the group, adds members, even when you are a super-admin.
 - The members of a project's agents group are the project's agents; no one adds members to it.

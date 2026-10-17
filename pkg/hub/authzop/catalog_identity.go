@@ -703,7 +703,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.update",
 		Domain:      "group",
-		Description: "Update group metadata. A user access token changes the owner only when it may add the new owner as a member of the group",
+		Description: "Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist",
 		EntryPoints: []EntryPoint{
 			// handleGroupRoutes (handlers_groups.go) dispatches on
 			// r.Method: PATCH, not PUT.

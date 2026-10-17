@@ -572,10 +572,10 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	// changes the owner only when it could add the new owner as a member:
 	// the same delegation check, against the group's closure, with the
 	// grantee being the new owner.
-	var ownerGrant groupMemberGrant
+	var ownerClosure string
 	if ownerChanged && tokenSetsOwner {
 		var ok bool
-		ownerGrant, ok = s.authorizeGroupOwnerChangeForToken(w, r, identity, group, req.OwnerID)
+		ownerClosure, ok = s.authorizeGroupOwnerChangeForToken(w, r, identity, group, req.OwnerID)
 		if !ok {
 			return
 		}
@@ -584,14 +584,14 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 		group.OwnerID = req.OwnerID
 	}
 
-	if ownerGrant.tokenClosure != "" {
+	if ownerClosure != "" {
 		// The owner change commits only under the closure the delegation
 		// check evaluated.
 		if err := s.store.WithTx(ctx, func(tx store.Store) error {
 			if err := tx.UpdateGroup(ctx, group); err != nil {
 				return err
 			}
-			return s.recheckGroupClosureTx(ctx, tx, group.ID, ownerGrant)
+			return s.recheckGroupClosureTx(ctx, tx, group.ID, groupMemberGrant{tokenClosure: ownerClosure})
 		}); err != nil {
 			if errors.Is(err, errGroupClosureChanged) {
 				Conflict(w, groupOwnerClosureChangedMessage)
@@ -1126,6 +1126,8 @@ func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Reques
 			// membership transaction.
 			closure, err := groupClosureAuthority(ctx, s.store, group.ID)
 			if err != nil {
+				s.groupsLogger().Error("failed to read the group's role bindings",
+					"group_id", group.ID, "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 					"failed to read the group's role bindings", nil)
 				return groupMemberGrant{}, false
@@ -1174,14 +1176,17 @@ const groupOwnerTokenRefusal = "Cannot grant authority you do not hold"
 // an owner member of group: CanDelegate for a group membership on the
 // group's closure, read first so the transaction can re-read it. It writes
 // groupOwnerTokenRefusal (or 500 when the closure cannot be read) and
-// returns ok=false when the token may not.
-func (s *Server) authorizeGroupOwnerChangeForToken(w http.ResponseWriter, r *http.Request, identity Identity, group *store.Group, newOwnerID string) (groupMemberGrant, bool) {
+// returns ok=false when the token may not; otherwise it returns the
+// closure the check evaluated.
+func (s *Server) authorizeGroupOwnerChangeForToken(w http.ResponseWriter, r *http.Request, identity Identity, group *store.Group, newOwnerID string) (string, bool) {
 	ctx := r.Context()
 	closure, err := groupClosureAuthority(ctx, s.store, group.ID)
 	if err != nil {
+		s.groupsLogger().Error("failed to read the group's role bindings",
+			"group_id", group.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
 			"failed to read the group's role bindings", nil)
-		return groupMemberGrant{}, false
+		return "", false
 	}
 	decision := s.authzService.CanDelegate(ctx, identity, GrantDescriptor{
 		Type:        GrantTypeGroupMembership,
@@ -1193,9 +1198,9 @@ func (s *Server) authorizeGroupOwnerChangeForToken(w http.ResponseWriter, r *htt
 		logAuthzDenial(r, identity, groupResource(group), ActionUpdate,
 			"CanDelegate denied for the new owner: "+decision.Reason)
 		writeForbidden(w, groupOwnerTokenRefusal)
-		return groupMemberGrant{}, false
+		return "", false
 	}
-	return groupMemberGrant{canDelegateResult: "allow", canDelegateReason: decision.Reason, tokenClosure: closure}, true
+	return closure, true
 }
 
 // handleGroupMemberByID handles DELETE on /api/v1/groups/{groupId}/members/{type}/{id}

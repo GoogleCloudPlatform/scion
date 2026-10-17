@@ -104,13 +104,14 @@ func (f *groupTokenFixture) group(t *testing.T, name string) *store.Group {
 }
 
 // bindGroup binds a role to a group at a scope.
-func (f *groupTokenFixture) bindGroup(t *testing.T, g *store.Group, roleID, scopeType, scopeID string) {
+func (f *groupTokenFixture) bindGroup(t *testing.T, g *store.Group, roleID, scopeType, scopeID string) string {
 	t.Helper()
-	_, err := f.s.CreateRoleBinding(context.Background(), &store.RoleBinding{
+	b, err := f.s.CreateRoleBinding(context.Background(), &store.RoleBinding{
 		RoleDefinitionID: roleID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: g.ID,
 		ScopeType: scopeType, ScopeID: scopeID, CreatedBy: "test",
 	})
 	require.NoError(t, err)
+	return b.ID
 }
 
 // nest makes child a member of parent.
@@ -758,10 +759,12 @@ func TestGroupOwnerChangeToken_RequiresDelegationForNewOwner(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, code, body)
 	assert.Equal(t, refusal, body, "an unknown group gets the same refusal")
 
-	readOnly := f.mint(t, hubBoundary(), "group:read")
+	// The token holds the closure's authority, so only the group:update
+	// check refuses it.
+	readOnly := f.mint(t, hubBoundary(), withSelectors([]string{"group:read"}, groupTokenRoleSelectors)...)
 	code, body = patch(readOnly, bound.ID, setOwner(newOwner))
 	assert.Equal(t, http.StatusForbidden, code, body)
-	assert.Equal(t, refusal, body, "a token without group:update gets the same refusal")
+	assert.Equal(t, refusal, body, "a token holding the closure's authority without group:update gets the same refusal")
 	assert.Equal(t, f.callerID, f.ownerOf(t, bound))
 
 	with := f.mint(t, hubBoundary(), withSelectors([]string{"group:update"}, groupTokenRoleSelectors)...)
@@ -917,7 +920,7 @@ func TestGroupMemberAddToken_UnresolvedClosureRoleIsInternalError(t *testing.T) 
 	for _, asNil := range []bool{false, true} {
 		f := newGroupTokenFixture(t, "gur")
 		g := f.group(t, "gur-group")
-		f.bindGroup(t, g, f.roleID, store.RoleScopeProject, f.projectID)
+		bindingID := f.bindGroup(t, g, f.roleID, store.RoleScopeProject, f.projectID)
 		target := f.user(t, "gur-target")
 		key := f.mint(t, hubBoundary(), withSelectors([]string{"group:addMember"}, groupTokenRoleSelectors)...)
 
@@ -927,6 +930,8 @@ func TestGroupMemberAddToken_UnresolvedClosureRoleIsInternalError(t *testing.T) 
 		f.srv.store = orig
 
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, "nil definition %v: %s", asNil, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), f.roleID, "the response names no role definition")
+		assert.NotContains(t, rec.Body.String(), bindingID, "the response names no role binding")
 		assert.False(t, f.isMember(t, g, store.GroupMemberTypeUser, target), "nothing is written")
 		assert.Empty(t, grantAudits(t, f.s, "group_member_add", g.ID))
 	}
