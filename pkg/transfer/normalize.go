@@ -89,10 +89,32 @@ func NormalizeDir(dir string) error {
 		if err != nil {
 			return err
 		}
-		tmpPath := path + ".tmp"
-		if err := os.WriteFile(tmpPath, normalized, info.Mode()); err != nil {
+		// A fixed path + ".tmp" could overwrite an existing file or follow a symlink.
+		tmp, err := os.CreateTemp(filepath.Dir(path), ".scion-normalize.tmp-*")
+		if err != nil {
 			return err
 		}
-		return os.Rename(tmpPath, path)
+		tmpPath := tmp.Name()
+		renamed := false
+		defer func() {
+			_ = tmp.Close()
+			if !renamed {
+				_ = os.Remove(tmpPath)
+			}
+		}()
+		if _, err := tmp.Write(normalized); err != nil {
+			return err
+		}
+		if err := tmp.Chmod(info.Mode()); err != nil {
+			return err
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			return err
+		}
+		renamed = true
+		return nil
 	})
 }
