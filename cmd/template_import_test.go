@@ -15,13 +15,127 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRunTemplateImport_ReportsWriteFailures(t *testing.T) {
+	for _, format := range []string{"plain", "json"} {
+		for _, tc := range []struct {
+			name     string
+			existing int
+			force    bool
+			dryRun   bool
+			wantErr  bool
+			statuses []string
+		}{
+			{name: "success", statuses: []string{"imported", "imported"}},
+			{name: "partial_failure", existing: 1, wantErr: true, statuses: []string{"error", "imported"}},
+			{name: "all_failed", existing: 2, wantErr: true, statuses: []string{"error", "error"}},
+			{name: "force_overwrite", existing: 2, force: true, statuses: []string{"imported", "imported"}},
+			{name: "dry_run", existing: 1, dryRun: true, statuses: []string{"would_import", "would_import"}},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				oldGlobal, oldFormat := globalMode, outputFormat
+				t.Cleanup(func() { globalMode, outputFormat = oldGlobal, oldFormat })
+				globalMode, outputFormat = false, format
+				projectDir := t.TempDir()
+				t.Chdir(projectDir)
+				templatesDir := filepath.Join(projectDir, ".scion", "templates")
+				require.NoError(t, os.MkdirAll(templatesDir, 0755))
+				sourceDir := filepath.Join(projectDir, "source")
+				names := []string{"alpha", "beta"}
+				const sourceConfig = "schema_version: \"1\"\nmodel: imported-model\n"
+				const originalConfig = "schema_version: \"1\"\nmodel: original-model\n"
+				for i, name := range names {
+					source := filepath.Join(sourceDir, name)
+					require.NoError(t, os.MkdirAll(source, 0755))
+					require.NoError(t, os.WriteFile(filepath.Join(source, "scion-agent.yaml"), []byte(sourceConfig), 0644))
+					if i < tc.existing {
+						dest := filepath.Join(templatesDir, name)
+						require.NoError(t, os.MkdirAll(dest, 0755))
+						require.NoError(t, os.WriteFile(filepath.Join(dest, "scion-agent.yaml"), []byte(originalConfig), 0644))
+					}
+				}
+
+				command := &cobra.Command{}
+				command.Flags().Bool("all", true, "")
+				command.Flags().Bool("force", tc.force, "")
+				command.Flags().Bool("dry-run", tc.dryRun, "")
+				command.Flags().String("harness", "", "")
+				command.Flags().String("name", "", "")
+				var runErr error
+				output := captureStdout(t, func() {
+					runErr = runTemplateImport(command, []string{sourceDir})
+				})
+				if tc.wantErr {
+					assert.Error(t, runErr, "write failures must fail the command")
+				} else {
+					assert.NoError(t, runErr)
+				}
+				assert.Equal(t, tc.wantErr && format == "json", isReportedInJSON(runErr))
+
+				if format == "json" {
+					var result struct {
+						Status  string
+						Command string
+						Details struct {
+							Templates []importResult
+							DryRun    bool
+						}
+					}
+					require.NoError(t, json.Unmarshal([]byte(output), &result), "stdout must remain one JSON document")
+					wantStatus := "success"
+					if tc.wantErr {
+						wantStatus = "partial_error"
+					}
+					assert.Equal(t, wantStatus, result.Status)
+					assert.Equal(t, "templates import", result.Command)
+					assert.Equal(t, tc.dryRun, result.Details.DryRun)
+					require.Len(t, result.Details.Templates, len(names))
+					for i, result := range result.Details.Templates {
+						assert.Equal(t, names[i], result.Name)
+						assert.Equal(t, tc.statuses[i], result.Status)
+						if result.Status == "error" {
+							assert.Contains(t, result.Error, "already exists")
+						}
+					}
+				} else {
+					for i, name := range names {
+						switch tc.statuses[i] {
+						case "error":
+							assert.Contains(t, output, "Error importing '"+name+"'")
+						case "imported":
+							assert.Contains(t, output, "Imported template '"+name+"'")
+						case "would_import":
+							assert.Contains(t, output, "[dry-run] Would import template '"+name+"'")
+						}
+					}
+				}
+				for i, name := range names {
+					path := filepath.Join(templatesDir, name, "scion-agent.yaml")
+					if tc.dryRun && i >= tc.existing {
+						assert.NoFileExists(t, path)
+						continue
+					}
+					want := sourceConfig
+					if tc.statuses[i] != "imported" {
+						want = originalConfig
+					}
+					data, err := os.ReadFile(path)
+					require.NoError(t, err)
+					assert.Equal(t, want, string(data))
+				}
+			})
+		}
+	}
+}
 
 func TestParseSingleFile_Claude(t *testing.T) {
 	dir := t.TempDir()
