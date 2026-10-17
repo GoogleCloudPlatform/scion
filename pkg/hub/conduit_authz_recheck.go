@@ -81,6 +81,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 	runCtx, cancel := context.WithCancel(ctx)
 	a.Start(runCtx)
 	s.bindConduitAuthzEvents()
+	s.bindConduitGrantKeyEvents()
+	go s.runConduitGrantKeySettle(runCtx, a.cfg.Clock)
 	stop = func() {
 		cancel()
 		s.conduitAuthz.CompareAndSwap(a, nil)
@@ -408,8 +410,12 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if len(actions) == 0 {
 		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
 	}
+	authorize := s.authorizeConduitAction
+	if hook := s.conduitAuthorizeActionTestHook; hook != nil {
+		authorize = hook
+	}
 	for _, action := range actions {
-		if err := s.authorizeConduitAction(ctx, req.Identity, req.Agent, action); err != nil {
+		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {
 			if errors.Is(err, errConduitAuthzUnavailable) {
 				return conduitAuthzUnavailable, "authorization lookup failed", err
 			}
