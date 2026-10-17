@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +41,9 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "gate-agent"}, ProjectID: "project-1", Scopes: []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}}}
 	scopes := []string{"scheduled_event:create", "agent:create"}
 	noRecord := CredentialKind("")
+	hubCeiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok)
+	hubUAT := NewScopedUserIdentityWithBoundaryAndDecoration(user, TokenBoundary{Kind: BoundaryKindHub}, scopes, "", hubCeiling, nil)
 
 	cases := []struct {
 		name     string
@@ -55,9 +59,9 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 		{"agent, agent JWT", agent, CredentialKindAgentJWT, http.StatusOK},
 		{"agent, no credential record", agent, noRecord, http.StatusOK},
 		{"project-scoped UAT, no credential record", NewScopedUserIdentity(user, "project-1", scopes), noRecord, http.StatusOK},
-		{"hub-scoped UAT, no credential record", NewScopedUserIdentity(user, "", scopes), noRecord, http.StatusOK},
+		{"hub-scoped UAT, no credential record", hubUAT, noRecord, http.StatusOK},
 		{"project-scoped UAT, UAT credential", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindUAT, http.StatusOK},
-		{"hub-scoped UAT, UAT credential", NewScopedUserIdentity(user, "", scopes), CredentialKindUAT, http.StatusOK},
+		{"hub-scoped UAT, UAT credential", hubUAT, CredentialKindUAT, http.StatusOK},
 		{"UAT credential on a plain user identity", user, CredentialKindUAT, http.StatusForbidden},
 		{"scoped identity with an interactive credential record", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindInteractive, http.StatusForbidden},
 		{"scoped identity with a hub delivery credential", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindHubDelivery, http.StatusForbidden},

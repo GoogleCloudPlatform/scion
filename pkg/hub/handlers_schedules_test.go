@@ -118,19 +118,22 @@ func TestSchedule_CreateDispatchAgentScopedUATNeedsBothSelectors(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	for _, boundary := range []struct{ name, projectID string }{{"project-scoped", projectID}, {"hub-scoped", ""}} {
+	for _, boundary := range []struct {
+		name     string
+		boundary TokenBoundary
+	}{{"project-scoped", projectBoundary(projectID)}, {"hub-scoped", hubBoundary()}} {
 		t.Run(boundary.name+" UAT with both selectors admitted", func(t *testing.T) {
-			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:create", "agent:create"})
+			scoped := scheduleTestUAT(t, ownerUser, boundary.boundary, "scheduled_event:create", "agent:create")
 			rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, request("scoped-dispatch-"+boundary.name))
 			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		})
 		t.Run(boundary.name+" UAT without scheduled_event:create refused", func(t *testing.T) {
-			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:read", "agent:create"})
+			scoped := scheduleTestUAT(t, ownerUser, boundary.boundary, "scheduled_event:read", "agent:create")
 			rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, request("scoped-dispatch-nocreate-"+boundary.name))
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		})
 		t.Run(boundary.name+" UAT without agent:create refused", func(t *testing.T) {
-			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:create", "agent:read"})
+			scoped := scheduleTestUAT(t, ownerUser, boundary.boundary, "scheduled_event:create", "agent:read")
 			rec := doScheduleAgentRequest(t, srv, scoped, projectID, "", http.MethodPost, request("scoped-dispatch-noagent-"+boundary.name))
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		})

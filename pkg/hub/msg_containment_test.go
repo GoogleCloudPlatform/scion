@@ -1095,7 +1095,7 @@ func TestC1_ScheduledMessageCreate_HubScopedUATAdmittedAtRoute(t *testing.T) {
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
 
 	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
-	scopedIdent := NewScopedUserIdentity(baseUser, "", []string{"scheduled_event:create", "agent:message"})
+	scopedIdent := scheduleTestUAT(t, baseUser, hubBoundary(), "scheduled_event:create", "agent:message")
 
 	reqBody := CreateScheduledEventRequest{
 		EventType: "message",
