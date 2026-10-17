@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -48,6 +49,22 @@ func (s *credentialIssuingSpyStore) count(ctx context.Context) {
 	if ctx.Value(credentialIssuingSpyKey{}) != nil {
 		s.calls.Add(1)
 	}
+}
+
+// DB and Dialect forward to the wrapped store, so New() runs its
+// migrations and startup checks against the real store.
+func (s *credentialIssuingSpyStore) DB() *sql.DB {
+	if p, ok := s.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (s *credentialIssuingSpyStore) Dialect() string {
+	if p, ok := s.Store.(interface{ Dialect() string }); ok {
+		return p.Dialect()
+	}
+	return ""
 }
 
 func (s *credentialIssuingSpyStore) GetUser(ctx context.Context, id string) (*store.User, error) {
