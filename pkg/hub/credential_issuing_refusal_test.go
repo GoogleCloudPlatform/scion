@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,7 +40,9 @@ type credentialIssuingSpyKey struct{}
 
 // credentialIssuingSpyStore counts the store reads a request to the
 // credential-issuing endpoint makes to resolve its owner, its target
-// project, the caller's bindings and the token count.
+// project, the caller's bindings and the token count. It forwards DB and
+// Dialect only; the scheduler optional interfaces (store.AdvisoryLocker,
+// store.ScheduledEventClaimer) are not forwarded.
 type credentialIssuingSpyStore struct {
 	store.Store
 	calls atomic.Int32
@@ -105,9 +108,10 @@ func credentialIssuingSpyServer(t *testing.T, projectID, ownerID string) (*Serve
 	return srv, spy
 }
 
-// postCredentialIssuingAs sends POST /api/v1/auth/tokens through the hub's route
-// table (route guard, then handler) with identity and cred installed as the
-// authentication middleware would install them, and the spy marker set.
+// postCredentialIssuingAs sends a request to the credential-issuing endpoint
+// through the hub's route table (route guard, then handler) with identity and
+// cred installed as the authentication middleware would install them, and the
+// spy marker set.
 func postCredentialIssuingAs(t *testing.T, srv *Server, identity Identity, cred CredentialContext, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(body)
@@ -142,6 +146,14 @@ func TestCredentialIssuingEndpoint_NonSessionCallersGetOneRefusal(t *testing.T) 
 	srv, spy := credentialIssuingSpyServer(t, projectID, ownerID)
 
 	user := NewAuthenticatedUser(ownerID, ownerID+"@test.com", "Owner", "member", string(ClientTypeAPI))
+	ceiling, ok := permissions.BuildCeilingFromSelectors([]string{"agent:read"})
+	require.True(t, ok)
+	scopedUser := NewScopedUserIdentityWithBoundary(user, TokenBoundary{Kind: BoundaryKindHub}, []string{"agent:read"}, tid("tcr-wd"), ceiling)
+	federatedUser := NewFederatedUserIdentity("https://peer.test", tid("tcr-fed-user"), "fu@peer.test", "Fed User", "member", nil)
+	federatedService := NewFederatedServiceIdentity("https://peer.test", tid("tcr-fed-svc"), "sa@peer.test", nil)
+	hubDelivery := &hubDeliveryIdentity{agentID: tid("tcr-hd-agent"), projectID: projectID,
+		ancestry: []string{ownerID}, originUserID: ownerID, boundAgentID: tid("tcr-hd-agent")}
+	workloadDelegation := CredentialContext{Kind: CredentialKindWorkloadDelegation, Type: string(CredentialKindWorkloadDelegation)}
 	callers := []struct {
 		name     string
 		identity Identity
@@ -155,6 +167,11 @@ func TestCredentialIssuingEndpoint_NonSessionCallersGetOneRefusal(t *testing.T) 
 		{"user with hub delivery kind", user, CredentialContext{Kind: CredentialKindHubDelivery}},
 		{"user with empty credential kind", user, CredentialContext{}},
 		{"user with unknown credential kind", user, CredentialContext{Kind: CredentialKind("not-a-kind")}},
+		{"user with workload delegation kind", user, workloadDelegation},
+		{"scoped user with workload delegation kind", scopedUser, workloadDelegation},
+		{"federated user", federatedUser, CredentialContext{Kind: CredentialKindFederation, Type: "federated_user"}},
+		{"federated service", federatedService, CredentialContext{Kind: CredentialKindFederation, Type: "federated_service"}},
+		{"hub delivery", hubDelivery, CredentialContext{Kind: CredentialKindHubDelivery}},
 		{"agent", cpmAgentIdentity(tid("tcr-agent"), projectID, nil), CredentialContext{Kind: CredentialKindAgentJWT, ID: "agent-jwt"}},
 		{"agent with session credential kind", cpmAgentIdentity(tid("tcr-agent"), projectID, nil), CredentialContext{Kind: CredentialKindInteractive}},
 		{"federated agent", NewFederatedAgentIdentity("https://peer.test", tid("tcr-fed-agent"), projectID, "a", "", nil, nil), CredentialContext{Kind: CredentialKindFederation}},
@@ -196,9 +213,9 @@ func TestCredentialIssuingEndpoint_NonSessionCallersGetOneRefusal(t *testing.T) 
 
 // TestCredentialIssuingEndpoint_VisitorAndDelegatedRefusedBeforeLookup
 // pins that a visitor and an agent delegated credential are refused at the
-// credential-issuing endpoint with 403, and that no owner, project,
-// binding or token-count read runs first, for an existing and a missing
-// target project.
+// credential-issuing endpoint, and that no owner, project, binding or
+// token-count read runs first, for an existing and a missing target
+// project.
 func TestCredentialIssuingEndpoint_VisitorAndDelegatedRefusedBeforeLookup(t *testing.T) {
 	projectID := tid("tcrv-project")
 	ownerID := tid("tcrv-owner")

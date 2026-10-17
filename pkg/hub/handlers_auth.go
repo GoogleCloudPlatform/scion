@@ -958,6 +958,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	if refuseNonSessionCredentialIssuance(w, r) {
 		return
 	}
+	// Non-nil: refuseNonSessionCredentialIssuance admitted only a user.
 	user := GetUserIdentityFromContext(r.Context())
 
 	var req TokenCreateRequest
