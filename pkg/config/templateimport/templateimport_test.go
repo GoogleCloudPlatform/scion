@@ -109,6 +109,29 @@ func TestDetectFromPath_Unknown(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+func TestDetectFromPath_DirectoryBoundaries(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{`.claude/agents/reviewer.md`, "claude"},
+		{`.gemini/agents/reviewer.md`, "gemini"},
+		{`C:\project\.claude\agents\reviewer.md`, "claude"},
+		{`C:\project\.gemini\agents\reviewer.md`, "gemini"},
+		{`backup.claude/agents/reviewer.md`, ""},
+		{`backup.gemini/agents/reviewer.md`, ""},
+		{`/project/backup.claude/agents/reviewer.md`, ""},
+		{`/project/backup.gemini/agents/reviewer.md`, ""},
+		{`C:\project\backup.claude\agents\reviewer.md`, ""},
+		{`C:\project\backup.gemini\agents\reviewer.md`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.want, detectFromPath(tt.path))
+		})
+	}
+}
+
 func TestDetectFromFrontMatter_Claude(t *testing.T) {
 	fm := map[string]any{
 		"name":           "reviewer",
