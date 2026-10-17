@@ -138,10 +138,17 @@ func TestMembershipToken_GovernanceMatrixApplies(t *testing.T) {
 	assert.True(t, mtBindingExists(t, f.store, admin2Binding))
 	assert.True(t, mtBindingExists(t, f.store, ownerBinding))
 
-	// An admin's token cannot raise a member to admin.
-	_, memberBinding3 := mtMemberUser(t, f, "m3", f.memberRD)
-	rec = doRequestWithUAT(t, f.srv, adminTok, http.MethodPatch, pinMemberPath(f.projectID, memberBinding3), map[string]string{"roleDefinitionId": f.adminRD.ID})
+	// An admin's token cannot raise a member to admin, even when its
+	// selectors carry every permission of the admin role: the governance
+	// matrix refuses the admin target.
+	mtNarrowRole(t, f.store, f.adminRD, "project.manage", "project.read", "agent.read")
+	adminCoveringTok := mtMint(t, f.srv, f.admin.ID, project, mtNarrowSelectors...)
+	member3, memberBinding3 := mtMemberUser(t, f, "m3", f.memberRD)
+	rec = doRequestWithUAT(t, f.srv, adminCoveringTok, http.MethodPatch, pinMemberPath(f.projectID, memberBinding3), map[string]string{"roleDefinitionId": f.adminRD.ID})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, ErrCodeTargetRoleProtected, mtErrCode(rec), rec.Body.String())
+	assert.True(t, mtBindingExists(t, f.store, memberBinding3))
+	assert.Equal(t, store.ProjectRoleMember, mmrRoleNameOf(t, f, member3.ID))
 
 	// The direct owner's token demotes and removes an admin (a lowering
 	// change grants nothing, so CanDelegate does not apply).
@@ -448,10 +455,11 @@ func TestMembershipToken_SelectorAndBoundaryPerRoute(t *testing.T) {
 	t.Run("refused", func(t *testing.T) {
 		f := setup(t)
 		noManage := mtMint(t, f.srv, f.owner.ID, projectBoundary(f.projectID), "project:read", "agent:read")
+		hubNoManage := mtMint(t, f.srv, f.owner.ID, hubBoundary(), "project:read", "agent:read")
 		otherProject := mtMint(t, f.srv, f.owner.ID, projectBoundary(f.otherProjectID), mtNarrowSelectors...)
 		before := len(mmrAuditRows(t, f.store, f.projectID))
 		for _, s := range steps(t, f) {
-			for name, key := range map[string]string{"without project:manage": noManage, "bound to another project": otherProject} {
+			for name, key := range map[string]string{"without project:manage": noManage, "hub boundary without project:manage": hubNoManage, "bound to another project": otherProject} {
 				rec := doRequestWithUAT(t, f.srv, key, s.method, s.path, s.body)
 				assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", s.name, name, rec.Body.String())
 			}
