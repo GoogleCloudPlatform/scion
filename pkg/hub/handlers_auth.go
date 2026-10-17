@@ -851,6 +851,26 @@ func denyTokenManagement(w http.ResponseWriter, r *http.Request, identity Identi
 	writeSessionOnlyDenial(w, ErrCodeForbidden, err.Error(), authzop.ReasonCredentialManagement)
 }
 
+// refuseNonSessionCredentialIssuance writes the refusal of a request to the
+// credential-issuing endpoint from an authenticated caller that is not a
+// user holding an interactive session or dev credential, and reports
+// whether it did. The refusal is the same for every such caller, whatever
+// its identity type, credential kind (known, unknown or empty) or
+// requested target: 403 with the fixed ErrUATCredentialDenied message and
+// the CREDENTIAL_MANAGEMENT session-only reason. It reads nothing but the
+// request context. A request with no identity is left to the caller (401).
+func refuseNonSessionCredentialIssuance(w http.ResponseWriter, r *http.Request) bool {
+	identity := GetIdentityFromContext(r.Context())
+	if isNilIdentity(identity) {
+		return false
+	}
+	if _, ok := identity.(UserIdentity); ok && sessionCredentialAllowed(r.Context()) {
+		return false
+	}
+	denyTokenManagement(w, r, identity, ErrUATCredentialDenied)
+	return true
+}
+
 // handleTokens routes user access token requests.
 func (s *Server) handleTokens(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -927,17 +947,18 @@ func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateToken handles POST /api/v1/auth/tokens.
 func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
-	user := GetUserIdentityFromContext(r.Context())
-	if user == nil {
+	if isNilIdentity(GetIdentityFromContext(r.Context())) {
 		Unauthorized(w)
 		return
 	}
 
-	// B4/A1: Credential caveat — only session/dev credentials may manage tokens.
-	if err := requireSessionCredential(r.Context()); err != nil {
-		denyTokenManagement(w, r, user, err)
+	// B4/A1: Credential caveat — only session/dev credentials of a user may
+	// create tokens. Every other authenticated caller gets one refusal,
+	// before the body is read or any target is resolved.
+	if refuseNonSessionCredentialIssuance(w, r) {
 		return
 	}
+	user := GetUserIdentityFromContext(r.Context())
 
 	var req TokenCreateRequest
 	if err := readJSON(r, &req); err != nil {
