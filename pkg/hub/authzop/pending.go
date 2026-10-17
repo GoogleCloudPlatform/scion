@@ -246,9 +246,7 @@ var PendingBearerOperations = []OperationID{
 	"template.delete",
 	"template.read",
 	"user.admin.invite",
-	"user.admin.suspend",
 	"user.read",
-	"user.update",
 }
 
 var pendingBearerOperationSet = func() map[OperationID]bool {

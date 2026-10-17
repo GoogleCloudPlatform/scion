@@ -236,9 +236,11 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 // Credential boundary enforcement (R4-C5)
 //
 // User mutation endpoints (PATCH, DELETE) require an interactive session JWT
-// or dev credential. Broker, agent, UAT, and federation credentials are
-// rejected at the boundary by requireSessionCredentialFor
-// (session_only_gate.go), which reports the session-only reason.
+// or dev credential, except that PATCH admits a user access token for the
+// fields updateUserTokenFields allows. Broker, agent and federation
+// credentials, and a token on DELETE, are rejected at the boundary by
+// requireSessionCredentialFor (session_only_gate.go), which reports the
+// session-only reason.
 // ---------------------------------------------------------------------------
 
 // allowedMutationCredentials is the closed set of credential kinds permitted
@@ -259,6 +261,62 @@ func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.Session
 	return authzop.ReasonGovernancePending
 }
 
+// updateUserCredential checks the credential of PATCH /api/v1/users/{id}
+// and returns the acting user. A user access token (a token identity whose
+// request carries the user access token credential kind) is returned as
+// token too; its fields are checked by updateUserTokenFields, and its
+// permissions on the hub-level user record. A token identity with any
+// other credential kind is refused with the path's session-only reason.
+// Every other request must carry an interactive session or a dev
+// credential (requireSessionCredentialFor).
+func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context, id string) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
+	identity := GetIdentityFromContext(ctx)
+	scoped, isToken := identity.(*ScopedUserIdentity)
+	if !isToken || isNilIdentity(identity) {
+		actor, ok = s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
+		return actor, nil, ok
+	}
+	if s.authzService == nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"authorization service unavailable", nil)
+		return nil, nil, false
+	}
+	if kind := requestCredentialKind(ctx, identity); kind != CredentialKindUAT {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("this operation requires an interactive session; credential kind %q is not allowed", kind),
+			updateUserSessionOnlyReason(ctx, id))
+		return nil, nil, false
+	}
+	return scoped, scoped, true
+}
+
+// updateUserTokenFields applies the field rules of PATCH
+// /api/v1/users/{id} for a user access token, before any permission check
+// or write. It writes the refusal and returns false when:
+//   - the body names role: a role change is session-only (GOV_PENDING);
+//   - the path names the token holder's own record and the body names a
+//     profile field, or no status field: the caller's own profile is
+//     session-only (INTERACTIVE_STATE).
+//
+// A status field on the holder's own record passes here and is refused by
+// the self-status guard after its user.suspend check.
+func updateUserTokenFields(w http.ResponseWriter, updates userPatchPayload, prefsPatch *userPreferencesPatch, isSelf bool) bool {
+	if updates.Role != nil {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"changing a user's role requires an interactive session",
+			authzop.ReasonGovernancePending)
+		return false
+	}
+	profile := updates.DisplayName != nil || prefsPatch != nil || updates.Status == nil
+	if isSelf && profile {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"changing your own profile requires an interactive session",
+			authzop.ReasonInteractiveState)
+		return false
+	}
+	return true
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /api/v1/users/{id} — per-field permission enforcement (R3/R4)
 //
@@ -266,6 +324,12 @@ func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.Session
 //   - role:                 user.promote + CanDelegate(super-admin)
 //   - status:               user.suspend
 //   - displayName/prefs:    user.update (self-service for own record)
+//
+// A user access token is checked on the hub-level user record
+// (hubScopedResource): status needs user:suspend, another user's profile
+// needs user:update, and a token PATCH that names no status field is
+// checked as a profile update. A token PATCH that names role, or that
+// changes its holder's own profile, is refused (updateUserTokenFields).
 //
 // A mixed PATCH must hold ALL required permissions before any write.
 // Unknown JSON fields are rejected. ALL mutations (bindings + User record +
@@ -330,7 +394,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
+	actor, token, ok := s.updateUserCredential(w, ctx, id)
 	if !ok {
 		return
 	}
@@ -455,6 +519,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	isSelf := actor.ID() == user.ID
+
+	// Token field rules run before the field values are validated, so a
+	// token's role field is refused whatever its value.
+	if token != nil && !updateUserTokenFields(w, updates, prefsPatch, isSelf) {
+		return
+	}
+
 	// Validate role field eagerly — reject unsupported values even if the
 	// role matches the current value.
 	if updates.Role != nil {
@@ -494,8 +566,19 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	needsSuspend := updates.Status != nil
 	needsUpdate := updates.DisplayName != nil || prefsPatch != nil
 
-	isSelf := actor.ID() == user.ID
 	needsCrossUserUpdate := needsUpdate && !isSelf
+	// A token PATCH of another user that names no status field is checked
+	// as a profile update, so it needs user:update even with no field set.
+	if token != nil && !isSelf && !needsSuspend {
+		needsCrossUserUpdate = true
+	}
+
+	// The record the field permissions are checked on: a token's selectors
+	// name the hub-level user record; a session keeps the user record.
+	userTarget := Resource{Type: "user", ID: user.ID}
+	if token != nil {
+		userTarget = hubScopedResource("user", user.ID)
+	}
 
 	// Pre-resolve super-admin role definition and canonical binding state
 	// before authorization. Canonical state comes from bindings, not User.Role,
@@ -534,7 +617,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(actor),
 			Credential: credentialContextForIdentity(actor),
-			Resource:   Resource{Type: "user", ID: user.ID},
+			Resource:   userTarget,
 			Action:     Action("suspend"),
 			Permission: "user.suspend",
 		})
@@ -553,7 +636,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(actor),
 			Credential: credentialContextForIdentity(actor),
-			Resource:   Resource{Type: "user", ID: user.ID},
+			Resource:   userTarget,
 			Action:     Action("update"),
 			Permission: "user.update",
 		})
@@ -738,7 +821,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// This response applies the same per-viewer preferences visibility rule
 	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
-	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
+	capTarget := userResource(user)
+	if token != nil {
+		capTarget = hubScopedResource("user", user.ID)
+	}
+	cap := s.authzService.ComputeCapabilities(ctx, actor, capTarget)
 	stripPreferencesForViewer(ctx, user, cap)
 
 	writeJSON(w, http.StatusOK, user)

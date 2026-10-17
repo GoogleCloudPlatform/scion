@@ -219,7 +219,10 @@ func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key str
 	t.Helper()
 	ep := e.EntryPoint
 	id := string(e.Spec.ID)
-	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	params := m.callerPatternOverrides()[overrideKey{id, ep.Pattern}]
+	if params == nil {
+		params = opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
+	}
 	if params == nil {
 		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
 	}
@@ -300,6 +303,10 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"hub.audit.explain", "/api/v1/authz/explain"}: {
 			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
 		},
+		// The user PATCH variants change a display name: the fixture user's
+		// for the cross-user variant, the caller's own for the self variant.
+		{"user.update", "/api/v1/users/{id}"}:      {"displayName": "BDM User"},
+		{"user.self.update", "/api/v1/users/{id}"}: {"displayName": "BDM Self"},
 		// Chat writes with bodies the handlers accept.
 		{"chat.prefs.update", "/api/v1/chat/prefs"}:                                    {"visibility_mode": "conversation"},
 		{"chat.thread.create", "/api/v1/chat/spaces/{id}/threads"}:                     {"name": "bdm thread"},
@@ -316,6 +323,15 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:            {"pinned": true},
 		{"chat.presence.update", "/api/v1/chat/presence"}:                              {"projectIds": []string{f.project}},
 		{"chat.userprefs.update", "/api/v1/chat/user-prefs"}:                           {"spaceSortMode": "alpha"},
+	}
+}
+
+// callerPatternOverrides holds per-operation path parameters that name the
+// matrix's own super-admin, for entry points told apart by whether the path
+// names the caller's own record.
+func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
+	return map[overrideKey]map[string]string{
+		{"user.self.update", "/api/v1/users/{id}"}: {"id": m.adminID},
 	}
 }
 
