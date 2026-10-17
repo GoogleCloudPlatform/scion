@@ -382,9 +382,12 @@ func TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches
 				body, totalCount = request(hub, tc.path+"?limit=100")
 				assert.Contains(t, body, tc.allowedID)
 				assert.Contains(t, body, tc.deniedID)
-				// The seeded hub-members group has no project parent, so a
-				// token cannot resolve its target scope and it is not listed.
-				assert.Equal(t, tc.unscopedTotal-1, totalCount)
+				// The seeded hub-members group has no project, so its target
+				// is the hub; the hub token with group:read lists it too.
+				hubMembers, err := s.GetGroupBySlug(ctx, hubMembersSlug)
+				require.NoError(t, err)
+				assert.Contains(t, body, hubMembers.ID)
+				assert.Equal(t, tc.unscopedTotal, totalCount)
 			} else {
 				body, totalCount = request(scoped, tc.path+"?limit=1")
 				assert.NotContains(t, body, tc.deniedID)
