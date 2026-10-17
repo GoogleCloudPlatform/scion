@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -55,6 +57,25 @@ func upProjectCredential(t *testing.T, srv *Server, s store.Store, adminID, name
 	adminUser := NewAuthenticatedUser(adminID, adminID+"@test.com", adminID, "admin", "api")
 	return NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(project),
 		selectors, tid(name+"-cred"), bearerCeiling(t, selectors...), nil)
+}
+
+// upTokenRefusal returns the response body of the PATCH /api/v1/users/{id}
+// refusal for a token that may use neither user.update nor user.suspend.
+func upTokenRefusal() string {
+	rec := httptest.NewRecorder()
+	writeUserPatchTokenRefusal(rec)
+	return rec.Body.String()
+}
+
+// requireUpTokenRefusal asserts that rec is that refusal: 403, code
+// forbidden, the user.update message and no session-only reason.
+func requireUpTokenRefusal(t *testing.T, rec *httptest.ResponseRecorder, label string) {
+	t.Helper()
+	assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", label, rec.Body.String())
+	assert.Equal(t, upTokenRefusal(), rec.Body.String(), label)
+	assert.Contains(t, rec.Body.String(), "requires user.update permission", label)
+	reason, _ := sessionOnlyDetailsOf(rec)
+	assert.Empty(t, reason, "%s: no session-only reason: %s", label, rec.Body.String())
 }
 
 // TestUserPatchToken_CrossUserProfileRequiresUpdateSelector pins the
@@ -97,7 +118,7 @@ func TestUserPatchToken_CrossUserProfileRequiresUpdateSelector(t *testing.T) {
 
 	projectCredential := upProjectCredential(t, srv, s, admin, "up-profile-project", "user:update")
 	rec = doRequestAsIdentity(t, srv, projectCredential, http.MethodPatch, path, map[string]interface{}{"displayName": "Project Bound"})
-	assert.Equal(t, http.StatusForbidden, rec.Code, "project boundary: %s", rec.Body.String())
+	requireUpTokenRefusal(t, rec, "project boundary")
 	assert.Equal(t, "Renamed By Token", upUser(t, s, target).DisplayName)
 
 	member := hubConfigTokenUser(t, s, "up-profile-member", store.SystemRoleHubMember)
@@ -136,16 +157,23 @@ func TestUserPatchToken_StatusRequiresSuspendSelector(t *testing.T) {
 
 	projectCredential := upProjectCredential(t, srv, s, admin, "up-status-project", "user:suspend")
 	rec = doRequestAsIdentity(t, srv, projectCredential, http.MethodPatch, path, map[string]string{"status": store.UserStatusSuspended})
-	assert.Equal(t, http.StatusForbidden, rec.Code, "project boundary: %s", rec.Body.String())
+	requireUpTokenRefusal(t, rec, "project boundary")
 	assert.Equal(t, store.UserStatusActive, upUser(t, s, target).Status)
 
 	member := hubConfigTokenUser(t, s, "up-status-member", store.SystemRoleHubMember)
 	igMintRefused(t, srv, member, hubBoundary(), "user:suspend")
 
+	rec = doRequestAsUser(t, srv, upUser(t, s, admin), http.MethodPatch, path, map[string]interface{}{"preferences": map[string]string{"theme": "dark"}})
+	require.Equal(t, http.StatusOK, rec.Code, "session sets a preference: %s", rec.Body.String())
+
 	suspend := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:suspend")
 	rec = doRequestWithToken(t, srv, suspend, http.MethodPatch, path, map[string]string{"status": store.UserStatusSuspended})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Equal(t, store.UserStatusSuspended, upUser(t, s, target).Status)
+	var suspended map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &suspended))
+	assert.NotContains(t, suspended, "preferences", "a token with user:suspend only gets no preferences: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"theme":"dark"`)
 
 	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "user_suspend", TargetType: "user", TargetID: target})
 	require.NoError(t, err)
@@ -291,4 +319,73 @@ func TestUserPatchToken_SelfStatusGuardStillApplies(t *testing.T) {
 	rec = doRequestAsUser(t, srv, upUser(t, s, admin), http.MethodPatch, path, map[string]string{"status": store.UserStatusSuspended})
 	assert.Equal(t, http.StatusConflict, rec.Code, "session: %s", rec.Body.String())
 	assert.Equal(t, store.UserStatusActive, upUser(t, s, admin).Status)
+}
+
+// TestUserPatchToken_RefusalSameForEveryUserID pins that a PATCH of
+// another user by a token that may use neither user.update nor
+// user.suspend gets one refusal whether or not the user exists, for every
+// body: a hub token with no user selector, a hub token with user:read
+// only, and project-boundary tokens with or without user selectors. A hub
+// token with user:update gets 404 for an unknown user, and one with
+// user:suspend gets 404 for a status change of an unknown user.
+func TestUserPatchToken_RefusalSameForEveryUserID(t *testing.T) {
+	srv, s := testServer(t)
+	admin := hubConfigTokenUser(t, s, "up-anyid-super", store.SystemRoleSuperAdmin)
+	target := upTarget(t, s, "up-anyid-target")
+	unknown := tid("up-anyid-unknown")
+	_, err := s.GetUser(context.Background(), unknown)
+	require.Error(t, err, "the unknown user does not exist")
+	original := upUser(t, s, target)
+
+	bodies := []map[string]interface{}{
+		{"displayName": "Not Allowed"},
+		{"status": store.UserStatusSuspended},
+		{"preferences": map[string]string{"theme": "dark"}},
+		{"role": store.UserRoleAdmin},
+		{},
+		{"status": "not-a-status"},
+	}
+	type caller struct {
+		label string
+		do    func(path string, body map[string]interface{}) *httptest.ResponseRecorder
+	}
+	viaToken := func(key string) func(string, map[string]interface{}) *httptest.ResponseRecorder {
+		return func(path string, body map[string]interface{}) *httptest.ResponseRecorder {
+			return doRequestWithToken(t, srv, key, http.MethodPatch, path, body)
+		}
+	}
+	viaIdentity := func(id *ScopedUserIdentity) func(string, map[string]interface{}) *httptest.ResponseRecorder {
+		return func(path string, body map[string]interface{}) *httptest.ResponseRecorder {
+			return doRequestAsIdentity(t, srv, id, http.MethodPatch, path, body)
+		}
+	}
+	callers := []caller{
+		{"hub token with no user selector", viaToken(mintHubConfigToken(t, srv, admin, hubBoundary(), "project:read"))},
+		{"hub token with user:read only", viaToken(mintHubConfigToken(t, srv, admin, hubBoundary(), "user:read"))},
+		{"project-boundary token with user:update and user:suspend", viaIdentity(upProjectCredential(t, srv, s, admin, "up-anyid-project-sel", "user:update", "user:suspend"))},
+		{"project-boundary token with no user selector", viaIdentity(NewScopedUserIdentityWithBoundaryAndDecoration(
+			NewAuthenticatedUser(admin, admin+"@test.com", admin, "admin", "api"), projectBoundary(igProject(t, s, "up-anyid-project")),
+			[]string{"project:read"}, tid("up-anyid-project-cred"), bearerCeiling(t, "project:read"), nil))},
+	}
+	for _, c := range callers {
+		for _, body := range bodies {
+			label, _ := json.Marshal(body)
+			existing := c.do("/api/v1/users/"+target, body)
+			missing := c.do("/api/v1/users/"+unknown, body)
+			requireUpTokenRefusal(t, existing, c.label+" existing user "+string(label))
+			assert.Equal(t, existing.Code, missing.Code, "%s %s: status", c.label, label)
+			assert.Equal(t, existing.Body.String(), missing.Body.String(), "%s %s: body", c.label, label)
+		}
+	}
+	got := upUser(t, s, target)
+	assert.Equal(t, original.DisplayName, got.DisplayName, "refused PATCHes write nothing")
+	assert.Equal(t, original.Status, got.Status)
+	assert.Equal(t, original.Role, got.Role)
+
+	update := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:update")
+	rec := doRequestWithToken(t, srv, update, http.MethodPatch, "/api/v1/users/"+unknown, map[string]interface{}{"displayName": "Nobody"})
+	assert.Equal(t, http.StatusNotFound, rec.Code, "user:update, unknown user: %s", rec.Body.String())
+	suspend := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:suspend")
+	rec = doRequestWithToken(t, srv, suspend, http.MethodPatch, "/api/v1/users/"+unknown, map[string]interface{}{"status": store.UserStatusSuspended})
+	assert.Equal(t, http.StatusNotFound, rec.Code, "user:suspend, unknown user: %s", rec.Body.String())
 }

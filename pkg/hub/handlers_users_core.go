@@ -290,6 +290,26 @@ func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context
 	return scoped, scoped, true
 }
 
+// userCrossProfileDenialMessage is the refusal message of a PATCH of
+// another user's profile without user.update.
+const userCrossProfileDenialMessage = "requires user.update permission to modify another user's profile"
+
+// tokenMayUpdateUsers reports whether a user access token may use
+// user.update or user.suspend at all: its ceiling allows one of them on its
+// boundary (tokenAllowsPermission). Both are hub-only, so a project-boundary
+// token never may.
+func tokenMayUpdateUsers(token *ScopedUserIdentity) bool {
+	return tokenAllowsPermission(token, "user.update") || tokenAllowsPermission(token, "user.suspend")
+}
+
+// writeUserPatchTokenRefusal writes the refusal of PATCH
+// /api/v1/users/{id} for a token that may use neither user.update nor
+// user.suspend, on another user's id. Its status, code, message and
+// details are the same for every such token and every id.
+func writeUserPatchTokenRefusal(w http.ResponseWriter) {
+	writeForbiddenStructured(w, userCrossProfileDenialMessage, "user", Action("update"))
+}
+
 // updateUserTokenFields applies the field rules of PATCH
 // /api/v1/users/{id} for a user access token, before any permission check
 // or write. It writes the refusal and returns false when:
@@ -329,7 +349,10 @@ func updateUserTokenFields(w http.ResponseWriter, updates userPatchPayload, pref
 // (hubScopedResource): status needs user:suspend, another user's profile
 // needs user:update, and a token PATCH that names no status field is
 // checked as a profile update. A token PATCH that names role, or that
-// changes its holder's own profile, is refused (updateUserTokenFields).
+// changes its holder's own profile, is refused (updateUserTokenFields). A
+// token PATCH of another user by a token that may use neither user:update
+// nor user:suspend gets one refusal for every id
+// (writeUserPatchTokenRefusal).
 //
 // A mixed PATCH must hold ALL required permissions before any write.
 // Unknown JSON fields are rejected. ALL mutations (bindings + User record +
@@ -396,6 +419,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Credential boundary + identity check (R4-C5).
 	actor, token, ok := s.updateUserCredential(w, ctx, id)
 	if !ok {
+		return
+	}
+	if token != nil && actor.ID() != id && !tokenMayUpdateUsers(token) {
+		writeUserPatchTokenRefusal(w)
 		return
 	}
 
@@ -641,7 +668,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			Permission: "user.update",
 		})
 		if !decision.Allowed {
-			writeForbiddenStructured(w, "requires user.update permission to modify another user's profile", "user", Action("update"))
+			writeForbiddenStructured(w, userCrossProfileDenialMessage, "user", Action("update"))
 			return
 		}
 	}
