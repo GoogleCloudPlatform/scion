@@ -36,7 +36,7 @@ permissions). Available scopes:
 |-------|--------|
 | `project:read` | Read project metadata |
 | `project:update` | Update project settings, configurations, and annotations |
-| `project:manage` | Manage project administration (membership operations) |
+| `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |

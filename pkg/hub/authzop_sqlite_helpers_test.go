@@ -92,6 +92,8 @@ type idFixtures struct {
 	roleBindingDel          string
 	projectMembership       string
 	projectMembershipUpdate string
+	memberPrincipalDel      string
+	roleBindingProjectDel   string
 	projectVisitor          string
 	projectVisitorUpdate    string
 	projectVisitorRule      string
@@ -501,6 +503,28 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	pmUpdate, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.userDel, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
 	require.NoError(t, err)
 	f.projectMembershipUpdate = pmUpdate.ID
+	// The members principal DELETE and the project-scoped role-binding
+	// DELETE each remove a project binding, so each gets its own
+	// principal holding project-member on f.project.
+	for _, d := range []struct {
+		name  string
+		user  *string
+		bound *string
+	}{
+		{"li-member-principal-del", &f.memberPrincipalDel, nil},
+		{"li-rb-project-del", nil, &f.roleBindingProjectDel},
+	} {
+		uid := tid(d.name)
+		require.NoError(t, s.CreateUser(ctx, &store.User{ID: uid, Email: d.name + "@test.com", DisplayName: d.name, Role: "member", Status: "active"}))
+		b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: projectMemberRole.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: uid, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user, CreatedAt: now})
+		require.NoError(t, err)
+		if d.user != nil {
+			*d.user = uid
+		}
+		if d.bound != nil {
+			*d.bound = b.ID
+		}
+	}
 
 	// project.visitors.update / .remove address a visitor (a federated
 	// account with a project-visitor binding on f.project) by account ID;
@@ -794,6 +818,10 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 
 		// Thread group delete uses its disposable twin.
 		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
+
+		// The project-scoped role-binding DELETE removes its own project
+		// binding; the hub-path DELETE keeps the system-scoped fixture.
+		{"project.membership.rolebinding.delete", "/api/v1/admin/role-bindings/{id}"}: {"id": f.roleBindingProjectDel},
 	}
 }
 
@@ -895,6 +923,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// Visitor rules (the item pattern addresses the rule remove takes).
 		"/api/v1/projects/{id}/visitors/rules":          {"id": f.project},
 		"/api/v1/projects/{id}/visitors/rules/{ruleId}": {"id": f.project, "ruleId": f.projectVisitorRule},
+
+		// The principal PUT (an empty body) and DELETE address a principal
+		// that holds a project binding the DELETE removes.
+		"/api/v1/projects/{id}/members/principals/{type}/{principalId}": {"id": f.project, "type": "user", "principalId": f.memberPrincipalDel},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},
