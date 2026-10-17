@@ -403,6 +403,19 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
 		message = "Version conflict - resource was modified"
+	case errors.Is(err, store.ErrTestAdminGrantRefused):
+		// Admin tier A3 grant shaping: a grant a test identity with an
+		// admin role may not make. The fixed sentinel text only: the
+		// wrapped error is not shown.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantRefused.Error()
+	case errors.Is(err, store.ErrTestAdminGrantUnshaped):
+		// Admin tier A3 grant shaping, fail-closed: the store could not
+		// bound the grant by the identity's expiry.
+		statusCode = http.StatusForbidden
+		code = ErrCodeForbidden
+		message = store.ErrTestAdminGrantUnshaped.Error()
 	case errors.Is(err, store.ErrProjectMembersGroupPrincipal):
 		// Must precede ErrInvalidInput, which it wraps.
 		statusCode = http.StatusBadRequest

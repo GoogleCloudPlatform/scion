@@ -554,11 +554,12 @@ func TestTestIdentityWeb_Mint(t *testing.T) {
 	e.clock.Advance(2 * time.Minute)
 	assert.Equal(t, http.StatusConflict, e.mintRec(e.issuerTok, short.Identity.ID).Code)
 
-	// The admin kinds (phase A1) are not admitted.
+	// The admin kinds (phase A1) are not admitted while admin web sessions
+	// are off (WS4: test_admin_web_sessions.go), nor is any other kind.
 	for _, kind := range []string{"test_hub_admin", "test_super_admin", store.UserKindHuman, ""} {
-		assert.False(t, testIdentityWebKindAdmitted(&store.User{Kind: kind}), kind)
+		assert.False(t, e.srv.testIdentityWebKindAdmitted(&store.User{Kind: kind}), kind)
 	}
-	assert.True(t, testIdentityWebKindAdmitted(&store.User{Kind: store.UserKindTestFixture}))
+	assert.True(t, e.srv.testIdentityWebKindAdmitted(&store.User{Kind: store.UserKindTestFixture}))
 
 	// Audit: one issue row, no code anywhere in it; no code in the logs.
 	audits := tiWebAudits(t, e.st, testIdentityWebCodeIssueMutation)
@@ -1574,7 +1575,7 @@ func TestTestIdentityWeb_LogoutClears(t *testing.T) {
 func TestTestIdentityWeb_Indicator(t *testing.T) {
 	e := newTIWebEnv(t)
 	status := doRequestNoAuth(t, e.srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIdentityWebSessionsUnavailableReason":"","testIssuerAudience":""}`, status.Body.String())
+	assert.JSONEq(t, `{"testIdentities":true,"testHubAdmin":false,"testSuperAdmin":false,"testIdentityWebSessions":true,"testIdentityWebSessionsUnavailableReason":"","testAdminWebSessions":false,"testIssuerAudience":""}`, status.Body.String())
 
 	rec := doRequest(t, e.srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

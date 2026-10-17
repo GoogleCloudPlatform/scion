@@ -138,6 +138,9 @@ func (_u *BrokerJoinTokenUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(brokerjointoken.FieldCreatedBy, field.TypeString, value)
 	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(brokerjointoken.FieldIssuanceID, field.TypeString)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{brokerjointoken.Label}
@@ -297,6 +300,9 @@ func (_u *BrokerJoinTokenUpdateOne) sqlSave(ctx context.Context) (_node *BrokerJ
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(brokerjointoken.FieldCreatedBy, field.TypeString, value)
+	}
+	if _u.mutation.IssuanceIDCleared() {
+		_spec.ClearField(brokerjointoken.FieldIssuanceID, field.TypeString)
 	}
 	_node = &BrokerJoinToken{config: _u.config}
 	_spec.Assign = _node.assignValues

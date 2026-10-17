@@ -1185,17 +1185,35 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// authorizeTokenConversationRead is the token rule for reading one
-// conversation, applied after the checks every caller passes: a direct
-// conversation needs inbox:read for the peer agent's project (a hub
+// authorizeTokenConversationRead applies the token rule for reading one
+// conversation (tokenMayReadConversation) after the checks every caller
+// passes, and writes 403 (or the store error) on refusal.
+func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
+	ok, err := s.tokenMayReadConversation(r.Context(), token, s.newSelfScopeCheck(r.Context(), token, permInboxRead), conv)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !ok {
+		writeTokenConversationRefusal(w, r, token, permInboxRead)
+		return false
+	}
+	return true
+}
+
+// tokenMayReadConversation is the token rule for reading one conversation,
+// shared by the conversation read routes and the attachment download: a
+// direct conversation needs inbox:read for the peer agent's project (a hub
 // boundary for a direct conversation between users) and agent:read on the
 // peer agent; a group with no project needs inbox:read on a hub boundary.
-// A project group needs only the project:read check it already passed.
-func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
+// A project group needs only the project:read check every caller passes.
+// check must be the inbox:read self-scope check of token. A store error is
+// returned.
+func (s *Server) tokenMayReadConversation(ctx context.Context, token *ScopedUserIdentity, check *selfScopeCheck, conv *store.Conversation) (bool, error) {
 	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
-		return true
+		return true, nil
 	}
-	return s.authorizeTokenConversation(w, r, token, permInboxRead, conv)
+	return s.tokenMayUseConversation(ctx, token, check, conv)
 }
 
 // isConversationParticipant checks whether a principal is an active participant

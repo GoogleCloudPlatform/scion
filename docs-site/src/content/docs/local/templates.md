@@ -3,7 +3,7 @@ title: Templates & Roles
 description: Define reusable, harness-agnostic agent roles with Scion templates, compose them with skills, and manage them locally or through a Hub.
 ---
 
-A **template** defines an agent's *role* — its purpose, instructions, and persona — as a small directory of files you can version, share, and reuse. Templates are **harness-agnostic**: the same `code-reviewer` role can run on Claude, Gemini, or any other supported harness. The harness-specific mechanics (container image, concrete model, auth) live separately in a **harness-config**, so a template stays portable across backends.
+A **template** defines an agent's *role* — its job: purpose, instructions, and persona — as a small directory of files you can version, share, and reuse. Templates are **harness-agnostic**: the same `code-reviewer` role can run on Claude, Gemini, or any other supported harness. The harness-specific mechanics (container image, concrete model, auth) live separately in a **harness-config**, so a template stays portable across backends.
 
 Templates work hand-in-hand with **skills** — reusable instruction snippets a template can bundle or pull from the [Skill Bank](/scion/local/skills/). A role is the "who"; skills are the "how-to" capabilities you graft onto it.
 
@@ -63,29 +63,46 @@ Common fields:
 | `default_harness_config` | The harness-config to use when the user does not pass one. |
 | `model` | Model **size alias** (`small`, `medium`, `large`, `extra-large`) — see [Model size aliases](#model-size-aliases). |
 | `skills` | Skill references to resolve at provision time — see [Skills](#skills). |
-| `env` | Environment variables for the job's own tools. Each one is set only when no other source sets it, and its value is used literally. See [Environment keys are ignored](#environment-keys-are-ignored). |
+| `env` | Environment variables for the job's own tools: a fallback, see [Template env](#template-env). |
 | `mcp_servers` | MCP server definitions, translated per harness. |
-| `secrets` | Secrets the agent requires. |
-| `services`, `max_turns`, `max_duration` | Further job settings. |
+| `secrets` | Names of the secrets the job requires (values come from user, project, hub or broker secrets). |
+| `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
+| `message_mode` | Hub only: the initial message mode for agents created from the template. |
+
+The full field reference is [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/).
+
+### A template describes the job, not the environment
+
+A template sets **job keys**: what the agent does. Where and how it runs comes from the harness-config, settings and profiles, the hub and the project. The **environment keys** `image`, `resources`, `volumes`, `kubernetes`, `hub` and `telemetry` are **ignored in a template, with a warning** (`template <name> sets environment key(s) <keys>; ignored (environment comes from settings)`). The template still loads, and a hub admin can list affected templates with `GET /api/v1/admin/validate-resources`.
+
+| You want to set | Put it in |
+| :--- | :--- |
+| Container image | The harness-config's `config.yaml` `image`, or settings `harness_configs.<name>.image` / a profile `harness_overrides.<name>.image` |
+| CPU, memory, disk | Settings `default_resources`, profile `resources` / `harness_overrides`, hub `agent_defaults.resources`, or the project's resource defaults |
+| Volumes | Settings `harness_configs.<name>.volumes`, or the harness-config |
+| Kubernetes settings | Settings runtimes and profiles |
+| Telemetry | Settings `telemetry`, the hub telemetry config, or project telemetry policy |
+
+A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`); its inline `telemetry` can only turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
+
+### Template env
+
+`env:` in a template is for the tools the job ships with. Each variable is a **fallback**:
+
+- It applies only when no other source sets the key: settings and harness-config env, hub, project and user env, request env, secrets, and the auth, harness and telemetry env the runtime adds all win over it.
+- Values are literal. `${VAR}` is not expanded, and an empty value is not filled from the broker host.
+- `SCION_*` keys are ignored.
+- No key the harness-config's auth metadata lists (its `required_env`, `required_files` alternative and `autodetect` env keys) is ever filled from a template. Supply credentials as secrets or hub env.
+- Edits take effect on the agent's next start: the broker reads the template's current env on every start, and never stores it in the agent's config.
+- A template `TZ` is not applied to Hub-dispatched agents; see [Times and Timezones](/scion/reference/times-and-timezones/).
 
 :::tip
 Top-level keys accept **either hyphens or underscores** — `default-harness-config` and `default_harness_config` are equivalent. Underscored form is canonical.
 :::
 
 :::caution
-Keep harness-specific settings **out** of the template. `auth_selectedType` and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning, and `image` is ignored (see below) — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
+Keep harness-specific settings **out** of the template. `image` is ignored with a warning (see above). `auth_selectedType` and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
 :::
-
-### Environment keys are ignored
-
-A template describes the agent's job, not the environment it runs in. These keys in a template are **ignored** with a warning: in the `scion start` output for local agents, and in the Runtime Broker log for Hub-dispatched agents (the Hub also logs one when such a template is uploaded):
-
-- `image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes`.
-- `env` entries whose name starts with `SCION_`, the platform's own namespace.
-
-Template uploads that contain them are not rejected. Set these values in [settings](/scion/reference/settings-precedence/), a profile, the harness-config or the Hub defaults instead. Hub administrators can find templates that still set them in the `templateConfigFindings` section of `GET /api/v1/admin/validate-resources` (finding kind `environment_keys`).
-
-The remaining `env` entries are a separate, lowest-precedence layer: each is set only when no other source (settings, profile, harness-config, Hub or project env, secrets) sets that variable. It never sets the harness-config's credential variables. Values are literal: `${VAR}` is not expanded, and an empty value is skipped (with a warning in the `scion start` output for local agents) instead of being taken from the host environment. For Hub-dispatched agents a template `TZ` is not applied; see [Times and timezones](/scion/reference/times-and-timezones/).
 
 ## Creating an agent from a template
 
@@ -119,14 +136,16 @@ scion start coord --type ./templates/coordinator
 When you do not pass `--harness-config`, Scion resolves it in this order:
 
 1. **CLI flag** — `--harness-config` (alias `--harness`).
-2. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`.
-3. **System default** — `default_harness_config` in the global `settings.yaml`.
+2. **Project default** — the project's `scion.io/default-harness-config` setting.
+3. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`, else its `harness_config`. When both are set, `default_harness_config` wins.
+4. **Hub default** — `agent_defaults.default_harness_config` on the hub.
+5. **System default** — `default_harness_config` in the active profile, then in `settings.yaml`.
 
 ## Template composition & inheritance
 
 Every non-`default` template automatically **inherits the `default` template as a base layer**. When an agent is provisioned, Scion builds a chain — `default` first, then your template — and layers them:
 
-- **Config** is merged field-by-field (`MergeScionConfig`): your template's values override the base, maps like `env` and `mcp_servers` are unioned, and `skills` are **appended** (so base skills are kept and yours are added).
+- **Config** is merged field-by-field (`MergeScionConfig`): your template's values override the base, maps like `env` and `mcp_servers` are unioned, and `skills` are **appended** (so base skills are kept and yours are added). Environment keys are dropped from every template in the chain before the merge, and the chain's `env` becomes the template env fallback.
 - **Content references** (`agents.md`, `system-prompt.md`) are resolved by walking the chain from most-specific to least-specific, so a file inherited from the base is still found even if your template doesn't redefine it.
 - **`home/` files** from the base are copied first, then overlaid by your template's `home/`.
 

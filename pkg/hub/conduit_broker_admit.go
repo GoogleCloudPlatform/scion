@@ -93,7 +93,7 @@ func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request, for
 	}
 	rt := s.conduit.Load()
 	if rt == nil && !forRelay {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
+		s.writeConduitRelayNotRunning(w)
 		return conduitAdmission{}, false
 	}
 	broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)

@@ -1706,6 +1706,38 @@ func TestCloudRunSandboxRuntime_List_ReturnsStateEntries(t *testing.T) {
 	// When #1260 merges, this test should be updated.
 }
 
+// TestCloudRunSandboxRuntime_List_NameIsAgentSlug: List reports the agent
+// slug (the scion.name label) as Name, as the Docker and substrate runtimes
+// do, not AgentID, which Run records as the project-prefixed container name;
+// an entry without the label falls back to AgentID (ptone/scion#5156).
+func TestCloudRunSandboxRuntime_List_NameIsAgentSlug(t *testing.T) {
+	rt := NewCloudRunSandboxRuntimeForTest("/nonexistent", filepath.Join(t.TempDir(), "state.json"), t.TempDir())
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "proj-b--dev",
+		AgentID:     "proj-b--dev",
+		Labels:      map[string]string{"scion.name": "dev"},
+	})
+	rt.state.add(&sandboxStateEntry{
+		SandboxName: "proj-b--old",
+		AgentID:     "proj-b--old",
+	})
+
+	agents, err := rt.List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	names := make(map[string]string)
+	for _, a := range agents {
+		names[a.ContainerID] = a.Name
+	}
+	if got := names["proj-b--dev"]; got != "dev" {
+		t.Errorf("Name of labelled entry = %q, want the scion.name label %q", got, "dev")
+	}
+	if got := names["proj-b--old"]; got != "proj-b--old" {
+		t.Errorf("Name of entry without scion.name = %q, want AgentID %q", got, "proj-b--old")
+	}
+}
+
 func TestCloudRunSandboxRuntime_List_LabelFilter(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 	rt := &CloudRunSandboxRuntime{

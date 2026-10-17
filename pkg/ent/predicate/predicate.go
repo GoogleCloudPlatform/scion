@@ -186,6 +186,12 @@ type ProjectPreStartHook func(*sql.Selector)
 // ProjectSyncState is the predicate function for projectsyncstate builders.
 type ProjectSyncState func(*sql.Selector)
 
+// ProjectVisitorExclusion is the predicate function for projectvisitorexclusion builders.
+type ProjectVisitorExclusion func(*sql.Selector)
+
+// ProjectVisitorRule is the predicate function for projectvisitorrule builders.
+type ProjectVisitorRule func(*sql.Selector)
+
 // RelayInstance is the predicate function for relayinstance builders.
 type RelayInstance func(*sql.Selector)
 

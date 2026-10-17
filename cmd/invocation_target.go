@@ -354,7 +354,7 @@ func resolveInvocationTargetWith(cmd *cobra.Command, mode CLIMode, r targetResol
 	ctx, err := r.loadContext()
 	if err != nil {
 		if isHubNickname(hubEndpoint) {
-			return fmt.Errorf("cannot look up hub '%s': %w", hubEndpoint, err)
+			return fmt.Errorf("cannot look up hub '%s': %w", config.RedactURL(hubEndpoint), err)
 		}
 		_, _ = fmt.Fprintf(stderr, "Warning: ignoring the current context: %v\n", err)
 		contextWarned = true
@@ -444,9 +444,9 @@ func directoryLinkedHub(r targetResolution, c *config.CLIContext) (endpoint, nam
 // endpoint alone when the hub has no nickname.
 func describeHub(name, endpoint string) string {
 	if name == "" {
-		return endpoint
+		return config.RedactURL(endpoint)
 	}
-	return fmt.Sprintf("'%s' (%s)", name, endpoint)
+	return fmt.Sprintf("'%s' (%s)", name, config.RedactURL(endpoint))
 }
 
 // warnHubFlagMismatch warns when --hub selects a hub other than the one

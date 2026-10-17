@@ -91,6 +91,12 @@ Examples:
   # Delete a test identity when the run is done
   scion hub test-identity delete <id>
 
+  # On a hub with --test-mode=admin: a test identity with the hub-admin
+  # role, its residue report, and the emergency stop (human super-admin)
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin journey" --out ./admin.token
+  scion hub test-identity residue <id>
+  scion hub test-identity revoke-all --reason "INC-123" --dry-run
+
   # With a target-hub profile: issue into the run cache, mint a web-login
   # code for the identity, then tear the run down
   scion --hub-profile t1 hub test-identity issue --as owner --run r1
@@ -111,9 +117,18 @@ email, role and expiry are printed.
 outlives the identity. --lifetime is the identity lifetime (default 1h on
 the hub, at most 8h).
 
+With --admin-role hub-admin or super-admin, the identity holds the real
+hub-admin or super-admin role, on a hub started with --test-mode=admin (or
+super-admin for the super-admin role). The issuer must be a live human
+super-admin. --purpose (8 to 200 characters) and --out are required, --role
+does not apply, and the token is never re-issued. Lifetimes: hub-admin
+token 15m (at most 30m), identity 1h; super-admin token 10m (at most 15m),
+identity 30m. Not available in agent mode or with a hub profile.
+
 Examples:
   scion hub test-identity issue --out ./fixture.token
-  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token`,
+  scion hub test-identity issue --role viewer --ttl 15m --lifetime 2h --purpose "nightly" --out /tmp/viewer.token
+  scion hub test-identity issue --admin-role hub-admin --purpose "admin settings journey" --out ./hub-admin.token`,
 	Args: cobra.NoArgs,
 	RunE: runHubTestIdentityIssue,
 }
@@ -282,6 +297,11 @@ type testIdentityTokenOptions struct {
 }
 
 func runHubTestIdentityIssue(cmd *cobra.Command, _ []string) error {
+	// --admin-role (admin tier A4) is checked first: it never runs with a
+	// profile or in agent mode (hub_test_identity_admin.go).
+	if cmd.Flags().Changed("admin-role") {
+		return runHubTestIdentityAdminIssue(cmd)
+	}
 	if hubProfileSelected() {
 		return runProfileTestIdentityIssue(cmd)
 	}
@@ -384,7 +404,15 @@ func runHubTestIdentityDelete(cmd *cobra.Command, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
-	return deleteTestIdentity(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0])
+	return deleteTestIdentityWithHint(ctx, cmd.OutOrStdout(), cmd.ErrOrStderr(), client.TestIdentities(), args[0], testAdminDeleteHintApplies())
+}
+
+// testAdminDeleteHintApplies reports whether a plain delete's 404 notice
+// names the admin-role purge path: only on the human path without a hub
+// profile (delegation-issued identities are member or viewer, and agents
+// never manage admin-role identities).
+func testAdminDeleteHintApplies() bool {
+	return !hubProfileSelected() && resolveMode() != ModeAgent
 }
 
 // purgeTestIdentity purges a test identity and prints the hub's report.
@@ -727,13 +755,24 @@ func listTestIdentities(ctx context.Context, out io.Writer, svc hubclient.TestId
 // or it is not one of the caller's) succeeds with a notice, so a teardown
 // step can run more than once.
 func deleteTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string) error {
+	return deleteTestIdentityWithHint(ctx, out, errOut, svc, id, false)
+}
+
+// deleteTestIdentityWithHint is deleteTestIdentity; with adminHint, a 404
+// notice also says that a test identity with an admin role is removed only
+// by a purge. The hub answers a plain delete of one with 404, and the CLI
+// cannot tell that from a missing identity.
+func deleteTestIdentityWithHint(ctx context.Context, out, errOut io.Writer, svc hubclient.TestIdentityService, id string, adminHint bool) error {
 	err := svc.Delete(ctx, id)
 	if err == nil {
 		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", id)
 		return nil
 	}
 	if apiclient.IsNotFoundError(err) {
-		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found (already deleted, or not one you may delete); nothing to do.\n", id)
+		_, _ = fmt.Fprintf(errOut, "Notice: test identity %s was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n", id)
+		if adminHint {
+			_, _ = fmt.Fprintf(errOut, "A test identity with an admin role is not removed by a plain delete: use \"scion hub test-identity delete %s --purge\".\n", id)
+		}
 		return nil
 	}
 	if agents, projects, ok := hubclient.TestIdentityDeleteConflict(err); ok && (len(agents) > 0 || len(projects) > 0) {
