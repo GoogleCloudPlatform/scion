@@ -3,7 +3,7 @@ title: Templates & Roles
 description: Define reusable, harness-agnostic agent roles with Scion templates, compose them with skills, and manage them locally or through a Hub.
 ---
 
-A **template** defines an agent's *role* — its purpose, instructions, and persona — as a small directory of files you can version, share, and reuse. Templates are **harness-agnostic**: the same `code-reviewer` role can run on Claude, Gemini, or any other supported harness. The harness-specific mechanics (container image, concrete model, auth) live separately in a **harness-config**, so a template stays portable across backends.
+A **template** defines an agent's *role* — its job: purpose, instructions, and persona — as a small directory of files you can version, share, and reuse. Templates are **harness-agnostic**: the same `code-reviewer` role can run on Claude, Gemini, or any other supported harness. The harness-specific mechanics (container image, concrete model, auth) live separately in a **harness-config**, so a template stays portable across backends.
 
 Templates work hand-in-hand with **skills** — reusable instruction snippets a template can bundle or pull from the [Skill Bank](/scion/local/skills/). A role is the "who"; skills are the "how-to" capabilities you graft onto it.
 
@@ -50,11 +50,6 @@ model: large                       # portable size alias — see Model size alia
 
 skills:
   - uri: "gh://scion-frontiers/agent-team/pr-code-review"
-
-resources:
-  requests:
-    cpu: "500m"
-    memory: "512Mi"
 ```
 
 Common fields:
@@ -68,18 +63,45 @@ Common fields:
 | `default_harness_config` | The harness-config to use when the user does not pass one. |
 | `model` | Model **size alias** (`small`, `medium`, `large`, `extra-large`) — see [Model size aliases](#model-size-aliases). |
 | `skills` | Skill references to resolve at provision time — see [Skills](#skills). |
-| `env` | Environment variables for the agent. |
-| `resources` | CPU/memory requests and limits. |
+| `env` | Environment variables for the job's own tools: a fallback, see [Template env](#template-env). |
 | `mcp_servers` | MCP server definitions, translated per harness. |
-| `secrets` | Secrets the agent requires. |
-| `volumes`, `services`, `max_turns`, `max_duration`, `telemetry`, `kubernetes` | Further runtime knobs. |
+| `secrets` | Names of the secrets the job requires (values come from user, project, hub or broker secrets). |
+| `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
+| `message_mode` | Hub only: the initial message mode for agents created from the template. |
+
+The full field reference is [Agent Configuration (`scion-agent.yaml`)](/scion/reference/agent-config/).
+
+### A template describes the job, not the environment
+
+A template sets **job keys**: what the agent does. Where and how it runs comes from the harness-config, settings and profiles, the hub and the project. The **environment keys** `image`, `resources`, `volumes`, `kubernetes`, `hub` and `telemetry` are **ignored in a template, with a warning** (`template <name> sets environment key(s) <keys>; ignored (environment comes from settings)`). The template still loads, and a hub admin can list affected templates with `GET /api/v1/admin/validate-resources`.
+
+| You want to set | Put it in |
+| :--- | :--- |
+| Container image | The harness-config's `config.yaml` `image`, or settings `harness_configs.<name>.image` / a profile `harness_overrides.<name>.image` |
+| CPU, memory, disk | Settings `default_resources`, profile `resources` / `harness_overrides`, hub `agent_defaults.resources`, or the project's resource defaults |
+| Volumes | Settings `harness_configs.<name>.volumes`, or the harness-config |
+| Kubernetes settings | Settings runtimes and profiles |
+| Telemetry | Settings `telemetry`, the hub telemetry config, or project telemetry policy |
+
+A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`); its inline `telemetry` can only turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
+
+### Template env
+
+`env:` in a template is for the tools the job ships with. Each variable is a **fallback**:
+
+- It applies only when no other source sets the key: settings and harness-config env, hub, project and user env, request env, secrets, and the auth, harness and telemetry env the runtime adds all win over it.
+- Values are literal. `${VAR}` is not expanded, and an empty value is not filled from the broker host.
+- `SCION_*` keys are ignored.
+- No key the harness-config's auth metadata lists (its `required_env`, `required_files` alternative and `autodetect` env keys) is ever filled from a template. Supply credentials as secrets or hub env.
+- Edits take effect on the agent's next start: the broker reads the template's current env on every start, and never stores it in the agent's config.
+- A template `TZ` is not applied to Hub-dispatched agents; see [Times and Timezones](/scion/reference/times-and-timezones/).
 
 :::tip
 Top-level keys accept **either hyphens or underscores** — `default-harness-config` and `default_harness_config` are equivalent. Underscored form is canonical.
 :::
 
 :::caution
-Keep harness-specific settings **out** of the template. `image`, `auth_selectedType`, and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
+Keep harness-specific settings **out** of the template. `image` is ignored with a warning (see above). `auth_selectedType` and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
 :::
 
 ## Creating an agent from a template
@@ -114,14 +136,16 @@ scion start coord --type ./templates/coordinator
 When you do not pass `--harness-config`, Scion resolves it in this order:
 
 1. **CLI flag** — `--harness-config` (alias `--harness`).
-2. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`.
-3. **System default** — `default_harness_config` in the global `settings.yaml`.
+2. **Project default** — the project's `scion.io/default-harness-config` setting.
+3. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`, else its `harness_config`. When both are set, `default_harness_config` wins.
+4. **Hub default** — `agent_defaults.default_harness_config` on the hub.
+5. **System default** — `default_harness_config` in the active profile, then in `settings.yaml`.
 
 ## Template composition & inheritance
 
 Every non-`default` template automatically **inherits the `default` template as a base layer**. When an agent is provisioned, Scion builds a chain — `default` first, then your template — and layers them:
 
-- **Config** is merged field-by-field (`MergeScionConfig`): your template's values override the base, maps like `env` and `mcp_servers` are unioned, and `skills` are **appended** (so base skills are kept and yours are added).
+- **Config** is merged field-by-field (`MergeScionConfig`): your template's values override the base, maps like `env` and `mcp_servers` are unioned, and `skills` are **appended** (so base skills are kept and yours are added). Environment keys are dropped from every template in the chain before the merge, and the chain's `env` becomes the template env fallback.
 - **Content references** (`agents.md`, `system-prompt.md`) are resolved by walking the chain from most-specific to least-specific, so a file inherited from the base is still found even if your template doesn't redefine it.
 - **`home/` files** from the base are copied first, then overlaid by your template's `home/`.
 
@@ -192,10 +216,10 @@ skills:
   - uri: "gh://my-org/skills/linting"           # federated GitHub source
     as: lint-rules                              # mount under a different name
   - uri: "skill://scion/user/alice/scratch"
-    optional: true                              # don't fail provisioning if unresolved
+    optional: true                              # skip (with a warning) if it can't be resolved or installed
 ```
 
-Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
+Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved or installed; the skipped skill is logged as a warning). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::tip
 A skill supplied by a template always takes precedence over a **platform skill** (one embedded in the Scion binary and injected automatically) of the same name.
@@ -337,7 +361,7 @@ scion templates update code-reviewer --scope project
 
 Inside a project, `templates update` considers global and user templates plus the current project's templates (use `--project` to pick another project); outside a project it considers every template you can see. A failed refresh makes the command exit non-zero, in both text and JSON output.
 
-Refreshing works only for sources in a public GitHub repository: a folder on a branch (`https://github.com/<owner>/<repo>/tree/<branch>/<path>`), a branch's root (`https://github.com/<owner>/<repo>/tree/<branch>`), or `https://github.com/<owner>/<repo>[/<path>]` on branch `main`. As a `--url` override, a bare repository URL (`https://github.com/<owner>/<repo>` or `github.com/<owner>/<repo>`) is read as that repository's `.scion/templates` folder on branch `main`, the same as when importing. Folder names may contain letters, digits, spaces and `.` `_` `@` `+` `-`, and branch names letters, digits and `.` `_` `-`. Built-in templates and templates created without a source URL cannot be refreshed: `--all` skips them, and the Web UI does not offer a refresh for them. The Hub checks the source URL each time, refuses URLs that include a username or password, and limits how large the download and the extracted folder may be and how many entries the folder may contain (directories count toward this limit as well as files). A refresh writes only into the named template, even when the source folder holds several: it uses the one folder named after the template's name or slug, refuses a source with none or more than one such folder, and never creates a new template. A refresh does not touch harness-configs: a `harness-configs/` folder inside the template's source is stored as part of the template's files, but no Hub harness-config is created or updated from it. It needs the same permission as importing a template into that scope. With `--all`, each template's refresh has its own time limit.
+Refreshing works only for sources in a GitHub repository: a folder on a branch (`https://github.com/<owner>/<repo>/tree/<branch>/<path>`), a branch's root (`https://github.com/<owner>/<repo>/tree/<branch>`), or `https://github.com/<owner>/<repo>[/<path>]` on branch `main`. As a `--url` override, a bare repository URL (`https://github.com/<owner>/<repo>` or `github.com/<owner>/<repo>`) is read as that repository's `.scion/templates` folder on branch `main`, the same as when importing. Folder names may contain letters, digits, spaces and `.` `_` `@` `+` `-`, and branch names letters, digits and `.` `_` `-`. Built-in templates and templates created without a source URL cannot be refreshed: `--all` skips them, and the Web UI does not offer a refresh for them. The Hub checks the source URL each time, refuses URLs that include a username or password, and limits how large the download and the extracted folder may be and how many entries the folder may contain (directories count toward this limit as well as files). A refresh writes only into the named template, even when the source folder holds several: it uses the one folder named after the template's name or slug, refuses a source with none or more than one such folder, and never creates a new template. A refresh does not touch harness-configs: a `harness-configs/` folder inside the template's source is stored as part of the template's files, but no Hub harness-config is created or updated from it. It needs the same permission as importing a template into that scope. A source in a private repository needs a repository credential in the template's scope, the same one importing would use (see [Template and Harness-Config Imports](/scion/hosted/user/secrets/#template-and-harness-config-imports)). With `--all`, each template's refresh has its own time limit.
 
 The Web UI offers the same action as **Refresh from Source** on a template's detail page, and **Refresh All from Source** on the templates list, which refreshes a few templates at a time. The detail page shows the stored source without any username or password; sources that are not web URLs are shown as "non-web source".
 

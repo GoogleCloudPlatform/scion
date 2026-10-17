@@ -192,13 +192,16 @@ func TestAgentCreateDeliverIDs_NonDeliverControl(t *testing.T) {
 
 // expectedReadsBeforeDeliverEligibility is the edge-read order of an agent
 // create up to the parent's delivery-eligibility read: the create
-// authorization walk, the creating agent's standing check
+// authorization walk (walkDelegationChainHops, the frame that reads the
+// edges for every walk entry point), the creating agent's standing check
 // (ptone/scion#3433), then the parent's active edge and its coverage.
 var expectedReadsBeforeDeliverEligibility = []string{
-	"walkDelegationChainWithCause",
+	"walkDelegationChainHops",
 	"resolveChainRoot",
 	"agentSourceEffectCeiling",
-	"ceilingFilteredAgentScopes",
+	// The coverage read: the chain filter without the test-admin clamp
+	// (admin tier A3 keeps the clamp out of child edges).
+	"chainFilteredAgentScopes",
 }
 
 // edgeReadCaller names the innermost marker function on the stack of an
@@ -206,9 +209,10 @@ var expectedReadsBeforeDeliverEligibility = []string{
 func edgeReadCaller() string {
 	markers := []string{
 		"parentDeliverEligibility",
+		"chainFilteredAgentScopes",
 		"ceilingFilteredAgentScopes",
 		"agentSourceEffectCeiling",
-		"walkDelegationChainWithCause",
+		"walkDelegationChainHops",
 		"AuthorizeAgentToken",
 		"resolveChainRoot",
 	}

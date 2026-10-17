@@ -37,6 +37,9 @@ import (
 //	PATCH  /api/v1/projects/{id}/visitors/{visitorId}  replace a grant's window
 //	DELETE /api/v1/projects/{id}/visitors/{visitorId}  revoke a grant
 //
+// The visitor rule routes (by email domain) live under /visitors/rules
+// (handlers_project_visitor_rules.go).
+//
 // {visitorId} is the federated account ID. Every route answers 404 while
 // the federation.project_visitors experiment is off, needs an interactive
 // session (or dev) credential, and needs project.manage_visitors on the
@@ -88,7 +91,18 @@ type ProjectVisitor struct {
 	NotBefore      *time.Time `json:"notBefore,omitempty"`
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
+	// Source is how the visitor holds the grant: "email" for a grant by
+	// email (POST /visitors), or "rule" for a binding a visitor rule
+	// created, whose ID is SourceRuleID.
+	Source       string `json:"source"`
+	SourceRuleID string `json:"sourceRuleId,omitempty"`
 }
+
+// Values of ProjectVisitor.Source.
+const (
+	projectVisitorSourceEmail = "email"
+	projectVisitorSourceRule  = "rule"
+)
 
 // ListProjectVisitorsResponse is the GET /visitors response.
 type ListProjectVisitorsResponse struct {
@@ -119,6 +133,20 @@ var (
 	errVisitorAccountRace = errors.New("federated account created concurrently")
 )
 
+// errVisitorGrantedByRule marks a grant by email to an account that is
+// already a visitor of the project through a visitor rule; the add
+// handler answers it with 409 and visitorGrantedByRuleMessage.
+var errVisitorGrantedByRule = errors.New("the account is already a visitor of this project through a visitor rule")
+
+// visitorGrantedByRuleMessage is the 409 message of a grant by email to a
+// person who is already a visitor of the project through a visitor rule.
+const visitorGrantedByRuleMessage = "That email already has access to this project through a visitor rule; to keep access independently of the rule, remove the visitor, then grant the email again"
+
+// errVisitorRuleBindingWindow marks a window change of a binding a visitor
+// rule created: its window follows the rule's, so the update handler
+// answers it with 409.
+var errVisitorRuleBindingWindow = errors.New("the visitor's window follows its visitor rule")
+
 // errVisitorWindowNotAmplifiable marks a window change that extends a grant
 // by an actor who does not hold every project-visitor permission; the
 // update handler answers it with 403.
@@ -132,6 +160,10 @@ func (s *Server) handleProjectVisitors(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 	visitorID := strings.TrimPrefix(rest, "/")
+	if ruleRest, ok := strings.CutPrefix(visitorID, projectVisitorRulesSegment); ok && (ruleRest == "" || strings.HasPrefix(ruleRest, "/")) {
+		s.handleProjectVisitorRules(w, r, projectID, strings.TrimPrefix(ruleRest, "/"))
+		return
+	}
 	if strings.Contains(visitorID, "/") {
 		NotFound(w, "Project visitor")
 		return
@@ -164,7 +196,7 @@ func (s *Server) handleProjectVisitors(w http.ResponseWriter, r *http.Request, p
 	case r.Method == http.MethodPatch:
 		s.handleUpdateProjectVisitor(w, r, project, actor, visitorID)
 	default:
-		s.handleRemoveProjectVisitor(w, r, project, visitorID)
+		s.handleRemoveProjectVisitor(w, r, project, actor, visitorID)
 	}
 }
 
@@ -249,6 +281,15 @@ func (s *Server) handleAddProjectVisitor(w http.ResponseWriter, r *http.Request,
 	if !s.visitorGrantNonAmplification(w, ctx, actor, project.ID) {
 		return
 	}
+	// A transport identity (the platform service account or a proxy driver
+	// principal, ptone/scion#4240 WS2) never becomes a hub account, so it
+	// gets no pending visitor account either. Same answer as allow-list add
+	// and invite: the message does not name drivers.
+	if s.isTransportIdentity(email) {
+		logProxyDriverCreateRefusal("project visitor grant", actor.ID(), email)
+		ValidationError(w, proxyDriverPrincipalUserMessage, map[string]interface{}{"field": "email"})
+		return
+	}
 
 	var (
 		visitor ProjectVisitor
@@ -265,6 +306,8 @@ func (s *Server) handleAddProjectVisitor(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusCreated, visitor)
 	case errors.Is(err, errVisitorAlreadyGranted):
 		Conflict(w, "That email is already a visitor of this project for that issuer; change the grant's window instead")
+	case errors.Is(err, errVisitorGrantedByRule):
+		Conflict(w, visitorGrantedByRuleMessage)
 	case errors.Is(err, errVisitorAccountSuspended):
 		Conflict(w, "That visitor account is suspended")
 	case errors.Is(err, errVisitorAccountRace):
@@ -302,6 +345,14 @@ func (s *Server) grantProjectVisitor(ctx context.Context, projectID, actorID, is
 		}
 		if u.Status == store.UserStatusSuspended {
 			return errVisitorAccountSuspended
+		}
+		if _, existing, err := projectVisitorBinding(ctx, tx, projectID, u.ID); err == nil {
+			if existing.SourceRuleID != nil {
+				return errVisitorGrantedByRule
+			}
+			return errVisitorAlreadyGranted
+		} else if !errors.Is(err, store.ErrNotFound) {
+			return err
 		}
 		rb, err := tx.CreateVisitorRoleBinding(ctx, &store.RoleBinding{
 			PrincipalType: store.RoleBindingPrincipalUser,
@@ -350,17 +401,23 @@ func (s *Server) visitorGrantNonAmplification(w http.ResponseWriter, ctx context
 }
 
 // actorHoldsVisitorPermissions reports whether actor holds every
-// permission of the project-visitor role on projectID. An unscoped local
-// platform admin does, as in CanDelegate.
+// permission of the project-visitor role on projectID, decided by
+// CanDelegate for a binding of that role at the project's scope. The
+// descriptor names no grantee: CanDelegate refuses a federated grantee on
+// the paths it gates, and the visitor routes are the path that binds one.
 func (s *Server) actorHoldsVisitorPermissions(ctx context.Context, actor UserIdentity, projectID string) (bool, error) {
-	if IsUnscopedLocalPlatformAdmin(actor) {
-		return true, nil
-	}
 	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
 	if err != nil {
 		return false, err
 	}
-	return s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID).Allowed, nil
+	decision := s.authzService.CanDelegate(ctx, actor, GrantDescriptor{
+		Type:             GrantTypeRoleBinding,
+		RoleDefinitionID: rd.ID,
+		RolePermissions:  rd.Permissions,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projectID,
+	})
+	return decision.Allowed, nil
 }
 
 // visitorWindowExtends reports whether the window (newNotBefore,
@@ -398,16 +455,26 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	var out ProjectVisitor
+	var (
+		out      ProjectVisitor
+		updated  *store.RoleBinding
+		narrowed bool
+	)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		u, before, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
 		if err != nil {
 			return err
 		}
+		if before.SourceRuleID != nil {
+			return errVisitorRuleBindingWindow
+		}
 		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
 			return errVisitorWindowNotAmplifiable
 		}
-		updated, err := tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
+		// The old window admits a time the new one does not: a later or
+		// added start, or an earlier or added expiry.
+		narrowed = visitorWindowExtends(req.NotBefore, req.ExpiresAt, before.NotBefore, before.ExpiresAt)
+		updated, err = tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
 		}
@@ -426,35 +493,39 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorGrantNonAmplificationMessage, nil)
 		return
 	}
+	if errors.Is(err, errVisitorRuleBindingWindow) {
+		Conflict(w, "This visitor's access comes from a visitor rule; change the rule's window instead")
+		return
+	}
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return
+	}
+	// A narrower window can end the visitor's authorization, so once the
+	// change has committed the visitor's conduit streams on the project
+	// are re-checked. A window that only widens ends nothing.
+	if narrowed {
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(updated))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}.
-func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, visitorID string) {
-	ctx := r.Context()
-	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		u, rb, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
-		if err != nil {
-			return err
-		}
-		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
-			return err
-		}
-		subject, err := federationSubjectOf(ctx, tx, u.ID)
-		if err != nil {
-			return err
-		}
-		return writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRevoke, project.ID,
-			visitorAuditSummary(u, rb, subject), nil)
-	})
+// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. The
+// membership service revokes the grant, and for a binding a visitor rule
+// created also excludes the visitor from that rule in the same
+// transaction; once that has committed, the conduit streams of the
+// visitor on the project are re-checked.
+func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, actor UserIdentity, visitorID string) {
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+	removed, err := s.membershipService.RemoveVisitor(r.Context(), project.ID, visitorID, actor.ID())
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(removed))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -561,6 +632,11 @@ func projectVisitorView(u *store.User, rb *store.RoleBinding) ProjectVisitor {
 		NotBefore: rb.NotBefore,
 		ExpiresAt: rb.ExpiresAt,
 		CreatedAt: rb.CreatedAt,
+		Source:    projectVisitorSourceEmail,
+	}
+	if rb.SourceRuleID != nil {
+		v.Source = projectVisitorSourceRule
+		v.SourceRuleID = *rb.SourceRuleID
 	}
 	if u.FederatedEmail != nil {
 		v.Email = *u.FederatedEmail
@@ -608,6 +684,9 @@ func visitorAuditSummary(u *store.User, rb *store.RoleBinding, subject string) m
 	}
 	if subject != "" {
 		out["subject"] = subject
+	}
+	if v.SourceRuleID != "" {
+		out["source_rule_id"] = v.SourceRuleID
 	}
 	if v.NotBefore != nil {
 		out["not_before"] = v.NotBefore.UTC().Format(time.RFC3339)

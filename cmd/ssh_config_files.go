@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
@@ -88,20 +89,25 @@ func sshHostName(label, projectSlug, agentSlug string) string {
 // without user info, query or fragment, are accepted.
 func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if hasSpaceOrControl(endpoint) {
-		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", config.RedactURL(endpoint))
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err)
+		// The parse error quotes the URL; show it without user info.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = config.RedactURL(ue.URL)
+		}
+		return nil, fmt.Errorf("invalid hub endpoint %q: %w", config.RedactURL(endpoint), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", config.RedactURL(endpoint))
 	}
 	if u.Hostname() == "" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", config.RedactURL(endpoint))
 	}
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", config.RedactURL(endpoint))
 	}
 	return u, nil
 }
@@ -470,6 +476,21 @@ func sshShellQuote(s string) string {
 // absolute path; the label, project and agent must be slugs and the endpoint
 // must have no whitespace or control characters.
 func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (string, error) {
+	return renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, sshKnownHostsRef(label))
+}
+
+// renderSSHHostBlockKnown is renderSSHHostBlock with knownHostsRef as the
+// UserKnownHostsFile line, for host files kept outside ~/.ssh/config.d.
+func renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef string) (string, error) {
+	return renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef, "")
+}
+
+// renderSSHHostBlockPinned is renderSSHHostBlockKnown with pinFile, when not
+// empty, passed to scion tunnel as --known-hosts together with the block's
+// HostKeyAlias as --host-key-alias, so its host-key hint reads the pin this
+// block uses. pinFile must be an absolute path. ssh's own check is the same
+// either way.
+func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef, pinFile string) (string, error) {
 	if !filepath.IsAbs(exe) {
 		return "", fmt.Errorf("scion executable path %q is not absolute", exe)
 	}
@@ -482,18 +503,24 @@ func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (st
 	if err := checkSSHNameParts(label, projectSlug, agentSlug); err != nil {
 		return "", err
 	}
+	if pinFile != "" && (!filepath.IsAbs(pinFile) || hasControl(pinFile)) {
+		return "", fmt.Errorf("known-hosts path %q is not a clean absolute path", pinFile)
+	}
 	host := sshHostName(label, projectSlug, agentSlug)
-	proxy := strings.Join([]string{
+	words := []string{
 		sshShellQuote(exe), "tunnel", "--stdio", "--ssh",
 		"--hub", sshShellQuote(endpoint),
 		"--project", sshShellQuote(projectSlug),
-		sshShellQuote(agentSlug),
-	}, " ")
+	}
+	if pinFile != "" {
+		words = append(words, "--known-hosts", sshShellQuote(pinFile), "--host-key-alias", sshShellQuote(host))
+	}
+	proxy := strings.Join(append(words, sshShellQuote(agentSlug)), " ")
 	var b strings.Builder
 	b.WriteString("Host " + host + "\n")
 	b.WriteString("  ProxyCommand " + proxy + "\n")
 	b.WriteString("  HostKeyAlias " + host + "\n")
-	b.WriteString("  UserKnownHostsFile " + sshKnownHostsRef(label) + "\n")
+	b.WriteString("  UserKnownHostsFile " + knownHostsRef + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
 	return b.String(), nil
 }

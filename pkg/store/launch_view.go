@@ -26,7 +26,13 @@ type AgentLaunch struct {
 	Kind      string `json:"kind"` // create | start | restart
 	Step      string `json:"step,omitempty"`
 	Error     string `json:"error,omitempty"`
+	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden (ptone/scion#4666)
 	EndReason string `json:"endReason,omitempty"`
+	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
+	// the resting phase the agent is treated as being in for a later start or
+	// resume (EffectiveRestingPhase), set only when it differs from the
+	// agent's phase.
+	ResumePhase string `json:"resumePhase,omitempty"`
 
 	// Present only while State == "active" (omitted otherwise).
 	Deadline         *time.Time `json:"deadline,omitempty"`
@@ -52,7 +58,11 @@ func ComputeAgentLaunch(a *Agent, now time.Time) *AgentLaunch {
 		Kind:      a.LaunchKind,
 		Step:      a.LaunchStep,
 		Error:     a.LaunchError,
+		Cause:     a.LaunchCause,
 		EndReason: a.LaunchEndReason,
+	}
+	if rest := EffectiveRestingPhase(a); rest != a.Phase {
+		l.ResumePhase = rest
 	}
 	if a.LaunchState == LaunchStateActive && !a.LaunchDeadline.IsZero() {
 		d := a.LaunchDeadline

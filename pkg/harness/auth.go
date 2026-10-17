@@ -17,6 +17,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,7 +53,9 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 		if v, ok := env[key]; ok && v != "" {
 			return v
 		}
-		if localSources {
+		// Names refused for agents (util.IsAgentRefusedHostEnvName) are
+		// never read from the host env.
+		if localSources && !util.IsAgentRefusedHostEnvName(key) {
 			return os.Getenv(key)
 		}
 		return ""
@@ -65,11 +68,7 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 			lookup("GCP_PROJECT"),
 			lookup("ANTHROPIC_VERTEX_PROJECT_ID"),
 		),
-		GoogleCloudRegion: util.FirstNonEmpty(
-			lookup("GOOGLE_CLOUD_REGION"),
-			lookup("CLOUD_ML_REGION"),
-			lookup("GOOGLE_CLOUD_LOCATION"),
-		),
+		GoogleCloudRegion:    resolveVertexLocation(lookup),
 		GoogleAppCredentials: lookup("GOOGLE_APPLICATION_CREDENTIALS"),
 		GCPMetadataMode:      lookup("SCION_METADATA_MODE"),
 	}
@@ -101,6 +100,29 @@ func GatherAuthWithEnv(env map[string]string, localSources bool, authMeta *confi
 	}
 
 	return auth
+}
+
+// resolveVertexLocation returns the Vertex AI location in the shared
+// precedence order GOOGLE_CLOUD_LOCATION > GOOGLE_CLOUD_REGION >
+// CLOUD_ML_REGION (ptone/scion#4719); the harness provisioners
+// (harnesses/scion_harness.py resolve_vertex_location) use the same order.
+// When GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION are both set and differ,
+// it warns once. The container runtime then sets both variables to the
+// returned value (ContainerScriptHarness.ResolveAuth).
+func resolveVertexLocation(lookup func(string) string) string {
+	location := lookup("GOOGLE_CLOUD_LOCATION")
+	region := lookup("GOOGLE_CLOUD_REGION")
+	if location != "" && region != "" && location != region {
+		warnVertexLocationConflict(location, region)
+	}
+	return util.FirstNonEmpty(location, region, lookup("CLOUD_ML_REGION"))
+}
+
+// warnVertexLocationConflict reports a GOOGLE_CLOUD_LOCATION /
+// GOOGLE_CLOUD_REGION conflict. It is a variable so tests can observe it.
+var warnVertexLocationConflict = func(location, region string) {
+	slog.Warn("GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION differ; using GOOGLE_CLOUD_LOCATION",
+		"GOOGLE_CLOUD_LOCATION", location, "GOOGLE_CLOUD_REGION", region)
 }
 
 // HostCredentialFile is a harness-declared credential file found in a home
@@ -559,6 +581,15 @@ func DetectAuthTypeFromGCPIdentityFromConfig(authMeta *config.HarnessAuthMetadat
 // stops resolution there. The GCP-identity leg only runs when neither leg
 // found any autodetect-relevant key at all.
 //
+// The file leg normally wins over the env leg, with one exception
+// (ptone/scion#4559): when the harness's default_type is api-key, the file
+// leg resolves to vertex-ai (a gcloud-adc file credential) and the env leg
+// resolves to api-key, the API key wins. This matches the provisioners of
+// the harnesses it applies to (claude, gemini-cli, grok-build, hermes),
+// which all rank api-key above vertex-ai. Every other file-vs-env pair keeps
+// the file result; antigravity (default_type oauth-token, whose provisioner
+// ranks vertex-ai first) is unaffected.
+//
 // Returns "" only when no file secret, env var, or GCP identity signal
 // resolves anything — callers should apply their own default-type fallback
 // in that case, exactly as RequiredAuthEnvKeysFromConfig and
@@ -568,25 +599,38 @@ func AutoDetectAuthType(authMeta *config.HarnessAuthMetadata, fileSecretNames, e
 		return ""
 	}
 
-	if detected := DetectAuthTypeFromFileSecretsFromConfig(authMeta, fileSecretNames); detected != "" {
-		return detected
-	}
-	if hasAutodetectCandidate(authMeta.Autodetect.Files, fileSecretNames) {
-		// A file credential is present and resolves to default_type — see
-		// the ambiguity explained above. pickAutodetectCandidate only
-		// returns "" here when authMeta.DefaultType is non-empty and among
-		// the matched candidates, so this is never itself empty.
-		return authMeta.DefaultType
-	}
+	fileType := resolveAutodetectLeg(authMeta.DefaultType, authMeta.Autodetect.Files, fileSecretNames)
+	envType := resolveAutodetectLeg(authMeta.DefaultType, authMeta.Autodetect.Env, envKeys)
 
-	if detected := DetectAuthTypeFromEnvVarsFromConfig(authMeta, envKeys); detected != "" {
-		return detected
+	if fileType != "" {
+		if fileType == "vertex-ai" && envType == "api-key" && authMeta.DefaultType == "api-key" {
+			return envType
+		}
+		return fileType
 	}
-	if hasAutodetectCandidate(authMeta.Autodetect.Env, envKeys) {
-		return authMeta.DefaultType
+	if envType != "" {
+		return envType
 	}
 
 	return DetectAuthTypeFromGCPIdentityFromConfig(authMeta, gcpSAAssigned)
+}
+
+// resolveAutodetectLeg returns the auth type one autodetect table resolves
+// for the present keys, or "" when no present key maps to any type. Unlike
+// pickAutodetectCandidate it returns defaultType (the harness default_type,
+// not "") when a present credential resolves to the default type; see
+// AutoDetectAuthType.
+func resolveAutodetectLeg(defaultType string, autodetect map[string]string, presentKeys map[string]struct{}) string {
+	if detected := pickAutodetectCandidate(defaultType, autodetect, presentKeys); detected != "" {
+		return detected
+	}
+	if hasAutodetectCandidate(autodetect, presentKeys) {
+		// pickAutodetectCandidate only returns "" for a present candidate
+		// when defaultType is non-empty and among the matched candidates,
+		// so this is never itself empty.
+		return defaultType
+	}
+	return ""
 }
 
 // hasAutodetectCandidate reports whether any key in presentKeys maps to a

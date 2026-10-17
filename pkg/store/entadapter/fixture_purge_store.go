@@ -106,7 +106,12 @@ func (s *UserStore) ListExpiredTestFixtureUsers(ctx context.Context, q store.Exp
 		return nil, fmt.Errorf("%w: ExpiredAtOrBefore is required", store.ErrInvalidInput)
 	}
 	query := s.client.User.Query().
-		Where(user.KindEQ(user.KindTestFixture), user.ExpiresAtNotNil(), user.ExpiresAtLTE(q.ExpiredAtOrBefore))
+		Where(user.ExpiresAtNotNil(), user.ExpiresAtLTE(q.ExpiredAtOrBefore))
+	if q.IncludeAdminKinds {
+		query = query.Where(user.KindIn(user.KindTestFixture, user.KindTestHubAdmin, user.KindTestSuperAdmin))
+	} else {
+		query = query.Where(user.KindEQ(user.KindTestFixture))
+	}
 	if !q.ExpiredAfter.IsZero() {
 		query = query.Where(user.ExpiresAtGT(q.ExpiredAfter))
 	}

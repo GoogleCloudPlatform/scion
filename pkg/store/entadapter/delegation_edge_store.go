@@ -16,13 +16,11 @@ package entadapter
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -386,10 +384,12 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 // UPDATE) when it is inactive or its updated instant differs from
 // guard.UpdatedAt, and otherwise puts the exact stored value it read into the
 // WHERE as a compare-and-swap: on SQLite the raw text, bound as a string
-// against the column; on Postgres the timestamptz value, which compares as an
-// instant. The raw read runs before the typed read, on the same (possibly
-// transaction-bound) client, so any ent write between them bumps updated
-// and changes the stored value, and the UPDATE matches no row.
+// against the column (rawStoredText, storedTextEQ; shared with
+// TemplateStore.SetTemplateAgentConfig); on Postgres the timestamptz value,
+// which compares as an instant. The raw read runs before the typed read, on
+// the same (possibly transaction-bound) client, so any ent write between
+// them bumps updated and changes the stored value, and the UPDATE matches no
+// row.
 //
 // A missing edge returns ErrNotFound. A guard with both Unrecorded and
 // Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
@@ -408,7 +408,7 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 	var rawUpdated string
 	rawFound := false
 	if guard.UpdatedAt != nil && !pg {
-		rawUpdated, rawFound, err = s.rawUpdatedText(ctx, uid)
+		rawUpdated, rawFound, err = rawStoredText(ctx, s.client.Driver(), delegationedge.Table, delegationedge.FieldID, delegationedge.FieldUpdated, uid)
 		if err != nil {
 			return false, err
 		}
@@ -431,9 +431,7 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 			if !rawFound {
 				return false, nil
 			}
-			preds = append(preds, predicate.DelegationEdge(func(sel *entsql.Selector) {
-				sel.Where(entsql.EQ(sel.C(delegationedge.FieldUpdated), rawUpdated))
-			}))
+			preds = append(preds, predicate.DelegationEdge(storedTextEQ(delegationedge.FieldUpdated, rawUpdated)))
 		}
 	}
 	if guard.Unrecorded {
@@ -461,32 +459,6 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 		return false, mapError(err)
 	}
 	return n == 1, nil
-}
-
-// rawUpdatedText returns the stored text of the updated column of edgeID on
-// SQLite, read through s.client so that inside WithTx it runs on the
-// transaction's connection. found is false when no row has that ID.
-func (s *DelegationEdgeStore) rawUpdatedText(ctx context.Context, uid uuid.UUID) (text string, found bool, err error) {
-	rows := &entsql.Rows{}
-	query := "SELECT CAST(" + delegationedge.FieldUpdated + " AS TEXT) FROM " + delegationedge.Table + " WHERE " + delegationedge.FieldID + " = ?"
-	if err := s.client.Driver().Query(ctx, query, []any{uid}, rows); err != nil {
-		return "", false, mapError(err)
-	}
-	defer func() { _ = rows.Close() }()
-	if !rows.Next() {
-		return "", false, mapError(rows.Err())
-	}
-	var raw sql.NullString
-	if err := rows.Scan(&raw); err != nil {
-		return "", false, mapError(err)
-	}
-	if err := rows.Err(); err != nil {
-		return "", false, mapError(err)
-	}
-	if !raw.Valid {
-		return "", false, nil
-	}
-	return raw.String, true, nil
 }
 
 // ReactivateDelegationEdge reactivates edgeID when it is inactive with cause

@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -209,6 +208,12 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			Forbidden(w)
 			return "", false
 		}
+		// Hub-scope variables and secrets are not available to test
+		// identities with admin roles (test-admin policy).
+		if s.testAdminPolicyRefuses(ctx, "handlers_env_secrets.go:resolveEnvSecretAccess") {
+			Forbidden(w)
+			return "", false
+		}
 		return s.hubID, true
 
 	default:
@@ -239,6 +244,12 @@ func (s *Server) authorizeHubEnvVarList(w http.ResponseWriter, r *http.Request, 
 	identity := GetIdentityFromContext(ctx)
 	userIdent, isUser := identity.(UserIdentity)
 	if !isUser || isNilIdentity(userIdent) || userIdent.Role() == store.UserRoleAdmin {
+		// Test identities with admin roles do not read hub environment
+		// variables (test-admin policy).
+		if isUser && s.testAdminPolicyRefuses(ctx, "handlers_env_secrets.go:authorizeHubEnvVarList") {
+			Forbidden(w)
+			return true, false, false
+		}
 		// Agents, brokers, anonymous callers and legacy admins keep the
 		// existing hub-scope handling in resolveEnvSecretAccess.
 		return true, false, true
@@ -2244,7 +2255,7 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 			Status:     autoBroker.Status,
 			LinkedBy:   autoProvideLinkedBy,
 		}
-		if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
+		if addErr := s.linkProjectProvider(ctx, provider); addErr != nil {
 			s.envSecretLog.Warn("Failed to auto-link broker to project",
 				"broker", autoBroker.Name, "project_id", project.ID, "error", addErr)
 			continue
@@ -2558,19 +2569,21 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 		LinkedBy:   linkedBy,
 	}
 
-	if err := s.store.AddProjectProvider(ctx, provider); err != nil {
+	if err := s.linkProjectProvider(ctx, provider); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	// For linked projects (local directory) on the embedded broker, initialize
 	// the .scion directory so agents and templates directories exist before
-	// the first agent starts. Other brokers manage their own filesystem.
+	// the first agent starts. Other brokers manage their own filesystem, and
+	// the broker's global directory is left to global init.
 	if cleanPath != "" && embedded {
-		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-			slog.Warn("failed to initialize .scion in linked project",
-				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
+		if scionDir, ok := linkedProjectInitDir(cleanPath); ok {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+				slog.Warn("failed to initialize .scion in linked project",
+					"project_id", projectID, "localPath", cleanPath, "error", err.Error())
+			}
 		}
 	}
 

@@ -34,25 +34,42 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// Admin-kind test identities (ptone/scion#4240, admin tier phase A1).
+// Admin-kind test identities (ptone/scion#4240, admin tier phases A1 and
+// A2).
 //
 // POST /api/v1/test-identities/admin issues a short-lived test identity
-// holding a real, expiring system hub-admin binding (kind test_hub_admin,
-// email in store.TestHubAdminEmailDomain) and returns one access token for
-// it. The test_super_admin kind is defined but its issuance answers 404
-// until the admin tier's policy phase (A2) ships and its own gate is on.
+// holding a real, expiring system hub-admin binding (adminRole hub-admin:
+// kind test_hub_admin, email in store.TestHubAdminEmailDomain) or
+// super-admin binding plus the admin role (adminRole super-admin: kind
+// test_super_admin, store.TestSuperAdminEmailDomain), and returns one
+// access token for it. Each kind answers 404 unless the hub started with
+// its level: --test-mode=admin (or above) for hub-admin,
+// --test-mode=super-admin for super-admin. What either kind may do is
+// limited by the test-admin policy (test_admin_policy.go).
 // POST /api/v1/test-identities/admin/revoke-all deletes every admin-kind
 // identity, for a human super-admin session.
 //
-// Both routes answer 404 unless the hub started with the test admin gate
-// on (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
-// hold the kind's capability (test_identity.issue_admin), and be a live
+// Both routes answer 404 unless the hub started with --test-mode=admin or
+// above (test_admin_gate.go). The issuer must be a human (kindForPrincipal),
+// hold the kind's capability (test_identity.issue_admin or
+// test_identity.issue_super_admin), and be a live
 // super-admin through its own current bindings (canIssueTestAdmin). An
 // access-token issuer must present a hub-boundary token carrying exactly
 // the capability's scope, at most testAdminIssuerPATMaxAge old, which is
 // loaded and checked on every issuance. Issuance writes the user row, its
 // binding, the hub grant sync, a test_admin_issue mutation audit and a
 // test admin audit sink line in one transaction.
+//
+// A workload issuer delegation of the kind's scope (phase X4,
+// test_identity_workload_issuer.go) also issues: the request is served as
+// the delegation's grantor within the delegation's one scope. Its caps are
+// keyed on the delegation (the delegation's admin cap, at most 2 test
+// hub-admins or 1 test super-admin), under the same hub-wide caps, and its
+// rate on the delegation. Inside the issuance transaction the delegation is
+// re-read (DEC-3 C2, C3) and the grantor is re-checked as a live human
+// super-admin holding the capability (DEC-3 C1,
+// recheckTestAdminDelegationGrantor). The identity, its audit record and
+// its sink line carry the delegation id.
 
 // Admin-kind lifetimes (admin tier design §4.2). A token never outlives
 // its identity.
@@ -74,8 +91,9 @@ const (
 	// (either kind) one issuer may hold at once.
 	testAdminPerIssuerCap = 1
 	// testAdminHubCap is the number of live admin-kind identities the hub
-	// holds at once.
-	testAdminHubCap = 2
+	// holds at once, counted across every issuer, access token and workload
+	// delegation (raised from 2 to 4 with workload delegation, DEC-7).
+	testAdminHubCap = 4
 	// testSuperAdminHubCap is how many of those may be test_super_admin.
 	testSuperAdminHubCap = 1
 	// Issuance rates per issuer: 6 per hour for hub-admin, 2 per hour for
@@ -109,6 +127,7 @@ const (
 	testAdminRevokeMutation = "test_admin_revoke"
 
 	testAdminReasonIssuerCap       = "admin_issuer_cap_reached"
+	testAdminReasonDelegationCap   = "admin_delegation_cap_reached"
 	testAdminReasonHubCap          = "admin_hub_cap_reached"
 	testAdminReasonSuperAdminCap   = "super_admin_hub_cap_reached"
 	testAdminReasonNotLiveAdmin    = "issuer_not_live_super_admin"
@@ -125,6 +144,7 @@ const (
 
 var (
 	errTestAdminIssuerCap     = errors.New("live test admin identity limit for this issuer reached")
+	errTestAdminDelegationCap = errors.New("live test admin identity limit for this issuer delegation reached")
 	errTestAdminHubCap        = errors.New("live test admin identity limit for this hub reached")
 	errTestSuperAdminHubCap   = errors.New("live test super-admin identity limit for this hub reached")
 	errTestAdminIssuerPAT     = errors.New("issuer access token is not admitted for test admin issuance")
@@ -252,18 +272,50 @@ func testAdminRowRejection(ctx context.Context, kindFn func(context.Context, str
 // row block, from the row it read, and feeds mutation audit labels
 // (auditActorFromContext).
 type testAdminActor struct {
-	Kind               string
+	Kind string
+	// Credential names how the request authenticated: "web_session" for a
+	// token the web server minted for a test identity web session (WS4),
+	// "bearer" for the identity's own access token.
+	Credential         string
 	IssuerID           string
 	IssuerCredentialID string
 	IssuanceID         string
 	PurposeHash        string
+	// IdentityID and ExpiresAt are the identity's user ID and expiry, the
+	// inputs of grant shaping (grantShapingMiddleware).
+	IdentityID string
+	ExpiresAt  time.Time
 }
 
 type testAdminActorKey struct{}
 
-// contextWithTestAdminActor records u's immutable issuance facts on ctx.
-func contextWithTestAdminActor(ctx context.Context, u *store.User) context.Context {
-	a := testAdminActor{Kind: u.Kind}
+// Values of testAdminActor.Credential.
+const (
+	testAdminCredentialBearer     = "bearer"
+	testAdminCredentialWebSession = "web_session"
+)
+
+// testAdminCredentialFor returns testAdminActor.Credential for a hub-issued
+// user token's client type. An admin-kind identity has no OAuth, test-login
+// or refresh path, so its only token with client type web is the one the
+// web server mints per request for its web session
+// (testIdentityAccessToken); its own access token is issued with client
+// type api. The client type is a signed claim, and it is used here for the
+// audit record only, never for an authorization decision.
+func testAdminCredentialFor(clientType ClientType) string {
+	if clientType == ClientTypeWeb {
+		return testAdminCredentialWebSession
+	}
+	return testAdminCredentialBearer
+}
+
+// contextWithTestAdminActor records u's immutable issuance facts on ctx,
+// and how the request authenticated (testAdminCredentialFor).
+func contextWithTestAdminActor(ctx context.Context, u *store.User, credential string) context.Context {
+	a := testAdminActor{Kind: u.Kind, Credential: credential, IdentityID: u.ID}
+	if u.ExpiresAt != nil {
+		a.ExpiresAt = *u.ExpiresAt
+	}
 	if u.IssuedBy != nil {
 		a.IssuerID = *u.IssuedBy
 	}
@@ -297,6 +349,7 @@ func (a testAdminActor) labels() string {
 	return boundedLabelsJSON(map[string]string{
 		"test_tier":            "admin",
 		"kind":                 a.Kind,
+		"credential":           a.Credential,
 		"issuer_id":            a.IssuerID,
 		"issuer_credential_id": a.IssuerCredentialID,
 		"issuance_id":          a.IssuanceID,
@@ -308,16 +361,18 @@ func (a testAdminActor) labels() string {
 // /api/v1/test-identities/admin. Unknown fields are rejected, so no user
 // field (kind, email, expiry, issuer, role) can be bound from a request.
 type CreateTestAdminIdentityRequest struct {
-	// AdminRole is "hub-admin" (or "super-admin", refused with 404 until
-	// the admin tier's policy phase).
+	// AdminRole is "hub-admin" or "super-admin" (404 unless the hub
+	// started with --test-mode=super-admin).
 	AdminRole string `json:"adminRole"`
 	// Purpose is required, 8 to 200 characters.
 	Purpose string `json:"purpose"`
 	// LifetimeSeconds is the identity lifetime. 0 means the kind's
-	// default; at most the kind's cap (60 min for hub-admin).
+	// default; at most the kind's cap (60 min for hub-admin, 30 min for
+	// super-admin).
 	LifetimeSeconds int64 `json:"lifetimeSeconds,omitempty"`
 	// TokenTTLSeconds is the access token lifetime. 0 means the kind's
-	// default (15 min for hub-admin); at most the kind's cap (30 min).
+	// default (15 min for hub-admin, 10 min for super-admin); at most the
+	// kind's cap (30 min for hub-admin, 15 min for super-admin).
 	TokenTTLSeconds int64 `json:"tokenTtlSeconds,omitempty"`
 }
 
@@ -420,13 +475,18 @@ func newTestAdminEmail(kind testAdminKind) (string, error) {
 // (kindForPrincipal), the kind's capability, a live super-admin through
 // its own current bindings (canIssueTestAdmin, DEC-3 C1), and for an
 // access token the server-side token checks (verifyTestAdminIssuerPAT,
-// DEC-3 C2 and C3). It returns the issuer and the access token's ID (""
-// for a session). It writes the response and returns false on refusal.
-func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec testAdminKindSpec) (UserIdentity, string, bool) {
+// DEC-3 C2 and C3). A workload delegation (phase X4) is admitted only with
+// the state its auth arm attached, for the grantor it names, when its one
+// scope is the kind's scope; the caller is then the grantor. It returns the
+// issuer, the issuer credential ID ("" for a session, the access token ID,
+// or the delegation ID) and the workload delegation state (nil unless the
+// request is a workload delegation). It writes the response and returns
+// false on refusal.
+func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec testAdminKindSpec) (UserIdentity, string, *workloadDelegationState, bool) {
 	ctx := r.Context()
 	resource := Resource{Type: permissions.ResourceTestIdentity}
 	action := Action(permissionAction(spec.permission))
-	deny := func(user UserIdentity, reason, detailReason string) (UserIdentity, string, bool) {
+	deny := func(user UserIdentity, reason, detailReason string) (UserIdentity, string, *workloadDelegationState, bool) {
 		if user != nil {
 			logAuthzDenial(r, user, resource, action, reason)
 		}
@@ -435,20 +495,31 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 			details = map[string]interface{}{"reason": detailReason}
 		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "requires "+spec.permission+" permission", details)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok || isNilIdentity(user) {
 		return deny(nil, "", "")
 	}
 	cred := GetCredentialContextFromContext(ctx)
+	var workload *workloadDelegationState
 	switch cred.Kind {
 	case CredentialKindInteractive, CredentialKindDev, CredentialKindUAT:
+	case CredentialKindWorkloadDelegation:
+		st := workloadDelegationCaller(ctx)
+		scoped, isScoped := user.(*ScopedUserIdentity)
+		if st == nil || !isScoped || scoped.ID() != st.delegation.GrantorID || scoped.CredentialID() != st.delegation.ID {
+			return deny(user, "workload delegation state missing or inconsistent", "")
+		}
+		if testIdentityDelegationScopes[st.delegation.Scope].adminKind != spec.kind {
+			return deny(user, "workload delegation scope does not cover this admin kind", "")
+		}
+		workload = st
 	default:
 		return deny(user, "credential kind not admitted for test admin issuance", "")
 	}
@@ -473,7 +544,12 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 		return deny(user, err.Error(), testAdminReasonNotLiveAdmin)
 	}
 	credentialID := ""
-	if cred.Kind == CredentialKindUAT {
+	switch {
+	case workload != nil:
+		// The auth arm checked the delegation (C2, C3); the issuance
+		// transaction checks it again, with C1, under the issuance lock.
+		credentialID = workload.delegation.ID
+	case cred.Kind == CredentialKindUAT:
 		credentialID = cred.ID
 		if scoped, ok := identity.(*ScopedUserIdentity); ok && scoped != nil && scoped.CredentialID() != "" {
 			credentialID = scoped.CredentialID()
@@ -482,7 +558,7 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 			return deny(user, err.Error(), testAdminReasonIssuerPAT)
 		}
 	}
-	return user, credentialID, true
+	return user, credentialID, workload, true
 }
 
 // permissionAction returns the action segment of a permission ID.
@@ -502,6 +578,10 @@ func permissionAction(permissionID string) string {
 // ceiling, so revoking the user's super-admin binding stops the next
 // issuance even while the token is valid.
 func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission string) error {
+	// Test identities never issue (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, userID, "handlers_test_admin_identities.go:canIssueTestAdmin") {
+		return fmt.Errorf("%w: test identities do not issue", errTestAdminIssuerNotLive)
+	}
 	u, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
@@ -517,6 +597,55 @@ func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission strin
 		return fmt.Errorf("%w: no active super-admin binding", errTestAdminIssuerNotLive)
 	}
 	perms, err := s.authzService.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, userID, "", "")
+	if err != nil {
+		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
+	}
+	for _, p := range perms {
+		if p == permission {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: capability not held through current bindings", errTestAdminIssuerNotLive)
+}
+
+// recheckTestAdminDelegationGrantor is DEC-3 C1 inside the issuance
+// transaction of a workload delegation request (phase X4): through tx, and
+// so in the same transaction and under the same issuance lock as the caps
+// and the insert, the delegation's grantor must still be a human (its
+// stored kind), an active user with the stored admin role, hold an active
+// super-admin binding and hold permission through its current bindings.
+// It is canIssueTestAdmin's check, read through the transaction, so a
+// grantor demoted after the request authenticated mints nothing. It returns
+// errTestAdminIssuerNotLive on any failure; a store error is returned as
+// is.
+func (s *Server) recheckTestAdminDelegationGrantor(ctx context.Context, tx store.Store, grantorID, permission string) error {
+	az := s.authzFor(tx)
+	if az == nil {
+		return fmt.Errorf("%w: no authorization service", errTestAdminIssuerNotLive)
+	}
+	// Reads through tx only (no request memo from the outer store).
+	ctx = maskAuthzInputs(ctx)
+	k, err := az.kindForPrincipal(ctx, grantorID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
+	}
+	if !k.isHuman() {
+		return fmt.Errorf("%w: not a human user", errTestAdminIssuerNotLive)
+	}
+	u, err := tx.GetUser(ctx, grantorID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%w: grantor not found", errTestAdminIssuerNotLive)
+	}
+	if err != nil {
+		return err
+	}
+	if u.Status != store.UserStatusActive || u.Role != store.UserRoleAdmin || isReservedTestIdentityEmail(u.Email) {
+		return fmt.Errorf("%w: grantor is not an active admin", errTestAdminIssuerNotLive)
+	}
+	if !az.IsSystemAdmin(ctx, grantorID) {
+		return fmt.Errorf("%w: no active super-admin binding", errTestAdminIssuerNotLive)
+	}
+	perms, err := az.getEffectivePermissions(ctx, store.RoleBindingPrincipalUser, grantorID, "", "")
 	if err != nil {
 		return fmt.Errorf("%w: %v", errTestAdminIssuerNotLive, err)
 	}
@@ -560,8 +689,10 @@ func (s *Server) verifyTestAdminIssuerPAT(ctx context.Context, userID, credentia
 }
 
 // testAdminAuditSummary is the AfterSummary of a test_admin_issue record
-// (DEC-3 C4: the issuer and its credential ID). It never includes a token.
-func testAdminAuditSummary(u *store.User, issuerCredentialID string, tokenTTL time.Duration) string {
+// (DEC-3 C4: the issuer and its credential ID; for a workload delegation
+// request the credential ID is the delegation ID and wl adds the
+// delegation part). It never includes a token.
+func testAdminAuditSummary(u *store.User, issuerCredentialID string, tokenTTL time.Duration, wl *testIdentityWorkloadAudit) string {
 	str := func(p *string) string {
 		if p == nil {
 			return ""
@@ -573,17 +704,18 @@ func testAdminAuditSummary(u *store.User, issuerCredentialID string, tokenTTL ti
 		expiresAt = u.ExpiresAt.UTC().Format(time.RFC3339)
 	}
 	b, _ := json.Marshal(struct {
-		UserID             string `json:"user_id"`
-		Email              string `json:"email"`
-		Kind               string `json:"kind"`
-		Role               string `json:"role"`
-		IssuedBy           string `json:"issued_by"`
-		IssuerCredentialID string `json:"issuer_credential_id"`
-		IssuanceID         string `json:"issuance_id"`
-		Purpose            string `json:"purpose"`
-		ExpiresAt          string `json:"expires_at"`
-		TokenTTLSeconds    int64  `json:"token_ttl_seconds"`
-	}{u.ID, u.Email, u.Kind, u.Role, str(u.IssuedBy), issuerCredentialID, str(u.IssuanceID), str(u.Purpose), expiresAt, int64(tokenTTL / time.Second)})
+		UserID             string                     `json:"user_id"`
+		Email              string                     `json:"email"`
+		Kind               string                     `json:"kind"`
+		Role               string                     `json:"role"`
+		IssuedBy           string                     `json:"issued_by"`
+		IssuerCredentialID string                     `json:"issuer_credential_id"`
+		IssuanceID         string                     `json:"issuance_id"`
+		Purpose            string                     `json:"purpose"`
+		ExpiresAt          string                     `json:"expires_at"`
+		TokenTTLSeconds    int64                      `json:"token_ttl_seconds"`
+		Workload           *testIdentityWorkloadAudit `json:"workload_delegation,omitempty"`
+	}{u.ID, u.Email, u.Kind, u.Role, str(u.IssuedBy), issuerCredentialID, str(u.IssuanceID), str(u.Purpose), expiresAt, int64(tokenTTL / time.Second), wl})
 	return string(b)
 }
 
@@ -606,12 +738,13 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		return
 	}
 	// A kind that is off answers 404, as the whole route does while the
-	// tier is off: the test super-admin kind until its own gate exists.
+	// tier is off: the test super-admin kind on a hub started with
+	// --test-mode=admin.
 	if !s.testAdminTierEnabled(spec.kind) {
 		NotFound(w, "endpoint")
 		return
 	}
-	issuer, issuerCredentialID, ok := s.testAdminIssuer(w, r, spec)
+	issuer, issuerCredentialID, workload, ok := s.testAdminIssuer(w, r, spec)
 	if !ok {
 		return
 	}
@@ -676,21 +809,55 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 	if issuerCredentialID != "" {
 		u.IssuerCredentialID = &issuerCredentialID
 	}
+	// A workload delegation request is capped and rate limited per
+	// delegation (its admin cap, never above the scope's maximum) and
+	// stamps the delegation on the identity; any other request per issuer
+	// user.
+	perCredentialCap, capErr, rateKey := testAdminPerIssuerCap, errTestAdminIssuerCap, issuerID
+	workloadAudit := testIdentityWorkloadAuditOf(ctx)
+	var delegationID string
+	if workload != nil {
+		delegationID = workload.delegation.ID
+		u.IssuerDelegationID = &delegationID
+		perCredentialCap, capErr, rateKey = workload.delegation.MemberCap, errTestAdminDelegationCap, "delegation:"+delegationID
+		if maxCap := testIdentityDelegationScopes[workload.delegation.Scope].maxCap; perCredentialCap > maxCap {
+			perCredentialCap = maxCap
+		}
+	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 
 	var token string
 	var expiresIn int64
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
-		// The member tier's issuance lock serializes both tiers' counts.
+		// The member tier's issuance lock serializes both tiers' counts. On
+		// SQLite it is a no-op: the parallel-mint guarantee rides SQLite's
+		// single writer. On Postgres it is pg_advisory_xact_lock.
 		if err := tx.LockTestFixtureIssuance(ctx); err != nil {
 			return err
 		}
-		n, err := tx.CountLiveTestAdminUsers(ctx, "", issuerID, now)
+		var (
+			n   int
+			err error
+		)
+		if workload != nil {
+			// C2/C3 and C1 inside the lock: a delegation revoked or expired,
+			// or a grantor demoted, since the request authenticated mints
+			// nothing.
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, issuerID, spec.permission); err != nil {
+				return err
+			}
+			n, err = tx.CountLiveTestAdminUsersByDelegation(ctx, delegationID, now)
+		} else {
+			n, err = tx.CountLiveTestAdminUsers(ctx, "", issuerID, now)
+		}
 		if err != nil {
 			return err
 		}
-		if n >= testAdminPerIssuerCap {
-			return errTestAdminIssuerCap
+		if n >= perCredentialCap {
+			return capErr
 		}
 		n, err = tx.CountLiveTestAdminUsers(ctx, "", "", now)
 		if err != nil {
@@ -710,7 +877,7 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		}
 		// The per-issuer rate is charged only once the caps pass, so a
 		// cap-refused attempt does not use up an hourly issuance.
-		if !limiter.Allow(issuerID) {
+		if !limiter.Allow(rateKey) {
 			return errTestAdminRateLimited
 		}
 		rd, err := tx.GetRoleDefinitionByName(ctx, spec.systemRole, store.RoleScopeSystem)
@@ -734,7 +901,7 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			MutationType: testAdminIssueMutation,
 			TargetType:   testIdentityAuditTargetType,
 			TargetID:     u.ID,
-			AfterSummary: testAdminAuditSummary(u, issuerCredentialID, tokenTTL),
+			AfterSummary: testAdminAuditSummary(u, issuerCredentialID, tokenTTL, workloadAudit),
 			Timestamp:    now,
 		}
 		auditActor.ApplyActor(record)
@@ -742,8 +909,10 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			return fmt.Errorf("audit test admin issue: %w", err)
 		}
 		// The sink line is written last, inside the transaction: if it
-		// fails, nothing is issued.
-		if err := s.testAdminAudit.emit(testAdminAuditEventIssue, map[string]any{
+		// fails, nothing is issued. A workload delegation request's line
+		// carries the delegation ID and the workload subject (identifiers
+		// only).
+		line := map[string]any{
 			"test_identity_id":     u.ID,
 			"kind":                 kindStr,
 			"issuer_id":            issuerID,
@@ -753,7 +922,12 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			"expires_at":           expiresAt.UTC().Format(time.RFC3339),
 			"token_ttl_seconds":    int64(tokenTTL / time.Second),
 			"request_id":           logging.RequestIDFromContext(ctx),
-		}); err != nil {
+		}
+		if workload != nil {
+			line["issuer_delegation_id"] = delegationID
+			line["workload_sub"] = workload.sub
+		}
+		if err := s.testAdminAudit.emit(testAdminAuditEventIssue, line); err != nil {
 			return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
 		}
 		return nil
@@ -764,6 +938,15 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 		case errors.Is(err, errTestAdminIssuerCap):
 			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
 				map[string]interface{}{"reason": testAdminReasonIssuerCap, "limit": testAdminPerIssuerCap})
+		case errors.Is(err, errTestAdminDelegationCap):
+			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
+				map[string]interface{}{"reason": testAdminReasonDelegationCap, "limit": perCredentialCap})
+		case errors.Is(err, errTestIdentityDelegationNotLive):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
+		case errors.Is(err, errTestAdminIssuerNotLive):
+			slog.WarnContext(ctx, "test admin issuance refused: grantor no longer a live super-admin", "issuer_id", issuerID, "delegation_id", delegationID)
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "requires "+spec.permission+" permission",
+				map[string]interface{}{"reason": testAdminReasonNotLiveAdmin})
 		case errors.Is(err, errTestAdminHubCap):
 			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(),
 				map[string]interface{}{"reason": testAdminReasonHubCap, "limit": testAdminHubCap})
@@ -788,7 +971,7 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 	}
 
 	slog.InfoContext(ctx, "test admin identity issued", "test_identity_id", u.ID, "issuer_id", issuerID,
-		"kind", kindStr, "issuance_id", issuanceID, "expires_at", expiresAt)
+		"kind", kindStr, "issuance_id", issuanceID, "delegation_id", delegationID, "expires_at", expiresAt)
 	writeJSON(w, http.StatusCreated, TestAdminIdentityTokenResponse{
 		Identity:       testAdminIdentityViewOf(u, req.AdminRole, now),
 		AccessToken:    token,
@@ -805,8 +988,11 @@ var errTestAdminSinkWrite = errors.New("test admin audit sink write failed")
 // handleRevokeAllTestAdminIdentities handles POST
 // /api/v1/test-identities/admin/revoke-all: the emergency stop of admin
 // tier design §3.3, for a human super-admin on an interactive session (or
-// dev credential) only. It deletes every admin-kind identity, live or
-// expired, with its role bindings, group memberships and user-scope data,
+// dev credential) only. It first bumps the session generation of every
+// admin-kind identity, so their browser web sessions end on their next
+// request (WS4), then deletes every admin-kind identity, live or expired,
+// with every grant stamped with its issuance (admin tier A3), its role
+// bindings, group memberships and user-scope data,
 // and writes a test_admin_revoke audit record and sink line for each. An
 // identity the user delete refuses (it owns agents, or is a project's last
 // owner) is instead suspended and stripped of its role bindings in one
@@ -829,6 +1015,12 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
 		return
 	}
+	// Revoke-all is for human super-admins only (test-admin policy, deny).
+	if s.testAdminPolicyRefusesUser(ctx, actor.ID(), "handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities") {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session",
+			map[string]interface{}{"reason": testAdminReasonCallerNotHuman})
+		return
+	}
 	if !s.authzService.IsSystemAdmin(ctx, actor.ID()) {
 		logAuthzDenial(r, actor, Resource{Type: permissions.ResourceTestIdentity}, Action("revoke"), "caller is not a super-admin")
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "revoke-all requires a human super-admin session", nil)
@@ -839,6 +1031,22 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	// End every live browser session of these identities first (WS4): each
+	// row's session generation is bumped, on its own write, before any
+	// delete. A web session snapshots the generation at redeem and is
+	// refused on its next request (page, API or event stream) once the row
+	// moves on, even while the row delete below is still pending or is
+	// refused. It fails closed: if any bump fails, nothing is deleted and
+	// the answer is 503, so revoke-all never reports a revocation that may
+	// have left a live session behind. A row already gone needs no bump.
+	for i := range users {
+		if err := s.store.IncrementSessionGeneration(ctx, users[i].ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.ErrorContext(ctx, "test admin revoke-all: session generation bump failed; no identity deleted or suspended", "test_identity_id", users[i].ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"test admin revoke-all could not end every identity's web sessions; no identity was deleted or suspended; retry", nil)
+			return
+		}
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
 	now := s.testIdentities.clock()
@@ -898,6 +1106,20 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 			return fmt.Errorf("%w: %v", errTestAdminSinkWrite, err)
 		}
 		return nil
+	}
+	// The grants the identity handed out (stamped with its issuance, admin
+	// tier A3) end first. Its stamped resources (agents, projects) stay
+	// for the purge route, which also removes any grant left here.
+	if u.IssuanceID != nil && *u.IssuanceID != "" {
+		report := &TestIdentityPurgeReport{IdentityID: u.ID}
+		run := fixturePurgeRun{rootID: u.ID, user: u, issuanceID: *u.IssuanceID, trigger: testAdminRevokeMutation, actor: auditActor}
+		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: auditActor.CorrelationID, Trigger: testAdminRevokeMutation}
+		if u.IssuedBy != nil {
+			run.issuerID, basis.IssuerID = *u.IssuedBy, *u.IssuedBy
+		}
+		if err := s.purgeTestAdminGrants(ctx, run, basis, report); err != nil {
+			return "", err
+		}
 	}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := deleteUserRowCascadeTx(ctx, tx, u.ID, s.membershipNow()); err != nil {

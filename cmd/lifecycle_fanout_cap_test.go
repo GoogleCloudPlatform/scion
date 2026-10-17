@@ -33,9 +33,6 @@ import (
 // ptone/scion#3755: suspend --all --format json now exits non-zero (with no
 // extra error banner) on partial failure, like stop --all, while the JSON
 // document and text mode are unchanged; with no failures it exits zero.
-//
-// The local stopAllAgents/suspendAllAgents paths use the same boundedFanOut
-// call but are not tested here because they need a real runtime.
 
 const lifecycleFanOutTotal = 40
 

@@ -54,11 +54,24 @@ type MaintenanceExecutor interface {
 	Run(ctx context.Context, logger io.Writer, params map[string]string) error
 }
 
+// HubSettingSectionUpdateAvailable is the hub_settings section key used to
+// store the latest detected release update for the admin UI.
+const HubSettingSectionUpdateAvailable = "system.update_available"
+
 // SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
 // to the per-instance hub ID namespace in GCP Secret Manager.
 type SecretMigrationExecutor struct {
 	store         store.Store
 	secretBackend secret.SecretBackend
+}
+
+// NewSecretMigrationExecutor returns a SecretMigrationExecutor that reads
+// secrets from s and migrates them in backend.
+func NewSecretMigrationExecutor(s store.Store, backend secret.SecretBackend) *SecretMigrationExecutor {
+	return &SecretMigrationExecutor{
+		store:         s,
+		secretBackend: backend,
+	}
 }
 
 // SecretMigrationResult holds the outcome of a secret migration run.
@@ -167,6 +180,25 @@ type PullImagesExecutor struct {
 	harnesses  []string // harness names (e.g., "claude", "antigravity")
 }
 
+// PullImagesOptions configures a PullImagesExecutor. Zero values are kept
+// as-is; Run applies its own defaults.
+type PullImagesOptions struct {
+	RuntimeBin string   // "docker", "podman", or "container"
+	Registry   string   // image registry prefix
+	Tag        string   // image tag (default "latest")
+	Harnesses  []string // harness names (e.g., "claude", "antigravity")
+}
+
+// NewPullImagesExecutor returns a PullImagesExecutor configured from opts.
+func NewPullImagesExecutor(opts PullImagesOptions) *PullImagesExecutor {
+	return &PullImagesExecutor{
+		runtimeBin: opts.RuntimeBin,
+		registry:   opts.Registry,
+		tag:        opts.Tag,
+		harnesses:  opts.Harnesses,
+	}
+}
+
 func (e *PullImagesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.pull-images")
 
@@ -242,6 +274,25 @@ type RebuildServerExecutor struct {
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
 	binaryDest  string // install path (e.g., /usr/local/bin/scion)
 	serviceName string // systemd service name (e.g., "scion-hub")
+}
+
+// RebuildServerOptions configures a RebuildServerExecutor. Zero values are
+// kept as-is; Run applies its own defaults.
+type RebuildServerOptions struct {
+	RepoPath    string // path to scion source checkout
+	RepoBranch  string // git branch to checkout before building (empty = stay on current)
+	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
+	ServiceName string // systemd service name (e.g., "scion-hub")
+}
+
+// NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
+func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
+	return &RebuildServerExecutor{
+		repoPath:    opts.RepoPath,
+		repoBranch:  opts.RepoBranch,
+		binaryDest:  opts.BinaryDest,
+		serviceName: opts.ServiceName,
+	}
 }
 
 func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -367,6 +418,21 @@ type RebuildWebExecutor struct {
 	repoBranch string // git branch to checkout before building (empty = stay on current)
 }
 
+// RebuildWebOptions configures a RebuildWebExecutor. Zero values are kept
+// as-is; Run applies its own checks.
+type RebuildWebOptions struct {
+	RepoPath   string // path to scion source checkout
+	RepoBranch string // git branch to checkout before building (empty = stay on current)
+}
+
+// NewRebuildWebExecutor returns a RebuildWebExecutor configured from opts.
+func NewRebuildWebExecutor(opts RebuildWebOptions) *RebuildWebExecutor {
+	return &RebuildWebExecutor{
+		repoPath:   opts.RepoPath,
+		repoBranch: opts.RepoBranch,
+	}
+}
+
 func (e *RebuildWebExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-web")
 
@@ -440,6 +506,14 @@ type RebuildContainerBinariesExecutor struct {
 	repoPath string
 }
 
+// NewRebuildContainerBinariesExecutor returns a
+// RebuildContainerBinariesExecutor that builds from the checkout at repoPath.
+func NewRebuildContainerBinariesExecutor(repoPath string) *RebuildContainerBinariesExecutor {
+	return &RebuildContainerBinariesExecutor{
+		repoPath: repoPath,
+	}
+}
+
 func (e *RebuildContainerBinariesExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-container-binaries")
 
@@ -478,6 +552,30 @@ type BuildHarnessConfigImageExecutor struct {
 	registry   string
 	tag        string
 	gcpProject string
+}
+
+// BuildHarnessConfigImageOptions configures a BuildHarnessConfigImageExecutor.
+// Zero values are kept as-is; Run applies its own defaults.
+type BuildHarnessConfigImageOptions struct {
+	Store      store.Store
+	Storage    storage.Storage
+	RuntimeBin string
+	Registry   string
+	Tag        string
+	GCPProject string
+}
+
+// NewBuildHarnessConfigImageExecutor returns a BuildHarnessConfigImageExecutor
+// configured from opts.
+func NewBuildHarnessConfigImageExecutor(opts BuildHarnessConfigImageOptions) *BuildHarnessConfigImageExecutor {
+	return &BuildHarnessConfigImageExecutor{
+		store:      opts.Store,
+		storage:    opts.Storage,
+		runtimeBin: opts.RuntimeBin,
+		registry:   opts.Registry,
+		tag:        opts.Tag,
+		gcpProject: opts.GCPProject,
+	}
 }
 
 func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {
@@ -594,8 +692,8 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 		outputImage = pushImage
 	}
 
-	// Update the harness config's image in the DB so agents
-	// pick up the newly-built image instead of the stale upstream reference.
+	// Record the newly-built image on the harness config (BuiltImage), so
+	// the image status display and checks show it.
 	if err := syncBuiltImage(ctx, e.store, logger, hc, outputImage); err != nil {
 		log.Error("Failed to sync built image back to store", "error", err)
 		_, _ = fmt.Fprintf(logger, "Warning: build succeeded but failed to update harness-config image: %v\n", err)
@@ -606,13 +704,13 @@ func (e *BuildHarnessConfigImageExecutor) Run(ctx context.Context, logger io.Wri
 	return nil
 }
 
-// materializeHarnessConfigFiles downloads all files from a harness config's
-// storage path into the given directory. It is shared by both the local and
-// Cloud Build executors.
+// materializeHarnessConfigFiles downloads all files of a harness config (its
+// blobs, or its path objects for a legacy row) into the given directory. It
+// is shared by both the local and Cloud Build executors.
 func materializeHarnessConfigFiles(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, destDir string, logger io.Writer) error {
 	_, _ = fmt.Fprintf(logger, "Materializing %d file(s) from harness-config %q...\n", len(hc.Files), hc.Name)
 	for _, f := range hc.Files {
-		objectPath := hc.StoragePath + "/" + f.Path
+		objectPath := harnessConfigFileObjectPath(hc, f)
 		reader, _, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			return fmt.Errorf("failed to download %q from storage: %w", f.Path, err)
@@ -920,20 +1018,22 @@ func deriveImageBaseName(hc *store.HarnessConfig) string {
 	return hc.Name
 }
 
-// syncBuiltImage updates the harness config's DB record to reference the
-// newly-built image without modifying config.yaml in storage. The image field
-// in config.yaml is a stable reference; two-phase resolution at agent start
-// prefers local images. This matches the CLI build path's behavior
-// (see cmd/build.go syncBuildToHub).
+// syncBuiltImage records the newly-built image on the harness config's DB
+// record without modifying config.yaml in storage. It writes only the
+// BuiltImage column (store.UpdateHarnessConfigBuiltImage): the built image
+// is operational state, not derived from config.yaml, so it never writes
+// Config.Image, which the commit path derives and would otherwise clear on
+// the next commit (ptone/scion#4219). The image handlers show and check
+// BuiltImage when set (effectiveHarnessConfigImage). The image field in
+// config.yaml stays a stable reference; two-phase resolution at agent start
+// prefers local images. This matches the CLI build path's behavior (see
+// cmd/build.go syncBuildToHub).
 func syncBuiltImage(ctx context.Context, storeDB store.Store, logger io.Writer, hc *store.HarnessConfig, outputImage string) error {
-	if hc.Config == nil {
-		hc.Config = &store.HarnessConfigData{}
-	}
-	hc.Config.Image = outputImage
-	if err := storeDB.UpdateHarnessConfig(ctx, hc); err != nil {
+	if err := storeDB.UpdateHarnessConfigBuiltImage(ctx, hc.ID, outputImage); err != nil {
 		return fmt.Errorf("failed to update harness-config record: %w", err)
 	}
-	_, _ = fmt.Fprintf(logger, "Updated harness-config record image to %s\n", outputImage)
+	hc.BuiltImage = outputImage
+	_, _ = fmt.Fprintf(logger, "Updated harness-config record built image to %s\n", outputImage)
 
 	return nil
 }
@@ -1369,6 +1469,25 @@ type BinaryUpdateExecutor struct {
 	githubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
 	channel     string      // release channel override (empty = detect from current version)
 	store       store.Store // optional — used to clear system.update_available on success
+}
+
+// BinaryUpdateOptions configures a BinaryUpdateExecutor. Zero values are kept
+// as-is; Run applies its own defaults.
+type BinaryUpdateOptions struct {
+	ServiceName string      // systemd service name (e.g., "scion-hub")
+	GitHubRepo  string      // GitHub repo for release lookups (e.g., "GoogleCloudPlatform/scion")
+	Channel     string      // release channel override (empty = detect from current version)
+	Store       store.Store // optional — used to clear system.update_available on success
+}
+
+// NewBinaryUpdateExecutor returns a BinaryUpdateExecutor configured from opts.
+func NewBinaryUpdateExecutor(opts BinaryUpdateOptions) *BinaryUpdateExecutor {
+	return &BinaryUpdateExecutor{
+		serviceName: opts.ServiceName,
+		githubRepo:  opts.GitHubRepo,
+		channel:     opts.Channel,
+		store:       opts.Store,
+	}
 }
 
 func (e *BinaryUpdateExecutor) Run(ctx context.Context, logger io.Writer, params map[string]string) error {

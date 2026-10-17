@@ -245,6 +245,27 @@ func TestRenderDoctorHealthSummary_TestIdentityLineOnlyWhenEnabled(t *testing.T)
 	line := findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
 	assert.Equal(t, "info", line.Status)
 	assert.Equal(t, "Enabled on this Hub: test identities, test admin identities (2 live admin test identities)", line.Message)
+
+	// A hub that reports its --test-mode level names it in the line.
+	s.Hub.TestMode = "admin"
+	line = findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub (--test-mode=admin): test identities, test admin identities (2 live admin test identities)", line.Message)
+	s.Hub.TestMode = "off"
+	line = findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub: test identities, test admin identities (2 live admin test identities)", line.Message, "off is not named")
+}
+
+func TestRenderDoctorHealthSummary_TestIdentityWebSessionsUnavailableReason(t *testing.T) {
+	s := degradedSummary()
+	s.Hub.TestIdentitiesEnabled = true
+	s.Hub.TestIdentityWebSessionsUnavailableReason = "proxy_auth_without_driver_principals"
+	line := findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub: test identities; test identity web sessions unavailable: proxy_auth_without_driver_principals", line.Message)
+
+	s.Hub.TestIdentityWebSessionsEnabled = true
+	s.Hub.TestIdentityWebSessionsUnavailableReason = ""
+	line = findCheck(t, renderDoctorHealthSummary(&s, false), "test-identities")
+	assert.Equal(t, "Enabled on this Hub: test identities, test identity web sessions", line.Message)
 }
 
 func TestRenderDoctorHealthSummary_ServiceAccountCheck(t *testing.T) {

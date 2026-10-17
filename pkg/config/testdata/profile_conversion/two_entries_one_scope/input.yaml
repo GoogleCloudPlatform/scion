@@ -1,0 +1,19 @@
+schema_version: "1"
+runtimes:
+  cluster-a:
+    type: kubernetes
+    context: prod
+    namespace: agents
+    priority_class_name: high
+  cluster-b:
+    type: k8s
+    context: prod
+    namespace: agents
+    priority_class_name: high
+    shared_dir_size: 30Gi
+profiles:
+  a:
+    runtime: cluster-a
+    shared_dir_size: 30Gi
+  b:
+    runtime: cluster-b

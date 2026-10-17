@@ -41,8 +41,10 @@ var artifactShareCmd = &cobra.Command{
 link can open the artifact's current version in a browser without signing
 in, until the link expires or is revoked. The link is shown only once.
 
-Only the artifact's owner, or a user it granted admin, can share it.
-Agents cannot create share links.
+Only the artifact's owner, or a user it granted admin, can share it. On
+an artifact owned by an agent, the user who delegated to the agent (while
+they hold a role in its home project) and the home project's owners can
+too. Agents cannot create share links.
 
 Examples:
   scion artifact share scion://artifact/5f1c2d3e-...             # default lifetime (7 days unless the hub says otherwise)
@@ -52,13 +54,13 @@ Examples:
   scion artifact share scion://artifact/5f1c2d3e-... --revoke <link-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		settings, client, err := requireArtifactHubClient()
+		_, client, endpoint, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 		defer cancel()
-		return shareArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), args[0],
+		return shareArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), endpoint, args[0],
 			artifactShareTTL, artifactShareList, artifactShareRevoke)
 	},
 }

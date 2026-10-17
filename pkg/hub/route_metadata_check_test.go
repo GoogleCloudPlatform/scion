@@ -256,16 +256,35 @@ func TestRouteMetadataTableVisitorRoutesAreValid(t *testing.T) {
 }
 
 // startNewWithRouteTable runs New with table as the startup route table
-// and returns its error; New must refuse to start.
+// and returns its error. table must fail only the visitor route check, and
+// New must refuse to start with exactly that check's error. A panic in New
+// fails the test: it means New ran past the visitor route check.
 func startNewWithRouteTable(t *testing.T, table map[string]RouteMetadata) error {
 	t.Helper()
+	if err := validateSessionOnlyRoutes(table); err != nil {
+		t.Fatalf("the test route table fails the session-only check: %v", err)
+	}
+	want := validateVisitorRoutes(table)
+	if want == nil {
+		t.Fatal("the test route table passes the visitor route check; want one New refuses")
+	}
 	prev := startupRouteMetadata
 	startupRouteMetadata = func() map[string]RouteMetadata { return table }
 	t.Cleanup(func() { startupRouteMetadata = prev })
 
-	srv, err := New(ServerConfig{}, nil)
+	srv, err := func() (_ *Server, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("New panicked (%v); want it to refuse to start with the visitor route error %q", r, want)
+			}
+		}()
+		return New(ServerConfig{}, nil)
+	}()
 	if err == nil || srv != nil {
-		t.Fatalf("New = %v, %v; want a refusal", srv, err)
+		t.Fatalf("New = %v, %v; want a refusal with the visitor route error %q", srv, err, want)
+	}
+	if err.Error() != want.Error() {
+		t.Fatalf("New err = %q; want the visitor route error %q", err, want)
 	}
 	return err
 }

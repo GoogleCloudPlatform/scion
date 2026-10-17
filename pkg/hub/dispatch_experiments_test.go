@@ -49,6 +49,27 @@ func TestK8sNFSHomeExperiment_Registered(t *testing.T) {
 	}
 }
 
+// hub.agent_plugins is a server-layer experiment, off by default, sent with
+// dispatches so the broker can gate plugin staging and restore.
+func TestAgentPluginsExperiment_Dispatched(t *testing.T) {
+	exp, ok := experiments.Default().Lookup(experiments.AgentPlugins)
+	if !ok {
+		t.Fatalf("%s is not registered", experiments.AgentPlugins)
+	}
+	if exp.Default || !exp.HasLayer(experiments.LayerServer) || exp.HasLayer(experiments.LayerWeb) {
+		t.Errorf("experiment = %+v, want default off, server layer only", exp)
+	}
+
+	on := dispatchExperimentsServer(t, `{"overrides":{"hub.agent_plugins":true}}`)
+	if got := on.dispatchExperiments(); !slices.Equal(got, []string{experiments.AgentPlugins}) {
+		t.Errorf("on: dispatch experiments = %v, want [%s]", got, experiments.AgentPlugins)
+	}
+	off := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_nfs_home":true}}`)
+	if got := off.dispatchExperiments(); slices.Contains(got, experiments.AgentPlugins) {
+		t.Errorf("off: dispatch experiments = %v include %s", got, experiments.AgentPlugins)
+	}
+}
+
 func dispatchExperimentsServer(t *testing.T, raw string) *Server {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
@@ -80,7 +101,7 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 		!slices.Equal(req.Config.HubAgentDefaults.Experiments, []string{experiments.K8sNFSHome}) {
 		t.Fatalf("create dispatch: want experiments [%s], got %+v", experiments.K8sNFSHome, req.Config)
 	}
-	start := startHubAgentDefaults(d.autoExposePortsDefault(), d.dispatchExperiments())
+	start := startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), d.dispatchExperiments(), nil)
 	if start == nil || !slices.Equal(start.Experiments, []string{experiments.K8sNFSHome}) {
 		t.Fatalf("start dispatch: want experiments [%s], got %+v", experiments.K8sNFSHome, start)
 	}
@@ -103,7 +124,7 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 	if got := d.dispatchExperiments(); got != nil {
 		t.Errorf("off by default: want no experiments, got %v", got)
 	}
-	if got := startHubAgentDefaults(nil, d.dispatchExperiments()); got != nil {
+	if got := startHubAgentDefaults(d.hubAgentDefaults(), nil, d.dispatchExperiments(), nil); got != nil {
 		t.Errorf("off: start dispatch must omit the defaults, got %+v", got)
 	}
 }

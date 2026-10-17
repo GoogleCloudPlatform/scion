@@ -124,9 +124,10 @@ scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
 scion hub env set --scope hub --always GOOGLE_CLOUD_REGION=<region>
 ```
 
-(`GOOGLE_CLOUD_LOCATION` is accepted as an equivalent alternative to
-`GOOGLE_CLOUD_REGION`.) Without this, an agent using GCP-identity auth
-(Workload Identity or an assigned service account) fails to start with
+(`GOOGLE_CLOUD_LOCATION` is accepted as an alternative to
+`GOOGLE_CLOUD_REGION`; if both are set, `GOOGLE_CLOUD_LOCATION` wins.)
+Without this, an agent using GCP-identity auth (Workload Identity or an
+assigned service account) fails to start with
 `2 required environment variable(s) are missing: GOOGLE_CLOUD_PROJECT,
 GOOGLE_CLOUD_LOCATION` — the runtime broker's preflight check rejects the
 create before it ever reaches the pod.

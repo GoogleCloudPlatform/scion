@@ -171,8 +171,27 @@ func (s *Server) syncHarnessConfigFromStorage(ctx context.Context, ref HarnessCo
 	}
 	id := hc.ID
 	_, err, _ = repairFlight.Do("hc:"+id, func() (interface{}, error) {
-		return nil, s.syncHarnessConfigFromStorageInner(context.WithoutCancel(ctx), id)
+		return nil, s.syncHarnessConfigFromStorageRetrying(context.WithoutCancel(ctx), id)
 	})
+	return err
+}
+
+// syncHarnessConfigFromStorageRetrying runs the repair, and runs it once
+// more (re-reading the row and re-deriving from storage) when its commit
+// loses the compare-and-swap to a concurrent commit. A second conflict is
+// logged and skipped: the row was just written by another commit, which is
+// newer than anything the repair would write (ptone/scion#4219).
+func (s *Server) syncHarnessConfigFromStorageRetrying(ctx context.Context, id string) error {
+	err := s.syncHarnessConfigFromStorageInner(ctx, id)
+	if !errors.Is(err, store.ErrHarnessConfigConflict) {
+		return err
+	}
+	s.resourceLog.Warn("harness-config repair: harness-config changed during repair; retrying once", "id", id)
+	err = s.syncHarnessConfigFromStorageInner(ctx, id)
+	if errors.Is(err, store.ErrHarnessConfigConflict) {
+		s.resourceLog.Warn("harness-config repair: harness-config changed again during repair; skipping", "id", id)
+		return nil
+	}
 	return err
 }
 
@@ -187,6 +206,16 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 		return fmt.Errorf("harness-config %q not found", id)
 	}
 
+	// A blob row's content cannot drift: each blob is named by its hash and
+	// never overwritten. The shared repair below reads <StoragePath>/<path>,
+	// which a blob row never has, and would drop every entry as "missing",
+	// so blob rows only check and log; they never lose manifest entries
+	// (ptone/scion#4219).
+	if isHarnessConfigBlobLayout(hc) {
+		s.checkHarnessConfigBlobs(ctx, hc)
+		return nil
+	}
+
 	updated, contentHash, changed, err := s.syncResourceFromStorage(
 		ctx, storage.ResourceKindHarnessConfig, hc.Name,
 		hc.StoragePath, hc.Scope, hc.ScopeID, hc.Slug, hc.Files)
@@ -197,11 +226,24 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 		return nil
 	}
 
-	hc.Files = updated
-	hc.ContentHash = contentHash
-	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
+	// Refuse an unusable stored config.yaml before the commit copies
+	// anything into blobs, so a refused repair changes no storage
+	// (ptone/scion#4219). The commit runs the same check again.
+	if err := s.checkLegacyHarnessConfigYAML(ctx, hc, updated); err != nil {
 		return fmt.Errorf("harness-config repair: update DB: %w", err)
 	}
+
+	// Commit the manifest rebuilt from storage. The commit migrates the
+	// legacy row to the blob layout (copying its files from the legacy
+	// path, the computed one for a row without a storage path, which is
+	// where syncResourceFromStorage read them), re-derives Harness and
+	// Config from the stored config.yaml, and writes against the row as
+	// read. A refused commit (an unusable provisioner) leaves the row
+	// unchanged and is returned for the caller to log.
+	if err := s.commitHarnessConfigFiles(ctx, hc, updated, harnessConfigCommitOpts{}); err != nil {
+		return fmt.Errorf("harness-config repair: update DB: %w", err)
+	}
+	contentHash = hc.ContentHash
 	s.resourceLog.Info("harness-config repair: synced DB manifest from storage",
 		"config", hc.Name, "id", hc.ID, "scope", hc.Scope, "scopeId", hc.ScopeID,
 		"contentHash", contentHash)
@@ -356,8 +398,13 @@ func (s *Server) SyncAllHarnessConfigsFromStorage(ctx context.Context) {
 // GCS content for all active templates. With hub-namespaced storage paths,
 // cross-hub interference is eliminated; this sync handles legitimate
 // single-hub mismatches only (interrupted uploads, manual edits, etc.).
+//
+// It then backfills the AgentConfig snapshot of rows that have none
+// (BackfillTemplateAgentConfigs, ptone/scion#4222), after the repair so a
+// row the repair just rewrote is read as rewritten.
 func (s *Server) SyncAllTemplatesFromStorage(ctx context.Context) {
 	s.syncAllResourcesFromStorage(ctx, storage.ResourceKindTemplate)
+	s.BackfillTemplateAgentConfigs(ctx)
 }
 
 func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.ResourceKind) {
@@ -547,4 +594,24 @@ func (s *Server) resolveTemplateForRepair(ctx context.Context, ref TemplateRepai
 		return nil, fmt.Errorf("lookup template %q: %w", ref.Name, err)
 	}
 	return tmpl, nil
+}
+
+// checkLegacyHarnessConfigYAML applies the one content check
+// (unusableProvisionerInYAML) to the config.yaml a legacy row stores at its
+// legacy path, for the manifest files. A manifest without config.yaml, or an
+// object that cannot be read, is left to the commit.
+func (s *Server) checkLegacyHarnessConfigYAML(ctx context.Context, hc *store.HarnessConfig, files []store.TemplateFile) error {
+	stor := s.GetStorage()
+	f, ok := templateFileByPath(files, harnessConfigYAMLPath)
+	if stor == nil || !ok {
+		return nil
+	}
+	data, err := readTemplateObject(ctx, stor, s.harnessConfigLegacyPath(hc)+"/"+f.Path, maxHarnessConfigFileSize)
+	if err != nil {
+		return nil
+	}
+	if perr := unusableProvisionerInYAML(hc.Name, data); perr != nil {
+		return &unusableHarnessConfigError{perr: perr}
+	}
+	return nil
 }

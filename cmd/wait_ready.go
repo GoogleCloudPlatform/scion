@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -125,7 +124,7 @@ func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (ready
 				return p, nil
 			}
 			switch as.Phase {
-			case state.PhaseStopping, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+			case state.PhaseStopping, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 				return p, fmt.Errorf("agent '%s' entered phase %s while waiting for it to accept input", opts.AgentName, p.Phase)
 			}
 			if !announced && opts.Progress != nil {
@@ -185,26 +184,4 @@ func hubReadyProbe(a *hubclient.Agent) readyProbe {
 		return readyProbe{Phase: phase, Activity: activity, LegacyStatus: true}
 	}
 	return readyProbe{Phase: a.Phase, Activity: a.Activity}
-}
-
-// agentLister is the part of the local agent manager --wait-ready needs.
-type agentLister interface {
-	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
-}
-
-// localReadyProbe reads a local agent's phase and activity (from its
-// agent-info.json, via the manager's list).
-func localReadyProbe(mgr agentLister, agentName string) func(ctx context.Context) (readyProbe, error) {
-	return func(ctx context.Context) (readyProbe, error) {
-		agents, err := mgr.List(ctx, nil)
-		if err != nil {
-			return readyProbe{}, err
-		}
-		for _, a := range agents {
-			if a.Name == agentName || a.Slug == agentName {
-				return readyProbe{Phase: a.Phase, Activity: a.Activity}, nil
-			}
-		}
-		return readyProbe{}, fmt.Errorf("agent '%s' not found", agentName)
-	}
 }

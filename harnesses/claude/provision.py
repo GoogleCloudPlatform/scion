@@ -56,8 +56,12 @@ Design references below (section N, Dn) are to
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -111,7 +115,9 @@ AUTH = scion_harness.AuthSpec(
         scion_harness.file_method("auth-file", path=CLAUDE_AUTH_FILE, secret_key="CLAUDE_AUTH"),
         scion_harness.env_method("vertex-ai",
                                  all_of=["GOOGLE_CLOUD_PROJECT"],
-                                 any_of=["GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"],
+                                 # Shared precedence: LOCATION > REGION > CLOUD_ML_REGION.
+                                 # select_auth picks the first present key as env_key.
+                                 any_of=list(scion_harness.vertex_location_keys()),
                                  hint="provide GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION/GOOGLE_CLOUD_REGION/CLOUD_ML_REGION "
                                       "(with ADC or GCP service account) for Vertex AI"),
     ],
@@ -184,18 +190,9 @@ def _detect_claude_version() -> str:
     return ""
 
 
-def _parse_semver(version: str) -> tuple[int, int, int] | None:
-    """Parse a (major, minor, patch) tuple from a version string like '2.1.270'."""
-    if not version:
-        return None
-    core = version.strip().lstrip("v").split("-", 1)[0].split("+", 1)[0]
-    parts = core.split(".")
-    if len(parts) < 3:
-        return None
-    try:
-        return (int(parts[0]), int(parts[1]), int(parts[2]))
-    except ValueError:
-        return None
+# Moved to the shared helper (design 2.1); the alias keeps existing callers
+# and tests working.
+_parse_semver = scion_harness.parse_semver
 
 
 def _requires_opus_5_5_min_version(model: str) -> bool:
@@ -384,6 +381,13 @@ def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.
         env = {"CLAUDE_CODE_OAUTH_TOKEN": _resolve(ctx, "CLAUDE_CODE_OAUTH_TOKEN")}
     elif auth.method == "vertex-ai":
         region_key = auth.env_key or "GOOGLE_CLOUD_REGION"
+        # Read the sources selection and _resolve use: a staged secret file,
+        # else the process env for candidate keys (Claude then reads the
+        # env value through the ${VAR} placeholder).
+        scion_harness.warn_vertex_location_conflict(
+            lambda k: ctx.read_secret(k, env_fallback=k in ctx.env_keys),
+            ctx.warn,
+        )
         env = {
             "CLAUDE_CODE_USE_VERTEX": "1",
             "ANTHROPIC_VERTEX_PROJECT_ID": _resolve(ctx, "GOOGLE_CLOUD_PROJECT"),
@@ -398,6 +402,909 @@ def _build_env_overlay(ctx: scion_harness.ProvisionContext, auth: scion_harness.
     env["DISABLE_AUTOUPDATER"] = "1"
 
     return env
+
+
+# --- Agent Plugins (hub.agent_plugins) ---------------------------------------
+#
+# Route (design 2.5, 3): a pure file write. The staged bundle is copied into
+# Claude's skills dir as ~/.claude/skills/<name>/ with a generated
+# .claude-plugin/plugin.json beside the unchanged bundle files; Claude
+# auto-loads it as <name>@skills-dir. MCP servers are inlined in that manifest,
+# translated from the Go-validated plugins.json mcp.servers entries.
+
+CLAUDE_PLUGINS_MIN_VERSION = (2, 1, 157)  # approximate skills-dir plugin floor (L6)
+CLAUDE_PLUGIN_MANIFEST_DIR = ".claude-plugin"
+AGENT_PLUGIN_MANIFEST = "plugin.json"
+
+# Literal text Claude expands to the plugin's root directory.
+CLAUDE_PLUGIN_ROOT_VAR = "${CLAUDE_PLUGIN_ROOT}"
+
+# The stdio cwd wrapper (design 3.2). cwd, command and args are positional
+# parameters: the shell never re-parses plugin strings.
+STDIO_CWD_WRAPPER = 'cd -- "$1" || exit 127; shift; exec "$@"'
+
+_PLUGIN_PLACEHOLDER_RE = re.compile(r"\$\{PLUGIN_(ROOT|DATA)\}")
+
+# Paths Claude loads by default from a plugin root (claude 2.1.296: probed
+# with `claude plugin details`, and read from the binary's plugin loader).
+# An Agent Plugins bundle gets no Claude component beyond its skills/ and the
+# Go-validated MCP servers in the generated manifest (design 3.1), so these
+# are never installed, and a bundle that ships one gets a warning:
+#   .mcp.json         MCP servers, loaded in addition to manifest mcpServers
+#   .lsp.json         LSP server processes
+#   hooks/            hooks/hooks.json: commands run on Claude events
+#   commands/         slash commands (loaded as skills)
+#   agents/           subagents
+#   monitors/         monitors/monitors.json: unsandboxed background scripts
+#   output-styles/    output styles (change the system prompt)
+#   workflows/        plugin workflows
+#   themes/           themes
+#   settings.json     plugin settings
+#   .claude-plugin/   replaced by the generated manifest
+# Kept: skills/ (the spec component), plugin.json and mcp.json (Claude
+# ignores both), and every other file, which MCP servers may need. bin/ is
+# kept too: stdio commands live there (./bin/x), and Claude appends a
+# plugin's bin/ to the PATH of its Bash tool (append only, so it cannot
+# shadow existing commands).
+# A bundle's root SKILL.md (a dual-packaged bundle for skills-only
+# harnesses) is also not installed: spec 1.0.0 skills live under skills/,
+# and in an owned dir a root SKILL.md must always mean "a skill moved in".
+ROOT_SKILL_FILE = "SKILL.md"
+
+CLAUDE_STRIPPED_PATHS = (
+    ".mcp.json", ".lsp.json", "hooks", "commands", "agents", "monitors",
+    "output-styles", "workflows", "themes", "settings.json",
+)
+
+
+class McpServerSkipped(Exception):
+    """A server that cannot be expressed faithfully in Claude's config."""
+
+
+def _has_foreign_placeholder(value: str, allow_plugin_tokens: bool) -> bool:
+    """True when value holds `${` that Claude would expand but the spec
+    requires to stay literal. With allow_plugin_tokens, exact
+    ${PLUGIN_ROOT}/${PLUGIN_DATA} tokens are fine (they are translated)."""
+    if allow_plugin_tokens:
+        value = _PLUGIN_PLACEHOLDER_RE.sub("", value)
+    return "${" in value
+
+
+def _expand_plugin_placeholders(value: str, root: str, data: str) -> str:
+    """Single-pass, non-recursive expansion (spec 9.2): replacement text is
+    never rescanned."""
+    return _PLUGIN_PLACEHOLDER_RE.sub(lambda m: root if m.group(1) == "ROOT" else data, value)
+
+
+def _translate_cwd(cwd: str | None, root: str, data: str) -> str:
+    if not cwd:
+        return root  # spec 7.2.1: the plugin root
+    if cwd.startswith("./"):
+        rest = cwd[2:].rstrip("/")
+        return f"{root}/{rest}" if rest else root
+    return _expand_plugin_placeholders(cwd, root, data)
+
+
+def _stripped_ref(path: str | None, args_only: bool = False) -> str | None:
+    """The stripped top-level entry a plugin-relative path ("./x/...",
+    "${PLUGIN_ROOT}/x/...") points into, or None. With args_only, only the
+    ${PLUGIN_ROOT}/ form counts (an arg or env value's "./" is relative to
+    the server's cwd, which may not be the root)."""
+    if not path:
+        return None
+    for prefix in (("${PLUGIN_ROOT}/",) if args_only else ("./", "${PLUGIN_ROOT}/")):
+        if path.startswith(prefix):
+            first = os.path.normpath(path[len(prefix):]).split("/", 1)[0]
+            if first in CLAUDE_STRIPPED_PATHS or first == CLAUDE_PLUGIN_MANIFEST_DIR:
+                return first
+    return None
+
+
+def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any]:
+    """Translate one Go-validated mcp.json server into a Claude mcpServers
+    entry (design 3.2). Raises McpServerSkipped when the server holds
+    placeholder-like text Claude would expand, or an unsupported type."""
+    root = CLAUDE_PLUGIN_ROOT_VAR
+    typ = server.get("type")
+    if typ == "stdio":
+        command = server.get("command")
+        if not isinstance(command, str) or not command:
+            raise McpServerSkipped("missing command")
+        args = [a for a in (server.get("args") or []) if isinstance(a, str)]
+        env = {k: v for k, v in (server.get("env") or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        cwd = server.get("cwd") if isinstance(server.get("cwd"), str) else None
+        # The spec does not expand command (or anything outside args, env
+        # and cwd), so any `${` there must stay literal; Claude would
+        # expand it.
+        if (
+            _has_foreign_placeholder(command, False)
+            or any(_has_foreign_placeholder(a, True) for a in args)
+            or any(_has_foreign_placeholder(v, True) for v in env.values())
+            or (cwd is not None and _has_foreign_placeholder(cwd, True))
+        ):
+            raise McpServerSkipped("placeholder")
+        # cwd' is the plugin root, so "./" args are root-relative too.
+        cwd_is_root = cwd in (None, "", "./", "${PLUGIN_ROOT}", "${PLUGIN_ROOT}/")
+        stripped = (
+            _stripped_ref(command)
+            or (_stripped_ref(cwd) if cwd else None)
+            or next((r for r in (_stripped_ref(a, args_only=not cwd_is_root) for a in args) if r), None)
+            or next((r for r in (_stripped_ref(v, args_only=True) for v in env.values()) if r), None)
+        )
+        if stripped:
+            raise McpServerSkipped(f"it uses {stripped}, which is not installed for claude")
+        if command.startswith("./"):
+            command = f"{root}/{command[2:]}"
+        out_env = {k: _expand_plugin_placeholders(v, root, data_dir) for k, v in env.items()}
+        # Set last (spec 9.1), replacing any same-name entry.
+        out_env.pop("PLUGIN_ROOT", None)
+        out_env.pop("PLUGIN_DATA", None)
+        out_env["PLUGIN_ROOT"] = root
+        out_env["PLUGIN_DATA"] = data_dir
+        return {
+            "type": "stdio",
+            "command": "/bin/sh",
+            "args": [
+                "-c", STDIO_CWD_WRAPPER, "sh",
+                _translate_cwd(cwd, root, data_dir),
+                command,
+                *[_expand_plugin_placeholders(a, root, data_dir) for a in args],
+            ],
+            "env": out_env,
+        }
+    if typ in ("streamable-http", "sse"):
+        url = server.get("url")
+        if not isinstance(url, str) or not url:
+            raise McpServerSkipped("missing url")
+        headers = {k: v for k, v in (server.get("headers") or {}).items() if isinstance(k, str) and isinstance(v, str)}
+        # The spec forbids any expansion in url and headers.
+        if _has_foreign_placeholder(url, False) or any(
+            _has_foreign_placeholder(v, False) or _has_foreign_placeholder(k, False) for k, v in headers.items()
+        ):
+            raise McpServerSkipped("placeholder")
+        out: dict[str, Any] = {"type": "http" if typ == "streamable-http" else "sse", "url": url}
+        if headers:
+            out["headers"] = headers
+        return out
+    raise McpServerSkipped(f"unsupported type {typ!r}")
+
+
+def translate_mcp_servers(
+    ctx: scion_harness.ProvisionContext,
+    plugin: scion_harness.AgentPlugin,
+    data_dir: str,
+) -> dict[str, dict[str, Any]]:
+    """Claude mcpServers for plugin, from the Go-validated plugins.json
+    mcp.servers only. Skipped servers are warned about; the rest load."""
+    out: dict[str, dict[str, Any]] = {}
+    for name in sorted(plugin.mcp_servers or {}):
+        try:
+            out[name] = translate_mcp_server(plugin.mcp_servers[name], data_dir)
+        except McpServerSkipped as exc:
+            reason = (
+                "value contains placeholder-like text that Claude would expand"
+                if str(exc) == "placeholder" else str(exc)
+            )
+            ctx.warn(f"agent plugin {plugin.name}: mcp server {name} skipped for claude: {reason}")
+    return out
+
+
+def _warn_invalid_mcp(ctx: scion_harness.ProvisionContext, plugin: scion_harness.AgentPlugin) -> None:
+    """Re-warn the servers Go skipped (plugins.json mcp.invalid)."""
+    mcp = plugin.raw.get("mcp")
+    invalid = mcp.get("invalid") if isinstance(mcp, dict) else None
+    for diag in invalid if isinstance(invalid, list) else []:
+        msg = diag.get("message") if isinstance(diag, dict) else None
+        if isinstance(msg, str) and msg:
+            ctx.warn(f"agent plugin {plugin.name}: {msg}")
+
+
+def claude_plugin_name(name: str) -> str:
+    """The name written to the generated manifest. Spec names are used
+    as-is: Claude 2.1.296 accepts dotted names (smoke L2)."""
+    return name
+
+
+def build_claude_manifest(
+    ctx: scion_harness.ProvisionContext,
+    plugin: scion_harness.AgentPlugin,
+    data_dir: str,
+) -> dict[str, Any]:
+    """The generated .claude-plugin/plugin.json (design 3.1)."""
+    manifest: dict[str, Any] = {"name": claude_plugin_name(plugin.name)}
+    version = plugin.raw.get("version")
+    if isinstance(version, str) and version:
+        manifest["version"] = version
+    description = plugin.raw.get("description")
+    if isinstance(description, str) and description:
+        manifest["description"] = description
+    servers = translate_mcp_servers(ctx, plugin, data_dir)
+    if servers:
+        manifest["mcpServers"] = servers
+    return manifest
+
+
+def _remove_path(path: str) -> None:
+    """Remove path without following a symlink."""
+    if os.path.islink(path) or (os.path.lexists(path) and not os.path.isdir(path)):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+
+
+GENERATED_MANIFEST_REL = f"{CLAUDE_PLUGIN_MANIFEST_DIR}/{AGENT_PLUGIN_MANIFEST}"
+
+
+# Every read or delete under a plugin dir goes through these fd-relative
+# helpers: the plugin dir is opened with O_NOFOLLOW, then each path
+# component with dir_fd and O_NOFOLLOW, so a symlink anywhere below the
+# plugin dir (a replaced file or a replaced ancestor dir) is never followed.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _safe_rel(rel: Any) -> bool:
+    """A recorded path: relative, normalised, not ".", no ".." component,
+    no NUL. Anything else is ignored (never joined onto the plugin dir)."""
+    return (
+        isinstance(rel, str) and bool(rel) and "\x00" not in rel
+        and not os.path.isabs(rel) and os.path.normpath(rel) == rel
+        and rel != "." and ".." not in rel.split(os.sep)
+    )
+
+
+def _open_dir(path: str) -> int | None:
+    """An fd for path when it is a real directory (not a symlink), else None."""
+    try:
+        return os.open(path, _DIR_FLAGS)
+    except OSError:
+        return None
+
+
+def _open_parent(root_fd: int, rel: str) -> tuple[int, str] | None:
+    """(fd of rel's parent dir, rel's last component), walking every
+    ancestor below root_fd with O_NOFOLLOW; None when an ancestor is a
+    symlink, not a dir, or missing. The caller closes the fd."""
+    parts = rel.split(os.sep)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd, parts[-1]
+
+
+def _sha256_at(dir_fd: int, name: str) -> str | None:
+    """sha256 of the regular file name in dir_fd (never through a symlink)."""
+    try:
+        fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _sha256_rel(root: str, rel: str) -> str | None:
+    """sha256 of root/rel when root, every ancestor and the file are real
+    (no symlink anywhere below root), else None."""
+    root_fd = _open_dir(root)
+    if root_fd is None:
+        return None
+    try:
+        parent = _open_parent(root_fd, rel)
+        if parent is None:
+            return None
+        pfd, name = parent
+        try:
+            return _sha256_at(pfd, name)
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(root_fd)
+
+
+def _walk_entries(root: str) -> tuple[list[str], list[str]]:
+    """(files, dirs) under root as sorted relative paths; symlinks are
+    reported as files and never followed."""
+    files: list[str] = []
+    dirs: list[str] = []
+    for cur, dnames, fnames in os.walk(root, followlinks=False):
+        rel = os.path.relpath(cur, root)
+        for d in list(dnames):
+            p = os.path.join(cur, d)
+            r = os.path.normpath(os.path.join(rel, d))
+            if os.path.islink(p):
+                files.append(r)
+                dnames.remove(d)
+            else:
+                dirs.append(r)
+        for fn in fnames:
+            files.append(os.path.normpath(os.path.join(rel, fn)))
+    return sorted(files), sorted(dirs)
+
+
+class ClaudePluginInstaller(scion_harness.PluginInstaller):
+    """Installs Agent Plugins as Claude skills-dir plugins (design 2.5).
+
+    Invariant: Scion deletes only what Scion wrote. install records, in the
+    plugin's native_ref, every file it wrote under ~/.claude/skills/<name>/
+    with its sha256 (the generated .claude-plugin/plugin.json and the root
+    plugin.json included) and every directory. Removal and hand-back delete
+    only recorded files whose content still matches, then prune recorded
+    directories that end up empty. An update moves everything else (runtime
+    output such as __pycache__ or a server's log, a file a user added or
+    edited) into the new copy; it is never deleted.
+
+    Ownership: a dir is Scion's while the plugin is recorded in
+    ~/.scion/agent-plugins/state-claude.json. Only a co-tenant marker makes
+    Scion give it up (hand-back: Scion's files removed, record dropped,
+    warned): Go's skills_dir_conflict, a root SKILL.md (any type; Scion
+    never installs one), or a .claude-plugin/plugin.json that is not the
+    generated one Scion wrote. Other unrecorded content is runtime output.
+    Registration (is_present) is the generated manifest's and the root
+    plugin.json's recorded sha.
+    """
+
+    harness = "claude"
+    cli = "claude"
+    min_version = CLAUDE_PLUGINS_MIN_VERSION
+
+    def __init__(self, ctx: scion_harness.ProvisionContext, claude_version: str | None = None):
+        self.ctx = ctx
+        skills_rel = str(ctx.harness_config.get("skills_dir") or ".claude/skills")
+        self.skills_dir = os.path.join(ctx.home, skills_rel)
+        self.data_root = os.path.join(scion_harness.agent_plugins_dir(), "data")
+        # provision() already ran `claude --version`; reuse it.
+        self._claude_version = claude_version
+        try:
+            desired = scion_harness.read_agent_plugins(ctx)
+        except ValueError:
+            desired = None  # reconcile reports it and changes nothing
+        self.index_ok = desired is not None
+        self.desired = {p.name: p.digest for p in desired or []}
+        self.conflicts = {p.name for p in desired or [] if p.skills_dir_conflict}
+        recorded = self._recorded_plugins()
+        self.owned = set(recorded)
+        # What Scion had recorded at the start of this provision, per plugin.
+        # install judges an owned target against it: reconcile may already
+        # have dropped the record (after an uninstall) by the time install runs.
+        self.refs: dict[str, dict[str, Any]] = {
+            n: rec["native_ref"] for n, rec in recorded.items()
+            if isinstance(rec, dict) and isinstance(rec.get("native_ref"), dict)
+        }
+        self.digests: dict[str, Any] = {
+            n: rec.get("digest") for n, rec in recorded.items() if isinstance(rec, dict)
+        }
+
+    # --- state and paths -------------------------------------------------
+
+    def _state_path(self) -> str:
+        return os.path.join(scion_harness.agent_plugins_dir(), f"state-{self.harness}.json")
+
+    def _pending_path(self) -> str:
+        return os.path.join(scion_harness.agent_plugins_dir(), f"pending-{self.harness}.json")
+
+    def _load_pending(self) -> dict[str, Any]:
+        """Intent records: installs whose swap may have happened without the
+        state save that follows (a crash or the provisioner timeout)."""
+        path = self._pending_path()
+        try:
+            if os.path.islink(path):
+                return {}
+            doc = scion_harness.load_json(path)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(doc, dict) or doc.get("schema_version") != scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION:
+            return {}
+        plugins = doc.get("plugins")
+        return {k: v for k, v in plugins.items() if isinstance(v, dict)} if isinstance(plugins, dict) else {}
+
+    def _save_pending(self, pending: dict[str, Any]) -> None:
+        path = self._pending_path()
+        if not pending:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        scion_harness.atomic_write_json(path, {
+            "schema_version": scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION,
+            "harness": self.harness,
+            "plugins": pending,
+        })
+
+    def _settle_pending(self, recorded: dict[str, Any]) -> bool:
+        """Finish or discard the intent records of interrupted installs.
+        The swap is proven only when the target carries the intent's
+        generated manifest (bytes unique to Scion) at the recorded sha; the
+        intent is then adopted into the state (markers are handled by the
+        stale pass that follows). Without that proof the intent is
+        discarded and the dir and any existing record are left untouched.
+        Returns whether recorded changed."""
+        pending = self._load_pending()
+        if not pending:
+            return False
+        changed = False
+        for name in sorted(pending):
+            entry = pending[name]
+            ref = entry.get("native_ref") if isinstance(entry.get("native_ref"), dict) else {}
+            rec = recorded.get(name) if isinstance(recorded.get(name), dict) else None
+            gen_sha = self._recorded_files(ref).get(GENERATED_MANIFEST_REL)
+            target = self.target(name)
+            if not scion_harness.valid_agent_plugin_name(name) or not gen_sha:
+                continue
+            if rec is not None and rec.get("native_ref") == ref:
+                continue  # the state save happened: confirmed
+            if not self._is_real_dir(target) or _sha256_rel(target, GENERATED_MANIFEST_REL) != gen_sha:
+                continue  # no proof the swap happened: leave everything as it is
+            recorded[name] = {"digest": entry.get("digest"), "version": entry.get("version"), "native_ref": ref}
+            self.owned.add(name)
+            self.refs[name] = ref
+            self.digests[name] = entry.get("digest")
+            changed = True
+            self.ctx.info(f"agent plugin {name}: recorded an install interrupted before its state was saved")
+        self._save_pending({})
+        return changed
+
+    def _recorded_plugins(self) -> dict[str, Any]:
+        """The plugins recorded in the state file; {} when absent or
+        unreadable (reconcile reports an unreadable file)."""
+        path = self._state_path()
+        try:
+            if os.path.islink(path):
+                return {}
+            doc = scion_harness.load_json(path)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(doc, dict) or doc.get("schema_version") != scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION:
+            return {}
+        plugins = doc.get("plugins")
+        return plugins if isinstance(plugins, dict) else {}
+
+    def target(self, name: str) -> str:
+        return os.path.join(self.skills_dir, name)
+
+    def data_dir(self, name: str) -> str:
+        return os.path.join(self.data_root, name)
+
+    @staticmethod
+    def _recorded_files(ref: dict[str, Any]) -> dict[str, str]:
+        files = ref.get("files")
+        if not isinstance(files, dict):
+            return {}
+        return {k: v for k, v in files.items() if _safe_rel(k) and isinstance(v, str)}
+
+    @staticmethod
+    def _recorded_dirs(ref: dict[str, Any]) -> set[str]:
+        dirs = ref.get("dirs")
+        return {d for d in dirs if _safe_rel(d)} if isinstance(dirs, list) else set()
+
+    def _is_real_dir(self, path: str) -> bool:
+        return os.path.isdir(path) and not os.path.islink(path)
+
+    # --- the ownership invariant ----------------------------------------
+
+    def _markers(self, target: str, ref: dict[str, Any]) -> list[str]:
+        """Co-tenant markers in an owned dir: a root SKILL.md of any type
+        (Scion never installs one), or a .claude-plugin that is a symlink or
+        whose plugin.json is not the generated one Scion wrote."""
+        out: list[str] = []
+        if os.path.lexists(os.path.join(target, ROOT_SKILL_FILE)):
+            out.append(ROOT_SKILL_FILE)
+        gen_dir = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
+        gen_sha = self._recorded_files(ref).get(GENERATED_MANIFEST_REL)
+        if os.path.islink(gen_dir):
+            out.append(CLAUDE_PLUGIN_MANIFEST_DIR)
+        elif os.path.lexists(os.path.join(target, GENERATED_MANIFEST_REL)) and \
+                _sha256_rel(target, GENERATED_MANIFEST_REL) != gen_sha:
+            out.append(GENERATED_MANIFEST_REL)
+        return out
+
+    def _runtime_entries(self, target: str, ref: dict[str, Any]) -> list[str]:
+        """What an update must carry into the new copy: unrecorded entries
+        (a whole unrecorded dir counts once) and recorded files whose
+        content changed or that are no longer regular files."""
+        files = self._recorded_files(ref)
+        dirs = self._recorded_dirs(ref)
+        found_files, found_dirs = _walk_entries(target)
+        unrec_dirs = [d for d in found_dirs if d not in dirs]
+        tops = [d for d in unrec_dirs if not any(d.startswith(u + os.sep) for u in unrec_dirs)]
+
+        def under_top(rel: str) -> bool:
+            return any(rel.startswith(t + os.sep) for t in tops)
+
+        out = list(tops)
+        for rel in found_files:
+            if under_top(rel):
+                continue
+            if rel not in files or _sha256_rel(target, rel) != files[rel]:
+                out.append(rel)
+        return sorted(out)
+
+    def _remove_ours(self, target: str, ref: dict[str, Any]) -> None:
+        """Delete the recorded files whose content still matches, then the
+        recorded dirs (deepest first) and the target itself when empty.
+        Every operation is relative to an O_NOFOLLOW fd for the target: an
+        entry below a symlinked or non-dir ancestor is skipped, a symlink is
+        never followed, and unlink/rmdir act on the entry itself."""
+        root_fd = _open_dir(target)
+        if root_fd is None:
+            return
+        try:
+            for rel, sha in sorted(self._recorded_files(ref).items()):
+                parent = _open_parent(root_fd, rel)
+                if parent is None:
+                    continue
+                pfd, name = parent
+                try:
+                    if _sha256_at(pfd, name) == sha:
+                        os.unlink(name, dir_fd=pfd)
+                finally:
+                    os.close(pfd)
+            dirs = sorted(self._recorded_dirs(ref), key=lambda d: d.count(os.sep), reverse=True)
+            for rel in dirs:
+                parent = _open_parent(root_fd, rel)
+                if parent is None:
+                    continue
+                pfd, name = parent
+                try:
+                    os.rmdir(name, dir_fd=pfd)  # only an empty real dir; never a symlink
+                except OSError:
+                    pass
+                finally:
+                    os.close(pfd)
+        finally:
+            os.close(root_fd)
+        try:
+            if self._is_real_dir(target) and not os.listdir(target):
+                os.rmdir(target)
+        except OSError:
+            pass
+
+    def _hand_back(self, name: str, ref: dict[str, Any], why: str) -> None:
+        """Remove only Scion's files from the plugin dir and leave the rest
+        (the caller drops the record). Warns."""
+        target = self.target(name)
+        if self._is_real_dir(target):
+            self._remove_ours(target, ref)
+        left = " (the rest was left in place)" if os.path.lexists(target) else ""
+        self.ctx.warn(f"agent plugin {name}: {why}; removed only the files Scion installed{left}")
+
+    def release_stale(self) -> None:
+        """Runs before reconcile_agent_plugins on every start (it acts even
+        when reconcile later skips for an old CLI: it only ever protects
+        co-tenant content, and the claude route makes no CLI call). Sweeps
+        leftover .<n>.tmp/.<n>.old dirs of owned plugins, settles intent
+        records, then hands back every owned dir that Go flags as a
+        skills_dir_conflict or that holds a co-tenant marker (see _markers):
+        Scion's files are removed, the record is dropped, and a warning is
+        given. Runtime output never triggers a hand-back."""
+        recorded = self._recorded_plugins()
+        self._sweep_leftovers(recorded)
+        if not self.index_ok:
+            return  # an unreadable index: change nothing (reconcile warns)
+        changed = self._settle_pending(recorded)
+        for name in sorted(recorded):
+            rec = recorded[name]
+            if not scion_harness.valid_agent_plugin_name(name) or not isinstance(rec, dict):
+                continue
+            ref = rec.get("native_ref") if isinstance(rec.get("native_ref"), dict) else {}
+            target = self.target(name)
+            if name in self.conflicts:
+                why = f"a skill named {name} now shares its directory"
+            elif not self._is_real_dir(target):
+                continue  # gone: reconcile reinstalls or forgets it
+            else:
+                markers = self._markers(target, ref)
+                if not markers:
+                    continue
+                why = f"{target} now also holds content Scion did not install ({', '.join(markers)})"
+            try:
+                self._hand_back(name, ref, why)
+            except OSError as exc:
+                self.ctx.warn(f"agent plugin {name}: cannot release {target}: {exc}")
+                continue
+            recorded.pop(name)
+            self.owned.discard(name)
+            self.refs.pop(name, None)
+            changed = True
+        if changed:
+            scion_harness.atomic_write_json(self._state_path(), {
+                "schema_version": scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION,
+                "harness": self.harness,
+                "plugins": recorded,
+            })
+
+    def _sweep_leftovers(self, recorded: dict[str, Any]) -> None:
+        """Remove .<n>.tmp / .<n>.old (names only Scion creates) left by an
+        interrupted install of an owned plugin. Runs on every start, so the
+        fast path cleans up too (claude skips hidden skills-dir entries, so
+        they never load)."""
+        for name in sorted(set(recorded) | self.owned):
+            if not scion_harness.valid_agent_plugin_name(name):
+                continue
+            for leftover in (f".{name}.tmp", f".{name}.old"):
+                path = os.path.join(self.skills_dir, leftover)
+                if os.path.lexists(path):
+                    try:
+                        _remove_path(path)
+                    except OSError as exc:
+                        self.ctx.warn(f"agent plugin {name}: cannot remove leftover {path}: {exc}")
+
+    # --- PluginInstaller --------------------------------------------------
+
+    def detect_version(self) -> tuple[int, int, int] | None:
+        if self._claude_version is None:
+            proc = scion_harness.run_cli(
+                ["claude", "--version"],
+                timeout=self.cli_timeout(scion_harness.AGENT_PLUGIN_VERSION_TIMEOUT),
+            )
+            self._claude_version = (proc.stdout or "") if proc.returncode == 0 else ""
+        return scion_harness.parse_semver(self._claude_version)
+
+    def _current_ref(self, name: str) -> dict[str, Any]:
+        if name in self.refs:
+            return self.refs[name]
+        rec = self._recorded_plugins().get(name)
+        ref = rec.get("native_ref") if isinstance(rec, dict) else None
+        return ref if isinstance(ref, dict) else {}
+
+    def _set_intent(self, name: str, entry: dict[str, Any] | None) -> None:
+        pending = self._load_pending()
+        if entry is None:
+            pending.pop(name, None)
+        else:
+            pending[name] = entry
+        self._save_pending(pending)
+
+    @staticmethod
+    def _move_entry(src_root: str, dst_root: str, rel: str) -> None:
+        """Rename src_root/rel to dst_root/rel without following a symlink
+        in src_root below the root (fd-relative source), creating the
+        destination's parent dirs inside dst_root (Scion's own dir)."""
+        src_fd = _open_dir(src_root)
+        if src_fd is None:
+            raise OSError(f"{src_root} is not a real directory")
+        try:
+            parent = _open_parent(src_fd, rel)
+            if parent is None:
+                raise OSError(f"{rel}: a parent in {src_root} is not a real directory")
+            spfd, sname = parent
+            try:
+                dst_parent = os.path.join(dst_root, os.path.dirname(rel))
+                os.makedirs(dst_parent, exist_ok=True)
+                dpfd = _open_dir(dst_parent)
+                if dpfd is None:
+                    raise OSError(f"{dst_parent} is not a real directory")
+                try:
+                    os.rename(sname, os.path.basename(rel), src_dir_fd=spfd, dst_dir_fd=dpfd)
+                finally:
+                    os.close(dpfd)
+            finally:
+                os.close(spfd)
+        finally:
+            os.close(src_fd)
+
+    @staticmethod
+    def _collides(root: str, rel: str) -> bool:
+        """Whether rel cannot be placed in root: it exists there, or an
+        ancestor exists as something other than a real dir."""
+        if os.path.lexists(os.path.join(root, rel)):
+            return True
+        parts = rel.split(os.sep)[:-1]
+        cur = root
+        for part in parts:
+            cur = os.path.join(cur, part)
+            if os.path.lexists(cur) and not (os.path.isdir(cur) and not os.path.islink(cur)):
+                return True
+        return False
+
+    def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
+        name = plugin.name
+        target = self.target(name)
+        # The reason is the whole message: reconcile reports it once.
+        if plugin.skills_dir_conflict:
+            raise scion_harness.PluginInstallError(
+                f"plugin {name} not installed for claude: a skill named {name} is already installed in the skills dir")
+        if os.path.lexists(target) and name not in self.owned:
+            raise scion_harness.PluginInstallError(
+                f"plugin {name} not installed for claude: {target} exists and was not installed by Scion")
+        if os.path.islink(target):
+            raise scion_harness.PluginInstallError(f"{target} is a symlink")
+        replacing = os.path.lexists(target)
+        old_ref = self._current_ref(name) if replacing else {}
+        old_intent = None
+        if replacing:
+            markers = self._markers(target, old_ref)
+            if markers:
+                # The last guard before an update (release_stale normally
+                # handed such a dir back already).
+                self._hand_back(name, old_ref,
+                                f"{target} now also holds content Scion did not install ({', '.join(markers)})")
+                self.owned.discard(name)
+                self.refs.pop(name, None)
+                raise scion_harness.PluginInstallError(
+                    f"plugin {name} not installed for claude: {target} holds content Scion did not install")
+            # reconcile may already have dropped the old record (the update
+            # path). Until this install is in place, an intent record keeps
+            # the old install owned: a failure or crash leaves an intent the
+            # next start adopts (the old generated manifest is the proof).
+            old_intent = {"digest": self.digests.get(name), "version": "", "native_ref": old_ref}
+            self._set_intent(name, old_intent)
+
+        _warn_invalid_mcp(self.ctx, plugin)
+        data_dir = self.data_dir(name)
+        manifest = build_claude_manifest(self.ctx, plugin, data_dir)
+
+        tmp = os.path.join(self.skills_dir, f".{name}.tmp")
+        old = os.path.join(self.skills_dir, f".{name}.old")
+        carried: list[str] = []
+        swapped = False
+
+        def restore() -> None:
+            """Undo a failed install: the original dir back in place, every
+            carried entry back into it, then Scion's tmp dir removed."""
+            if swapped:
+                return
+            if os.path.lexists(old) and not os.path.lexists(target):
+                os.rename(old, target)
+            for rel in reversed(carried):
+                self._move_entry(tmp, target, rel)
+            carried.clear()
+            _remove_path(tmp)
+
+        try:
+            # PLUGIN_DATA (spec 9.1): created before launch, private to the
+            # agent user, kept across updates and removals.
+            if os.path.islink(data_dir):
+                raise OSError(f"{data_dir} is a symlink")
+            os.makedirs(data_dir, mode=0o700, exist_ok=True)
+            os.chmod(data_dir, 0o700)  # not a symlink (checked above)
+            os.makedirs(self.skills_dir, exist_ok=True)
+            for leftover in (tmp, old):  # names only Scion uses
+                _remove_path(leftover)
+            shutil.copytree(plugin.staged_dir, tmp, symlinks=True)
+            for rel in (*CLAUDE_STRIPPED_PATHS, CLAUDE_PLUGIN_MANIFEST_DIR):
+                path = os.path.join(tmp, rel)
+                if os.path.lexists(path):
+                    _remove_path(path)
+                    self.ctx.warn(f"agent plugin {name}: ignored claude-specific {rel} in bundle")
+            root_skill = os.path.join(tmp, ROOT_SKILL_FILE)
+            if os.path.lexists(root_skill):
+                _remove_path(root_skill)
+                self.ctx.warn(
+                    f"agent plugin {name}: ignored root {ROOT_SKILL_FILE} in bundle "
+                    "(Agent Plugins skills live under skills/)")
+            gen = os.path.join(tmp, CLAUDE_PLUGIN_MANIFEST_DIR)
+            os.makedirs(gen)
+            scion_harness.atomic_write_json(os.path.join(gen, AGENT_PLUGIN_MANIFEST), manifest)
+            # Record what Scion writes. Go never stages a symlink; drop any
+            # so every recorded entry is a regular file or a dir.
+            files, dirs = _walk_entries(tmp)
+            recorded: dict[str, str] = {}
+            for rel in files:
+                sha = _sha256_rel(tmp, rel)
+                if sha is None:
+                    _remove_path(os.path.join(tmp, rel))
+                    continue
+                recorded[rel] = sha
+            ref = {"path": target, "files": recorded, "dirs": dirs}
+            if replacing:
+                # Carry runtime output and edits into the new copy; never
+                # delete them. A path the new version also uses blocks the
+                # update (the old version stays installed and owned).
+                runtime = self._runtime_entries(target, old_ref)
+                blocked = [rel for rel in runtime if self._collides(tmp, rel)]
+                if blocked:
+                    shown = ", ".join(blocked[:3]) + (", …" if len(blocked) > 3 else "")
+                    _remove_path(tmp)
+                    raise scion_harness.PluginInstallError(
+                        f"plugin {name} not updated for claude: {target} holds files Scion did not write "
+                        f"at paths the new version uses ({shown}); move them away to update")
+                for rel in runtime:
+                    self._move_entry(target, tmp, rel)
+                    carried.append(rel)
+            # Intent record for the new copy: if the process dies after the
+            # swap but before reconcile saves the state, the next start
+            # adopts it (see _settle_pending).
+            self._set_intent(name, {"digest": plugin.digest, "version": plugin.version, "native_ref": ref})
+            # Atomic swap: old aside, tmp into place.
+            if replacing:
+                os.rename(target, old)
+            os.rename(tmp, target)
+            swapped = True
+        except (OSError, scion_harness.PluginInstallError) as exc:
+            try:
+                restore()
+            except OSError as rexc:
+                self.ctx.warn(f"agent plugin {name}: could not fully undo the failed install: {rexc}")
+            try:
+                self._set_intent(name, old_intent)  # keep the old install owned, or forget
+            except OSError:
+                pass
+            if isinstance(exc, scion_harness.PluginInstallError):
+                raise
+            raise scion_harness.PluginInstallError(f"cannot write {target}: {exc}") from None
+        if replacing:
+            # The old copy now holds only Scion's recorded files (everything
+            # else was carried): remove those; anything left is reported and
+            # the next start sweeps it.
+            try:
+                self._remove_ours(old, old_ref)
+            except OSError:
+                pass
+            if os.path.lexists(old):
+                self.ctx.warn(f"agent plugin {name}: could not fully remove the previous copy {old}")
+        self.owned.add(name)
+        self.refs[name] = ref
+        self.digests[name] = plugin.digest
+        return ref
+
+    def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
+        """Remove the plugin: delete only recorded files whose content still
+        matches, then recorded dirs that end up empty. Anything else
+        (runtime output, a user's files) stays in the dir, which no longer
+        has a manifest, so Claude does not load it. data/<name> is kept
+        (spec 9.1 makes deletion optional). Success is judged by the result:
+        Scion's generated manifest must be gone.
+
+        A plugin that is still desired is being updated (reconcile removes
+        the previous version first): nothing is removed here; install
+        replaces it in place and carries its runtime output over."""
+        if name in self.desired and name in self.owned:
+            return
+        target = self.target(name)
+        if self._is_real_dir(target):
+            try:
+                self._remove_ours(target, native_ref)
+            except OSError as exc:
+                raise scion_harness.PluginInstallError(f"cannot remove {target}: {exc}") from None
+            gen_sha = self._recorded_files(native_ref).get(GENERATED_MANIFEST_REL)
+            if gen_sha and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha:
+                raise scion_harness.PluginInstallError(f"{target} is still present")
+            if os.path.lexists(target):
+                self.ctx.info(f"agent plugin {name}: removed; files Scion did not write remain in {target}")
+        self.owned.discard(name)
+        self.refs.pop(name, None)
+
+    def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
+        """Claude registers a skills-dir plugin by its generated manifest,
+        and the Go skills-dir skips (design 2.7) rely on the root
+        plugin.json: both must be the ones Scion wrote (recorded sha), at the
+        current skills dir, with the data dir in place (spec 9.1: created
+        before launch). A plugin now in conflict with a skill is reported
+        missing."""
+        if name in self.conflicts:
+            return False
+        path = native_ref.get("path")
+        if isinstance(path, str) and path and os.path.normpath(path) != os.path.normpath(self.target(name)):
+            return False
+        files = self._recorded_files(native_ref)
+        gen_sha = files.get(GENERATED_MANIFEST_REL)
+        root_sha = files.get(AGENT_PLUGIN_MANIFEST)
+        target = self.target(name)
+        return (
+            bool(gen_sha) and bool(root_sha) and self._is_real_dir(target)
+            and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha
+            and _sha256_rel(target, AGENT_PLUGIN_MANIFEST) == root_sha
+            and self._is_real_dir(self.data_dir(name))
+        )
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -482,6 +1389,15 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         instructions_file,
         system_prompt_mode="none",
     )
+
+    # Last (design 2.1): install Agent Plugins into the skills dir.
+    try:
+        installer = ClaudePluginInstaller(ctx, claude_version=claude_version)
+        installer.release_stale()
+    except Exception as exc:  # noqa: BLE001 - never fail provisioning for plugins
+        ctx.warn(f"agent plugins: reconcile failed: {exc}")
+        return
+    scion_harness.reconcile_agent_plugins(ctx, installer)
 
 
 if __name__ == "__main__":

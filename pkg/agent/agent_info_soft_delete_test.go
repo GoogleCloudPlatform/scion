@@ -28,18 +28,18 @@ func TestMarkAgentSoftDeleted(t *testing.T) {
 	if err := MarkAgentSoftDeleted(agentName, projectDir, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	st, ok := GetAgentDeleteState(agentName, projectDir)
-	if !ok || st.Phase != "deleted" || !st.DeletedAt.IsZero() {
-		t.Fatalf("after mark without time: %+v ok=%v", st, ok)
+	st := getSavedAgentInfo(agentName, projectDir)
+	if st == nil || st.Phase != "deleted" || !st.DeletedAt.IsZero() {
+		t.Fatalf("after mark without time: %+v", st)
 	}
 
 	at := time.Date(2026, 10, 12, 1, 2, 3, 0, time.UTC)
 	if err := MarkAgentSoftDeleted(agentName, projectDir, at); err != nil {
 		t.Fatal(err)
 	}
-	st, ok = GetAgentDeleteState(agentName, projectDir)
-	if !ok || st.Phase != "deleted" || !st.DeletedAt.Equal(at) {
-		t.Fatalf("after mark with time: %+v ok=%v", st, ok)
+	st = getSavedAgentInfo(agentName, projectDir)
+	if st == nil || st.Phase != "deleted" || !st.DeletedAt.Equal(at) {
+		t.Fatalf("after mark with time: %+v", st)
 	}
 	data, err := os.ReadFile(filepath.Join(agentHome, "agent-info.json"))
 	if err != nil || !strings.Contains(string(data), `"extra": "kept"`) && !strings.Contains(string(data), `"extra":"kept"`) {

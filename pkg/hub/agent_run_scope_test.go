@@ -41,20 +41,19 @@ import (
 
 // --- fakes -------------------------------------------------------------
 
-// fakeAgentRunReader returns agent or err and counts reads.
+// fakeAgentRunReader returns agent's run state or err and counts reads.
 type fakeAgentRunReader struct {
 	agent *store.Agent
 	err   error
 	calls atomic.Int32
 }
 
-func (f *fakeAgentRunReader) GetAgent(context.Context, string) (*store.Agent, error) {
+func (f *fakeAgentRunReader) GetAgentRunState(context.Context, string) (store.AgentRunState, error) {
 	f.calls.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return store.AgentRunState{}, f.err
 	}
-	a := *f.agent
-	return &a, nil
+	return store.AgentRunState{RunID: f.agent.RunID, DeletedAt: f.agent.DeletedAt}, nil
 }
 
 // fakeRunScopeMetrics records outcomes.
@@ -313,7 +312,7 @@ var recordNothing credRecord = func() *string { return nil }
 func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
 	ctx := context.Background()
-	srv.authConfig.AgentRunScope = testRunScopeChecker(agentRunScopeEnforce, time.Now().Add(-time.Hour), s)
+	enforceRunScopeForRefusals(srv, s)
 	h := srv.Handler()
 
 	type cause struct {
@@ -349,6 +348,9 @@ func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 	goneTok := signRunToken(t, srv, s, gone, "run-gone", recordRun("run-gone"))
 	require.NoError(t, s.DeleteAgent(ctx, gone.ID))
 	causes = append(causes, cause{name: "agent-gone", agent: gone, token: goneTok})
+	for _, c := range agentTokenRefusalCases(t, srv, s, project) {
+		causes = append(causes, cause{name: c.name, agent: &store.Agent{ID: c.agentID}, token: c.token, header: c.runHeader})
+	}
 
 	want := httptest.NewRecorder()
 	writeAgentTokenRefused(want)
@@ -367,6 +369,25 @@ func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 				assert.NotContains(t, got.Body, "run-")
 			})
 		}
+	}
+
+	t.Run("development middleware", func(t *testing.T) {
+		dh := DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(http.NotFoundHandler())
+		got := rawOf(agentRequest(t, dh, http.MethodGet, "/api/v1/agents/any", "not-a-token", ""))
+		assert.Equal(t, wantRaw, got)
+	})
+
+	for _, marker := range []bool{true, false} {
+		name := "refresh handler without credential marker"
+		if marker {
+			name = "refresh handler with credential marker"
+		}
+		t.Run(name, func(t *testing.T) {
+			req, agentID := revokedRefreshRequest(t, srv, s, project, "refused-"+name, marker)
+			rec := httptest.NewRecorder()
+			srv.handleAgentTokenRefresh(rec, req, agentID)
+			assert.Equal(t, wantRaw, rawOf(rec))
+		})
 	}
 
 	t.Run("bound token is served", func(t *testing.T) {
@@ -458,11 +479,12 @@ func (f *failingCredentialCreateStore) CreateAgentCredential(ctx context.Context
 }
 
 // TestAgentTokenRefreshRecordFailureIsGeneric500: when the refreshed
-// token's credential cannot be recorded, refresh answers the same generic
-// 500 in every mode, without the cause.
+// token's credential cannot be recorded, refresh answers the 500 every
+// other issuing path answers (writeAgentTokenRecordError) in every mode,
+// without the cause.
 func TestAgentTokenRefreshRecordFailureIsGeneric500(t *testing.T) {
 	want := httptest.NewRecorder()
-	writeError(want, http.StatusInternalServerError, ErrCodeInternalError, "failed to generate refreshed token", nil)
+	require.True(t, writeAgentTokenRecordError(want, errAgentTokenRecord))
 
 	for _, mode := range []agentRunScopeMode{agentRunScopeOff, agentRunScopeObserve, agentRunScopeEnforce} {
 		t.Run(mode.String(), func(t *testing.T) {

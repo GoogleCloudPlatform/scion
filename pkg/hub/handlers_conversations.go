@@ -63,6 +63,10 @@ type createConversationRequest struct {
 	DisplayName string `json:"displayName"`
 	ProjectID   string `json:"projectId"`
 	Kind        string `json:"kind"`
+	// ThreadGroupID optionally files the new conversation into a thread
+	// group of its project (ptone/scion#4424). It is validated before the
+	// conversation is minted.
+	ThreadGroupID string `json:"threadGroupId,omitempty"`
 }
 
 // setDefaultAgentRequest is the request body for setting the default agent.
@@ -759,6 +763,22 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Order (ptone/scion#4424 merge with the message-mode join check): the
+	// agent creator's join check runs first, then the threadGroupId
+	// validation; both run before anything is minted.
+	//
+	// Validate the thread group before anything is minted, so a bad
+	// threadGroupId creates nothing (design ptone/scion#4424 section 2).
+	var threadGroup *store.ThreadGroup
+	if req.ThreadGroupID != "" {
+		g, apiErr := s.threadGroupForNewConversation(ctx, req.ThreadGroupID, req.ProjectID)
+		if apiErr != nil {
+			apiErr.write(w)
+			return
+		}
+		threadGroup = g
+	}
+
 	// kind == "group" from here (direct was rejected above). Route creation
 	// through the same atomic topic-creation path every other native group
 	// mint site uses (design doc: chat-thread-bridge §3), instead of a bare
@@ -812,6 +832,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		} else {
 			participants = append(participants, *participant)
 		}
+	}
+
+	if threadGroup != nil {
+		s.fileNewConversation(ctx, threadGroup, conv.ID, identity.ID())
 	}
 
 	writeJSON(w, http.StatusCreated, conversationResponse{
@@ -1161,17 +1185,35 @@ func (s *Server) handleLeaveConversation(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// authorizeTokenConversationRead is the token rule for reading one
-// conversation, applied after the checks every caller passes: a direct
-// conversation needs inbox:read for the peer agent's project (a hub
+// authorizeTokenConversationRead applies the token rule for reading one
+// conversation (tokenMayReadConversation) after the checks every caller
+// passes, and writes 403 (or the store error) on refusal.
+func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
+	ok, err := s.tokenMayReadConversation(r.Context(), token, s.newSelfScopeCheck(r.Context(), token, permInboxRead), conv)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	if !ok {
+		writeTokenConversationRefusal(w, r, token, permInboxRead)
+		return false
+	}
+	return true
+}
+
+// tokenMayReadConversation is the token rule for reading one conversation,
+// shared by the conversation read routes and the attachment download: a
+// direct conversation needs inbox:read for the peer agent's project (a hub
 // boundary for a direct conversation between users) and agent:read on the
 // peer agent; a group with no project needs inbox:read on a hub boundary.
-// A project group needs only the project:read check it already passed.
-func (s *Server) authorizeTokenConversationRead(w http.ResponseWriter, r *http.Request, token *ScopedUserIdentity, conv *store.Conversation) bool {
+// A project group needs only the project:read check every caller passes.
+// check must be the inbox:read self-scope check of token. A store error is
+// returned.
+func (s *Server) tokenMayReadConversation(ctx context.Context, token *ScopedUserIdentity, check *selfScopeCheck, conv *store.Conversation) (bool, error) {
 	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
-		return true
+		return true, nil
 	}
-	return s.authorizeTokenConversation(w, r, token, permInboxRead, conv)
+	return s.tokenMayUseConversation(ctx, token, check, conv)
 }
 
 // isConversationParticipant checks whether a principal is an active participant

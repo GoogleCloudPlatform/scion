@@ -25,12 +25,13 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 )
 
 // shouldOfferProjectProvider reports whether runtime-broker register should
 // offer to add the newly registered broker as a provider for the current
-// project. It needs a hub-linked project with hub mode on, and the project
+// project. It needs a hub-linked project and a hub endpoint, and the project
 // must not be the global directory: "global" is a local pseudo-project and is
 // never linked to, or created on, the hub (ptone/scion#3534).
 func shouldOfferProjectProvider(projectID string, hubEnabled, isGlobal bool) bool {
@@ -180,6 +181,37 @@ func removeDirIfEmpty(dir string) (bool, error) {
 	return true, nil
 }
 
+// adoptDedupedBrokerID checks the co-located broker's deduplicated ID and
+// saves it to the global hub.brokerId setting. An ID that is not a single
+// path element is an error, and nothing is saved: the caller must not run
+// with it.
+func adoptDedupedBrokerID(globalDir, brokerID string, logf func(string, ...any)) error {
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return fmt.Errorf("deduplicated broker ID: %w", err)
+	}
+	if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
+		logf("Warning: failed to persist deduplicated broker ID: %v", err)
+	}
+	return nil
+}
+
+// recoverEmbeddedBrokerID returns the broker ID recovered from the single
+// embedded broker record and saves it to the global hub.brokerId setting.
+// An ID that is not a single path element is an error, and nothing is
+// saved: the caller must not start with it or substitute another ID.
+func recoverEmbeddedBrokerID(globalDir, embeddedID string, logf func(string, ...any)) (string, error) {
+	if err := brokercredentials.ValidateBrokerIDPathElement(embeddedID); err != nil {
+		return "", fmt.Errorf("recovered broker ID: %w", err)
+	}
+	logf("NOTICE: recovered broker ID %s from database (single embedded broker)", embeddedID)
+	// Persist so we don't re-recover on next boot (writes to both legacy
+	// hub.brokerId and versioned server.broker.broker_id via UpdateSetting).
+	if err := config.UpdateSetting(globalDir, "hub.brokerId", embeddedID, true); err != nil {
+		logf("Warning: failed to persist recovered broker ID to settings: %v", err)
+	}
+	return embeddedID, nil
+}
+
 // brokerLocalStatePaths lists the broker-local state that
 // 'runtime-broker deregister --purge-local' removes for brokerID: the
 // standalone broker daemon log, the broker's state directory and the broker
@@ -189,7 +221,7 @@ func removeDirIfEmpty(dir string) (bool, error) {
 // directory the broker keeps its state under (~/.scion).
 func brokerLocalStatePaths(globalDir, scionHome, brokerID string) []string {
 	paths := []string{daemon.GetLogPath(globalDir)}
-	if brokerID != "" && brokerID == filepath.Base(brokerID) && brokerID != "." && brokerID != ".." {
+	if brokercredentials.ValidateBrokerIDPathElement(brokerID) == nil {
 		paths = append(paths, filepath.Join(scionHome, "runtime-broker-state", brokerID))
 	}
 	return append(paths, filepath.Join(scionHome, "cache", "templates"))
