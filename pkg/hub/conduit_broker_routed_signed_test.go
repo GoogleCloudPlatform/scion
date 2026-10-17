@@ -35,9 +35,11 @@ import (
 
 // TestRoutedBrokerRPC_SignedForTheSession: each routed attempt carries the
 // hub's signature and names, in a signed header, the session it is sent
-// on; a retry on another session is signed again for that session.
+// on; a retry on another session is signed again for that session. The
+// two sessions are on two relays, each current on its own, so the retry
+// reaches the other session as soon as the first loses its result.
 func TestRoutedBrokerRPC_SignedForTheSession(t *testing.T) {
-	f := newRoutedBrokerFixture(t, nil)
+	f, hubB := newTwoRelayRoutedFixture(t)
 	var mu sync.Mutex
 	seen := map[*routedTestBroker][]map[string]string{}
 	record := func(b **routedTestBroker) func(context.Context, string, *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope {
@@ -62,7 +64,7 @@ func TestRoutedBrokerRPC_SignedForTheSession(t *testing.T) {
 	var b1, b2 *routedTestBroker
 	b1 = f.dialRoutedBroker(t, routedBrokerOpts{answer: record(&b1), interceptor: dropOnce(&p1)})
 	p1.Store(&b1.ls)
-	b2 = f.dialRoutedBroker(t, routedBrokerOpts{answer: record(&b2), interceptor: dropOnce(&p2)})
+	b2 = f.dialRoutedBrokerOn(t, hubB, routedBrokerOpts{answer: record(&b2), interceptor: dropOnce(&p2)})
 	p2.Store(&b2.ls)
 
 	require.NoError(t, f.client.CleanupProject(context.Background(), f.brokerID, "", "proj-a", "p1"))

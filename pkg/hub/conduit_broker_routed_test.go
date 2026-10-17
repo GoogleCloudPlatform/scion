@@ -18,10 +18,12 @@ package hub
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,6 +152,40 @@ type routedBrokerOpts struct {
 // and returns once the hub registered it.
 func (f *routedBrokerFixture) dialRoutedBroker(t *testing.T, o routedBrokerOpts) *routedTestBroker {
 	t.Helper()
+	b, cfg, hello := f.routedBrokerSession(o)
+	d := &ws.Dialer{
+		URL:    f.wsURL("/api/v1/conduit"),
+		Header: func(context.Context) (http.Header, error) { return f.signedHeaderAs(t, f.brokerID, f.secret), nil },
+	}
+	return f.dialRoutedBrokerWith(t, d, b, cfg, hello)
+}
+
+// dialRoutedBrokerOn opens a broker conduit session as the fixture's broker
+// on the second relay x (newTwoRelayRoutedFixture) and returns once the
+// registry lists it.
+func (f *routedBrokerFixture) dialRoutedBrokerOn(t *testing.T, x *routedExtraRelay, o routedBrokerOpts) *routedTestBroker {
+	t.Helper()
+	b, cfg, hello := f.routedBrokerSession(o)
+	return f.dialRoutedBrokerWith(t, &ws.Dialer{URL: "ws" + strings.TrimPrefix(x.public.URL, "http") + "/"}, b, cfg, hello)
+}
+
+// dialRoutedBrokerWith dials b's session through d.
+func (f *routedBrokerFixture) dialRoutedBrokerWith(t *testing.T, d *ws.Dialer, b *routedTestBroker, cfg conduit.Config, hello *conduitv1.Hello) *routedTestBroker {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s, w, err := conduit.Dial(ctx, d, cfg, hello)
+	require.NoError(t, err)
+	b.ls = s.(conduit.LocalSession)
+	b.sessionID = w.GetSessionId()
+	t.Cleanup(func() { _ = b.ls.Close() })
+	f.waitBrokerSession(t, w.GetSessionId())
+	return b
+}
+
+// routedBrokerSession builds the scripted broker, its session config and
+// its Hello from o.
+func (f *routedBrokerFixture) routedBrokerSession(o routedBrokerOpts) (*routedTestBroker, conduit.Config, *conduitv1.Hello) {
 	if o.incarnation == "" {
 		o.incarnation = "proc-1"
 	}
@@ -186,19 +222,75 @@ func (f *routedBrokerFixture) dialRoutedBroker(t *testing.T, o routedBrokerOpts)
 		PrincipalId:   f.brokerID,
 		Capabilities:  &conduitv1.Capabilities{Rpc: o.rpcs, EndpointIncarnation: o.incarnation},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	d := &ws.Dialer{
-		URL:    f.wsURL("/api/v1/conduit"),
-		Header: func(context.Context) (http.Header, error) { return f.signedHeaderAs(t, f.brokerID, f.secret), nil },
-	}
-	s, w, err := conduit.Dial(ctx, d, cfg, hello)
+	return b, cfg, hello
+}
+
+// routedExtraRelay is a second relay on the routed fixture's registry: the
+// relay of another hub node, which the fixture's router reaches through
+// its internal API.
+type routedExtraRelay struct {
+	relay  *relay.Relay
+	public *httptest.Server
+}
+
+// newTwoRelayRoutedFixture is a routed fixture whose relay (hub-a) and a
+// second relay (hub-b) share one registry and one relay-peer secret.
+// hub-b checks its own address at start (RequireSelfCheck), so the
+// fixture's router can reach it. A broker's sessions on two relays are
+// each current at once (design §3.4: a broker session is current while no
+// newer session of the broker exists on its relay), so a request retried
+// after one session fails finds the other eligible, whatever the timing of
+// row deletes.
+func newTwoRelayRoutedFixture(t *testing.T) (*routedBrokerFixture, *routedExtraRelay) {
+	t.Helper()
+	secret := make([]byte, 32)
+	_, err := rand.Read(secret)
 	require.NoError(t, err)
-	b.ls = s.(conduit.LocalSession)
-	b.sessionID = w.GetSessionId()
-	t.Cleanup(func() { _ = b.ls.Close() })
-	f.waitBrokerSession(t, w.GetSessionId())
-	return b
+	peerAuth := func(self string) relay.PeerAuth {
+		a, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: secret, SelfID: self})
+		require.NoError(t, err)
+		return a
+	}
+	f := newRoutedBrokerFixture(t, func(o *ConduitRelayOptions) { o.PeerAuth = peerAuth("hub-a") })
+
+	var internal atomic.Pointer[http.Handler]
+	in := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := internal.Load()
+		if h == nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		(*h).ServeHTTP(w, r)
+	}))
+	t.Cleanup(in.Close)
+	r, err := relay.New(relay.Config{
+		InstanceID:       "hub-b",
+		InternalEndpoint: in.URL,
+		RequireSelfCheck: true,
+		Registry:         registry.New(f.regStore, registry.Config{}),
+		Store:            f.regStore,
+		Session:          conduit.Config{Clock: clock.Real()},
+		GrantKeys:        func(context.Context) ([]*conduitv1.GrantKey, error) { return nil, nil },
+		PeerAuth:         peerAuth("hub-b"),
+		HTTPClient:       in.Client(),
+	})
+	require.NoError(t, err)
+	h := r.InternalHandler()
+	internal.Store(&h)
+	require.NoError(t, r.Start(context.Background()))
+	t.Cleanup(r.Kill)
+
+	x := &routedExtraRelay{relay: r}
+	principal := relay.Principal{Kind: registry.PrincipalBroker, ID: f.brokerID}
+	x.public = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		conn, err := ws.Upgrade(w, req, nil, ws.Options{})
+		if err != nil {
+			return
+		}
+		_ = r.Serve(context.Background(), conn, principal)
+	}))
+	t.Cleanup(x.public.Close)
+	return f, x
 }
 
 // waitBrokerSession checks that the registry lists sessionID. The relay
@@ -520,14 +612,16 @@ func dropResponseThenClose(ls *atomic.Pointer[conduit.LocalSession]) conduit.Int
 // TestRoutedExec_AckDroppedIsOutcomeUnknown (criterion 20 T7): an exec
 // whose ack is dropped answers 502 outcome_unknown with the fixed message
 // and details, carries no output, and is not run again, although another
-// session of the broker could serve it.
+// session of the broker could serve it: the two sessions are on two
+// relays, each current on its own, so the other session is eligible and a
+// wrong retry would run the exec a second time.
 func TestRoutedExec_AckDroppedIsOutcomeUnknown(t *testing.T) {
-	f := newRoutedBrokerFixture(t, nil)
+	f, hubB := newTwoRelayRoutedFixture(t)
 	agent := f.seedRoutedAgent(t, nil)
 	var p1, p2 atomic.Pointer[conduit.LocalSession]
 	b1 := f.dialRoutedBroker(t, routedBrokerOpts{interceptor: dropResponseThenClose(&p1)})
 	p1.Store(&b1.ls)
-	b2 := f.dialRoutedBroker(t, routedBrokerOpts{interceptor: dropResponseThenClose(&p2)})
+	b2 := f.dialRoutedBrokerOn(t, hubB, routedBrokerOpts{interceptor: dropResponseThenClose(&p2)})
 	p2.Store(&b2.ls)
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/exec", map[string]interface{}{"command": []string{"touch", "x"}})
@@ -597,9 +691,12 @@ func TestRoutedCleanupProject_NonSuccessIsError(t *testing.T) {
 }
 
 // TestRoutedCleanupProject_LostResultRetried: cleanup is idempotent, so a
-// result lost with its session is retried on another session.
+// result lost with its session is retried on another session. The two
+// sessions are on two relays, each current on its own, so the other
+// session is eligible as soon as the first fails: without the retry the
+// call fails or falls back, and the lost session has closed.
 func TestRoutedCleanupProject_LostResultRetried(t *testing.T) {
-	f := newRoutedBrokerFixture(t, nil)
+	f, hubB := newTwoRelayRoutedFixture(t)
 	var lost atomic.Bool
 	var p1, p2 atomic.Pointer[conduit.LocalSession]
 	dropOnce := func(p *atomic.Pointer[conduit.LocalSession]) conduit.Interceptor {
@@ -613,12 +710,13 @@ func TestRoutedCleanupProject_LostResultRetried(t *testing.T) {
 	}
 	b1 := f.dialRoutedBroker(t, routedBrokerOpts{interceptor: dropOnce(&p1)})
 	p1.Store(&b1.ls)
-	b2 := f.dialRoutedBroker(t, routedBrokerOpts{interceptor: dropOnce(&p2)})
+	b2 := f.dialRoutedBrokerOn(t, hubB, routedBrokerOpts{interceptor: dropOnce(&p2)})
 	p2.Store(&b2.ls)
 
 	require.NoError(t, f.client.CleanupProject(context.Background(), f.brokerID, "", "proj-a", "p1"))
-	assert.Equal(t, 1, b1.count(conduit.RPCProjectCleanup), "first session")
-	assert.Equal(t, 1, b2.count(conduit.RPCProjectCleanup), "retried on the other session")
+	assert.True(t, lost.Load(), "one result was lost")
+	assert.Equal(t, 1, b1.count(conduit.RPCProjectCleanup), "the session on hub-a ran it once")
+	assert.Equal(t, 1, b2.count(conduit.RPCProjectCleanup), "the session on hub-b ran it once: one of them is the retry")
 	assert.Equal(t, 0, f.legacy.calls)
 }
 
@@ -658,7 +756,10 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 		{"deadline: logs retried on another session", conduit.RPCAgentLogs},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRoutedBrokerFixture(t, nil)
+			// One session per relay: the session that did not hold the
+			// request is eligible at once, so a retry (logs) reaches it and
+			// a wrong retry (exec) would run there.
+			f, hubB := newTwoRelayRoutedFixture(t)
 			entered := make(chan struct{}, 4)
 			var drained atomic.Bool
 			hold := func(ctx context.Context, op string, env *wsprotocol.RequestEnvelope) *wsprotocol.ResponseEnvelope {
@@ -672,7 +773,7 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 			// The broker sessions' drain deadline runs on a fake clock.
 			fake := clock.NewFake(time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC))
 			b1 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold, clk: fake})
-			b2 := f.dialRoutedBroker(t, routedBrokerOpts{answer: hold, clk: fake})
+			b2 := f.dialRoutedBrokerOn(t, hubB, routedBrokerOpts{answer: hold, clk: fake})
 			errc := make(chan error, 1)
 			var logs string
 			go func() {
@@ -699,7 +800,8 @@ func TestRoutedBrokerRPC_GoAway(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, "routed logs", logs)
-				assert.Equal(t, 2, b1.count(tc.op)+b2.count(tc.op), "retried once on the other session")
+				assert.Equal(t, 1, b1.count(tc.op), "each session ran logs once: the holder, then the retry on the other")
+				assert.Equal(t, 1, b2.count(tc.op), "each session ran logs once: the holder, then the retry on the other")
 			}
 			assert.Equal(t, 0, f.legacy.calls)
 		})

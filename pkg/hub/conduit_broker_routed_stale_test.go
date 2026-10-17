@@ -72,10 +72,12 @@ func TestRoutedBrokerRPC_StaleHeaderInRpcResponseIsBrokerAnswer(t *testing.T) {
 					map[string]string{relay.HeaderStaleReason: string(registry.ReasonDraining)},
 					[]byte(`{"error":{"code":"conflict","message":"broker says conflict"}}`)))
 			})
-			// Two sessions: if the header were honoured, the request would
-			// be re-resolved to the second one.
+			// Two sessions on two relays, each current on its own: if the
+			// header were honoured, the request would be re-resolved to the
+			// other session, which would serve it too.
+			other := w.StartNode("relay-c", nil)
 			holder.MustDial("bs", hello, conduit.Config{RPCHandler: stale})
-			holder.MustDial("bs", hello, conduit.Config{RPCHandler: stale})
+			other.MustDial("bs", hello, conduit.Config{RPCHandler: stale})
 
 			rt, err := router.New(router.Config{Relay: a.Relay, Registry: w.Registry, Store: w.Store, Peers: a.Peers, Now: w.Now, Brokers: noBrokerControlChannel{}})
 			require.NoError(t, err)
