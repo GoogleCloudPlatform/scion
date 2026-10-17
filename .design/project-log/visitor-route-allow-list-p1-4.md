@@ -84,6 +84,7 @@
 ## Merge forward
 
 - 2026-10-15: merged upstream main forward; the visitor grant code now comes from upstream, and this item's changes are unchanged.
+- 2026-10-17: merged the visitor rule and federation principal check work, then upstream main, forward; visitors added by a domain rule get the same per-route admission as visitors granted by email, and this item's changes are unchanged.
 
 ## Startup refusal tests
 
