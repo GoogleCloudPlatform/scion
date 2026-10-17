@@ -357,7 +357,7 @@ func TestExplicitGroupToken_ResolvesHubTarget(t *testing.T) {
 	}
 
 	readKey := f.mint(t, hubBoundary(), "group:read")
-	rec := doRequestWithUAT(t, f.srv, readKey, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	rec := doRequestWithUAT(t, f.srv, readKey, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	seen := listIDs(rec.Code, rec.Body.Bytes())
 	assert.True(t, seen[explicit.ID], "a hub token with group:read lists an explicit group its holder may read")
 	assert.True(t, seen[other.ID], "the holder's system group.read covers every explicit group")
@@ -373,7 +373,7 @@ func TestExplicitGroupToken_ResolvesHubTarget(t *testing.T) {
 	assert.True(t, d.Allowed, d.Reason)
 
 	unrelated := f.mint(t, hubBoundary(), "project:read")
-	rec = doRequestWithUAT(t, f.srv, unrelated, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	rec = doRequestWithUAT(t, f.srv, unrelated, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	seen = listIDs(rec.Code, rec.Body.Bytes())
 	assert.False(t, seen[explicit.ID], "a token without group:read lists no explicit group")
 	assert.False(t, seen[other.ID])
@@ -383,11 +383,11 @@ func TestExplicitGroupToken_ResolvesHubTarget(t *testing.T) {
 	})
 	assert.Error(t, err, "group:read is not mintable on a project boundary")
 	legacy := uatpInsertLegacyToken(t, f.s, f.callerID, f.projectID, []string{"group:read"})
-	rec = doRequestWithUAT(t, f.srv, legacy, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	rec = doRequestWithUAT(t, f.srv, legacy, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	seen = listIDs(rec.Code, rec.Body.Bytes())
 	assert.False(t, seen[explicit.ID], "a project-boundary row carrying group:read lists no explicit group")
 
-	session := doRequestAsUser(t, f.srv, f.caller, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	session := doRequestAsUser(t, f.srv, f.caller, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	seen = listIDs(session.Code, session.Body.Bytes())
 	assert.True(t, seen[explicit.ID], "a session lists the explicit group")
 	assert.True(t, seen[other.ID], "a session lists every explicit group its holder may read")
@@ -547,13 +547,13 @@ func TestGroupMemberAddToken_HeldToGroupRoleHierarchy(t *testing.T) {
 		UserID: adminID, Name: "ghr-list", Boundary: hubBoundary(), Scopes: []string{"group:list"},
 	})
 	require.NoError(t, err)
-	rec = doRequestWithUAT(t, srv, listKey, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	rec = doRequestWithUAT(t, srv, listKey, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp ListGroupsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Empty(t, resp.Groups, "a token gets the per-row list, so group:list alone shows no row")
 
-	session := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/groups?limit=200", nil)
+	session := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/groups?limit=100", nil)
 	require.Equal(t, http.StatusOK, session.Code, session.Body.String())
 	resp = ListGroupsResponse{}
 	require.NoError(t, json.Unmarshal(session.Body.Bytes(), &resp))
@@ -588,11 +588,25 @@ func TestGroupMembershipToken_CannotCarryAuthorityBeyondCaller(t *testing.T) {
 	f.bindGroup(t, top, wide.ID, store.RoleScopeProject, f.projectID)
 	inner := f.group(t, "gcb-inner")
 	f.nest(t, top, inner)
-	// A second project where the caller has no role at all.
+	// A second project where the caller has no project read.
 	otherProject := tid("gcb-other-project")
 	createRS1Project(t, f.s, otherProject, tid("gcb-other-owner"))
 	elsewhere := f.group(t, "gcb-elsewhere")
 	f.bindGroup(t, elsewhere, f.roleID, store.RoleScopeProject, otherProject)
+	// The caller holds agent.create only in the second project, so the
+	// agent:create selector is mintable on a hub boundary while the caller
+	// still lacks agent.create in the first project and project read in
+	// the second.
+	createOnly, err := f.s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "gcb-create", Description: "agent create", ScopeType: store.RoleScopeProject,
+		Permissions: []string{"agent.create"},
+	})
+	require.NoError(t, err)
+	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: createOnly.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.callerID,
+		ScopeType: store.RoleScopeProject, ScopeID: otherProject, CreatedBy: "test",
+	})
+	require.NoError(t, err)
 
 	subtree := f.group(t, "gcb-subtree")
 	subUser := f.user(t, "gcb-subtree-user")
