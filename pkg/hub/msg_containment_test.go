@@ -28,8 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1021,11 +1019,11 @@ func TestC1_AuthorizeScheduledMessageAuthoring_CrossProjectByAgentID(t *testing.
 	}
 }
 
-func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
-	// T-B1-07: a project-scoped UAT cannot create a scheduled message event
-	// through handleScheduledEvents. The authoring credential gate refuses it
-	// with the session-only GOV_PENDING refusal before the scheduled_event
-	// access check and before the target is resolved.
+func TestC1_ScheduledMessageCreate_ScopedUATWithoutProjectRoleDeniedAtRoute(t *testing.T) {
+	// T-B1-07: a project-scoped UAT whose user holds no role in the project
+	// cannot create a scheduled message event through handleScheduledEvents,
+	// even with scheduled_event:create and agent:message: the scheduled_event
+	// access check refuses it with 403 and nothing is written.
 	srv, s := testServer(t)
 	ctx := context.Background()
 	// A scheduler is attached so that a request admitted past every check
@@ -1064,21 +1062,22 @@ func TestC1_ScheduledMessageCreate_ScopedUATDeniedAtRoute(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleScheduledEvents(rec, req, project.ID, "")
 	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for UAT-scoped authoring: %s", rec.Body.String())
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "project-scoped token message create")
-	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
+	assert.NotContains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the credential kind is admitted; the permission check refuses")
 	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, res.Items, "nothing is written")
 }
 
-// A hub-scoped UAT is refused by the same authoring credential gate, with
-// the session-only GOV_PENDING refusal, before the scheduled_event access
-// check and before the target is resolved.
-func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
+// A hub-scoped UAT of a project owner with scheduled_event:create and
+// agent:message creates a scheduled message event naming a target that does
+// not exist yet (the target is checked again when the event fires). The
+// event records the token's attribution and its bounded ceiling with the
+// hub boundary.
+func TestC1_ScheduledMessageCreate_HubScopedUATAdmittedAtRoute(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	// A scheduler is attached so that a request admitted past every check
-	// is stored and answered 201, which the assertions below reject.
+	// A scheduler is attached so that an admitted request is stored and
+	// answered 201.
 	srv.scheduler = NewScheduler(s, slog.Default())
 
 	project := &store.Project{
@@ -1096,8 +1095,7 @@ func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
 
 	baseUser := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "token")
-	scopedIdent := NewScopedUserIdentityWithBoundary(baseUser, TokenBoundary{Kind: BoundaryKindHub},
-		[]string{"scheduled_event:create", "agent:message"}, "", permissions.FrozenPermissionCeiling{})
+	scopedIdent := NewScopedUserIdentity(baseUser, "", []string{"scheduled_event:create", "agent:message"})
 
 	reqBody := CreateScheduledEventRequest{
 		EventType: "message",
@@ -1108,16 +1106,19 @@ func TestC1_ScheduledMessageCreate_HubScopedUATDeniedAtRoute(t *testing.T) {
 	bodyBytes, _ := json.Marshal(reqBody)
 	req := httptest.NewRequest("POST", "/api/v1/projects/"+project.ID+"/scheduled-events", bytes.NewReader(bodyBytes))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), scopedIdent))
+	req = req.WithContext(contextWithCredentialContext(contextWithIdentity(req.Context(), scopedIdent), credentialContextForIdentity(scopedIdent)))
 
 	rec := httptest.NewRecorder()
 	srv.handleScheduledEvents(rec, req, project.ID, "")
-	require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 for hub-scoped UAT authoring: %s", rec.Body.String())
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "hub-scoped token message create")
-	assert.Contains(t, rec.Body.String(), scheduleAuthoringCredentialRefusedMessage, "the refusal comes from the authoring credential gate")
+	require.Equal(t, http.StatusCreated, rec.Code, "expected 201 for hub-scoped UAT authoring: %s", rec.Body.String())
 	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project.ID}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Empty(t, res.Items, "nothing is written")
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, store.InitiatorCredentialKindUAT, res.Items[0].InitiatorCredentialKind)
+	assert.Equal(t, store.EffectCeilingBounded, res.Items[0].AuthorityCeiling.Kind)
+	assert.Equal(t, string(BoundaryKindHub), res.Items[0].AuthorityCeiling.BoundaryKind)
+	assert.Contains(t, res.Items[0].AuthorityCeiling.PermissionIDs, scheduledMessagePermission)
+	srv.scheduler.StopEventTimer(res.Items[0].ID)
 }
 
 func TestC1_AuthorizeScheduledMessageAuthoring_ConflictingTarget(t *testing.T) {

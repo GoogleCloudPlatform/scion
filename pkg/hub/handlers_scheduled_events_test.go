@@ -74,12 +74,12 @@ func TestScheduledEvent_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-// TestScheduledEvent_CreateDispatchAgentScopedUATDenied covers dispatch_agent
-// event create: a scoped UAT is denied even when the underlying user holds
-// full project-owner authority, and the same unscoped user is allowed. Both
-// UATs are refused by the authoring credential gate
-// (assertScheduleAuthoringRefused).
-func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
+// TestScheduledEvent_CreateDispatchAgentScopedUATNeedsBothSelectors covers
+// dispatch_agent event create by a scoped UAT of a project owner: a project
+// or hub token is admitted when it carries scheduled_event:create and
+// agent:create, and refused with 403 when either selector is missing. The
+// same unscoped user is admitted.
+func TestScheduledEvent_CreateDispatchAgentScopedUATNeedsBothSelectors(t *testing.T) {
 	srv, s, projectID := setupScheduledEventTest(t)
 	ctx := context.Background()
 
@@ -109,18 +109,23 @@ func TestScheduledEvent_CreateDispatchAgentScopedUATDenied(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("project-scoped UAT for the same user denied", func(t *testing.T) {
-		scoped := NewScopedUserIdentity(ownerUser, projectID, []string{"scheduled_event:create", "agent:create"})
-		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
-		assertScheduleAuthoringRefused(t, rec)
-		assertScheduledEventBoundaryIneligible(t, srv, scoped, projectID, ActionCreate)
-	})
-
-	t.Run("hub-scoped UAT for the same user denied", func(t *testing.T) {
-		scoped := NewScopedUserIdentity(ownerUser, "", []string{"scheduled_event:create", "agent:create"})
-		rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
-		assertScheduleAuthoringRefused(t, rec)
-	})
+	for _, boundary := range []struct{ name, projectID string }{{"project-scoped", projectID}, {"hub-scoped", ""}} {
+		t.Run(boundary.name+" UAT with both selectors admitted", func(t *testing.T) {
+			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:create", "agent:create"})
+			rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		})
+		t.Run(boundary.name+" UAT without scheduled_event:create refused", func(t *testing.T) {
+			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:read", "agent:create"})
+			rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+		t.Run(boundary.name+" UAT without agent:create refused", func(t *testing.T) {
+			scoped := NewScopedUserIdentity(ownerUser, boundary.projectID, []string{"scheduled_event:create", "agent:read"})
+			rec := doScheduledEventUserRequest(t, srv, scoped, http.MethodPost, projectID, "", req)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+	}
 }
 
 func TestScheduledEvent_CreateWithFireAt(t *testing.T) {

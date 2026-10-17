@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,18 +31,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Token admission on the scheduled-event and schedule routes: reads, list,
-// cancellation, deletion and pause admit a user access token with the
-// matching scheduled_event selector; authoring (create of either event type,
-// update, resume) refuses every token before any target lookup. Every token
-// here is minted through UserAccessTokenService and sent through the server
-// handler.
+// Token admission on the scheduled-event and schedule routes: every route
+// admits a user access token with its exact scheduled_event selector on a
+// boundary that contains the schedule's project. Authoring (create of
+// either event type, update, resume) also runs the event type's target
+// checks. Every token here is minted through UserAccessTokenService and sent
+// through the server handler.
 
 // scheduleTokenAllSelectors is every selector a schedule route could use,
 // plus the agent selectors scheduled authoring checks.
 var scheduleTokenAllSelectors = []string{
-	"scheduled_event:read", "scheduled_event:list", "scheduled_event:update", "scheduled_event:delete",
-	"agent:create", "agent:message",
+	"scheduled_event:read", "scheduled_event:list", "scheduled_event:create", "scheduled_event:update", "scheduled_event:delete",
+	"agent:create", "agent:read", "agent:message",
 }
 
 // scheduleTokenFixture is a schedule test project with a project owner who
@@ -78,6 +79,27 @@ func (f scheduleTokenFixture) tokens(t *testing.T, scopes ...string) map[string]
 		"project token": f.mint(t, projectBoundary(f.project), scopes...),
 		"hub token":     f.mint(t, hubBoundary(), scopes...),
 	}
+}
+
+// otherOwnedProject creates another project the fixture owner owns and
+// returns its ID.
+func (f scheduleTokenFixture) otherOwnedProject(t *testing.T, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	other := tid(name)
+	require.NoError(t, f.store.CreateProject(ctx, &store.Project{ID: other, Name: name, Slug: other}))
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, other, f.owner.ID()))
+	return other
+}
+
+// mintToken is mint, also returning the stored token row.
+func (f scheduleTokenFixture) mintToken(t *testing.T, boundary TokenBoundary, scopes ...string) (string, *store.UserAccessToken) {
+	t.Helper()
+	key, tok, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.owner.ID()), CreateTokenParams{
+		UserID: f.owner.ID(), Name: "sched-" + tid("tok"), Boundary: boundary, Scopes: scopes,
+	})
+	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
+	return key, tok
 }
 
 func (f scheduleTokenFixture) path(rest string) string {
@@ -128,52 +150,59 @@ func (f scheduleTokenFixture) createOwnerEvent(t *testing.T) string {
 	return evt.ID
 }
 
-// TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup requires the
-// scheduled-message authoring rule to refuse a token before the target is
-// resolved: a token naming a target that does not exist is refused with the
-// GOV_PENDING reason, where a session naming the same target is admitted
-// (the target is checked again when the event fires). Over the routes, a
-// token is refused before the body is read, and nothing is written.
-func TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup(t *testing.T) {
+// TestScheduledMessageAuthoringToken_UnknownTargetLikeSession requires the
+// scheduled-message authoring rule to treat a token naming a target that
+// does not exist as it treats a session: authoring is admitted, and the
+// target is checked again when the event fires. Over the routes, a token
+// with the authoring selectors creates a message schedule and a message
+// event naming an unknown target, and a malformed body is refused with 400
+// and writes nothing.
+func TestScheduledMessageAuthoringToken_UnknownTargetLikeSession(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-msg-lookup")
 	missingTarget := `{"agentId":"` + tid("no-such-agent") + `","message":"x"}`
+	args := []struct{ payload, agentID, agentName string }{
+		{missingTarget, "", ""},
+		{"", "", "no-such-agent"},
+		{"", "", ""},
+	}
+
+	// A session naming the same missing targets is admitted by the rule.
+	for _, a := range args {
+		session := authoredRequest(t, f.owner, http.MethodPost, f.path("/schedules"), nil)
+		rec := httptest.NewRecorder()
+		assert.True(t, f.srv.authorizeScheduledMessageAuthoring(rec, session, f.project, a.payload, a.agentID, a.agentName), "session: %+v: %s", a, rec.Body.String())
+	}
 
 	for label, key := range f.tokens(t, scheduleTokenAllSelectors...) {
 		ctx := realTokenContext(t, f.srv, key)
-		for _, args := range []struct{ payload, agentID, agentName string }{
-			{missingTarget, "", ""},
-			{"", "", "no-such-agent"},
-			{"", "", ""},
-		} {
+		for _, a := range args {
 			rec := httptest.NewRecorder()
 			ok := f.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, f.path("/schedules"), nil),
-				f.project, args.payload, args.agentID, args.agentName)
-			assert.False(t, ok, "%s: %+v", label, args)
-			assertScheduleAuthoringRefused(t, rec)
+				f.project, a.payload, a.agentID, a.agentName)
+			assert.True(t, ok, "%s: %+v: %s", label, a, rec.Body.String())
 		}
 
 		before, beforeEvents := f.scheduleCount(t), f.eventCount(t)
-		cases := []struct{ name, path, body string }{
-			{"message schedule, unknown target", "/schedules", `{"name":"tok-msg","cronExpr":"0 * * * *","eventType":"message","agentName":"no-such-agent","message":"x"}`},
-			{"message event, unknown target", "/scheduled-events", `{"eventType":"message","fireIn":"1h","payload":` + jsonQuote(missingTarget) + `}`},
-			{"dispatch_agent schedule", "/schedules", `{"name":"tok-da","cronExpr":"0 * * * *","eventType":"dispatch_agent","agentName":"tok-worker"}`},
-			{"dispatch_agent event", "/scheduled-events", `{"eventType":"dispatch_agent","fireIn":"1h","agentName":"tok-worker"}`},
+		for _, tc := range []struct{ name, path, body string }{
 			{"malformed schedule body", "/schedules", `{`},
 			{"malformed event body", "/scheduled-events", `{`},
-		}
-		for _, tc := range cases {
+		} {
 			rec := scheduleTokenRaw(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
-			t.Logf("%s, %s: %d", label, tc.name, rec.Code)
-			assertScheduleAuthoringRefused(t, rec)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s, %s: %s", label, tc.name, rec.Body.String())
 		}
 		assert.Equal(t, before, f.scheduleCount(t), "%s: no schedule written", label)
 		assert.Equal(t, beforeEvents, f.eventCount(t), "%s: no event written", label)
-	}
 
-	// A session naming the same missing target is admitted by the rule.
-	session := authoredRequest(t, f.owner, http.MethodPost, f.path("/schedules"), nil)
-	rec := httptest.NewRecorder()
-	assert.True(t, f.srv.authorizeScheduledMessageAuthoring(rec, session, f.project, missingTarget, "", ""), rec.Body.String())
+		for _, tc := range []struct{ name, path, body string }{
+			{"message schedule, unknown target", "/schedules", `{"name":"tok-msg-` + strings.ReplaceAll(label, " ", "-") + `","cronExpr":"0 * * * *","eventType":"message","agentName":"no-such-agent","message":"x"}`},
+			{"message event, unknown target", "/scheduled-events", `{"eventType":"message","fireIn":"1h","payload":` + jsonQuote(missingTarget) + `}`},
+		} {
+			rec := scheduleTokenRaw(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
+			assert.Equal(t, http.StatusCreated, rec.Code, "%s, %s: %s", label, tc.name, rec.Body.String())
+		}
+		assert.Equal(t, before+1, f.scheduleCount(t), "%s: one schedule written", label)
+		assert.Equal(t, beforeEvents+1, f.eventCount(t), "%s: one event written", label)
+	}
 }
 
 // jsonQuote returns s as a JSON string literal.
@@ -182,64 +211,58 @@ func jsonQuote(s string) string {
 	return string(b)
 }
 
-// TestScheduleResume_RefusesTokensForEveryEventType requires a resume to
-// refuse every token, for a message and a dispatch_agent schedule alike,
-// on both boundaries and with every schedule selector: the schedule stays
-// paused and its authorization revision stays as it was. The owner's session
-// resumes the same schedules.
-func TestScheduleResume_RefusesTokensForEveryEventType(t *testing.T) {
-	f := newScheduleTokenFixture(t, "sched-resume-tok")
-	keys := f.tokens(t, scheduleTokenAllSelectors...)
-
-	for _, eventType := range []string{"message", "dispatch_agent"} {
-		id := createOwnerSchedule(t, f.srv, f.owner, f.project, "resume-tok-"+eventType, eventType)
-		pauseSchedule(t, f.srv, f.owner, f.project, id)
-		before := loadScheduleRevision(t, f.store, id)
-
-		for label, key := range keys {
-			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, f.path("/schedules/"+id+"/resume"), nil)
-			assertScheduleAuthoringRefused(t, rec)
-			assert.Equal(t, store.ScheduleStatusPaused, f.scheduleStatus(t, id), "%s, %s", eventType, label)
-			assert.Equal(t, before, loadScheduleRevision(t, f.store, id), "%s, %s", eventType, label)
-		}
-
-		rec := doAuthoredScheduleRequest(t, f.srv, f.owner, f.project, id+"/resume", http.MethodPost, nil)
-		require.Equal(t, http.StatusOK, rec.Code, "%s: session resume: %s", eventType, rec.Body.String())
-	}
-}
-
-// TestScheduleUpdate_RefusesTokensForEveryEventType requires an update to
-// refuse every token, for a message and a dispatch_agent schedule alike, on
-// both boundaries and with every schedule selector, whatever the update
-// changes (a name only, the payload, or the status). Nothing changes. The
-// owner's session updates the same schedules.
-func TestScheduleUpdate_RefusesTokensForEveryEventType(t *testing.T) {
+// TestScheduleUpdateToken_RequiresUpdateSelector requires a PATCH by a
+// token to need scheduled_event:update on a boundary that contains the
+// schedule's project, for a message and a dispatch_agent schedule alike. A
+// project or hub token with the selector (and the event type's agent
+// selectors) renames a schedule without a new revision, and changes its
+// payload with a new revision that records the token. A token without the
+// selector, or a project token for another project, is refused and nothing
+// changes. The owner's session updates the same schedules.
+func TestScheduleUpdateToken_RequiresUpdateSelector(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-update-tok")
-	keys := f.tokens(t, scheduleTokenAllSelectors...)
+	other := f.otherOwnedProject(t, "sched-update-other")
+	refused := map[string]string{
+		"project token without the selector": f.mint(t, projectBoundary(f.project), "scheduled_event:create", "scheduled_event:read", "agent:create", "agent:read", "agent:message"),
+		"hub token without the selector":     f.mint(t, hubBoundary(), "scheduled_event:create", "scheduled_event:read", "agent:create", "agent:read", "agent:message"),
+		"project token for another project":  f.mint(t, projectBoundary(other), scheduleTokenAllSelectors...),
+	}
 
 	for _, eventType := range []string{"message", "dispatch_agent"} {
-		name := "update-tok-" + eventType
-		id := createOwnerSchedule(t, f.srv, f.owner, f.project, name, eventType)
 		payload := `{"agentName":"retarget"}`
 		if eventType == "message" {
-			payload = `{"agentName":"retarget","message":"x"}`
+			payload = `{"agentName":"` + authzHelperAgentSlug + `","message":"changed"}`
 		}
-		before := loadScheduleRevision(t, f.store, id)
 
-		for label, key := range keys {
-			for _, body := range []UpdateScheduleRequest{
-				{Name: name + "-renamed"},
-				{Payload: payload},
-				{Status: store.ScheduleStatusPaused},
-			} {
+		name := "update-refused-" + eventType
+		id := createOwnerSchedule(t, f.srv, f.owner, f.project, name, eventType)
+		before := loadScheduleRevision(t, f.store, id)
+		for label, key := range refused {
+			for _, body := range []UpdateScheduleRequest{{Name: name + "-renamed"}, {Payload: payload}} {
 				rec := doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+id), body)
-				assertScheduleAuthoringRefused(t, rec)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s, %s: %s", eventType, label, rec.Body.String())
 				sc, err := f.store.GetSchedule(context.Background(), id)
 				require.NoError(t, err)
 				assert.Equal(t, name, sc.Name, "%s, %s", eventType, label)
-				assert.Equal(t, store.ScheduleStatusActive, sc.Status, "%s, %s", eventType, label)
 				assert.Equal(t, before, loadScheduleRevision(t, f.store, id), "%s, %s", eventType, label)
 			}
+		}
+
+		for label, key := range f.tokens(t, scheduleTokenAllSelectors...) {
+			name := "update-" + eventType + "-" + label
+			id := createOwnerSchedule(t, f.srv, f.owner, f.project, name, eventType)
+			before := loadScheduleRevision(t, f.store, id)
+
+			rec := doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+id), UpdateScheduleRequest{Name: name + "-renamed"})
+			require.Equal(t, http.StatusOK, rec.Code, "%s, %s: rename: %s", eventType, label, rec.Body.String())
+			assert.Equal(t, before, loadScheduleRevision(t, f.store, id), "%s, %s: a rename writes no new revision", eventType, label)
+
+			rec = doRequestWithToken(t, f.srv, key, http.MethodPatch, f.path("/schedules/"+id), UpdateScheduleRequest{Payload: payload})
+			require.Equal(t, http.StatusOK, rec.Code, "%s, %s: payload: %s", eventType, label, rec.Body.String())
+			after := loadScheduleRevision(t, f.store, id)
+			assert.Equal(t, store.InitiatorCredentialKindUAT, after.Attribution.InitiatorCredentialKind, "%s, %s", eventType, label)
+			assert.Equal(t, before.Attribution.AuthorizationRevision+1, after.Attribution.AuthorizationRevision, "%s, %s", eventType, label)
+			assert.Equal(t, store.EffectCeilingBounded, after.Ceiling.Kind, "%s, %s", eventType, label)
 		}
 
 		rec := doAuthoredScheduleRequest(t, f.srv, f.owner, f.project, id, http.MethodPatch, UpdateScheduleRequest{Name: name + "-renamed"})
@@ -285,36 +308,32 @@ func TestSchedulePause_AdmitsTokenWithUpdateSelector(t *testing.T) {
 	}
 }
 
-// TestScheduleUpdateSelector_DoesNotAdmitAuthoring requires a token holding
-// only scheduled_event:update to be refused on every authoring route
-// (create of either event type on both collections, update, resume) with
-// the GOV_PENDING reason, while the same token pauses a schedule.
-func TestScheduleUpdateSelector_DoesNotAdmitAuthoring(t *testing.T) {
+// TestScheduleUpdateSelector_DoesNotAdmitCreate requires a token holding
+// scheduled_event:update and no scheduled_event:create to be refused with
+// 403 on both create routes for either event type, while the same token
+// pauses a schedule.
+func TestScheduleUpdateSelector_DoesNotAdmitCreate(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-upd-sel")
-	paused := createOwnerSchedule(t, f.srv, f.owner, f.project, "upd-sel-paused", "dispatch_agent")
-	pauseSchedule(t, f.srv, f.owner, f.project, paused)
 	active := createOwnerSchedule(t, f.srv, f.owner, f.project, "upd-sel-active", "message")
-	before := f.scheduleCount(t)
+	before, beforeEvents := f.scheduleCount(t), f.eventCount(t)
+	updateOnly := []string{"scheduled_event:update", "agent:create", "agent:read", "agent:message"}
 
-	for label, key := range f.tokens(t, "scheduled_event:update") {
-		authoring := []struct {
-			method, path string
-			body         interface{}
+	for label, key := range f.tokens(t, updateOnly...) {
+		creates := []struct {
+			path string
+			body interface{}
 		}{
-			{http.MethodPost, "/schedules", CreateScheduleRequest{Name: "upd-sel-new", CronExpr: "0 * * * *", EventType: "message", AgentName: authzHelperAgentSlug, Message: "x"}},
-			{http.MethodPost, "/schedules", CreateScheduleRequest{Name: "upd-sel-new-da", CronExpr: "0 * * * *", EventType: "dispatch_agent", AgentName: "w"}},
-			{http.MethodPost, "/scheduled-events", CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: authzHelperAgentSlug, Message: "x"}},
-			{http.MethodPost, "/scheduled-events", CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", AgentName: "w"}},
-			{http.MethodPatch, "/schedules/" + active, UpdateScheduleRequest{Name: "x"}},
-			{http.MethodPost, "/schedules/" + paused + "/resume", nil},
+			{"/schedules", CreateScheduleRequest{Name: "upd-sel-new", CronExpr: "0 * * * *", EventType: "message", AgentName: authzHelperAgentSlug, Message: "x"}},
+			{"/schedules", CreateScheduleRequest{Name: "upd-sel-new-da", CronExpr: "0 * * * *", EventType: "dispatch_agent", AgentName: "w"}},
+			{"/scheduled-events", CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: authzHelperAgentSlug, Message: "x"}},
+			{"/scheduled-events", CreateScheduledEventRequest{EventType: "dispatch_agent", FireIn: "1h", AgentName: "w"}},
 		}
-		for _, tc := range authoring {
-			rec := doRequestWithToken(t, f.srv, key, tc.method, f.path(tc.path), tc.body)
-			t.Logf("%s: %s %s: %d", label, tc.method, tc.path, rec.Code)
-			assertScheduleAuthoringRefused(t, rec)
+		for _, tc := range creates {
+			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s: POST %s: %s", label, tc.path, rec.Body.String())
 		}
 		assert.Equal(t, before, f.scheduleCount(t), label)
-		assert.Equal(t, store.ScheduleStatusPaused, f.scheduleStatus(t, paused), label)
+		assert.Equal(t, beforeEvents, f.eventCount(t), label)
 	}
 
 	key := f.mint(t, projectBoundary(f.project), "scheduled_event:update")
@@ -371,20 +390,19 @@ func TestScheduleTokens_ReadsListsAndDeletesUseExactSelectors(t *testing.T) {
 	assert.Equal(t, store.ScheduledEventCancelled, evt.Status)
 }
 
-// TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup requires
-// PATCH /schedules/{id} and POST /schedules/{id}/resume to refuse every
-// token with the GOV_PENDING reason before the schedule is looked up, the
-// permission is checked or the body is read: a token gets the same refusal
-// for a schedule ID that does not exist, for a schedule of another project
-// the owner can see, for a token without any scheduled_event selector, and
-// for a malformed body. Nothing changes.
-func TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup(t *testing.T) {
+// TestScheduleUpdateAndResumeToken_ChecksSelectorBeforeScheduleLookup
+// requires PATCH /schedules/{id} and POST /schedules/{id}/resume to check a
+// token's scheduled_event:update selector before the schedule is looked up
+// or the body is read: a token without it gets 403 for a schedule ID that
+// does not exist, for a schedule of another project the owner can see, for
+// an existing schedule and for a malformed body. A token with the selector
+// gets 404 for the missing and the other project's schedule, and 400 for the
+// malformed body. Nothing changes.
+func TestScheduleUpdateAndResumeToken_ChecksSelectorBeforeScheduleLookup(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-lookup-order")
 	ctx := context.Background()
 
-	other := tid("sched-lookup-other")
-	require.NoError(t, f.store.CreateProject(ctx, &store.Project{ID: other, Name: "lookup-other", Slug: other}))
-	require.NoError(t, f.srv.createProjectOwnerRoleBinding(ctx, other, f.owner.ID()))
+	other := f.otherOwnedProject(t, "sched-lookup-other")
 	createdAt := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	otherSchedule := tid("sched-lookup-other-sc")
 	require.NoError(t, f.store.CreateSchedule(ctx, &store.Schedule{
@@ -398,32 +416,36 @@ func TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup(t *testing.T) 
 	missing := tid("no-such-schedule")
 	rename := `{"name":"renamed"}`
 
-	type routeCase struct{ name, method, path, body string }
-	refusedFor := func(scopes []string, cases []routeCase) {
+	type routeCase struct {
+		name, method, path, body string
+		want                     int
+	}
+	run := func(scopes []string, cases []routeCase) {
 		for label, key := range f.tokens(t, scopes...) {
 			for _, tc := range cases {
 				rec := scheduleTokenRaw(t, f.srv, key, tc.method, f.path(tc.path), tc.body)
-				t.Logf("%s, %v, %s: %d", label, scopes, tc.name, rec.Code)
-				assertScheduleAuthoringRefused(t, rec)
+				assert.Equal(t, tc.want, rec.Code, "%s, %v, %s: %s", label, scopes, tc.name, rec.Body.String())
 			}
 		}
 	}
 
-	// (a) Every schedule selector, on a schedule that is not in this project.
-	refusedFor(scheduleTokenAllSelectors, []routeCase{
-		{"update, missing schedule", http.MethodPatch, "/schedules/" + missing, rename},
-		{"resume, missing schedule", http.MethodPost, "/schedules/" + missing + "/resume", ""},
-		{"update, other project's schedule", http.MethodPatch, "/schedules/" + otherSchedule, rename},
-		{"resume, other project's schedule", http.MethodPost, "/schedules/" + otherSchedule + "/resume", ""},
+	// (a) No scheduled_event:update: refused before the lookup.
+	run([]string{"scheduled_event:create", "scheduled_event:read", "agent:create", "agent:read", "agent:message"}, []routeCase{
+		{"update, missing schedule", http.MethodPatch, "/schedules/" + missing, rename, http.StatusForbidden},
+		{"resume, missing schedule", http.MethodPost, "/schedules/" + missing + "/resume", "", http.StatusForbidden},
+		{"update, other project's schedule", http.MethodPatch, "/schedules/" + otherSchedule, rename, http.StatusForbidden},
+		{"resume, other project's schedule", http.MethodPost, "/schedules/" + otherSchedule + "/resume", "", http.StatusForbidden},
+		{"update, existing schedule", http.MethodPatch, "/schedules/" + active, rename, http.StatusForbidden},
+		{"resume, existing schedule", http.MethodPost, "/schedules/" + paused + "/resume", "", http.StatusForbidden},
+		{"update, malformed body", http.MethodPatch, "/schedules/" + active, `{`, http.StatusForbidden},
 	})
-	// (b) No scheduled_event selector, on existing schedules.
-	refusedFor([]string{"agent:read"}, []routeCase{
-		{"update without a schedule selector", http.MethodPatch, "/schedules/" + active, rename},
-		{"resume without a schedule selector", http.MethodPost, "/schedules/" + paused + "/resume", ""},
-	})
-	// (c) A malformed body on an existing schedule.
-	refusedFor(scheduleTokenAllSelectors, []routeCase{
-		{"update, malformed body", http.MethodPatch, "/schedules/" + active, `{`},
+	// (b) Every schedule selector: the lookup and the body decide.
+	run(scheduleTokenAllSelectors, []routeCase{
+		{"update, missing schedule", http.MethodPatch, "/schedules/" + missing, rename, http.StatusNotFound},
+		{"resume, missing schedule", http.MethodPost, "/schedules/" + missing + "/resume", "", http.StatusNotFound},
+		{"update, other project's schedule", http.MethodPatch, "/schedules/" + otherSchedule, rename, http.StatusNotFound},
+		{"resume, other project's schedule", http.MethodPost, "/schedules/" + otherSchedule + "/resume", "", http.StatusNotFound},
+		{"update, malformed body", http.MethodPatch, "/schedules/" + active, `{`, http.StatusBadRequest},
 	})
 
 	sc, err := f.store.GetSchedule(ctx, active)
@@ -433,29 +455,30 @@ func TestScheduleUpdateAndResume_RefuseTokensBeforeScheduleLookup(t *testing.T) 
 	assert.Equal(t, store.ScheduleStatusPaused, f.scheduleStatus(t, otherSchedule))
 }
 
-// TestScheduleCreate_RefusesSuperAdminTokenBeforeTargetLookup requires a
-// super-admin's hub token with every schedule selector to be refused with
-// the GOV_PENDING reason on both create routes when the named target does
-// not exist, the same as for any other token. Nothing is written.
-func TestScheduleCreate_RefusesSuperAdminTokenBeforeTargetLookup(t *testing.T) {
+// TestScheduleCreate_SuperAdminTokenNeedsCreateSelector requires a
+// super-admin's hub token to carry scheduled_event:create to create a
+// schedule or a scheduled event: with every other schedule selector it is
+// refused with 403 on both create routes, and nothing is written.
+func TestScheduleCreate_SuperAdminTokenNeedsCreateSelector(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-superadmin")
 	adminID := tid("sched-super-admin")
 	createTestUserWithRole(t, f.store, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	ensureHubMembership(context.Background(), f.store, adminID)
 	key, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(adminID), CreateTokenParams{
-		UserID: adminID, Name: "sched-" + tid("admin"), Boundary: hubBoundary(), Scopes: scheduleTokenAllSelectors,
+		UserID: adminID, Name: "sched-" + tid("admin"), Boundary: hubBoundary(),
+		Scopes: []string{"scheduled_event:read", "scheduled_event:list", "scheduled_event:update", "scheduled_event:delete", "agent:create", "agent:read", "agent:message"},
 	})
 	require.NoError(t, err)
 
 	before, beforeEvents := f.scheduleCount(t), f.eventCount(t)
-	missingTarget := `{"agentId":"` + tid("no-such-agent") + `","message":"x"}`
 	for _, tc := range []struct{ name, path, body string }{
-		{"message schedule, missing target", "/schedules", `{"name":"admin-msg","cronExpr":"0 * * * *","eventType":"message","agentName":"no-such-agent","message":"x"}`},
-		{"message event, missing target", "/scheduled-events", `{"eventType":"message","fireIn":"1h","payload":` + jsonQuote(missingTarget) + `}`},
+		{"message schedule", "/schedules", `{"name":"admin-msg","cronExpr":"0 * * * *","eventType":"message","agentName":"` + authzHelperAgentSlug + `","message":"x"}`},
+		{"message event", "/scheduled-events", `{"eventType":"message","fireIn":"1h","agentName":"` + authzHelperAgentSlug + `","message":"x"}`},
+		{"dispatch_agent schedule", "/schedules", `{"name":"admin-da","cronExpr":"0 * * * *","eventType":"dispatch_agent","agentName":"admin-worker"}`},
+		{"dispatch_agent event", "/scheduled-events", `{"eventType":"dispatch_agent","fireIn":"1h","agentName":"admin-worker"}`},
 	} {
 		rec := scheduleTokenRaw(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
-		t.Logf("super-admin hub token, %s: %d", tc.name, rec.Code)
-		assertScheduleAuthoringRefused(t, rec)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "super-admin hub token, %s: %s", tc.name, rec.Body.String())
 	}
 	assert.Equal(t, before, f.scheduleCount(t), "no schedule written")
 	assert.Equal(t, beforeEvents, f.eventCount(t), "no event written")

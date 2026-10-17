@@ -127,11 +127,12 @@ var expectedSelectorRegistry = map[string][]string{
 	// Project messaging policy (owner rule applies on top of the selector).
 	"project:set_messaging_policy": {"project.set_messaging_policy"},
 
-	// scheduled_event selectors (reads, cancellation and pause).
+	// scheduled_event selectors (reads, cancellation, pause and authoring).
 	"scheduled_event:delete": {"scheduled_event.delete"},
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+	"scheduled_event:create": {"scheduled_event.create"},
 
 	// agent selectors outside the agent:manage alias.
 	"agent:set_message_mode": {"agent.set_message_mode"},
