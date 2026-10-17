@@ -40,9 +40,9 @@ type credentialIssuingSpyKey struct{}
 
 // credentialIssuingSpyStore counts the store reads a request to the
 // credential-issuing endpoint makes to resolve its owner, its target
-// Dialect only; the interfaces the scheduler checks for (store.AdvisoryLocker,
-// Dialect only; the scheduler optional interfaces (store.AdvisoryLocker,
-// store.ScheduledEventClaimer) are not forwarded.
+// project, the caller's bindings and the token count. It forwards DB and
+// Dialect only; the interfaces the scheduler checks for
+// (store.AdvisoryLocker, store.ScheduledEventClaimer) are not forwarded.
 type credentialIssuingSpyStore struct {
 	store.Store
 	calls atomic.Int32
