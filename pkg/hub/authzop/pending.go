@@ -82,10 +82,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/message-logs/stream", Method: "GET", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/providers/{brokerId}", Method: "DELETE", Area: AreaProjects},
-	{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:dispatch_agent", Area: AreaProjects},
-	{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:message", Area: AreaProjects},
-	{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:dispatch_agent", Area: AreaProjects},
-	{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:message", Area: AreaProjects},
 	// --- messaging ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcs/object", Method: "GET", Area: AreaMessaging},
 	// --- chat ---
