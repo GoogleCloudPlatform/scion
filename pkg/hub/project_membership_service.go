@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
