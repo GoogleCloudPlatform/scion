@@ -853,6 +853,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'user:update',
+    label: 'user:update',
+    description: 'Update the display name and preferences of other users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
+    value: 'user:suspend',
+    label: 'user:suspend',
+    description: 'Suspend or reactivate users',
+    resource: 'user',
+    isAlias: false,
+  },
+  {
     value: 'user_skill_injection:update',
     label: 'user_skill_injection:update',
     description: 'Change the skills injected into your own agents',

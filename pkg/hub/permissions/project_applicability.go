@@ -238,6 +238,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"group.delete": {BoundaryKindHub}, "group.list": {BoundaryKindHub}, "group.addMember": {BoundaryKindHub},
 	"group.removeMember": {BoundaryKindHub},
 	"user.read":          {BoundaryKindHub}, "user.invite": {BoundaryKindHub}, "user.list": {BoundaryKindHub},
+	"user.update": {BoundaryKindHub}, "user.suspend": {BoundaryKindHub},
 	"broker.read": {BoundaryKindHub}, "broker.list": {BoundaryKindHub},
 	"gcp_service_account.read": {BoundaryKindHub}, "gcp_service_account.list": {BoundaryKindHub},
 	"gcp_service_account.verify": {BoundaryKindHub}, "gcp_service_account.assign": {BoundaryKindProject, BoundaryKindHub},
@@ -429,6 +430,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// mint case this table must cover explicitly, not by omission.
 	"user.read": {TargetClassKindHubResource}, "user.invite": {TargetClassKindHubResource},
 	"user.list": {TargetClassKindHubResource},
+	// user.update and user.suspend target the hub-level user record.
+	"user.update": {TargetClassKindHubResource}, "user.suspend": {TargetClassKindHubResource},
 
 	// broker.* — user-owned hub resource.
 	"broker.read": {TargetClassKindHubResource}, "broker.list": {TargetClassKindHubResource},
