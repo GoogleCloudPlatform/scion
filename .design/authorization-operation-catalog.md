@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 298
+**Operations:** 299
 
 ## Table of Contents
 
@@ -182,7 +182,7 @@
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition
 - [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal)
 - [role.binding.delete](#rolebindingdelete) — Delete a role binding (revoke authority from a principal)
-- [group.member.add](#groupmemberadd) — Add a member to a group
+- [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
 - [group.member.remove](#groupmemberremove) — Remove a member from a group
 - [group.delete](#groupdelete) — Delete a group
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
@@ -197,8 +197,9 @@
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
-- [group.read](#groupread) — Read group details or list groups
-- [group.create](#groupcreate) — Create a new group
+- [group.read](#groupread) — Read group details
+- [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
+- [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
 - [group.update](#groupupdate) — Update group metadata
 - [user.read](#userread) — Read user profile or list users
 - [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
@@ -6727,7 +6728,7 @@
 
 **Domain:** group
 
-**Description:** Add a member to a group
+**Description:** Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
 
 ### Entry Points
 
@@ -6737,7 +6738,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.addMember`
 
@@ -6748,7 +6751,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions
+- Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions. A user access token is refused when the closure carries a system-scoped binding, and must hold, in each project the closure binds, every permission those bindings carry
 
 ### Audit
 
@@ -6762,6 +6765,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority`
+- `pkg/hub:TestGroupMemberAddToken_SystemBindingsOnClosureDenied`
 
 ---
 
@@ -6779,7 +6784,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.removeMember`
 
@@ -6804,6 +6811,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -6821,7 +6829,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.delete`
 
@@ -6841,6 +6851,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7388,13 +7399,12 @@
 
 **Domain:** group
 
-**Description:** Read group details or list groups
+**Description:** Read group details
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/groups` |
 | http_route | GET | `/api/v1/groups/{id}` |
 
 **Principals:** `user`
@@ -7415,11 +7425,44 @@
 
 ---
 
+## group.list
+
+**Domain:** group
+
+**Description:** List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/groups` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
+
+**Base Permission:** `group.read`
+
+**Resource Resolver:** group-per-row
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestExplicitGroupToken_ResolvesHubTarget`
+
+---
+
 ## group.create
 
 **Domain:** group
 
-**Description:** Create a new group
+**Description:** Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
 
 ### Entry Points
 
@@ -7430,6 +7473,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `group.create`
 
@@ -7442,6 +7487,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupCreateToken_RequiresCreateSelectorOnHubBoundary`
 
 ---
 
@@ -7461,6 +7507,8 @@
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
+
 **Base Permission:** `group.update`
 
 **Resource Resolver:** group-from-url
@@ -7472,6 +7520,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
