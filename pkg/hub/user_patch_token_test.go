@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -68,12 +70,12 @@ func upTokenRefusal() string {
 }
 
 // requireUpTokenRefusal asserts that rec is that refusal: 403, code
-// forbidden, the user.update message and no session-only reason.
+// forbidden, the refusal message and no session-only reason.
 func requireUpTokenRefusal(t *testing.T, rec *httptest.ResponseRecorder, label string) {
 	t.Helper()
 	assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", label, rec.Body.String())
 	assert.Equal(t, upTokenRefusal(), rec.Body.String(), label)
-	assert.Contains(t, rec.Body.String(), "requires user.update permission", label)
+	assert.Contains(t, rec.Body.String(), userPatchTokenRefusalMessage, label)
 	reason, _ := sessionOnlyDetailsOf(rec)
 	assert.Empty(t, reason, "%s: no session-only reason: %s", label, rec.Body.String())
 }
@@ -197,10 +199,12 @@ func TestUserPatchToken_StatusRequiresSuspendSelector(t *testing.T) {
 	assert.Equal(t, store.UserStatusSuspended, upUser(t, s, target).Status)
 }
 
-// TestUserPatchToken_RoleFieldRefused pins that a token PATCH naming role
-// is refused as session-only (GOV_PENDING), whatever the role value and
-// whatever selectors the token carries, and writes nothing. A session
-// changes the role.
+// TestUserPatchToken_RoleFieldRefused pins that a PATCH naming role by a
+// token that may use user.update or user.suspend on the user is refused as
+// session-only (GOV_PENDING), whatever the role value, and writes nothing.
+// A token that may use neither gets the fixed refusal
+// (TestUserPatchToken_RefusalSameForEveryUserID). A session changes the
+// role.
 func TestUserPatchToken_RoleFieldRefused(t *testing.T) {
 	srv, s := testServer(t)
 	admin := hubConfigTokenUser(t, s, "up-role-super", store.SystemRoleSuperAdmin)
@@ -324,10 +328,12 @@ func TestUserPatchToken_SelfStatusGuardStillApplies(t *testing.T) {
 // TestUserPatchToken_RefusalSameForEveryUserID pins that a PATCH of
 // another user by a token that may use neither user.update nor
 // user.suspend gets one refusal whether or not the user exists, for every
-// body: a hub token with no user selector, a hub token with user:read
-// only, and project-boundary tokens with or without user selectors. A hub
-// token with user:update gets 404 for an unknown user, and one with
-// user:suspend gets 404 for a status change of an unknown user.
+// body: a super-admin's hub token with no user selector, a hub token with
+// user:read only, project-boundary tokens with or without user selectors,
+// and a hub token carrying user:update and user:suspend whose holder
+// holds neither permission. A hub token with user:update gets 404
+// for an unknown user, and one with user:suspend gets 404 for a status
+// change of an unknown user.
 func TestUserPatchToken_RefusalSameForEveryUserID(t *testing.T) {
 	srv, s := testServer(t)
 	admin := hubConfigTokenUser(t, s, "up-anyid-super", store.SystemRoleSuperAdmin)
@@ -360,7 +366,8 @@ func TestUserPatchToken_RefusalSameForEveryUserID(t *testing.T) {
 		}
 	}
 	callers := []caller{
-		{"hub token with no user selector", viaToken(mintHubConfigToken(t, srv, admin, hubBoundary(), "project:read"))},
+		{"super-admin's hub token with no user selector", viaToken(mintHubConfigToken(t, srv, admin, hubBoundary(), "project:read"))},
+		{"hub token with user:update and user:suspend, holder without either", viaToken(upHolderWithoutAuthority(t, srv, s, "up-anyid-holder"))},
 		{"hub token with user:read only", viaToken(mintHubConfigToken(t, srv, admin, hubBoundary(), "user:read"))},
 		{"project-boundary token with user:update and user:suspend", viaIdentity(upProjectCredential(t, srv, s, admin, "up-anyid-project-sel", "user:update", "user:suspend"))},
 		{"project-boundary token with no user selector", viaIdentity(NewScopedUserIdentityWithBoundaryAndDecoration(
@@ -388,4 +395,92 @@ func TestUserPatchToken_RefusalSameForEveryUserID(t *testing.T) {
 	suspend := mintHubConfigToken(t, srv, admin, hubBoundary(), "user:suspend")
 	rec = doRequestWithToken(t, srv, suspend, http.MethodPatch, "/api/v1/users/"+unknown, map[string]interface{}{"status": store.UserStatusSuspended})
 	assert.Equal(t, http.StatusNotFound, rec.Code, "user:suspend, unknown user: %s", rec.Body.String())
+}
+
+// upHolderWithoutAuthority mints a hub token carrying user:update and
+// user:suspend for a new super-admin, then removes the holder's role
+// bindings, and returns the token. The holder keeps hub membership, which
+// grants neither permission.
+func upHolderWithoutAuthority(t *testing.T, srv *Server, s store.Store, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	holder := hubConfigTokenUser(t, s, name, store.SystemRoleSuperAdmin)
+	key := mintHubConfigToken(t, srv, holder, hubBoundary(), "user:update", "user:suspend")
+	_, err := s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, holder)
+	require.NoError(t, err)
+	require.Equal(t, 0, superAdminBindingCount(t, s, holder))
+	u := upUser(t, s, holder)
+	u.Role = store.UserRoleMember
+	require.NoError(t, s.UpdateUser(ctx, u))
+	return key
+}
+
+// upAuditShape returns the decision audit records of one request with the
+// fields that identify the request (record ID, time, correlation ID) and
+// the path id (resource ID, route) cleared, after asserting that every
+// user record names the path id.
+func upAuditShape(t *testing.T, records []*store.DecisionAuditRecord, id, label string) []store.DecisionAuditRecord {
+	t.Helper()
+	out := make([]store.DecisionAuditRecord, 0, len(records))
+	for _, r := range records {
+		c := *r
+		if c.ResourceType == "user" {
+			assert.Equal(t, id, c.ResourceID, "%s: the record names the path id", label)
+		}
+		c.ID, c.Timestamp, c.CorrelationID = "", time.Time{}, ""
+		c.ResourceID = strings.ReplaceAll(c.ResourceID, id, "{id}")
+		c.Route = strings.ReplaceAll(c.Route, id, "{id}")
+		out = append(out, c)
+	}
+	return out
+}
+
+// TestUserPatchToken_RefusalDecisionAudited pins that the refusal of a
+// PATCH of another user by a token that may use neither user.update nor
+// user.suspend comes from authorization decisions on the hub-level user
+// record that are audited as denies, one for user.update and one for
+// user.suspend, and that the records have the same shape whether or not
+// the user exists: for a super-admin's token with no user selector and
+// for a token with both selectors whose holder holds neither
+// permission.
+func TestUserPatchToken_RefusalDecisionAudited(t *testing.T) {
+	srv, s := testServer(t)
+	admin := hubConfigTokenUser(t, s, "up-audit-super", store.SystemRoleSuperAdmin)
+	target := upTarget(t, s, "up-audit-target")
+	unknown := tid("up-audit-unknown")
+	_, err := s.GetUser(context.Background(), unknown)
+	require.Error(t, err, "the unknown user does not exist")
+
+	emitter := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
+	for _, c := range []struct {
+		label string
+		key   string
+	}{
+		{"super-admin's hub token with no user selector", mintHubConfigToken(t, srv, admin, hubBoundary(), "project:read")},
+		{"hub token with user:update and user:suspend, holder without either", upHolderWithoutAuthority(t, srv, s, "up-audit-holder")},
+	} {
+		body := map[string]interface{}{"displayName": "Not Allowed"}
+		var shapes [2][]store.DecisionAuditRecord
+		var bodies [2]string
+		for i, id := range []string{target, unknown} {
+			emitter.records = nil
+			rec := doRequestWithToken(t, srv, c.key, http.MethodPatch, "/api/v1/users/"+id, body)
+			requireUpTokenRefusal(t, rec, c.label+" "+id)
+			bodies[i] = rec.Body.String()
+
+			var userDenies []string
+			for _, r := range emitter.records {
+				if r.ResourceType == "user" {
+					assert.Equal(t, "deny", r.Result, "%s %s: %s", c.label, id, r.Permission)
+					userDenies = append(userDenies, r.PermissionID)
+				}
+			}
+			assert.Equal(t, []string{"user.update", "user.suspend"}, userDenies, "%s %s: audited decisions", c.label, id)
+			shapes[i] = upAuditShape(t, emitter.records, id, c.label)
+		}
+		assert.Equal(t, bodies[0], bodies[1], "%s: body", c.label)
+		assert.Equal(t, shapes[0], shapes[1], "%s: audit record shape", c.label)
+	}
 }

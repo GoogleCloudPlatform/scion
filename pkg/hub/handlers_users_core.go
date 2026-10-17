@@ -294,20 +294,47 @@ func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context
 // another user's profile without user.update.
 const userCrossProfileDenialMessage = "requires user.update permission to modify another user's profile"
 
-// tokenMayUpdateUsers reports whether a user access token may use
-// user.update or user.suspend at all: its ceiling allows one of them on its
-// boundary (tokenAllowsPermission). Both are hub-only, so a project-boundary
-// token never may.
-func tokenMayUpdateUsers(token *ScopedUserIdentity) bool {
-	return tokenAllowsPermission(token, "user.update") || tokenAllowsPermission(token, "user.suspend")
+// userPatchTokenRefusalMessage is the refusal message of a PATCH of
+// another user by a token that may use neither user.update nor
+// user.suspend on that user.
+const userPatchTokenRefusalMessage = "requires user.update or user.suspend permission to modify another user"
+
+// tokenMayUpdateUser reports whether the token identity actor may use
+// user.update or user.suspend on the hub-level record of user id. Each
+// permission is one authorization decision (Decide, which audits a deny),
+// evaluated on the token identity, so the holder's current authority and
+// the token's selectors and boundary all apply. The decision uses only the
+// path id: it reads no user record and no request body, so its outcome is
+// the same whether or not user id exists.
+func (s *Server) tokenMayUpdateUser(ctx context.Context, actor UserIdentity, id string) bool {
+	target := hubScopedResource("user", id)
+	for _, p := range []struct {
+		action     Action
+		permission string
+	}{
+		{Action("update"), "user.update"},
+		{Action("suspend"), "user.suspend"},
+	} {
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(actor),
+			Credential: credentialContextForIdentity(actor),
+			Resource:   target,
+			Action:     p.action,
+			Permission: p.permission,
+		})
+		if decision.Allowed {
+			return true
+		}
+	}
+	return false
 }
 
 // writeUserPatchTokenRefusal writes the refusal of PATCH
 // /api/v1/users/{id} for a token that may use neither user.update nor
-// user.suspend, on another user's id. Its status, code, message and
+// user.suspend on another user's id. Its status, code, message and
 // details are the same for every such token and every id.
 func writeUserPatchTokenRefusal(w http.ResponseWriter) {
-	writeForbiddenStructured(w, userCrossProfileDenialMessage, "user", Action("update"))
+	writeForbiddenStructured(w, userPatchTokenRefusalMessage, "user", Action("update"))
 }
 
 // updateUserTokenFields applies the field rules of PATCH
@@ -421,7 +448,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
-	if token != nil && actor.ID() != id && !tokenMayUpdateUsers(token) {
+	// A token on another user's id needs user.update or user.suspend on
+	// that user before the record is read; otherwise it gets one fixed
+	// refusal for every id and body.
+	if token != nil && actor.ID() != id && !s.tokenMayUpdateUser(ctx, actor, id) {
 		writeUserPatchTokenRefusal(w)
 		return
 	}
