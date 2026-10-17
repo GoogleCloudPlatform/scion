@@ -776,3 +776,104 @@ func TestVisitorAgents_MessageableFilterDeniesOnError(t *testing.T) {
 	unfiltered := get(list)
 	assert.Len(t, unfiltered.Agents, 2, "the unfiltered list makes no messaging decision")
 }
+
+// visitorOwnGrants returns the caller's own grants from GET
+// /api/v1/users/me/visitor-grants.
+func (f *visitorMessagingFixture) visitorOwnGrants(t *testing.T, token string) []VisitorOwnGrant {
+	t.Helper()
+	rec := f.do(t, token, http.MethodGet, "/api/v1/users/me/visitor-grants", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ListVisitorOwnGrantsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.Grants
+}
+
+// visitorOwnDMs returns the caller's own DMs from GET
+// /api/v1/users/me/visitor-dms.
+func (f *visitorMessagingFixture) visitorOwnDMs(t *testing.T, token string) []VisitorOwnDM {
+	t.Helper()
+	rec := f.do(t, token, http.MethodGet, "/api/v1/users/me/visitor-dms", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ListVisitorOwnDMsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp.DMs
+}
+
+// ruleVisitorAgentsStart makes a visitor through a domain rule
+// (ruleVisitor) and checks that it lists the project's agents and reads
+// one with the visitor view, sees the rule's grant as active in its own
+// grants, and after one send sees that DM in its own DM list. It returns
+// the rule, the visitor's account ID and its issuer credential.
+func (f *visitorMessagingFixture) ruleVisitorAgentsStart(t *testing.T, subject, email string) (ProjectVisitorRuleView, string, string) {
+	t.Helper()
+	rule, visitorID, token := f.ruleVisitor(t, subject, email)
+	list := f.projectAgentsPath(f.projectID)
+
+	rec := f.do(t, token, http.MethodGet, list, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "list with a rule grant: %s", rec.Body.String())
+	var agents ListVisitorAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &agents))
+	assert.ElementsMatch(t, []VisitorAgentView{
+		{Name: "helper", Slug: "helper", Status: "running"},
+		{Name: "sealed", Slug: "sealed", Status: "running"},
+	}, agents.Agents)
+	rec = f.do(t, token, http.MethodGet, list+"/"+f.agent.Slug, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "read with a rule grant: %s", rec.Body.String())
+	assert.JSONEq(t, `{"name":"helper","slug":"helper","status":"running"}`, rec.Body.String())
+
+	project, err := f.st.GetProject(context.Background(), f.projectID)
+	require.NoError(t, err)
+	assert.Equal(t, []VisitorOwnGrant{{ProjectID: project.ID, ProjectSlug: project.Slug, ProjectName: project.Name,
+		Status: visitorGrantStatusActive}}, f.visitorOwnGrants(t, token), "the rule's grant, active")
+
+	rec = f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("from a rule visitor"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
+	require.NoError(t, err)
+	dms := f.visitorOwnDMs(t, token)
+	require.Len(t, dms, 1, "the DM of the send")
+	assert.Equal(t, dmKey, dms[0].ConversationKey)
+	assert.Equal(t, f.agent.Slug, dms[0].AgentSlug)
+	return rule, visitorID, token
+}
+
+// A visitor created by a domain rule lists and reads the project's agents
+// and sees its grant and its DM like a visitor granted by email; removing
+// the rule refuses list and read on the next request, and its own grants
+// and DM lists are empty.
+func TestVisitorAgents_RuleVisitorAdmittedUntilRuleRemoved(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	rule, _, token := f.ruleVisitorAgentsStart(t, "sub-rua", "rua@any.example")
+	list := f.projectAgentsPath(f.projectID)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.rulesPath()+"/"+rule.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	assertVisitorRefusal(t, f.do(t, token, http.MethodGet, list, nil), "list after rule removal")
+	assertVisitorRefusal(t, f.do(t, token, http.MethodGet, list+"/"+f.agent.Slug, nil), "read after rule removal")
+	assert.Empty(t, f.visitorOwnGrants(t, token), "own grants after rule removal")
+	assert.Empty(t, f.visitorOwnDMs(t, token), "own DMs after rule removal")
+}
+
+// Revoking one rule visitor refuses its next list and read, empties its
+// own grants and DM lists, and the rule, applied again on the account's
+// next requests, does not bind it again.
+func TestVisitorAgents_RuleVisitorRevokedStaysRefused(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	rule, visitorID, token := f.ruleVisitorAgentsStart(t, "sub-rho", "rho@any.example")
+	list := f.projectAgentsPath(f.projectID)
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+visitorID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	assertVisitorRefusal(t, f.do(t, token, http.MethodGet, list, nil), "list after revocation")
+	assertVisitorRefusal(t, f.do(t, token, http.MethodGet, list+"/"+f.agent.Slug, nil), "read after revocation")
+	assert.Empty(t, f.visitorOwnGrants(t, token), "own grants after revocation")
+	assert.Empty(t, f.visitorOwnDMs(t, token), "own DMs after revocation")
+
+	// The account is still a visitor, so the rule is applied again on this
+	// request; the refusal holds and no binding is created.
+	require.NotNil(t, f.visitorThrough(t, token), "the revoked account still resolves as a visitor")
+	assertVisitorRefusal(t, f.do(t, token, http.MethodGet, list, nil), "list after the rule is applied again")
+	assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the rule does not bind the revoked visitor again")
+}
