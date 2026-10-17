@@ -153,6 +153,10 @@ const (
 	// BearerTargetThreadGroupRecord is a chat thread group's project, read
 	// from the thread group record (ptone/scion#4424).
 	BearerTargetThreadGroupRecord BearerTarget = "thread_group_record"
+	// BearerTargetGroupRecord is a group record: the group's project for a
+	// project-scoped group, or the hub for a group with no project
+	// (groupResource).
+	BearerTargetGroupRecord BearerTarget = "group_record"
 )
 
 var validBearerTargets = map[BearerTarget]bool{
@@ -168,6 +172,7 @@ var validBearerTargets = map[BearerTarget]bool{
 	BearerTargetSelfRecord:         true,
 	BearerTargetConversationRecord: true,
 	BearerTargetThreadGroupRecord:  true,
+	BearerTargetGroupRecord:        true,
 }
 
 // BearerSelfFilter is the result filter an admit_self operation applies.

@@ -308,6 +308,8 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:            {"pinned": true},
 		{"chat.presence.update", "/api/v1/chat/presence"}:                              {"projectIds": []string{f.project}},
 		{"chat.userprefs.update", "/api/v1/chat/user-prefs"}:                           {"spaceSortMode": "alpha"},
+		// Group create validates the name before the authorization check.
+		{"group.create", "/api/v1/groups"}: {"name": "bdm group create"},
 	}
 }
 

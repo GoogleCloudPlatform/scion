@@ -235,6 +235,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "group.list", Method: "GET", Pattern: "/api/v1/groups"}: {
+		Reason: "the group list filters each row by the group.read check instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403",
+		Pin:    "TestExplicitGroupToken_ResolvesHubTarget",
+	},
+	{OperationID: "group.member.add", Method: "POST", Pattern: "/api/v1/groups/{id}/members"}: {
+		Reason: "a token is held to the group role hierarchy: only the group's owner or an owner or admin member adds members, and the matrix's super-admin is none of these on the fixture group, so the admitting token is refused by the hierarchy check after the selector check",
+		Pin:    "TestGroupMemberAddToken_HeldToGroupRoleHierarchy",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",

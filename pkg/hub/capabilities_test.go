@@ -899,6 +899,17 @@ func TestResourceBuilders(t *testing.T) {
 		assert.Equal(t, "group", r.Type)
 		assert.Equal(t, "grp1", r.ID)
 		assert.Equal(t, "u1", r.OwnerID)
+		assert.Equal(t, "system", r.ParentType, "a group with no project is a hub-level resource")
+		assert.Empty(t, r.ParentID)
+	})
+
+	t.Run("groupResource project-scoped", func(t *testing.T) {
+		g := &store.Group{ID: "grp2", OwnerID: "u1", ProjectID: "p1"}
+		r := groupResource(g)
+		assert.Equal(t, "group", r.Type)
+		assert.Equal(t, "project", r.ParentType)
+		assert.Equal(t, "p1", r.ParentID)
+		assert.Equal(t, "u1", r.OwnerID)
 	})
 
 	t.Run("userResource", func(t *testing.T) {

@@ -152,17 +152,17 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.member.add",
 		Domain:      "group",
-		Description: "Add a member to a group",
+		Description: "Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "group-from-url",
 		BasePermission:        "group.addMember",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions",
+		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions. A user access token is refused when the closure carries a system-scoped binding, and must hold, in each project the closure binds, every permission those bindings carry",
 		AuthorityEval:         AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "group_member_add",
@@ -171,7 +171,12 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_SystemBindingsOnClosureDenied"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.member.remove",
@@ -184,7 +189,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.removeMember",
 		Effects:          []SecurityEffect{EffectRevokeAuthority},
@@ -201,7 +206,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.delete",
@@ -211,7 +220,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -224,7 +233,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -625,14 +638,13 @@ var identityOperations = []OperationSpec{
 	},
 
 	// =====================================================================
-	// Domain: group — group read, create, update
+	// Domain: group — group read, list, create, update
 	// =====================================================================
 	{
 		ID:          "group.read",
 		Domain:      "group",
-		Description: "Read group details or list groups",
+		Description: "Read group details",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -646,9 +658,30 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "group.list",
+		Domain:      "group",
+		Description: "List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "group-per-row",
+		BasePermission:   "group.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestExplicitGroupToken_ResolvesHubTarget"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
+	},
+	{
 		ID:          "group.create",
 		Domain:      "group",
-		Description: "Create a new group",
+		Description: "Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "POST"},
 		},
@@ -660,7 +693,11 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupCreateToken_RequiresCreateSelectorOnHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.update",
@@ -679,7 +716,11 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
