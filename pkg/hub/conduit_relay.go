@@ -326,7 +326,7 @@ func (s *Server) conduitWelcomeGrantKeys(ctx context.Context) ([]*conduitv1.Gran
 // token-refresh response, or nil when the experiment is off or the keys are
 // unavailable (the refresh itself must not fail over them).
 func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
-	keys, err := s.ConduitGrantPublicKeys(ctx)
+	keys, err := s.conduitHubDirectGrantKeys(ctx)
 	if err != nil {
 		if !errors.Is(err, errConduitDisabled) {
 			slog.Warn("Conduit grant keys unavailable for the token-refresh response", "error", err)

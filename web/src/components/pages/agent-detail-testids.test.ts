@@ -96,7 +96,8 @@ describe('agent page test ids for UAT', () => {
       'renderStateBanner'
     );
 
-    expect(text(byId(host, 'launch-step'))).toBe('Step: awaiting capacity');
+    expect(text(byId(host, 'launch-step'))).toBe('Step: waiting for node capacity');
+    expect(byId(host, 'launch-step')?.getAttribute('data-step')).toBe('awaiting_capacity');
     expect(text(byId(host, 'launch-message'))).toBe('waiting for a node');
   });
 
@@ -111,8 +112,11 @@ describe('agent page test ids for UAT', () => {
       'renderStateBanner'
     );
 
-    expect(text(byId(host, 'launch-error-code'))).toBe('launch_timeout — timed out');
+    expect(text(byId(host, 'launch-error-code'))).toBe(
+      'launch_timeout: the launch timed out — timed out'
+    );
     expect(text(byId(host, 'launch-code'))).toBe('launch_timeout');
+    expect(text(byId(host, 'launch-code-label'))).toBe('the launch timed out');
     expect(text(byId(host, 'launch-end-reason'))).toBe('timed out');
     expect(text(byId(host, 'launch-error-message'))).toBe('launch timed out');
     expect(text(byId(host, 'incomplete-create-template'))).toBe('coder');
@@ -121,6 +125,24 @@ describe('agent page test ids for UAT', () => {
     expect(byId(host, 'incomplete-create-recreate')?.getAttribute('href')).toBe(
       '/agents/new?projectId=p-1'
     );
+  });
+
+  it('marks the failed-start panel fields', () => {
+    const host = renderPart(
+      makeAgent({
+        phase: 'stopped',
+        message: 'pod_create: m',
+        launch: { ...failed, kind: 'start', error: 'runtime_error', step: 'pod_create' },
+      }),
+      'renderStateBanner'
+    );
+
+    expect(byId(host, 'failed-start-banner')).not.toBeNull();
+    expect(text(byId(host, 'launch-code'))).toBe('runtime_error');
+    expect(text(byId(host, 'launch-code-label'))).toBe('the runtime could not start the agent');
+    expect(text(byId(host, 'launch-end-reason'))).toBe('timed out');
+    expect(byId(host, 'launch-failed-step')?.getAttribute('data-step')).toBe('pod_create');
+    expect(text(byId(host, 'launch-error-message'))).toBe('pod_create: m');
   });
 
   it('marks the phase badge on the Status tab', () => {

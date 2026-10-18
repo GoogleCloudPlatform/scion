@@ -229,6 +229,14 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
+- **Invitations and the allow list.** Inviting users (single or bulk) and managing invitation
+  codes admit only a hub token carrying `user:invite`. Reading the allow list and its domains
+  needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
+  `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
+  permission. An invited user gets no role binding or group membership from the invitation.
+  Removing an allow-list entry deletes the invited user together with that user's role bindings
+  and group memberships, and is refused with `409` while the invited user is a project's last
+  owner.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your

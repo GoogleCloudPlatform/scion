@@ -18,7 +18,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestEnsureScionGitignore_AddsEntry(t *testing.T) {
@@ -393,5 +396,193 @@ func TestInitProject_CreatesEmptyTemplatesDir(t *testing.T) {
 		if _, err := os.Stat(perHarnessDir); !os.IsNotExist(err) {
 			t.Errorf("Expected per-harness template %s to NOT be created at project level", name)
 		}
+	}
+}
+
+// gitStatusPorcelain returns `git status --porcelain` for dir.
+func gitStatusPorcelain(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git status failed: %v", err)
+	}
+	return string(out)
+}
+
+// isolateGitConfig keeps the user's global git configuration (and any
+// global excludes file in it) out of the ignore checks below.
+func isolateGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+func TestEnsureScionGitExclude_AddsRuleWithoutTouchingTrackedFiles(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	if util.IsIgnored(repo, ".scion/agents/") {
+		t.Fatal("precondition: .scion/agents/ should not be ignored yet")
+	}
+
+	if err := EnsureScionGitExclude(repo); err != nil {
+		t.Fatalf("EnsureScionGitExclude failed: %v", err)
+	}
+
+	if !util.IsIgnored(repo, ".scion/agents/") {
+		t.Error(".scion/agents/ should be ignored after EnsureScionGitExclude")
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf(".gitignore should not be created, stat err = %v", err)
+	}
+	if st := gitStatusPorcelain(t, repo); st != "" {
+		t.Errorf("tracked tree should be unchanged, git status:\n%s", st)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("read exclude: %v", err)
+	}
+	if !strings.HasSuffix(string(content), "\n.scion/agents/\n") && string(content) != ".scion/agents/\n" {
+		t.Errorf("exclude should end with the rule on its own line, got %q", string(content))
+	}
+}
+
+func TestEnsureScionGitExclude_Idempotent(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	excludePath := filepath.Join(repo, ".git", "info", "exclude")
+	// No trailing newline: the rule must still land on its own line.
+	if err := os.WriteFile(excludePath, []byte("*.log"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if err := EnsureScionGitExclude(repo); err != nil {
+			t.Fatalf("EnsureScionGitExclude call %d failed: %v", i+1, err)
+		}
+	}
+
+	content, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(content), "*.log\n.scion/agents/\n"; got != want {
+		t.Errorf("exclude = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureScionGitExclude_NoChangeWhenAlreadyIgnored(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(".scion/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(repo, ".git", "info", "exclude")
+	before, _ := os.ReadFile(excludePath)
+
+	if err := EnsureScionGitExclude(repo); err != nil {
+		t.Fatalf("EnsureScionGitExclude failed: %v", err)
+	}
+
+	after, _ := os.ReadFile(excludePath)
+	if string(before) != string(after) {
+		t.Errorf("exclude changed although the path was already ignored: %q -> %q", before, after)
+	}
+}
+
+func TestEnsureScionGitExclude_RefusesSymlinkedExclude(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	excludePath := filepath.Join(repo, ".git", "info", "exclude")
+	_ = os.Remove(excludePath)
+	if err := os.Symlink(target, excludePath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureScionGitExclude(repo); err == nil {
+		t.Fatal("expected an error for a symlinked exclude file")
+	}
+	if content, _ := os.ReadFile(target); len(content) != 0 {
+		t.Errorf("symlink target should not be written, got %q", content)
+	}
+}
+
+func TestEnsureScionGitExclude_RefusesSymlinkedInfoDir(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	elsewhere := t.TempDir()
+	infoDir := filepath.Join(repo, ".git", "info")
+	if err := os.RemoveAll(infoDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, infoDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureScionGitExclude(repo); err == nil {
+		t.Fatal("expected an error for a symlinked info directory")
+	}
+	if _, err := os.Stat(filepath.Join(elsewhere, "exclude")); !os.IsNotExist(err) {
+		t.Errorf("nothing should be written through the symlinked info directory, stat err = %v", err)
+	}
+}
+
+func TestEnsureScionGitExclude_ErrorsWhenRepositoryUnignores(t *testing.T) {
+	isolateGitConfig(t)
+	repo := t.TempDir()
+	setupGitRepoDir(t, repo)
+	// A tracked negation outranks info/exclude, so the rule cannot take effect.
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("!.scion/agents/\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := EnsureScionGitExclude(repo)
+	if err == nil || !strings.Contains(err.Error(), "un-ignores .scion/agents/") {
+		t.Fatalf("expected an un-ignores error, got %v", err)
+	}
+}
+
+// TestSharedCloneSeed_PassesAgentsIgnoreCheck follows the hub's
+// shared-workspace seed (clone, then InitProject with an explicit .scion
+// target) for a repository whose tracked files do not ignore .scion/agents/,
+// and checks the result passes the ignore check provisioning applies.
+func TestSharedCloneSeed_PassesAgentsIgnoreCheck(t *testing.T) {
+	isolateGitConfig(t)
+	source := t.TempDir()
+	setupGitRepoDir(t, source)
+
+	clone := filepath.Join(t.TempDir(), "workspace")
+	if err := util.CloneSharedWorkspace(clone, source, "", ""); err != nil {
+		t.Fatalf("CloneSharedWorkspace failed: %v", err)
+	}
+	if err := InitProject(filepath.Join(clone, ".scion"), nil, InitProjectOpts{SkipRuntimeCheck: true, ProjectID: "hub-project-id"}); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+	// The explicit-target seed alone leaves agent state unignored.
+	if util.IsIgnored(clone, ".scion/agents/") {
+		t.Fatal("precondition: explicit-target InitProject should not ignore .scion/agents/")
+	}
+
+	if err := EnsureScionGitExclude(clone); err != nil {
+		t.Fatalf("EnsureScionGitExclude failed: %v", err)
+	}
+
+	if !util.IsIgnored(clone, ".scion/agents/") {
+		t.Error("seeded shared clone should pass the .scion/agents/ ignore check")
+	}
+	if _, err := os.Stat(filepath.Join(clone, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("seeded shared clone should not gain a .gitignore, stat err = %v", err)
 	}
 }
