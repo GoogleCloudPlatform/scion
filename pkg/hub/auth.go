@@ -170,6 +170,13 @@ type AuthConfig struct {
 	// accepts visitors from) answer 403; any other error answers 503. Nil
 	// keeps every verified identity.
 	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
+	// FederationHubUserTokensEnabled reports, on each request, whether
+	// user access credentials from hub issuers may be accepted at all
+	// (Server.federationHubUserTokensEnabled: the
+	// federation.project_visitors experiment). The issuer's
+	// accept_user_tokens must also be set. Nil refuses every such
+	// credential; agent tokens are unaffected.
+	FederationHubUserTokensEnabled func() bool
 	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
 	// state (test_identity_workload_issuer.go). Nil when no workload issuer
 	// is configured: a request that names a delegation is then refused.
@@ -381,7 +388,12 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"federation authentication is not configured", nil)
 					return
 				}
-				identity, err := fedAuth.Authenticate(federationToken)
+				fedOpts := FederationAuthOptions{
+					AcceptHubUserTokens: cfg.FederationHubUserTokensEnabled != nil && cfg.FederationHubUserTokensEnabled(),
+					PlatformAuthSA:      cfg.PlatformAuthSA,
+					DriverPrincipals:    cfg.DriverPrincipals,
+				}
+				identity, err := fedAuth.Authenticate(federationToken, fedOpts)
 				if err != nil {
 					if cfg.Debug {
 						log.Debug("Federation token validation failed", "error", err)

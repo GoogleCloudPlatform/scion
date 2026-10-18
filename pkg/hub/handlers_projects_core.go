@@ -1303,6 +1303,20 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return fmt.Errorf("shared workspace clone failed: %w", err)
 	}
 
+	// Agents provision from this clone, and provisioning requires
+	// .scion/agents/ to be git-ignored. The explicit-target InitProject
+	// below leaves the tracked .gitignore alone, so add the rule to the
+	// clone's own exclude file instead. Without it no agent can start, so
+	// a failure here fails the clone. The detailed error names host paths,
+	// so it is logged here and the returned error (which reaches the API
+	// response) is fixed text.
+	if err := config.EnsureScionGitExclude(workspacePath); err != nil {
+		s.projectsLogger().Warn("failed to set up the .scion/agents/ ignore rule in the shared workspace clone",
+			"project_id", project.ID, "error", err.Error())
+		_ = util.RemoveAllSafe(workspacePath)
+		return errors.New("shared workspace clone failed: could not set up the .scion/agents/ ignore rule")
+	}
+
 	// Seed the .scion project on top of the cloned workspace, with the hub
 	// project ID as the workspace project identity (replacing any identity
 	// the repository carries).

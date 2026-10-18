@@ -35,6 +35,7 @@ permissions). Available scopes:
 | Scope | Grants |
 |-------|--------|
 | `project:read` | Read project metadata |
+| `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project administration (membership operations) |
 | `agent:create` | Create agents |
@@ -76,7 +77,7 @@ boundary:
 | Scope | Boundary | Grants |
 |-------|----------|--------|
 | `broker:create` | Hub only | Register a Runtime Broker, or re-register (issue a new join token for) one your user created, including with `scion hub brokers join-token create`. A token does not let a super-admin re-register another user's broker. Requires that you currently hold `broker.create`, which hub members do. |
-| `broker:read` | Hub only | Read Runtime Broker records. `scion runtime-broker register` uses it to check an existing registration. |
+| `broker:read` | Hub only | Read Runtime Broker records and the projects a broker serves. `scion runtime-broker register` uses it to check an existing registration. It also reads the environment variables (sensitive values masked) and secret metadata of a Runtime Broker your user created. |
 | `federation_token:mint` | Hub only | Obtain a short-lived user access credential for yourself to present to a peer hub (`scion hub auth federation-token`). Experimental: available only while the `federation.project_visitors` experiment is on and the audience is listed in `server.oidc.user_token_audiences`. |
 
 `broker:create` covers registration only. It never associates a broker with a project, never
@@ -205,10 +206,15 @@ apart.
 
 The same per-request checks apply, with these limits:
 
-- **Lists.** A hub token lists only projects (and their resources) you currently have access to,
-  and the token needs the exact list permission, for example `agent:list`. A project token lists
-  only its own project. A list cursor issued to one token does not work for a token with a
-  different boundary, or for a browser session.
+- **Lists.** Every list needs the exact list permission in the token, on a hub or a project
+  token: `project:list` to list projects, `agent:list` to list agents, `skill:list` to list
+  skills. Without it the list is empty. A hub token lists only projects (and their resources)
+  you currently have access to. A project token lists only its own project. A skill list also
+  needs `skill:read`, and its total counts only the skills the token may read. Template and
+  harness configuration lists filter each row by `template:read` or `harness_config:read`; with
+  `template:list` or `harness_config:list` on a hub token, a holder of hub-wide list access gets
+  the unfiltered list. Query filters such as `projectId` only narrow a token's results. A list
+  cursor issued to one token does not work for another token, or for a browser session.
 - **Delegation.** Grants a token creates must fall inside its boundary. A token can never create
   a system-scoped grant. Under a hub boundary, you must also currently have the matching access in
   the grant's project.
@@ -229,6 +235,14 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
+- **Invitations and the allow list.** Inviting users (single or bulk) and managing invitation
+  codes admit only a hub token carrying `user:invite`. Reading the allow list and its domains
+  needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
+  `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
+  permission. An invited user gets no role binding or group membership from the invitation.
+  Removing an allow-list entry deletes the invited user together with that user's role bindings
+  and group memberships, and is refused with `409` while the invited user is a project's last
+  owner.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your
@@ -271,12 +285,13 @@ a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logou
 ### Scopes for CLI use
 
 Most CLI commands that run in a project look the project up on the Hub first, which needs
-`project:read`. Include `project:read` in every token you use with the CLI. Scopes common CLI
-flows need:
+`project:read`, and `project:list` when the CLI finds the project by its git remote, slug or
+name. Include `project:read` and `project:list` in every token you use with the CLI. Scopes
+common CLI flows need:
 
 | Flow | Scopes |
 |------|--------|
-| Any command run in a project | `project:read` |
+| Any command run in a project | `project:read`, `project:list` |
 | `scion list` | `project:read`, `agent:list` |
 | `scion look`, `scion logs` | `project:read`, `agent:read` |
 | `scion start` / `scion create` | `project:read`, `agent:create`, `agent:read` |
@@ -316,6 +331,12 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Broker secret rotation and association**: no UAT can rotate a Runtime Broker's HMAC
   secret or carry the broker owner's consent to associate a broker with a project. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-ownership).
+- **Runtime Broker changes**: updating or deregistering a Runtime Broker, writing its
+  environment variables or secrets, and sending a heartbeat on its behalf need a sign-in; a UAT
+  is denied with `403` and `details.reason` naming why.
+- **Image operations on a Runtime Broker**: pulling or removing a harness-config image on a
+  named Runtime Broker (`broker_id`) needs dispatch authority on that broker, which no UAT
+  scope carries, so a UAT is denied even on an auto-provide broker.
 
 ## Trust level separation
 
@@ -364,7 +385,9 @@ scion hub token list
 ```
 
 Revoke a token — it stops working for authentication but remains visible in listings as
-revoked:
+revoked. Log and message streams and terminal sessions opened with the token end within
+about 15 seconds of the token being revoked or expiring, of its user being suspended, or of
+the user losing the permission the stream needs:
 
 ```bash
 scion hub token revoke <token-id>
