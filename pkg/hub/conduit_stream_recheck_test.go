@@ -17,11 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -469,8 +471,20 @@ func TestConduitRenewStream_DevUser(t *testing.T) {
 
 	f.srv.authConfig.DevAuthEnabled = true
 	f.srv.authConfig.DevUserCfg = DevUserConfig{Username: "dev"}
-	_, err = f.renew(tok, open, 7)
-	assert.NotErrorIs(t, err, errConduitPrincipalInactive, "dev auth on: rebuilt as the development user")
+	var seen []Identity
+	f.srv.conduitAuthorizeActionTestHook = func(_ context.Context, ident Identity, _ *store.Agent, _ Action) error {
+		seen = append(seen, ident)
+		return nil
+	}
+	r, err := f.renew(tok, open, 7)
+	require.NoError(t, err, "dev auth on: the development user renews")
+	assert.Equal(t, recheckRenewed, classOfRenewal(err))
+	require.NotNil(t, r)
+	assert.Equal(t, grant.SubjectUserPrefix+DevUserID, r.Claims.Subject)
+	require.NotEmpty(t, seen)
+	for _, ident := range seen {
+		assert.IsType(t, &DevUser{}, ident, "evaluated as the development user")
+	}
 }
 
 // TestStartConduitExternal_RenewalPath (D3, S1): with target_stream_deadlines
@@ -495,14 +509,22 @@ func TestStartConduitExternal_RenewalPath(t *testing.T) {
 		assert.Contains(t, err.Error(), "server.hub.conduit.target_stream_deadlines")
 		assert.Nil(t, f.srv.conduitExternal.Load(), "nothing started")
 	})
-	t.Run("off without the renewal path starts", func(t *testing.T) {
+	t.Run("off without the renewal path starts and warns", func(t *testing.T) {
 		f := newFixture(t)
+		logs := &syncBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
 		opts := externalOptions(t, f)
 		opts.withoutStreamRenewer = true
 		require.NoError(t, f.srv.StartConduitExternal(ctx, opts))
 		assert.Nil(t, f.srv.streamRenewer())
+		out := logs.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, "relay-held streams have no renewal path")
+		assert.Contains(t, out, "target_stream_deadlines=off")
 	})
 	t.Run("enforce installs the renewal path", func(t *testing.T) {
 		f := newFixture(t)
@@ -624,4 +646,73 @@ func TestConduitRenewalUnsupportedPrincipal_OneDefinition(t *testing.T) {
 		}
 	}
 	assert.Equal(t, []string{"conduit_authz.go:conduitRenewalUnsupportedPrincipal"}, defs)
+}
+
+// recheckNilUserStore returns neither a user nor an error from every user
+// read while its switch is armed.
+type recheckNilUserStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *recheckNilUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault.Active() {
+		return nil, nil
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+// TestConduitRenewalIdentity_NilUserIsUnavailable (r2 F1): a user read
+// that returns neither a user nor an error is an internal inconsistency:
+// unavailable, not an inactive principal and not an allow, and nothing is
+// minted.
+func TestConduitRenewalIdentity_NilUserIsUnavailable(t *testing.T) {
+	f := newRenewalFixture(t)
+	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *recheckNilUserStore {
+		return &recheckNilUserStore{Store: inner, fault: sw}
+	})
+	fault.Arm()
+	r, err := f.renew(tok, open, 7)
+	assert.Nil(t, r, "nothing is minted")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errConduitAuthzUnavailable)
+	assert.NotErrorIs(t, err, errConduitPrincipalInactive)
+	assert.Equal(t, ConduitRenewalUnavailable, ClassifyConduitRenewal(err))
+}
+
+// TestRelayStreamRecheck_BadLatestGrantDenies (r2 F2): a relay-presented
+// latest grant that fails re-check verification is a deny (4401): a
+// tampered grant, and a grant bound to another epoch of the target session.
+func TestRelayStreamRecheck_BadLatestGrantDenies(t *testing.T) {
+	f := newRelayRenewalFixture(t)
+	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+	require.True(t, f.relayRecheck(t, f.item(tok, open, 7)).Renew, "the untouched grant renews")
+
+	tampered := append([]byte(nil), tok...)
+	// Flip a character inside the signature, away from its padding bits.
+	sig := bytes.LastIndexByte(tampered, '.') + 5
+	if tampered[sig] == 'A' {
+		tampered[sig] = 'B'
+	} else {
+		tampered[sig] = 'A'
+	}
+	staleTok, staleOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) {
+		c.Target.ConnectionEpoch++
+		c.JTI = "open-relay-stale"
+	})
+	for _, tc := range []struct {
+		name string
+		it   relay.HubStreamRecheckItem
+	}{
+		{"tampered signature", f.item(tampered, open, 7)},
+		{"another epoch of the target session", f.item(staleTok, staleOpen, 7)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := f.relayRecheck(t, tc.it)
+			assert.False(t, res.Renew)
+			assert.True(t, res.Close)
+			assert.Equal(t, conduit.CloseUnauthenticated, res.CloseCode)
+		})
+	}
 }
