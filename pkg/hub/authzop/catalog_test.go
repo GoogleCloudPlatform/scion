@@ -235,9 +235,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// List permissions covered by the corresponding read operation
 		// but registered as distinct permission IDs in the registry.
 		"agent.list":               "List subset of agent.read operation",
-		"skill.list":               "List subset of skill.read operation",
-		"template.list":            "List subset of template.read operation",
-		"harness_config.list":      "List subset of harnessconfig.read operation",
 		"group.list":               "List subset of group.read operation",
 		"gcp_service_account.list": "List subset of gcp.identity.read operation",
 		"scheduled_event.list":     "List subset of schedule.event.read operation",
@@ -271,7 +268,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// User/project permissions — NonRouteUse only
 		"user.list":                    "Reserved in the permission registry: no route checks it",
 		"project.clone":                "NonRouteUse only, no route declaration",
-		"project.list":                 "NonRouteUse only, no route declaration",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
