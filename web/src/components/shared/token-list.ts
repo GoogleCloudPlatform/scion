@@ -515,6 +515,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'hub_allow_list:read',
+    label: 'hub_allow_list:read',
+    description: 'Read allow list',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_allow_list:update',
+    label: 'hub_allow_list:update',
+    description: 'Update allow list',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:

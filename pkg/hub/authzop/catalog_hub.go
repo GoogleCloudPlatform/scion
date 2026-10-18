@@ -321,25 +321,29 @@ var hubOperations = []OperationSpec{
 		// (hub.allowlist.update).
 		ID:          "hub.allowlist.read",
 		Domain:      "hub",
-		Description: "Read the platform email allow list and its domains",
+		Description: "Read the platform email allow list and its domains. A token needs hub_allow_list:read on the hub boundary; it does not admit the allow-list writes",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/domains", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "hub.allow_list.read",
 		Effects:          []SecurityEffect{EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestHubAdminReadUpdateRoutePermissions"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestHubAdminReadUpdateRoutePermissions"},
+			{Package: "pkg/hub", Function: "TestAllowListReadToken_DoesNotAdmitWrites"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "hub.allowlist.update",
 		Domain:      "hub",
-		Description: "Manage the platform email allow list",
+		Description: "Manage the platform email allow list: add and import create invited records (status invited, placeholder role member, no role binding or group membership); delete removes an invited record under the last-project-owner guard and binding cascade of user.admin.delete. The route guard checks hub.allow_list.read, so a token needs hub_allow_list:read and hub_allow_list:update on the hub boundary",
 		EntryPoints: []EntryPoint{
 			// handleAdminAllowList (admin_allow_list.go) accepts POST
 			// (add); handleAdminAllowListByEmail accepts POST on import
@@ -349,7 +353,7 @@ var hubOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/allow-list/{email}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "hub-scoped",
 		BasePermission:   "hub.allow_list.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
@@ -360,7 +364,13 @@ var hubOperations = []OperationSpec{
 		// last_owner: the DELETE entry point applies the same
 		// last-project-owner guard and binding cascade as user.admin.delete.
 		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAllowListReadToken_DoesNotAdmitWrites"},
+			{Package: "pkg/hub", Function: "TestAllowListDeleteToken_LastProjectOwnerProtected"},
+			{Package: "pkg/hub", Function: "TestInvitationToken_CreatesNoRoleBindingOrGroupMembership"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
 	{
 		ID:          "hub.health.read",

@@ -87,6 +87,8 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_project_defaults:read":       {"hub.project_defaults.read"},
 	"hub_project_defaults:update":     {"hub.project_defaults.update"},
 	"hub_settings:update":             {"hub.settings.update"},
+	"hub_allow_list:read":             {"hub.allow_list.read"},
+	"hub_allow_list:update":           {"hub.allow_list.update"},
 	"hub_scheduler:read":              {"hub.scheduler.read"},
 	"hub_health:read":                 {"hub.health.read"},
 	"hub_validate:execute":            {"hub.validate.execute"},
