@@ -32,6 +32,10 @@ import (
 
 // session is the multiplexer behind every LocalSession.
 type session struct {
+	// onCallQueued, when set (tests), runs after Call queued its request,
+	// before it waits for the answer.
+	onCallQueued func(requestID string)
+
 	cfg      Config
 	clk      clock.Clock
 	conn     transport.Conn
@@ -658,6 +662,9 @@ func (s *session) writeLoop() {
 		if !ok {
 			return
 		}
+		if of.claim != nil && !of.claim() {
+			continue // abandoned by its sender before the write began
+		}
 		if of.f != nil {
 			for _, f := range s.intercept(Outbound, of.f) {
 				b, err := encodeFrame(f)
@@ -756,6 +763,8 @@ func (s *session) dispatch(f *conduitv1.Frame) {
 		s.handleGoAway(b.GoAway)
 	case *conduitv1.Frame_AuthRefresh:
 		s.handleAuthRefresh(b.AuthRefresh)
+	case *conduitv1.Frame_GrantKeysChanged:
+		s.handleGrantKeysChanged()
 	case *conduitv1.Frame_Hello, *conduitv1.Frame_Welcome:
 		s.protocolError("unexpected %s after handshake", FrameType(f))
 	default:
@@ -1300,6 +1309,44 @@ func (s *session) RefreshAuth(credential []byte, streamID uint32) error {
 // reasonBadFrame is the §3.3.1 reason token of a 4400 frame violation.
 const reasonBadFrame = "bad_frame"
 
+// ErrNotRelaySide is returned by NotifyGrantKeysChanged on a dialer.
+var ErrNotRelaySide = errors.New("conduit: only the relay side sends GrantKeysChanged")
+
+// NotifyGrantKeysChanged implements LocalSession. It never waits: the
+// frame is queued as a protocol-internal control frame, and a session whose
+// outbound buffer is full gets ErrBufferBudget instead, leaving the session
+// as it is (the target's periodic key refresh still applies).
+func (s *session) NotifyGrantKeysChanged() error {
+	if s.adm == nil {
+		return ErrNotRelaySide
+	}
+	if s.isDone() {
+		return ErrSessionClosed
+	}
+	f := &conduitv1.Frame{Body: &conduitv1.Frame_GrantKeysChanged{GrantKeysChanged: &conduitv1.GrantKeysChanged{}}}
+	return s.sched.enqueueInternal(&outFrame{f: f, class: classControl, size: int64(proto.Size(f))})
+}
+
+// handleGrantKeysChanged handles GrantKeysChanged (design v2.21.27 §3.5,
+// Key-set freshness). It travels only from the relay toward the target. On
+// the target side it goes to Config.OnGrantKeysChanged, a signal to fetch
+// keys and nothing more. One sent by a dialer is a frame violation: it is
+// logged and ends the session with 4400 bad_frame.
+func (s *session) handleGrantKeysChanged() {
+	if s.adm == nil {
+		if s.cfg.OnGrantKeysChanged != nil {
+			s.cfg.OnGrantKeysChanged(s.ctx)
+		}
+		return
+	}
+	info := s.Info()
+	s.cfg.Logger.Warn("conduit: dialer sent GrantKeysChanged",
+		"session_id", info.SessionID,
+		"principal_kind", info.PrincipalKind,
+		"principal_id", info.PrincipalID)
+	s.closeWithCode(CloseProtocolError, reasonBadFrame+": grant_keys_changed from dialer")
+}
+
 // handleAuthRefresh validates refreshes one at a time, in arrival order;
 // refreshes arriving while one is in flight collapse to the latest (a
 // newer credential supersedes older ones). A failed validation closes the
@@ -1365,12 +1412,18 @@ func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 // Config.MaxRPCFrame, are answered with 413 locally. On a draining
 // session (GoAway sent or received) Call returns ErrDraining: new work
 // belongs on the replacement session.
+//
+// When the session ends before the request's frame was handed to the
+// transport, Call returns an error matching both ErrRequestNotSent and
+// ErrSessionClosed. Once the writer has taken the frame, the session's end
+// is reported with ErrSessionClosed alone: the peer may have received the
+// request, so its outcome is unknown.
 func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduitv1.RpcResponse, error) {
 	if len(req.GetBody()) > MaxRPCBody {
 		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: 413}, nil
 	}
 	if s.isDone() {
-		return nil, ErrSessionClosed
+		return nil, fmt.Errorf("%w: %w", ErrRequestNotSent, ErrSessionClosed)
 	}
 	req = proto.Clone(req).(*conduitv1.RpcRequest)
 	if req.RequestId == "" {
@@ -1388,7 +1441,7 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 	s.mu.Lock()
 	if s.isDone() {
 		s.mu.Unlock()
-		return nil, s.endErr()
+		return nil, s.notSentErr()
 	}
 	if s.draining {
 		s.mu.Unlock()
@@ -1407,16 +1460,32 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 		s.closeIfDrained()
 	}()
 
-	if err := s.sendControl(ctx, frame); err != nil {
+	// write moves from writeQueued to writeTaken when the writer takes
+	// the frame, or to writeAbandoned when the session ends first; the
+	// one CAS that wins decides whether the peer may have the request.
+	var write atomic.Int32
+	of := &outFrame{
+		f: frame, class: classControl, size: int64(proto.Size(frame)),
+		claim: func() bool { return write.CompareAndSwap(writeQueued, writeTaken) },
+	}
+	if err := s.sched.enqueue(of, ctx.Done(), ctx.Err); err != nil {
 		if err == ErrSessionClosed {
-			err = s.endErr()
+			err = s.notSentErr()
 		}
 		return nil, err
+	}
+	if s.onCallQueued != nil {
+		s.onCallQueued(id)
 	}
 	select {
 	case resp := <-ch:
 		return resp, nil
 	case <-ctx.Done():
+		if write.CompareAndSwap(writeQueued, writeAbandoned) {
+			// Not yet handed to the transport: it is never written, so
+			// the peer has nothing to cancel.
+			return nil, ctx.Err()
+		}
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcCancel{RpcCancel: &conduitv1.RpcCancel{RequestId: id}}})
 		return nil, ctx.Err()
 	case <-s.done:
@@ -1425,8 +1494,25 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 			return resp, nil
 		default:
 		}
+		if write.CompareAndSwap(writeQueued, writeAbandoned) {
+			return nil, s.notSentErr()
+		}
 		return nil, s.endErr()
 	}
+}
+
+// States of a Call's request frame (see Call).
+const (
+	writeQueued int32 = iota
+	writeTaken
+	writeAbandoned
+)
+
+// notSentErr is the error of a Call whose request never reached the
+// transport because the session ended: ErrRequestNotSent wrapping the
+// session's end error.
+func (s *session) notSentErr() error {
+	return fmt.Errorf("%w: %w", ErrRequestNotSent, s.endErr())
 }
 
 func (s *session) handleRPCResponse(r *conduitv1.RpcResponse) {
@@ -1487,13 +1573,19 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 	// refuse answers from the read loop without blocking: status-only
 	// responses are tiny and use the internal control reserve, and they
 	// are queued ahead of any close-after-flush that follows.
+	// The two refusals that mean "not handled here" (no handler: 501;
+	// draining: 503) carry RefusalHeader, so the caller can tell them
+	// from a handler's own 501 or 503.
 	refuse := func(status int32, reason string) {
 		resp := &conduitv1.RpcResponse{RequestId: id, Status: status}
 		if reason != "" {
 			resp.Body = []byte(reason)
 		}
-		if status == 503 {
-			resp.Headers = map[string]string{RetryAfterHeader: "0"}
+		switch status {
+		case 501:
+			resp.Headers = map[string]string{RefusalHeader: RefusalUnsupported}
+		case 503:
+			resp.Headers = map[string]string{RetryAfterHeader: "0", RefusalHeader: RefusalDraining}
 		}
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}})
 	}
@@ -1543,6 +1635,8 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 		}
 		resp = proto.Clone(resp).(*conduitv1.RpcResponse)
 		resp.RequestId = id
+		// Only the session layer marks refusals; a handler cannot.
+		StripRefusal(resp.Headers)
 		frame := &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}}
 		if len(resp.GetBody()) > MaxRPCBody || proto.Size(frame) > s.cfg.MaxRPCFrame {
 			frame = &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: &conduitv1.RpcResponse{RequestId: id, Status: 413}}}
