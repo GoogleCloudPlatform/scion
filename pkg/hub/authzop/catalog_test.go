@@ -249,8 +249,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 
 		// Broker internal operations — broker-HMAC only, not user-facing
 		"broker.create":   "Broker-HMAC only, not user-facing",
-		"broker.update":   "Broker-HMAC only, not user-facing",
-		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
 		// Checked in the broker registration handler when a request turns
 		// auto-provide on; no route declares it.
