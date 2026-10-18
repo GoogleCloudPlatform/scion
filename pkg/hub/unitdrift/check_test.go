@@ -47,6 +47,8 @@ func setupRepo(t *testing.T, template, installed string) (string, Locator) {
 	}
 }
 
+func checkText(ctx context.Context, opts CheckOptions) string { return Check(ctx, opts).Text }
+
 func fixedRevision(context.Context, string) (string, error) { return "abc1234", nil }
 
 const wantDriftReport = `WARNING: installed unit differs from template: re-provision needed
@@ -55,7 +57,7 @@ To apply the template from commit abc1234 (branch main):
   1. On the workstation and checkout used to provision this hub (not on the hub VM), check out that commit.
   2. Run scripts/starter-hub/gce-start-hub.sh --full with the same flags and environment used at provisioning (for example --no-tls, HUB_BASE_URL and any hub-config.sh overrides). Running it without the original flags can reconfigure the hub (for example enable TLS on a --no-tls hub).
   3. Note that --full also re-applies settings.yaml, hub.env (if present on the workstation), the Caddyfile and the sudoers rules from that workstation, then pulls, builds and restarts the hub.
-Drop-ins under scion-hub.service.d can still override template keys after re-provisioning.
+Intentional local changes belong in a drop-in under scion-hub.service.d, which is not compared; drop-ins can still override template keys after re-provisioning.
 Differences (values of Environment and credential-like keys elided):
   installed: ExecStartPre=/bin/true
 `
@@ -63,7 +65,7 @@ Differences (values of Environment and credential-like keys elided):
 func TestCheck_DriftReportIsExact(t *testing.T) {
 	inst := strings.Replace(defaultRender(), "Restart=always", "ExecStartPre=/bin/true\nRestart=always", 1)
 	repo, loc := setupRepo(t, sampleTemplate, inst)
-	got := Check(context.Background(), CheckOptions{
+	got := checkText(context.Background(), CheckOptions{
 		RepoPath: repo, Branch: "main", Service: "scion-hub", Locate: loc, Revision: fixedRevision,
 	})
 	if got != wantDriftReport {
@@ -74,8 +76,8 @@ func TestCheck_DriftReportIsExact(t *testing.T) {
 func TestCheck_ServiceSuffixInDropInPath(t *testing.T) {
 	inst := strings.Replace(defaultRender(), "Restart=always", "Restart=no", 1)
 	repo, loc := setupRepo(t, sampleTemplate, inst)
-	got := Check(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub.service", Locate: loc})
-	if !strings.Contains(got, "Drop-ins under scion-hub.service.d ") {
+	got := checkText(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub.service", Locate: loc})
+	if !strings.Contains(got, "a drop-in under scion-hub.service.d,") {
 		t.Fatalf("drop-in path should not repeat .service:\n%s", got)
 	}
 }
@@ -83,7 +85,7 @@ func TestCheck_ServiceSuffixInDropInPath(t *testing.T) {
 func TestCheck_DriftWithoutRevision(t *testing.T) {
 	inst := strings.Replace(defaultRender(), "Restart=always", "Restart=no", 1)
 	repo, loc := setupRepo(t, sampleTemplate, inst)
-	got := Check(context.Background(), CheckOptions{
+	got := checkText(context.Background(), CheckOptions{
 		RepoPath: repo, Service: "scion-hub", Locate: loc,
 		Revision: func(context.Context, string) (string, error) { return "", errors.New("no git") },
 	})
@@ -94,7 +96,7 @@ func TestCheck_DriftWithoutRevision(t *testing.T) {
 
 func TestCheck_Match(t *testing.T) {
 	repo, loc := setupRepo(t, sampleTemplate, defaultRender())
-	got := Check(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub", Locate: loc})
+	got := checkText(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub", Locate: loc})
 	if got != "Systemd unit matches template.\n" {
 		t.Fatalf("report = %q", got)
 	}
@@ -108,7 +110,7 @@ func TestCheck_NotesForDropInsAndReload(t *testing.T) {
 		info.NeedDaemonReload = true
 		return info, err
 	}
-	got := Check(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub", Locate: withNotes})
+	got := checkText(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub", Locate: withNotes})
 	if !strings.HasPrefix(got, "Systemd unit matches template.\n") {
 		t.Fatalf("drop-ins must not cause drift:\n%s", got)
 	}
@@ -158,7 +160,7 @@ func TestCheck_SkippedCases(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			opts := mk(t)
 			opts.Service = "scion-hub"
-			got := Check(context.Background(), opts)
+			got := checkText(context.Background(), opts)
 			if !strings.HasPrefix(got, "Systemd unit check skipped: ") || strings.Contains(got, "WARNING") {
 				t.Fatalf("report = %q, want a skipped line", got)
 			}
@@ -173,7 +175,7 @@ func TestCheck_BlockingLocatorTimesOut(t *testing.T) {
 	release := make(chan struct{})
 	time.AfterFunc(3*time.Second, func() { close(release) })
 	start := time.Now()
-	got := Check(context.Background(), CheckOptions{
+	got := checkText(context.Background(), CheckOptions{
 		RepoPath: repo, Service: "scion-hub", Timeout: 50 * time.Millisecond,
 		Locate: func(context.Context, string) (UnitInfo, error) {
 			<-release
@@ -199,7 +201,7 @@ func TestCheck_PanicsBecomeSkipped(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := Check(context.Background(), opts)
+			got := checkText(context.Background(), opts)
 			if !strings.HasPrefix(got, "Systemd unit check skipped: ") || !strings.Contains(got, "internal error: boom") {
 				t.Fatalf("report = %q", got)
 			}
@@ -208,12 +210,98 @@ func TestCheck_PanicsBecomeSkipped(t *testing.T) {
 }
 
 func TestParseShow(t *testing.T) {
-	info := parseShow("FragmentPath=/etc/systemd/system/scion-hub.service\nDropInPaths=/a.conf /b.conf\nNeedDaemonReload=yes\n")
-	if info.FragmentPath != "/etc/systemd/system/scion-hub.service" || len(info.DropInPaths) != 2 || !info.NeedDaemonReload {
-		t.Fatalf("parseShow = %+v", info)
+	info, ok := parseShow("FragmentPath=/etc/systemd/system/scion-hub.service\nDropInPaths=/a.conf /b.conf\nNeedDaemonReload=yes\n")
+	if !ok || info.FragmentPath != "/etc/systemd/system/scion-hub.service" || len(info.DropInPaths) != 2 || !info.NeedDaemonReload {
+		t.Fatalf("parseShow = %+v, %v", info, ok)
 	}
-	info = parseShow("FragmentPath=\nDropInPaths=\nNeedDaemonReload=no\n")
-	if info.FragmentPath != "" || len(info.DropInPaths) != 0 || info.NeedDaemonReload {
-		t.Fatalf("parseShow empty = %+v", info)
+	info, ok = parseShow("FragmentPath=\nDropInPaths=\nNeedDaemonReload=no\n")
+	if !ok || info.FragmentPath != "" || len(info.DropInPaths) != 0 || info.NeedDaemonReload {
+		t.Fatalf("parseShow empty = %+v, %v", info, ok)
+	}
+	if _, ok := parseShow("DropInPaths=\nNeedDaemonReload=no\n"); ok {
+		t.Fatal("output without FragmentPath must not parse")
+	}
+}
+
+func TestUnitName(t *testing.T) {
+	for in, want := range map[string]string{"scion-hub": "scion-hub.service", "scion-hub.service": "scion-hub.service"} {
+		if got := UnitName(in); got != want {
+			t.Errorf("UnitName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Structural skips clear a stored drift record; transient ones keep it.
+func TestCheck_SkipClassification(t *testing.T) {
+	type tc struct {
+		opts       func(t *testing.T) CheckOptions
+		structural bool
+	}
+	// A directory where the template should be: reading fails with an error
+	// that is not "does not exist" (works for any user, unlike a chmod).
+	unreadableTemplate := func(t *testing.T) CheckOptions {
+		repo, loc := setupRepo(t, "", defaultRender())
+		if err := os.MkdirAll(filepath.Join(repo, TemplatePath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return CheckOptions{RepoPath: repo, Locate: loc}
+	}
+	cases := map[string]tc{
+		"no template": {func(t *testing.T) CheckOptions {
+			repo, loc := setupRepo(t, "", defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: loc}
+		}, true},
+		"not a starter-hub unit": {func(t *testing.T) CheckOptions {
+			repo, loc := setupRepo(t, sampleTemplate, "[Unit]\nDescription=Something else\n")
+			return CheckOptions{RepoPath: repo, Locate: loc}
+		}, true},
+		"template without Description": {func(t *testing.T) CheckOptions {
+			repo, loc := setupRepo(t, strings.Replace(sampleTemplate, "Description=Scion Hub API Server\n", "", 1), defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: loc}
+		}, true},
+		"no fragment": {func(t *testing.T) CheckOptions {
+			repo, _ := setupRepo(t, sampleTemplate, defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: func(context.Context, string) (UnitInfo, error) { return UnitInfo{}, nil }}
+		}, true},
+		"unreadable template": {unreadableTemplate, false},
+		"locator error": {func(t *testing.T) CheckOptions {
+			repo, _ := setupRepo(t, sampleTemplate, defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: func(context.Context, string) (UnitInfo, error) {
+				return UnitInfo{}, errors.New("systemctl show printed no FragmentPath")
+			}}
+		}, false},
+		"empty installed file": {func(t *testing.T) CheckOptions {
+			repo, loc := setupRepo(t, sampleTemplate, "")
+			return CheckOptions{RepoPath: repo, Locate: loc}
+		}, false},
+		"unreadable fragment": {func(t *testing.T) CheckOptions {
+			repo, _ := setupRepo(t, sampleTemplate, defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: func(context.Context, string) (UnitInfo, error) {
+				return UnitInfo{FragmentPath: filepath.Join(t.TempDir(), "missing.service")}, nil
+			}}
+		}, false},
+		"locator panics": {func(t *testing.T) CheckOptions {
+			repo, _ := setupRepo(t, sampleTemplate, defaultRender())
+			return CheckOptions{RepoPath: repo, Locate: func(context.Context, string) (UnitInfo, error) { panic("boom") }}
+		}, false},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			opts := c.opts(t)
+			opts.Service = "scion-hub"
+			rep := Check(context.Background(), opts)
+			if rep.Status != Skipped || rep.Structural != c.structural {
+				t.Fatalf("status %v structural %v, want Skipped structural %v (reason %q)", rep.Status, rep.Structural, c.structural, rep.Reason)
+			}
+		})
+	}
+}
+
+func TestCheck_DriftReportFields(t *testing.T) {
+	inst := strings.Replace(defaultRender(), "Restart=always", "Restart=no", 1)
+	repo, loc := setupRepo(t, sampleTemplate, inst)
+	rep := Check(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub", Locate: loc, Revision: fixedRevision})
+	if rep.Status != Drift || rep.Commit != "abc1234" || len(rep.Diff) != 2 || !strings.HasPrefix(rep.Text, DriftWarning) {
+		t.Fatalf("report = %+v", rep)
 	}
 }

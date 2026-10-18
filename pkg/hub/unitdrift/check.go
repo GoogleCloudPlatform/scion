@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,26 +53,32 @@ func SystemctlLocator(ctx context.Context, service string) (UnitInfo, error) {
 	if err != nil {
 		return UnitInfo{}, fmt.Errorf("systemctl show: %w", err)
 	}
-	return parseShow(string(out)), nil
+	info, ok := parseShow(string(out))
+	if !ok {
+		return UnitInfo{}, fmt.Errorf("systemctl show printed no FragmentPath")
+	}
+	return info, nil
 }
 
-func parseShow(out string) UnitInfo {
-	var info UnitInfo
+// parseShow parses "systemctl show" output; ok is false when the
+// FragmentPath key is missing, which is not the same as an empty value.
+func parseShow(out string) (info UnitInfo, ok bool) {
 	for _, line := range strings.Split(out, "\n") {
-		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found {
 			continue
 		}
 		switch key {
 		case "FragmentPath":
 			info.FragmentPath = value
+			ok = true
 		case "DropInPaths":
 			info.DropInPaths = strings.Fields(value)
 		case "NeedDaemonReload":
 			info.NeedDaemonReload = value == "yes"
 		}
 	}
-	return info
+	return info, ok
 }
 
 // Revision returns the short commit of the checkout at repoPath.
@@ -101,14 +108,40 @@ type CheckOptions struct {
 // DriftWarning is the first line of the report when the unit differs.
 const DriftWarning = "WARNING: installed unit differs from template: re-provision needed"
 
+// Report is the outcome of Check.
+type Report struct {
+	Status Status
+	// Reason explains a Skipped report.
+	Reason string
+	// Structural marks a Skipped report whose cause will not go away on
+	// its own (no template in the tree, not a starter-hub unit, the service
+	// not loaded from a unit file). Other skips are transient.
+	Structural bool
+	// Diff is the elided diff of a Drift report.
+	Diff []string
+	// Commit is the short commit of the checkout for a Drift report, or "".
+	Commit string
+	// Text is the block for the run log.
+	Text string
+}
+
+// UnitName returns the systemd unit name for a service name, adding
+// ".service" unless it is already there.
+func UnitName(service string) string {
+	if strings.HasSuffix(service, ".service") {
+		return service
+	}
+	return service + ".service"
+}
+
 // Check compares the installed unit with the template in the checkout and
-// returns a report for the run log. It never fails and never panics: any
-// problem, including a timeout, becomes a "skipped" report, so a caller can
-// always go on to restart the service.
-func Check(ctx context.Context, opts CheckOptions) (report string) {
+// returns a report, including a block for the run log. It never fails and
+// never panics: any problem, including a timeout, becomes a Skipped report,
+// so a caller can always go on to restart the service.
+func Check(ctx context.Context, opts CheckOptions) (report Report) {
 	defer func() {
 		if r := recover(); r != nil {
-			report = skipped(fmt.Sprintf("internal error: %v", r))
+			report = skipped(fmt.Sprintf("internal error: %v", r), false)
 		}
 	}()
 
@@ -121,41 +154,41 @@ func Check(ctx context.Context, opts CheckOptions) (report string) {
 
 	template, err := readLimited(filepath.Join(opts.RepoPath, TemplatePath))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return skipped("no unit template in the checked-out tree (" + TemplatePath + ")")
+		if errors.Is(err, fs.ErrNotExist) {
+			return skipped("no unit template in the checked-out tree ("+TemplatePath+")", true)
 		}
-		return skipped(fmt.Sprintf("cannot read the unit template: %v", err))
+		return skipped(fmt.Sprintf("cannot read the unit template: %v", err), false)
 	}
 	if opts.Locate == nil {
-		return skipped("no unit locator configured")
+		return skipped("no unit locator configured", false)
 	}
 	info, err := locateBounded(ctx, opts.Locate, opts.Service)
 	if err != nil {
-		return skipped(fmt.Sprintf("cannot locate the installed unit for %s: %v", opts.Service, err))
+		return skipped(fmt.Sprintf("cannot locate the installed unit for %s: %v", opts.Service, err), false)
 	}
 	if info.FragmentPath == "" {
-		return skipped(fmt.Sprintf("%s is not loaded from a unit file", opts.Service))
+		return skipped(fmt.Sprintf("%s is not loaded from a unit file", opts.Service), true)
 	}
 	installed, err := readLimited(info.FragmentPath)
 	if err != nil {
-		return skipped(fmt.Sprintf("cannot read the installed unit: %v", err))
+		return skipped(fmt.Sprintf("cannot read the installed unit: %v", err), false)
 	}
 
 	res := Compare(template, installed)
+	rep := Report{Status: res.Status, Diff: res.Diff}
 	var b strings.Builder
 	switch res.Status {
 	case Skipped:
-		return skipped(res.Reason)
+		return skipped(res.Reason, res.Structural)
 	case Match:
 		b.WriteString("Systemd unit matches template.\n")
 	case Drift:
-		commit := ""
 		if opts.Revision != nil {
-			if c, err := opts.Revision(ctx, opts.RepoPath); err == nil && c != "" {
-				commit = c
+			if c, err := opts.Revision(ctx, opts.RepoPath); err == nil {
+				rep.Commit = c
 			}
 		}
-		writeDrift(&b, opts.Service, opts.Branch, commit, res.Diff)
+		writeDrift(&b, opts.Service, opts.Branch, rep.Commit, res.Diff)
 	}
 	if len(info.DropInPaths) > 0 {
 		fmt.Fprintf(&b, "Note: drop-ins also apply and can override template keys, also after re-provisioning; they were not compared: %s\n",
@@ -164,7 +197,8 @@ func Check(ctx context.Context, opts CheckOptions) (report string) {
 	if info.NeedDaemonReload {
 		b.WriteString("Note: the unit file changed on disk but systemd has not reloaded it (systemctl daemon-reload needed).\n")
 	}
-	return b.String()
+	rep.Text = b.String()
+	return rep
 }
 
 // locateBounded runs the locator in its own goroutine so that a locator
@@ -216,8 +250,13 @@ func readLimited(path string) ([]byte, error) {
 	return b, nil
 }
 
-func skipped(reason string) string {
-	return "Systemd unit check skipped: " + reason + ".\n"
+func skipped(reason string, structural bool) Report {
+	return Report{
+		Status:     Skipped,
+		Reason:     reason,
+		Structural: structural,
+		Text:       "Systemd unit check skipped: " + reason + ".\n",
+	}
 }
 
 func writeDrift(b *strings.Builder, service, branch, commit string, diff []string) {
@@ -234,7 +273,7 @@ func writeDrift(b *strings.Builder, service, branch, commit string, diff []strin
 	b.WriteString("  1. On the workstation and checkout used to provision this hub (not on the hub VM), check out that commit.\n")
 	b.WriteString("  2. Run scripts/starter-hub/gce-start-hub.sh --full with the same flags and environment used at provisioning (for example --no-tls, HUB_BASE_URL and any hub-config.sh overrides). Running it without the original flags can reconfigure the hub (for example enable TLS on a --no-tls hub).\n")
 	b.WriteString("  3. Note that --full also re-applies settings.yaml, hub.env (if present on the workstation), the Caddyfile and the sudoers rules from that workstation, then pulls, builds and restarts the hub.\n")
-	fmt.Fprintf(b, "Drop-ins under %s.service.d can still override template keys after re-provisioning.\n", strings.TrimSuffix(service, ".service"))
+	fmt.Fprintf(b, "Intentional local changes belong in a drop-in under %s.d, which is not compared; drop-ins can still override template keys after re-provisioning.\n", UnitName(service))
 	b.WriteString("Differences (values of Environment and credential-like keys elided):\n")
 	for _, d := range diff {
 		fmt.Fprintf(b, "  %s\n", d)

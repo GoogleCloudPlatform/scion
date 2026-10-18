@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,6 +60,10 @@ type MaintenanceExecutor interface {
 // HubSettingSectionUpdateAvailable is the hub_settings section key used to
 // store the latest detected release update for the admin UI.
 const HubSettingSectionUpdateAvailable = "system.update_available"
+
+// HubSettingSectionUnitDrift is the hub_settings section key holding the
+// last systemd unit check of Rebuild from git (UnitDriftStatus).
+const HubSettingSectionUnitDrift = "system.unit_drift"
 
 // SecretMigrationExecutor migrates hub-scoped secrets from the legacy fixed "hub" scope ID
 // to the per-instance hub ID namespace in GCP Secret Manager.
@@ -282,6 +287,10 @@ type RebuildServerExecutor struct {
 	unitLocator  unitdrift.Locator
 	unitRevision unitdrift.Revision
 	unitTimeout  time.Duration // zero means unitdrift.DefaultTimeout
+
+	// store, when set, keeps the last unit check result for the
+	// Admin -> Maintenance banner (hub setting system.unit_drift).
+	store store.Store
 }
 
 // RebuildServerOptions configures a RebuildServerExecutor. Zero values are
@@ -291,6 +300,9 @@ type RebuildServerOptions struct {
 	RepoBranch  string // git branch to checkout before building (empty = stay on current)
 	BinaryDest  string // install path (e.g., /usr/local/bin/scion)
 	ServiceName string // systemd service name (e.g., "scion-hub")
+	// Store, when set, keeps the last systemd unit check result for the
+	// Admin -> Maintenance page. Optional.
+	Store store.Store
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
@@ -302,6 +314,7 @@ func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor 
 		serviceName:  opts.ServiceName,
 		unitLocator:  unitdrift.SystemctlLocator,
 		unitRevision: unitdrift.GitRevision,
+		store:        opts.Store,
 	}
 }
 
@@ -413,6 +426,9 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	if unitBranch == "" {
 		unitBranch = currentBranch
 	}
+	if unitBranch == "HEAD" { // detached checkout: no branch to name
+		unitBranch = ""
+	}
 	unitReport := unitdrift.Check(ctx, unitdrift.CheckOptions{
 		RepoPath: repoPath,
 		Branch:   unitBranch,
@@ -421,9 +437,12 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		Revision: e.unitRevision,
 		Timeout:  e.unitTimeout,
 	})
-	if strings.HasPrefix(unitReport, unitdrift.DriftWarning) {
+	if unitReport.Status == unitdrift.Drift {
 		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
 	}
+	// Persist the result for the Maintenance banner now, before the
+	// restart, so the restart cannot lose it.
+	e.persistUnitStatus(ctx, logger, unitReport, unitBranch, serviceName)
 	// The restart child's output and everything written after Start go
 	// through a Write-only, mutex-guarded writer. Handing the child a
 	// *bytes.Buffer directly would let exec copy with Buffer.ReadFrom, which
@@ -431,7 +450,7 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	// dropping the lines below; it would also race with them.
 	tail := &restartLogWriter{w: logger}
 	defer func() {
-		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport)
+		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport.Text)
 	}()
 
 	// Fire-and-forget: start the restart but don't wait for it to finish.
@@ -467,6 +486,77 @@ func (l *restartLogWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+// UnitDriftStatus is the stored result of the last systemd unit check,
+// shown on Admin -> Maintenance. Only "match" and "drift" are stored.
+type UnitDriftStatus struct {
+	Status    string   `json:"status"` // "match" or "drift"
+	CheckedAt string   `json:"checkedAt"`
+	Commit    string   `json:"commit"`
+	Branch    string   `json:"branch"`
+	Service   string   `json:"service"` // systemd unit name, e.g. scion-hub.service
+	Summary   []string `json:"summary,omitempty"`
+}
+
+// unitStatusTimeout bounds the store call that records the unit check.
+const unitStatusTimeout = 5 * time.Second
+
+// persistUnitStatus records the unit check for the Maintenance banner:
+// match and drift are stored, a structural skip removes the record (the
+// host is no longer comparable, so an old drift must not stick), and a
+// transient skip leaves it as it is. It never fails the run and recovers
+// from panics, so the restart that follows always runs.
+func (e *RebuildServerExecutor) persistUnitStatus(ctx context.Context, logger io.Writer, rep unitdrift.Report, branch, service string) {
+	if e.store == nil {
+		return
+	}
+	log := logging.Subsystem("hub.maintenance.rebuild-server")
+	defer func() {
+		if r := recover(); r != nil {
+			log.Warn("Recording the systemd unit status panicked", "panic", fmt.Sprint(r))
+			_, _ = fmt.Fprintf(logger, "Warning: could not record the systemd unit status: internal error\n\n")
+		}
+	}()
+	ctx, cancel := context.WithTimeout(ctx, unitStatusTimeout)
+	defer cancel()
+
+	var status string
+	switch rep.Status {
+	case unitdrift.Match:
+		status = "match"
+	case unitdrift.Drift:
+		status = "drift"
+	default:
+		if !rep.Structural {
+			return
+		}
+		if err := e.store.DeleteHubSetting(ctx, HubSettingSectionUnitDrift); err != nil && !errors.Is(err, store.ErrNotFound) {
+			log.Warn("Failed to clear the systemd unit status", "error", err)
+			_, _ = fmt.Fprintf(logger, "Warning: could not clear the systemd unit status: %v\n\n", err)
+			return
+		}
+		_, _ = fmt.Fprintf(logger, "Cleared the recorded systemd unit status (check not applicable).\n\n")
+		return
+	}
+	value, err := json.Marshal(UnitDriftStatus{
+		Status:    status,
+		CheckedAt: time.Now().UTC().Format(time.RFC3339),
+		Commit:    rep.Commit,
+		Branch:    branch,
+		Service:   unitdrift.UnitName(service),
+		Summary:   rep.Diff, // already elided by unitdrift
+	})
+	if err != nil {
+		log.Warn("Failed to encode the systemd unit status", "error", err)
+		return
+	}
+	if _, err := e.store.UpsertHubSetting(ctx, HubSettingSectionUnitDrift, json.RawMessage(value), "system", -1, "managed"); err != nil {
+		log.Warn("Failed to record the systemd unit status", "error", err)
+		_, _ = fmt.Fprintf(logger, "Warning: could not record the systemd unit status: %v\n\n", err)
+		return
+	}
+	_, _ = fmt.Fprintf(logger, "Recorded systemd unit status: %s\n\n", status)
 }
 
 // RebuildWebExecutor rebuilds the web frontend assets from source.

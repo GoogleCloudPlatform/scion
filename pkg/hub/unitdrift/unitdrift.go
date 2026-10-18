@@ -58,6 +58,9 @@ type Result struct {
 	Status Status
 	// Reason explains a Skipped result.
 	Reason string
+	// Structural marks a skip that will not go away on its own (see
+	// Report.Structural).
+	Structural bool
 	// Diff lists differing lines for a Drift result, "template: ..." or
 	// "installed: ...", with credential-like values elided.
 	Diff []string
@@ -128,7 +131,7 @@ func Compare(template, installed []byte) Result {
 	tmpl := normalize(template)
 	inst := normalize(installed)
 	if len(tmpl) == 0 {
-		return Result{Status: Skipped, Reason: "the unit template is empty"}
+		return Result{Status: Skipped, Reason: "the unit template is empty", Structural: true}
 	}
 	if len(inst) == 0 {
 		return Result{Status: Skipped, Reason: "the installed unit is empty"}
@@ -138,11 +141,11 @@ func Compare(template, installed []byte) Result {
 	}
 	tmplDesc, ok := description(tmpl)
 	if !ok {
-		return Result{Status: Skipped, Reason: "the unit template has no Description= line"}
+		return Result{Status: Skipped, Reason: "the unit template has no Description= line", Structural: true}
 	}
 	instDesc, _ := description(inst)
 	if !isKnownDescription(instDesc, tmplDesc) {
-		return Result{Status: Skipped, Reason: fmt.Sprintf("the installed unit is not a starter-hub unit (Description=%q)", instDesc)}
+		return Result{Status: Skipped, Reason: fmt.Sprintf("the installed unit is not a starter-hub unit (Description=%q)", instDesc), Structural: true}
 	}
 
 	compiled := make([]templateLine, len(tmpl))
