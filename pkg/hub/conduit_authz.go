@@ -799,11 +799,13 @@ func (s *Server) conduitUserStreamAuthzInterval() time.Duration {
 // targets: user streams to brokers are not renewed until brokers move to
 // conduit, and user sessions are never targets.
 func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (grant.Target, error) {
-	rt := s.conduit.Load()
-	if rt == nil || rt.store == nil {
+	// The registry of whichever conduit runtime runs on this node: the
+	// in-process one, or the shared registry of external relay mode.
+	_, reg, _ := s.conduitRegistry()
+	if reg == nil {
 		return grant.Target{}, fmt.Errorf("%w: no conduit registry on this node", errConduitAuthzUnavailable)
 	}
-	ps, found, err := rt.store.ListPrincipalSessionsBySession(ctx, sessionID)
+	ps, found, err := reg.ListPrincipalSessionsBySession(ctx, sessionID)
 	if err != nil {
 		return grant.Target{}, fmt.Errorf("%w: registry: %v", errConduitAuthzUnavailable, err)
 	}
