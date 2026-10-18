@@ -579,17 +579,14 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 	}
 
 	if verdict, _, err := s.evaluateConduitStream(ctx, conduitStreamEval{
-		AgentID:   target.ID,
-		ProjectID: c.ProjectID,
-		Identity:  func() (Identity, error) { return s.conduitRenewalIdentity(ctx, c, userID) },
-		Kind:      c.Stream.Kind,
-		ViaTunnel: c.Via == grant.ViaTunnel,
-		Port:      port,
-		ConfirmDeny: func(agent *store.Agent) bool {
-			_, err := s.store.GetAgent(ctx, agent.ID)
-			return err == nil && ctx.Err() == nil
-		},
-		LogAttrs: []any{"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID},
+		AgentID:     target.ID,
+		ProjectID:   c.ProjectID,
+		Identity:    func() (Identity, error) { return s.conduitRenewalIdentity(ctx, c, userID) },
+		Kind:        c.Stream.Kind,
+		ViaTunnel:   c.Via == grant.ViaTunnel,
+		Port:        port,
+		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
+		LogAttrs:    []any{"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID},
 	}); verdict != conduitAuthzAllowed {
 		return nil, err
 	}

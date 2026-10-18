@@ -147,7 +147,7 @@ func (s *Server) conduitStreamPlacement(ctx context.Context, agent *store.Agent,
 		return "", nil
 	}
 	if r, refused := placementRefusalOf(err); refused {
-		slog.Warn("Conduit renewal refused for the agent's saved placement; no renewal minted",
+		slog.Warn("Conduit stream re-check: the agent's saved placement refuses the stream; it is not renewed",
 			append([]any{"agent_id", agent.ID, "code", r.Code}, logAttrs...)...)
 		return "agent placement inconsistent", fmt.Errorf("%w: agent placement: %w", errConduitRenewalUnavailable, err)
 	}
@@ -155,4 +155,16 @@ func (s *Server) conduitStreamPlacement(ctx context.Context, agent *store.Agent,
 		return "agent placement check failed", fmt.Errorf("%w: %w: agent placement check: %w", errConduitAuthzUnavailable, errConduitRenewalUnavailable, err)
 	}
 	return "", nil
+}
+
+// conduitConfirmAgentPresent confirms a deny before it is acted on (design
+// v2.21.40 §3.9, Deny confirmation): it re-reads the agent and reports
+// whether the store answered with the agent, present and not deleted, and
+// the context is still live. A failed read, a read that returns no agent
+// and no error, or a deleted agent does not confirm, so the deny becomes
+// unavailable for this attempt; a deleted agent is reported as gone by the
+// next evaluation.
+func (s *Server) conduitConfirmAgentPresent(ctx context.Context, agentID string) bool {
+	agent, err := s.store.GetAgent(ctx, agentID)
+	return err == nil && agent != nil && agent.DeletedAt.IsZero() && ctx.Err() == nil
 }
