@@ -815,6 +815,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// Conduit grant key revocation, behind hub.conduit. Removes a key at
+	// once; returns the kid only.
+	"/api/v1/admin/conduit/grant-keys/revoke": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/revoke", RouteID: "admin.conduit.grantKeys.revoke",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 	// Bulk agent auth reset. Session only: a session-recovery route, like
 	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {

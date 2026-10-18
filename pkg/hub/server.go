@@ -1705,8 +1705,12 @@ type Server struct {
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
-	conduitAuthzBindMu     sync.Mutex
-	conduitAuthzUnbind     func()
+	conduitAuthzBindMu sync.Mutex
+	conduitAuthzUnbind func()
+	// conduitGrantKeysBindMu guards conduitGrantKeysUnbind, which releases
+	// the grant key change subscription (conduit_grant_notify.go).
+	conduitGrantKeysBindMu sync.Mutex
+	conduitGrantKeysUnbind func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -2261,6 +2265,11 @@ type Server struct {
 	// directly. Per-Server rather than a package var so a test can shorten
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
+
+	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
+	// authorizeConduitUserStream instead of authorizeConduitAction. Only
+	// tests set it, on their own Server; production code never does.
+	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -4544,6 +4553,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
+	s.bindConduitGrantKeyEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
@@ -7007,6 +7017,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))

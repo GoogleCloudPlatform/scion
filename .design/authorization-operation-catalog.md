@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 298
+**Operations:** 299
 
 ## Table of Contents
 
@@ -223,6 +223,7 @@
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
+- [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.read](#hubadminmoderead) — Read admin/maintenance mode state
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
@@ -8316,6 +8317,38 @@
 ### Tests
 
 - `pkg/hub:TestAdminConduitGrantKeyRotate`
+
+---
+
+## hub.conduitgrantkeys.revoke
+
+**Domain:** hub
+
+**Description:** Revoke a conduit grant key at once (the kid only in the response)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/conduit/grant-keys/revoke` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `hub.conduit_grant_keys.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminConduitGrantKeyRevoke`
 
 ---
 
