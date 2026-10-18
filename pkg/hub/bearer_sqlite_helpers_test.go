@@ -339,6 +339,13 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		// Streams of the fixture agent and project.
+		"/api/v1/agents/{id}/cloud-logs/stream":                        {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages/stream":                          {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs/stream":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs/stream": {"projectId": f.project, "id": f.agent},
+		"/api/v1/projects/{id}/message-logs/stream":                    {"id": f.project},
 	}
 }
 
