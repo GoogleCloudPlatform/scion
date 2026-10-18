@@ -1718,15 +1718,16 @@ type V1TrustedIssuerConfig struct {
 	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
 	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
 	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
-	// AllowedGCPProjects, AllowedDomains and AllowVisitorGrants must stay
-	// the last three fields, in the same position and order as on
-	// TrustedIssuerConfig (federation_config.go): this file's own
-	// GlobalConfig<->V1Settings conversions do a direct struct type
-	// conversion between the two (TrustedIssuerConfig(vi) and
+	// AllowedGCPProjects, AllowedDomains, AcceptUserTokens and
+	// AllowVisitorGrants must stay the last four fields, in the same
+	// position and order as on TrustedIssuerConfig (federation_config.go):
+	// this file's own GlobalConfig<->V1Settings conversions do a direct
+	// struct type conversion between the two (TrustedIssuerConfig(vi) and
 	// V1TrustedIssuerConfig(ti), below), which requires identical field
 	// name/type/order (struct tags aside).
 	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
 	AllowedDomains     []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+	AcceptUserTokens   bool     `json:"accept_user_tokens,omitempty" yaml:"accept_user_tokens,omitempty" koanf:"accept_user_tokens"`
 	AllowVisitorGrants bool     `json:"allow_visitor_grants,omitempty" yaml:"allow_visitor_grants,omitempty" koanf:"allow_visitor_grants"`
 }
 
