@@ -75,6 +75,11 @@ const maxDiffLines = 10
 
 var placeholderRE = regexp.MustCompile(`@[A-Z_]+@`)
 
+// placeholderPattern is what a placeholder matches: one non-empty run of
+// non-whitespace characters, so a flag added next to a per-host value is
+// not absorbed into it.
+const placeholderPattern = `(\S+)`
+
 // normalize splits a unit into the lines systemd acts on: CRLF folded,
 // leading and trailing whitespace trimmed, blank lines and full-line
 // comments (# or ;) dropped.
@@ -107,7 +112,7 @@ func compileLine(line string) templateLine {
 	last := 0
 	for _, loc := range placeholderRE.FindAllStringIndex(line, -1) {
 		pat.WriteString(regexp.QuoteMeta(line[last:loc[0]]))
-		pat.WriteString(`(\S+)`)
+		pat.WriteString(placeholderPattern)
 		names = append(names, line[loc[0]:loc[1]])
 		last = loc[1]
 	}
