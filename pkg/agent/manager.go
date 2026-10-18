@@ -272,6 +272,16 @@ func (m *AgentManager) Close() {
 	m.readyMemos.clear()
 }
 
+// projectScope returns the project name and recorded project ID
+// (ProjectIDAtPath) that scope a slug lookup for projectPath; both are ""
+// when no path is given.
+func projectScope(projectPath string) (name, id string) {
+	if projectPath == "" {
+		return "", ""
+	}
+	return resolveProjectName(projectPath), ProjectIDAtPath(projectPath)
+}
+
 // resolveProjectName maps a project path to the project name used to scope a
 // slug lookup. It returns "" when no path is given or it cannot be resolved.
 func resolveProjectName(projectPath string) string {
@@ -296,14 +306,16 @@ func agentHasProjectInfo(a api.AgentInfo) bool {
 //
 // When projectName is set, entries that carry project info must match it;
 // entries without any project info are accepted only when no entry with
-// matching project info exists (backward compatibility with pre-label
-// containers). It never falls back to an entry that is labelled for a
-// different project.
+// matching project info exists, and only if they are containers whose
+// recorded path identifies as projectID, the ID recorded at the request's
+// project path (LegacyEntryInProject, the rule every project-scoped
+// operation applies). Without a projectID no such entry is accepted. It
+// never falls back to an entry that is labelled for a different project.
 //
 // It fails closed with an error when more than one distinct entry remains,
 // instead of silently acting on whichever one the runtime listed first
 // (ptone/scion#1819). found is false when nothing matches.
-func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (target api.AgentInfo, found bool, err error) {
+func selectAgentTarget(agents []api.AgentInfo, agentID, projectName, projectID string) (target api.AgentInfo, found bool, err error) {
 	var scoped, unlabeled []api.AgentInfo
 	for _, a := range agents {
 		if !agentMatchesName(a, agentID) {
@@ -314,7 +326,9 @@ func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (tar
 			continue
 		}
 		if !agentHasProjectInfo(a) {
-			unlabeled = append(unlabeled, a)
+			if projectID != "" && LegacyEntryInProject(a, projectID) {
+				unlabeled = append(unlabeled, a)
+			}
 			continue
 		}
 		if matchAgentProject(a, projectName, "") {
@@ -382,6 +396,11 @@ func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 // is stopped (ptone/scion#2550).
 var ErrStopRunNotFound = errors.New("agent not found for the requested run")
 
+// ErrStopTargetNotFound is returned by Stop when it is scoped to a project
+// (a non-empty projectPath) and no entry of that project holds the agent's
+// name. Nothing is stopped.
+var ErrStopTargetNotFound = errors.New("agent not found in the requested project")
+
 func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
 	// Resolve the agent name to a container ID so that runtimes which do
 	// not support lookup-by-name (e.g. Apple's `container` CLI) receive
@@ -394,7 +413,8 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		if err != nil {
 			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
 		}
-		target, found, selErr := selectAgentTarget(filterAgentsByRun(agents, runID), agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath)
+		target, found, selErr := selectAgentTarget(filterAgentsByRun(agents, runID), agentID, name, id)
 		if selErr != nil {
 			return selErr
 		}
@@ -412,13 +432,24 @@ func (m *AgentManager) Stop(ctx context.Context, agentID, projectPath, runID str
 		return m.Runtime.Stop(ctx, ref)
 	}
 	if err == nil {
-		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath)
+		target, found, selErr := selectAgentTarget(agents, agentID, name, id)
 		if selErr != nil {
 			return selErr
 		}
 		if found {
 			return m.Runtime.Stop(ctx, runtime.RunRef{ID: runtime.AgentOperationID(target), RunID: target.RunID})
 		}
+	}
+	// A project-scoped stop that found no entry of its project never passes
+	// the bare name on: a runtime stops by name (a container or pod name
+	// that need not carry the project), so the name could stand for an
+	// entry the scoping above did not accept.
+	if projectPath != "" {
+		if err != nil {
+			return fmt.Errorf("failed to list agents for stop of %q: %w", agentID, err)
+		}
+		return fmt.Errorf("agent '%s': %w", agentID, ErrStopTargetNotFound)
 	}
 	// Fallback: agentID may already be a container ID, or the list
 	// failed — pass it through directly. An owned manager never passes an
@@ -476,7 +507,8 @@ func filterAgentsByExactRun(agents []api.AgentInfo, runID string) []api.AgentInf
 // another run's label are never selected. found is false when none
 // matches; an ambiguous match is an error.
 func SelectExactRunTarget(agents []api.AgentInfo, agentName, projectPath, runID string) (target api.AgentInfo, found bool, err error) {
-	return selectAgentTarget(filterAgentsByExactRun(agents, runID), agentName, resolveProjectName(projectPath))
+	name, id := projectScope(projectPath)
+	return selectAgentTarget(filterAgentsByExactRun(agents, runID), agentName, name, id)
 }
 
 // StopTarget stops the runtime entry ref, which the caller has already
@@ -497,7 +529,8 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	if err == nil {
 		// Resolve project name from projectPath (if provided) to scope the
 		// container lookup; refuse ambiguous matches rather than picking one.
-		entry, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		name, id := projectScope(projectPath)
+		entry, found, selErr := selectAgentTarget(agents, agentID, name, id)
 		if selErr != nil {
 			return false, selErr
 		}
@@ -658,7 +691,7 @@ func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, project
 		return nil
 	}
 	for _, a := range agents {
-		if !matchesAgentID(a, agentID) {
+		if !matchesAgentID(a, agentID) || (projectID != "" && !EntryInProject(a, projectID)) {
 			continue
 		}
 		switch state.Phase(a.Phase) {
@@ -1283,6 +1316,12 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, scope keysScope, a
 
 	var matches []api.AgentInfo
 	for _, a := range agents {
+		// A projectID scope accepts only entries of that project
+		// (EntryInProject), the rule every project-scoped operation
+		// applies, not just what the list filter returned.
+		if scope.projectID != "" && !EntryInProject(a, scope.projectID) {
+			continue
+		}
 		if matchesAgentID(a, agentSlug) {
 			matches = append(matches, a)
 		}
@@ -1586,6 +1625,12 @@ func (m *AgentManager) findMessageTargetCounted(ctx context.Context, agentID, pr
 	var target *api.AgentInfo
 	matches := 0
 	for _, a := range agents {
+		// With a projectID, only entries of that project count
+		// (EntryInProject), the rule every project-scoped operation
+		// applies, not just what the list filter returned.
+		if projectID != "" && !EntryInProject(a, projectID) {
+			continue
+		}
 		if matchesAgentID(a, agentID) {
 			matches++
 			if target == nil {

@@ -28,20 +28,29 @@ import (
 func TestSelectAgentTarget(t *testing.T) {
 	inA := api.AgentInfo{Name: "dev", ContainerID: "cid-a", Labels: map[string]string{"scion.project": "proj-a"}}
 	inB := api.AgentInfo{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b"}}
-	legacy := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy"}
+	// Entries with no project identity are accepted only as containers whose
+	// recorded path identifies as the requested project's ID.
+	legacy := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy", ProjectPath: identityTestProjectPath(t, identityProjB)}
+	legacyOther := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy-a", ProjectPath: identityTestProjectPath(t, identityProjA)}
+	legacyNoPath := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy-nopath"}
 
 	tests := []struct {
 		name        string
 		agents      []api.AgentInfo
 		projectName string
+		projectID   string
 		wantID      string
 		wantFound   bool
 		wantErr     bool
 	}{
 		{name: "scoped picks own project even when listed second", agents: []api.AgentInfo{inA, inB}, projectName: "proj-b", wantID: "cid-b", wantFound: true},
 		{name: "scoped never falls back to other project", agents: []api.AgentInfo{inA}, projectName: "proj-b"},
-		{name: "scoped prefers labelled over unlabelled", agents: []api.AgentInfo{legacy, inB}, projectName: "proj-b", wantID: "cid-b", wantFound: true},
-		{name: "scoped accepts unlabelled legacy when nothing labelled matches", agents: []api.AgentInfo{inA, legacy}, projectName: "proj-b", wantID: "cid-legacy", wantFound: true},
+		{name: "scoped prefers labelled over unlabelled", agents: []api.AgentInfo{legacy, inB}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-b", wantFound: true},
+		{name: "scoped accepts unlabelled legacy when nothing labelled matches", agents: []api.AgentInfo{inA, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},
+		{name: "scoped picks the unlabelled entry of its project among two", agents: []api.AgentInfo{legacyOther, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},
+		{name: "scoped skips unlabelled entry of another project", agents: []api.AgentInfo{inA, legacyOther}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped skips unlabelled entry without a path", agents: []api.AgentInfo{legacyNoPath}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped without a project ID accepts no unlabelled entry", agents: []api.AgentInfo{legacy}, projectName: "proj-b"},
 		{name: "unscoped multi-match fails closed", agents: []api.AgentInfo{inA, inB}, wantErr: true},
 		{name: "unscoped single match", agents: []api.AgentInfo{inA}, wantID: "cid-a", wantFound: true},
 		{name: "duplicate reports of same container are one match", agents: []api.AgentInfo{inA, inA}, wantID: "cid-a", wantFound: true},
@@ -49,7 +58,7 @@ func TestSelectAgentTarget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, found, err := selectAgentTarget(tt.agents, "dev", tt.projectName)
+			got, found, err := selectAgentTarget(tt.agents, "dev", tt.projectName, tt.projectID)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}

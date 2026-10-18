@@ -416,3 +416,119 @@ func TestStopAgent_LegacyEntryShapesPerRuntime(t *testing.T) {
 		})
 	}
 }
+
+// Get, logs and has-prompt: with the other project's unlabelled entry
+// listed first, each reads the requested project's entry, and an entry of
+// another project alone is not found.
+
+// readEntriesTwoProjects returns unlabelled "dev" containers of scopeProjA
+// (listed first) and scopeProjB, each with its own agent.log, and a
+// non-empty prompt.md for scopeProjB's only.
+func readEntriesTwoProjects(t *testing.T) []api.AgentInfo {
+	t.Helper()
+	pathA, pathB := legacyProjectPath(t, scopeProjA), legacyProjectPath(t, scopeProjB)
+	for path, text := range map[string]string{pathA: "log of A", pathB: "log of B"} {
+		home := config.GetAgentHomePath(path, "dev")
+		if err := os.MkdirAll(home, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "agent.log"), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agentDirB := config.ResolveAgentDir(pathB, "dev")
+	if err := os.MkdirAll(agentDirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDirB, "prompt.md"), []byte("do the task"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return []api.AgentInfo{legacyEntry("dev", "cid-a", pathA), legacyEntry("dev", "cid-b", pathB)}
+}
+
+func doRead(srv *Server, op string, projectID string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/agents/dev", nil)
+	switch op {
+	case "get":
+		srv.getAgent(w, r, "dev", projectID)
+	case "logs":
+		srv.getLogs(w, r, "dev", projectID)
+	case "has-prompt":
+		srv.checkAgentPrompt(w, r, "dev", projectID)
+	}
+	return w
+}
+
+func TestGetAgent_UnlabelledSameNameInTwoProjects_ReturnsRequestedProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := legacyScopeServer(t, mgr) // sets HOME, which the agent home path depends on
+	mgr.agents = readEntriesTwoProjects(t)
+
+	w := doRead(srv, "get", scopeProjB)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"cid-b"`) {
+		t.Fatalf("status=%d body=%s, want 200 with cid-b", w.Code, w.Body.String())
+	}
+}
+
+func TestGetLogs_UnlabelledSameNameInTwoProjects_ReadsRequestedProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := legacyScopeServer(t, mgr) // sets HOME, which the agent home path depends on
+	mgr.agents = readEntriesTwoProjects(t)
+
+	w := doRead(srv, "logs", scopeProjB)
+
+	if w.Code != http.StatusOK || w.Body.String() != "log of B" {
+		t.Fatalf("status=%d body=%q, want 200 \"log of B\"", w.Code, w.Body.String())
+	}
+}
+
+func TestCheckAgentPrompt_UnlabelledSameNameInTwoProjects_ReadsRequestedProject(t *testing.T) {
+	mgr := &filteringMockManager{}
+	srv, _ := legacyScopeServer(t, mgr) // sets HOME, which the agent home path depends on
+	mgr.agents = readEntriesTwoProjects(t)
+
+	w := doRead(srv, "has-prompt", scopeProjB)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"hasPrompt":true`) {
+		t.Fatalf("status=%d body=%s, want 200 with hasPrompt true", w.Code, w.Body.String())
+	}
+}
+
+func TestReadVerbs_UnlabelledOnlyInOtherProject_NotFound(t *testing.T) {
+	for _, op := range []string{"get", "logs", "has-prompt"} {
+		t.Run(op, func(t *testing.T) {
+			mgr := &filteringMockManager{}
+			srv, _ := legacyScopeServer(t, mgr)
+			mgr.agents = readEntriesTwoProjects(t)[:1] // scopeProjA's only
+
+			w := doRead(srv, op, scopeProjB)
+
+			if w.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s, want 404", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// Runtime selection for these verbs follows the same rule: the default
+// runtime holds another project's unlabelled entry, an auxiliary runtime
+// holds the requested project's.
+func TestResolveAgentRuntimeTarget_UnlabelledOtherProjectOnDefault_PicksRequestedProjectsRuntime(t *testing.T) {
+	defMgr := &filteringMockManager{}
+	defMgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-a", legacyProjectPath(t, scopeProjA))}
+	auxMgr := &filteringMockManager{}
+	auxMgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-b", legacyProjectPath(t, scopeProjB))}
+	srv := New(DefaultServerConfig(), defMgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	auxRT := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	mgr, rt := srv.resolveAgentRuntimeTarget(context.Background(), "dev", scopeProjB)
+
+	if mgr != auxMgr || rt != auxRT {
+		t.Fatalf("resolveAgentRuntimeTarget picked %T/%v, want the auxiliary runtime holding the requested project's entry", mgr, rt)
+	}
+}

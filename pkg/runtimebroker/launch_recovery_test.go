@@ -378,7 +378,9 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9"})
+		// The entry carries its project ID, as every run-labelled entry does:
+		// the recovery delete is scoped to the record's project path.
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
 		mgr.deleteBlock = make(chan struct{})
 		mgr.deleteStarted = make(chan struct{})
 		srv, rtb := newAsyncTestServer(t, mgr)

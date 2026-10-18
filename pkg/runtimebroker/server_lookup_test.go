@@ -463,12 +463,14 @@ func TestResolveAgentRuntimeTarget_ProjectScopedAuxiliary(t *testing.T) {
 
 func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.T) {
 	defaultMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
-		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": "project-a"}},
+		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name", "scion.project_id": scopeProjA}},
 	}}}
 	auxMgr := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
 		// No project_id label at all, so this backend is discovered only by
-		// the unlabeled-compatibility fallback.
-		{Name: "shared-name", Labels: map[string]string{"scion.name": "shared-name"}},
+		// the unlabeled-compatibility fallback, through a recorded path that
+		// identifies as the requested project.
+		{Name: "shared-name", ContainerID: "cid-shared", ProjectPath: legacyProjectPath(t, scopeProjB),
+			Labels: map[string]string{"scion.name": "shared-name"}},
 	}}}
 	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
@@ -477,7 +479,7 @@ func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRuntime, Manager: auxMgr}
 	srv.auxiliaryRuntimesMu.Unlock()
 
-	manager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "shared-name", "project-b")
+	manager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "shared-name", scopeProjB)
 	if manager != auxMgr || selectedRuntime != auxRuntime {
 		t.Error("expected fallback to skip the same-name agent from another project")
 	}
@@ -485,12 +487,13 @@ func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.
 
 func TestResolveAgentRuntimeTarget_ProjectFallbackAcceptsUnlabeledAgent(t *testing.T) {
 	manager := &filteringMockManager{mockManager: mockManager{agents: []api.AgentInfo{
-		{Name: "legacy-agent", Labels: map[string]string{"scion.name": "legacy-agent"}},
+		{Name: "legacy-agent", ContainerID: "cid-legacy", ProjectPath: legacyProjectPath(t, scopeProjA),
+			Labels: map[string]string{"scion.name": "legacy-agent"}},
 	}}}
 	runtime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), manager, runtime)
 
-	selectedManager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "legacy-agent", "project-a")
+	selectedManager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "legacy-agent", scopeProjA)
 	if selectedManager != manager || selectedRuntime != runtime {
 		t.Error("expected fallback to retain support for unlabeled agents")
 	}
@@ -504,37 +507,45 @@ func TestHasAgentInProjectOrUnlabeled(t *testing.T) {
 	}{
 		{
 			name:  "canonical label matches",
-			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-a"}},
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": scopeProjA}},
 			match: true,
 		},
 		{
 			name:  "canonical label mismatch",
-			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-b"}},
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": scopeProjB}},
 			match: false,
 		},
 		{
 			name:  "agent field matches without label",
-			agent: api.AgentInfo{ProjectID: "project-a"},
+			agent: api.AgentInfo{ProjectID: scopeProjA},
 			match: true,
 		},
 		{
 			name:  "explicit other project",
-			agent: api.AgentInfo{ProjectID: "project-b"},
+			agent: api.AgentInfo{ProjectID: scopeProjB},
 		},
 		{
 			name:  "label takes precedence over agent field",
-			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": "project-b"}, ProjectID: "project-a"},
+			agent: api.AgentInfo{Labels: map[string]string{"scion.project_id": scopeProjB}, ProjectID: scopeProjA},
 		},
 		{
-			name:  "unlabeled compatibility",
-			agent: api.AgentInfo{},
+			name:  "unlabeled container whose path identifies as the project",
+			agent: api.AgentInfo{ContainerID: "c", ProjectPath: legacyProjectPath(t, scopeProjA)},
 			match: true,
+		},
+		{
+			name:  "unlabeled container of another project",
+			agent: api.AgentInfo{ContainerID: "c", ProjectPath: legacyProjectPath(t, scopeProjB)},
+		},
+		{
+			name:  "unlabeled entry without a path",
+			agent: api.AgentInfo{ContainerID: "c"},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := hasAgentInProjectOrUnlabeled([]api.AgentInfo{test.agent}, "project-a"); got != test.match {
+			if got := hasAgentInProjectOrUnlabeled([]api.AgentInfo{test.agent}, scopeProjA); got != test.match {
 				t.Fatalf("hasAgentInProjectOrUnlabeled() = %v, want %v", got, test.match)
 			}
 		})
