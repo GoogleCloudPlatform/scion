@@ -59,10 +59,11 @@
 - [project.register](#projectregister) — Register a project from an external source
 - [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
 - [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
-- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
-- [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
+- [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
+- [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. A user access token needs scheduled_event:update and passes the event type's target checks
 - [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
+- [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
@@ -2429,7 +2430,7 @@
 
 **Domain:** schedule
 
-**Description:** Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup
+**Description:** Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
 
 ### Entry Points
 
@@ -2440,9 +2441,9 @@
 
 **Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `scheduled_event.create`
 
@@ -2467,7 +2468,7 @@
 
 ### Tests
 
-- `pkg/hub:TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup`
+- `pkg/hub:TestScheduleAuthoringToken_RequiresCreateSelector`
 
 ---
 
@@ -2475,7 +2476,7 @@
 
 **Domain:** schedule
 
-**Description:** Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update
+**Description:** Update or resume a recurring schedule of any event type. A user access token needs scheduled_event:update and passes the event type's target checks
 
 ### Entry Points
 
@@ -2486,9 +2487,9 @@
 
 **Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
 **Base Permission:** `scheduled_event.update`
 
@@ -2500,7 +2501,7 @@
 
 ### Tests
 
-- `pkg/hub:TestScheduleUpdateSelector_DoesNotAdmitAuthoring`
+- `pkg/hub:TestScheduleResumeToken_RechecksTarget`
 
 ---
 
@@ -2573,6 +2574,44 @@
 ### Tests
 
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## schedule.event.fire
+
+**Domain:** schedule
+
+**Description:** Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| scheduler_job | — | `executeSchedule:dispatch_agent` |
+| scheduler_job | — | `executeSchedule:message` |
+| scheduler_job | — | `fireEvent:dispatch_agent` |
+| scheduler_job | — | `fireEvent:message` |
+
+**Principals:** `system`
+
+**Credentials:** `system_internal`
+
+**Bearer:** `non_user` (pinned by `TestScheduledFire_UsesRecordedTokenCeiling`)
+
+**Resource Resolver:** event-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestScheduledFire_UsesRecordedTokenCeiling`
+- `pkg/hub:TestScheduledFire_UsesRecordedTokenBoundary`
+
+### Exemptions
+
+- **internal_only:** The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, and the fire is bounded by the revision's recorded ceiling and boundary (scope: scheduler fire) — waives: `base_permission`
 
 ---
 
