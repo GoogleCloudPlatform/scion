@@ -404,6 +404,7 @@ func TestSelectExactRunTarget_ScopesByDispatchedProjectID(t *testing.T) {
 		{"path records no project ID", noIDPath, entry(identityProjB), true},
 		{"path records a different local ID", localIDPath, entry(identityProjB), true},
 		{"entry of another project", noIDPath, entry(identityProjA), false},
+		{"entry of the path's local project", localIDPath, entry(identityProjA), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

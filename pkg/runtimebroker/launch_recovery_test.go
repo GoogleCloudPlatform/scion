@@ -225,8 +225,10 @@ func TestRecoverLaunches_TerminalPendingSucceededResent(t *testing.T) {
 func TestRecoverLaunches_ExactRunDelete(t *testing.T) {
 	entries := func(id string) []api.AgentInfo {
 		return []api.AgentInfo{
-			{Name: "agent-" + id, ContainerID: "c-legacy"},
-			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other"},
+			// Both carry the record's project ID, so only the exact-run
+			// filter keeps them from being deleted.
+			{Name: "agent-" + id, ContainerID: "c-legacy", ProjectID: "proj"},
+			{Name: "agent-" + id, ContainerID: "c-other", RunID: "run-other", ProjectID: "proj"},
 		}
 	}
 	for _, rtName := range []string{"mock", "kubernetes"} {
