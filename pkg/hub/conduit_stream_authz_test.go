@@ -843,7 +843,7 @@ func TestConduitStreamAuthz_NoticeSentOutsideStreamLock(t *testing.T) {
 	f := newDeadlineFixture(t, -1, time.Hour)
 	st, _, _ := f.trackRenewable("u1", 1)
 	entered, release := make(chan struct{}), make(chan struct{})
-	st.Renew = func() error {
+	st.Renew = func([]byte) error {
 		close(entered)
 		<-release
 		return nil

@@ -1025,8 +1025,8 @@ func watchStream(st *conduitUserStream) *streamCalls {
 		closeFn(code, reason)
 	}
 	if renewFn != nil {
-		st.Renew = func() error {
-			err := renewFn()
+		st.Renew = func(g []byte) error {
+			err := renewFn(g)
 			c.mu.Lock()
 			c.renews = append(c.renews, err)
 			c.mu.Unlock()
