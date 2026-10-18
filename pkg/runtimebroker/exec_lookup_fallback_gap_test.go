@@ -116,12 +116,15 @@ func addAuxRuntime(t *testing.T, srv *Server, name string, rt runtime.Runtime) {
 	srv.auxiliaryRuntimesMu.Unlock()
 }
 
-// unlabelledDev is a legacy "dev" entry with no project label, reachable
-// only through lookupAgentTarget's backward-compatibility fallback stage.
-func unlabelledDev(containerID string) []api.AgentInfo {
+// unlabelledDev is a legacy "dev" entry with no project label whose
+// recorded path identifies as stopLookupProjectID, reachable only through
+// lookupAgentTarget's backward-compatibility fallback stage.
+func unlabelledDev(t *testing.T, containerID string) []api.AgentInfo {
+	t.Helper()
 	return []api.AgentInfo{{
 		Name:        "dev",
 		ContainerID: containerID,
+		ProjectPath: legacyProjectPath(t, stopLookupProjectID),
 		Labels:      map[string]string{"scion.name": "dev"},
 	}}
 }
@@ -144,7 +147,7 @@ func execCalls(id string) []execCall {
 // one aux runtime is registered and lists nothing.
 func fallbackOnDefaultBroker(t *testing.T, defRec, auxRec *callRecorder) (*Server, agent.Manager, runtime.Runtime) {
 	t.Helper()
-	rt := recordingRuntime("docker", unlabelledDev("c-legacy"), defRec)
+	rt := recordingRuntime("docker", unlabelledDev(t, "c-legacy"), defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
 	srv := New(DefaultServerConfig(), mgr, rt)
@@ -161,7 +164,7 @@ func fallbackOnLaterAuxBroker(t *testing.T, defRec, recA, recB *callRecorder) *S
 	t.Cleanup(mgr.Close)
 	srv := New(DefaultServerConfig(), mgr, rt)
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, recA))
-	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", unlabelledDev("c-b"), recB))
+	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", unlabelledDev(t, "c-b"), recB))
 	return srv
 }
 

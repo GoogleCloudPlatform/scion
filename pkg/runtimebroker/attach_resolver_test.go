@@ -55,7 +55,9 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 		{name: "first-stage aux match", projectID: "", labels: map[string]string{"scion.name": "some-agent"}},
 		// project-scoped lookup of an unlabelled agent — only the
 		// no-project-label fallback stage can find it.
-		{name: "no-project-label fallback aux match", projectID: "proj-1", labels: map[string]string{"scion.name": "some-agent"}},
+		// The entry's recorded path identifies as the project, as the
+		// fallback stage requires.
+		{name: "no-project-label fallback aux match", projectID: scopeProjA, labels: map[string]string{"scion.name": "some-agent"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +71,12 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
 			}
-			auxMgr := &mockManager{agents: []api.AgentInfo{{Name: "some-agent", ID: "cid-1", Labels: tc.labels}}}
+			entry := api.AgentInfo{Name: "some-agent", ID: "cid-1", Labels: tc.labels}
+			if tc.projectID != "" {
+				entry.ContainerID = "cid-1"
+				entry.ProjectPath = legacyProjectPath(t, tc.projectID)
+			}
+			auxMgr := &mockManager{agents: []api.AgentInfo{entry}}
 			srv.auxiliaryRuntimesMu.Lock()
 			srv.auxiliaryRuntimes[auxiliaryRuntimeIdentity(auxRT)] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}
 			srv.auxiliaryRuntimesMu.Unlock()

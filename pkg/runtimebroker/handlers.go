@@ -3587,19 +3587,17 @@ func isContainerStopTolerable(err error) bool {
 		strings.Contains(msg, "exit status 125")
 }
 
-// agentsWithoutProjectLabel returns the subset of agents that carry no
-// project identity: no scion.project_id label and no ProjectID field
-// (agentHasNoProjectIdentity). The project-scoped lookups fall back to a
-// slug-only search for backward compatibility with pre-existing / solo-mode
-// containers that predate project labels; that fallback must only match such
-// genuinely unlabeled containers. A container labeled for a *different*
-// project must never satisfy a project-scoped request, or same-slug agents
-// across projects would collide. The ProjectID field counts too, because
-// Cloud Run stores the label under its GCP-sanitized key (ptone/scion#5268).
-func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
+// legacyAgentsInProject returns the entries that carry no project identity
+// but whose recorded project path identifies as projectID
+// (legacyEntryInProject). The project-scoped lookups fall back to these
+// when no entry is positively identified as belonging to projectID, for
+// containers that predate project labels. A same-named entry with no
+// project identity from another project, or with no recorded path, is not
+// returned, so every verb resolves such entries the way delete does.
+func legacyAgentsInProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, a := range agents {
-		if agentHasNoProjectIdentity(a) {
+		if legacyEntryInProject(a, projectID) {
 			filtered = append(filtered, a)
 		}
 	}
@@ -7725,6 +7723,17 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 	return projectkeys.ProjectIDFromLabels(a.Labels) == "" && a.ProjectID == ""
 }
 
+// legacyEntryInProject reports whether an entry with no project identity
+// (a container that predates project labels) may stand for an agent of
+// projectID: it must be a container (ContainerID set) whose recorded
+// project path positively identifies as projectID (pathIdentifiesAs).
+// Delete, stop, restart, exec and attach all accept such entries by this
+// one rule, so they resolve the same instance.
+func legacyEntryInProject(a api.AgentInfo, projectID string) bool {
+	return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
+		pathIdentifiesAs(a.ProjectPath, projectID)
+}
+
 // agentCandidate is a runtime entry for an agent name, with the manager
 // that listed it.
 type agentCandidate struct {
@@ -7799,8 +7808,7 @@ func (s *Server) collectAgentCandidates(ctx context.Context, managers []agent.Ma
 			// projectID; otherwise a same-named legacy container from another
 			// project could be deleted.
 			matches = collect(map[string]string{"scion.agent": "true"}, func(a api.AgentInfo) bool {
-				return a.ContainerID != "" && agentHasNoProjectIdentity(a) &&
-					pathIdentifiesAs(a.ProjectPath, projectID)
+				return legacyEntryInProject(a, projectID)
 			})
 		}
 	} else {

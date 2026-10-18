@@ -816,14 +816,16 @@ func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 		{
 			ContainerID: "legacy-container",
 			Name:        "oldagent",
+			ProjectPath: legacyProjectPath(t, scopeProjA),
 			Labels:      map[string]string{"scion.name": "oldagent"},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(DefaultServerConfig(), mgr, rt)
 
-	// Should still find agents without scion.project_id via fallback
-	result, err := srv.LookupAgent(context.Background(), "oldagent", "some-project-id")
+	// Should still find agents without scion.project_id via fallback when
+	// their recorded path identifies as the project.
+	result, err := srv.LookupAgent(context.Background(), "oldagent", scopeProjA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -967,9 +969,11 @@ func TestLookupAgent_RuntimeNameFromIdentityKeyedAux_ProjectFallbackBranch(t *te
 		{
 			ContainerID: "k8s-pod-legacy",
 			Name:        "k8sagent",
-			// No project label: only matched via the unlabeled-fallback path.
-			Labels:     map[string]string{"scion.name": "k8sagent"},
-			Kubernetes: &api.AgentK8sMetadata{Namespace: "scion-ns", PodName: "k8s-pod-legacy"},
+			// No project label: only matched via the unlabeled-fallback
+			// path, through a recorded path that identifies as the project.
+			ProjectPath: legacyProjectPath(t, scopeProjA),
+			Labels:      map[string]string{"scion.name": "k8sagent"},
+			Kubernetes:  &api.AgentK8sMetadata{Namespace: "scion-ns", PodName: "k8s-pod-legacy"},
 		},
 	}
 
@@ -985,7 +989,7 @@ func TestLookupAgent_RuntimeNameFromIdentityKeyedAux_ProjectFallbackBranch(t *te
 	// A non-empty projectID forces the project-scoped attempt to miss first
 	// (the aux agent carries no scion.project_id label), then fall through
 	// to the unlabeled-fallback loop.
-	result, err := srv.LookupAgent(context.Background(), "k8sagent", "some-project-id")
+	result, err := srv.LookupAgent(context.Background(), "k8sagent", scopeProjA)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
