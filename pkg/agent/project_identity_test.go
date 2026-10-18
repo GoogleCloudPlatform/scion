@@ -264,3 +264,120 @@ func TestDelete_UnlabelledOnlyInOtherProject_NothingDeleted(t *testing.T) {
 		t.Fatalf("deleted=%v, want none", deleted)
 	}
 }
+
+// The manager's stop compares the project ID of an entry that carries only
+// the ProjectID field (as a Cloud Run entry does).
+func TestStop_IDOnlyEntryOfOtherProject_StopsNothing(t *testing.T) {
+	pathB := identityTestProjectPath(t, identityProjB)
+	var stopped []string
+	mgr := &AgentManager{Runtime: &runtime.MockRuntime{
+		ListFunc: listAll(api.AgentInfo{Name: "dev", ContainerID: "agent-dev-abc", ProjectID: identityProjA,
+			Labels: map[string]string{"scion_name": "dev"}}),
+		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
+	}}
+
+	err := mgr.Stop(context.Background(), "dev", pathB, "")
+
+	if !errors.Is(err, ErrStopTargetNotFound) || len(stopped) != 0 {
+		t.Fatalf("Stop err=%v stopped=%v, want ErrStopTargetNotFound and none", err, stopped)
+	}
+}
+
+// A project name label alone does not make an entry one of the project.
+func TestStop_NameLabelAlone_StopsNothing(t *testing.T) {
+	pathB := identityTestProjectPath(t, identityProjB)
+	var stopped []string
+	mgr := &AgentManager{Runtime: &runtime.MockRuntime{
+		ListFunc: listAll(api.AgentInfo{Name: "dev", ContainerID: "cid-name", Phase: string(state.PhaseRunning),
+			Labels: map[string]string{"scion.name": "dev", "scion.project": resolveProjectName(pathB)}}),
+		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
+	}}
+
+	err := mgr.Stop(context.Background(), "dev", pathB, "")
+
+	if !errors.Is(err, ErrStopTargetNotFound) || len(stopped) != 0 {
+		t.Fatalf("Stop err=%v stopped=%v, want ErrStopTargetNotFound and none", err, stopped)
+	}
+}
+
+// startPreCleanFixture is a machine and project for Start. It returns the
+// project's .scion entry and the project ID the start is dispatched with.
+func startPreCleanFixture(t *testing.T) (string, string) {
+	t.Helper()
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(root, config.DotScion)
+	if err := config.InitProject(scionDir, getTestHarnesses()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	return scionDir, identityProjB
+}
+
+// Start's pre-clean deletes (or adopts) only entries of its project: an
+// unlabelled stopped entry recorded under another project's path is left
+// alone, one recorded under this project's path is cleaned.
+func TestStart_PreCleanUnlabelledEntries_OnlyOwnProject(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownPath   bool
+		wantClean bool
+	}{
+		{"entry of another project", false, false},
+		{"entry of this project", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scionDir, projectID := startPreCleanFixture(t)
+			path := identityTestProjectPath(t, identityProjA)
+			if tc.ownPath {
+				path = identityTestProjectPath(t, projectID)
+			}
+			var deleted []string
+			rt := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{{ContainerID: "cid-old", Name: "worker", Phase: "stopped",
+						ContainerStatus: "Exited (0)", ProjectPath: path, Labels: map[string]string{"scion.name": "worker"}}}, nil
+				},
+				RunFunc: func(context.Context, runtime.RunConfig) (string, error) { return "cid-new", nil },
+				DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+					deleted = append(deleted, ref.ID)
+					return nil
+				},
+			}
+			_, _ = NewManager(rt).Start(context.Background(), api.StartOptions{Name: "worker", ProjectPath: scionDir, HarnessConfig: "claude", NoAuth: true,
+				Env: map[string]string{"SCION_PROJECT_ID": projectID, "SCION_AGENT_ID": "agent-a1"}})
+			cleaned := false
+			for _, id := range deleted {
+				cleaned = cleaned || id == "cid-old"
+			}
+			if cleaned != tc.wantClean {
+				t.Fatalf("pre-clean deleted=%v, want cid-old cleaned=%v", deleted, tc.wantClean)
+			}
+		})
+	}
+}
+
+// hasRuntimeEntry counts only entries of the start's project.
+func TestHasRuntimeEntry_UnlabelledEntries_OnlyOwnProject(t *testing.T) {
+	pathB := identityTestProjectPath(t, identityProjB)
+	opts := api.StartOptions{Name: "dev", ProjectPath: pathB, Env: map[string]string{"SCION_PROJECT_ID": identityProjB}}
+	other := &AgentManager{Runtime: &runtime.MockRuntime{ListFunc: listAll(
+		unlabelledRunning("dev", "cid-a", identityTestProjectPath(t, identityProjA)))}}
+	own := &AgentManager{Runtime: &runtime.MockRuntime{ListFunc: listAll(unlabelledRunning("dev", "cid-b", pathB))}}
+
+	if other.hasRuntimeEntry(context.Background(), opts) {
+		t.Fatal("hasRuntimeEntry = true for another project's unlabelled entry, want false")
+	}
+	if !own.hasRuntimeEntry(context.Background(), opts) {
+		t.Fatal("hasRuntimeEntry = false for this project's unlabelled entry, want true")
+	}
+}

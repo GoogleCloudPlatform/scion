@@ -294,23 +294,16 @@ func resolveProjectName(projectPath string) string {
 	return ""
 }
 
-// agentHasProjectInfo reports whether a runtime entry carries any project
-// identity (label or field) that can be compared against a requested project.
-func agentHasProjectInfo(a api.AgentInfo) bool {
-	return projectkeys.ProjectIDFromLabels(a.Labels) != "" ||
-		projectkeys.ProjectNameFromLabels(a.Labels) != "" ||
-		a.ProjectID != "" || a.Project != ""
-}
-
 // selectAgentTarget picks the single runtime entry that agentID refers to.
 //
-// When projectName is set, entries that carry project info must match it;
-// entries without any project info are accepted only when no entry with
-// matching project info exists, and only if they are containers whose
-// recorded path identifies as projectID, the ID recorded at the request's
-// project path (LegacyEntryInProject, the rule every project-scoped
-// operation applies). Without a projectID no such entry is accepted. It
-// never falls back to an entry that is labelled for a different project.
+// A request scoped to a project (projectName or projectID set) accepts
+// only entries of projectID (matchAgentProject): entries positively
+// identified as belonging to it win, and an entry with no project identity
+// (no project ID label or field; a project name label alone is not an
+// identity) is accepted only when no identified entry matches, and only if
+// it is a container whose recorded path identifies as projectID
+// (LegacyEntryInProject), the rule every project-scoped operation applies.
+// A scoped request without a projectID accepts nothing.
 //
 // It fails closed with an error when more than one distinct entry remains,
 // instead of silently acting on whichever one the runtime listed first
@@ -321,18 +314,12 @@ func selectAgentTarget(agents []api.AgentInfo, agentID, projectName, projectID s
 		if !agentMatchesName(a, agentID) {
 			continue
 		}
-		if projectName == "" {
+		switch {
+		case !matchAgentProject(a, projectName, projectID):
+		case projectName == "" && projectID == "", InProjectStrict(a, projectID):
 			scoped = append(scoped, a)
-			continue
-		}
-		if !agentHasProjectInfo(a) {
-			if projectID != "" && LegacyEntryInProject(a, projectID) {
-				unlabeled = append(unlabeled, a)
-			}
-			continue
-		}
-		if matchAgentProject(a, projectName, "") {
-			scoped = append(scoped, a)
+		default:
+			unlabeled = append(unlabeled, a)
 		}
 	}
 	candidates := scoped

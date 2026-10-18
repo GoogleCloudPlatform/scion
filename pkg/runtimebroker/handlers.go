@@ -63,8 +63,7 @@ var tracer = otel.Tracer("scion-broker")
 
 // matchesAgent checks whether an agent matches the given id and optional projectID.
 // When projectID is provided, the entry must belong to it (matchesAgentProject).
-// When projectID is empty, matching falls back to name/containerID/slug only
-// (backward compatible with solo/CLI mode and pre-existing containers).
+// When projectID is empty, matching is by name/containerID/slug only.
 func matchesAgent(a api.AgentInfo, id, projectID string) bool {
 	nameMatch := a.Name == id || a.ContainerID == id || a.Slug == id
 	if !nameMatch {

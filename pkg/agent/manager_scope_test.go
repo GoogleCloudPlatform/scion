@@ -26,8 +26,16 @@ import (
 // silently pick a same-slug agent from another project.
 
 func TestSelectAgentTarget(t *testing.T) {
-	inA := api.AgentInfo{Name: "dev", ContainerID: "cid-a", Labels: map[string]string{"scion.project": "proj-a"}}
-	inB := api.AgentInfo{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b"}}
+	// Entries identified by their project ID (label or field; a Cloud Run
+	// entry carries only the field).
+	inA := api.AgentInfo{Name: "dev", ContainerID: "cid-a", Labels: map[string]string{"scion.project": "proj-a", "scion.project_id": identityProjA}}
+	inB := api.AgentInfo{Name: "dev", ContainerID: "cid-b", Labels: map[string]string{"scion.project": "proj-b", "scion.project_id": identityProjB}}
+	idOnlyA := api.AgentInfo{Name: "dev", ContainerID: "cid-id-a", ProjectID: identityProjA}
+	// A project name label alone is not an identity: such an entry is
+	// treated like one with no identity.
+	nameOnlyB := api.AgentInfo{Name: "dev", ContainerID: "cid-name-b", Labels: map[string]string{"scion.project": "proj-b"}}
+	nameOnlyBWithPath := api.AgentInfo{Name: "dev", ContainerID: "cid-name-b-path", ProjectPath: identityTestProjectPath(t, identityProjB),
+		Labels: map[string]string{"scion.project": "proj-b"}}
 	// Entries with no project identity are accepted only as containers whose
 	// recorded path identifies as the requested project's ID.
 	legacy := api.AgentInfo{Name: "dev", ContainerID: "cid-legacy", ProjectPath: identityTestProjectPath(t, identityProjB)}
@@ -43,8 +51,13 @@ func TestSelectAgentTarget(t *testing.T) {
 		wantFound   bool
 		wantErr     bool
 	}{
-		{name: "scoped picks own project even when listed second", agents: []api.AgentInfo{inA, inB}, projectName: "proj-b", wantID: "cid-b", wantFound: true},
-		{name: "scoped never falls back to other project", agents: []api.AgentInfo{inA}, projectName: "proj-b"},
+		{name: "scoped picks own project even when listed second", agents: []api.AgentInfo{inA, inB}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-b", wantFound: true},
+		{name: "scoped never falls back to other project", agents: []api.AgentInfo{inA}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped compares the project ID field of an ID-only entry", agents: []api.AgentInfo{idOnlyA}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped accepts an ID-only entry of its project", agents: []api.AgentInfo{idOnlyA}, projectName: "proj-a", projectID: identityProjA, wantID: "cid-id-a", wantFound: true},
+		{name: "scoped refuses a project name label alone", agents: []api.AgentInfo{nameOnlyB}, projectName: "proj-b", projectID: identityProjB},
+		{name: "scoped accepts a name-labelled entry whose path identifies as the project", agents: []api.AgentInfo{nameOnlyBWithPath}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-name-b-path", wantFound: true},
+		{name: "scoped without a project ID accepts no labelled entry", agents: []api.AgentInfo{inB}, projectName: "proj-b"},
 		{name: "scoped prefers labelled over unlabelled", agents: []api.AgentInfo{legacy, inB}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-b", wantFound: true},
 		{name: "scoped accepts unlabelled legacy when nothing labelled matches", agents: []api.AgentInfo{inA, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},
 		{name: "scoped picks the unlabelled entry of its project among two", agents: []api.AgentInfo{legacyOther, legacy}, projectName: "proj-b", projectID: identityProjB, wantID: "cid-legacy", wantFound: true},

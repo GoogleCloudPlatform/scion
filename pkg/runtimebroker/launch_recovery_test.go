@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -378,9 +379,17 @@ func TestRecoverLaunches_NoRegistryEntry(t *testing.T) {
 		if err := writeLaunchMarker(projectDir, false, "agent-L9", "L9"); err != nil {
 			t.Fatal(err)
 		}
-		// The entry carries its project ID, as every run-labelled entry does:
-		// the recovery delete is scoped to the record's project path.
-		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: "proj"})
+		// The record's project path carries a project ID and the entry is
+		// labelled with it, so the recovery delete, scoped to that path,
+		// finds the entry as one of its project.
+		const recoveryProjectID = "33333333-cccc-cccc-cccc-333333333333"
+		if err := os.MkdirAll(filepath.Join(projectDir, config.DotScion), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.WriteProjectID(filepath.Join(projectDir, config.DotScion), recoveryProjectID); err != nil {
+			t.Fatal(err)
+		}
+		mgr := newRecFakeManager(api.AgentInfo{Name: "agent-L9", ContainerID: "c-run", RunID: "run-L9", ProjectID: recoveryProjectID})
 		mgr.deleteBlock = make(chan struct{})
 		mgr.deleteStarted = make(chan struct{})
 		srv, rtb := newAsyncTestServer(t, mgr)

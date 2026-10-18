@@ -43,7 +43,8 @@ func TestStart_CloudRunStoppedInstancePreCleanedWithItsRun(t *testing.T) {
 				RunID:           "run-a",
 				Name:            "projects/p/locations/l/instances/agent-tz-agent-0123456789",
 				ContainerStatus: "CONDITION_SUCCEEDED",
-				Labels:          map[string]string{"scion_name": "tz-agent", "scion_run_id": "run-a", "agent_id": "agent-1"},
+				ProjectID:       identityProjB,
+				Labels:          map[string]string{"scion_name": "tz-agent", "scion_run_id": "run-a", "agent_id": "agent-1", "scion_project_id": identityProjB},
 			}}, nil
 		},
 		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
@@ -58,6 +59,7 @@ func TestStart_CloudRunStoppedInstancePreCleanedWithItsRun(t *testing.T) {
 	}
 	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-b",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

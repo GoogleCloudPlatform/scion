@@ -2936,7 +2936,7 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 		return true
 	}
 	for _, e := range entries {
-		if matchAgentProject(e, projectName, projectID) {
+		if matchAgentProject(e, projectName, scopeProjectID(projectID, opts.ProjectPath)) {
 			return true
 		}
 	}
