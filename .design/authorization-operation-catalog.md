@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 299
+**Operations:** 303
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [agent.read](#agentread) — Read a single agent's metadata by ID
-- [agent.list](#agentlist) — List agents within the caller's authorized project scope
+- [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
 - [agent.update](#agentupdate) — Update agent configuration or metadata
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
@@ -54,7 +54,7 @@
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
-- [project.list](#projectlist) — List projects within the caller's authorized scope
+- [project.list](#projectlist) — List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project
 - [project.update](#projectupdate) — Update project settings and metadata
 - [project.register](#projectregister) — Register a project from an external source
 - [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
@@ -254,16 +254,19 @@
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
 - [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
-- [skill.read](#skillread) — Read skill definitions or list/discover skills
+- [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
+- [skill.read](#skillread) — Read skill definitions or discover skills
 - [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.update](#skillupdate) — Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Register skills in a skill registry
+- [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
 - [template.read](#templateread) — Read template definitions or discover available templates
 - [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
 - [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
 - [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
-- [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
+- [harnessconfig.list](#harnessconfiglist) — List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan
+- [harnessconfig.read](#harnessconfigread) — Read harness configurations
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
@@ -671,17 +674,20 @@
 
 **Domain:** agent
 
-**Description:** List agents within the caller's authorized project scope
+**Description:** List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents` |
+| http_route | GET | `/api/v1/projects/{id}/agents` |
 
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.list`
 
@@ -717,6 +723,9 @@
 - `pkg/hub:TestRS2_ConstraintChangeCursorReplay`
 - `pkg/hub:TestRS2_TransitiveGroupAccess`
 - `pkg/hub:TestRS2_FilterCompositionMatrix`
+- `pkg/hub:TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling`
+- `pkg/hub:TestProjectAgentListToken_RequiresAgentListOnTheProject`
+- `pkg/hub:TestListFilters_CannotEnlargeTokenResults`
 
 ---
 
@@ -2231,7 +2240,7 @@
 
 **Domain:** project
 
-**Description:** List projects within the caller's authorized scope
+**Description:** List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project
 
 ### Entry Points
 
@@ -2242,6 +2251,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
 
 **Base Permission:** `project.list`
 
@@ -2280,6 +2291,7 @@
 - `pkg/hub:TestRS2_TransferredOwnership`
 - `pkg/hub:TestRS2_TransitiveGroupAccess`
 - `pkg/hub:TestRS2_FilterCompositionMatrix`
+- `pkg/hub:TestProjectListToken_RequiresProjectListSelector`
 
 ---
 
@@ -9378,17 +9390,49 @@
 
 ---
 
-## skill.read
+## skill.list
 
 **Domain:** skill
 
-**Description:** Read skill definitions or list/discover skills
+**Description:** List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `list_scope`; boundaries `project`, `hub`)
+
+**Base Permission:** `skill.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSkillListToken_CountsOnlyAuthorizedRows`
+
+---
+
+## skill.read
+
+**Domain:** skill
+
+**Description:** Read skill definitions or discover skills
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
 | http_route | GET | `/api/v1/skills/{id}` |
 | http_route | POST | `/api/v1/skills/discover-directory` |
 
@@ -9400,7 +9444,7 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
@@ -9555,6 +9599,39 @@
 
 ---
 
+## template.list
+
+**Domain:** template
+
+**Description:** List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `template.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestCatalogWideList_UsesListSelectorThroughEvidence`
+
+---
+
 ## template.read
 
 **Domain:** template
@@ -9565,7 +9642,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/templates` |
 | http_route | GET | `/api/v1/templates/{id}` |
 | http_route | POST | `/api/v1/resources/discover` |
 
@@ -9577,7 +9653,7 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
@@ -9691,17 +9767,49 @@
 
 ---
 
-## harnessconfig.read
+## harnessconfig.list
 
 **Domain:** harnessconfig
 
-**Description:** Read harness configurations or list available configs
+**Description:** List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/harness-configs` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `harness_config.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestCatalogWideList_UsesListSelectorThroughEvidence`
+
+---
+
+## harnessconfig.read
+
+**Domain:** harnessconfig
+
+**Description:** Read harness configurations
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
 | http_route | GET | `/api/v1/harness-configs/{id}` |
 
 **Principals:** `user`
@@ -9714,7 +9822,7 @@
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 
