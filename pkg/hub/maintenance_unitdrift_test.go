@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -115,25 +114,6 @@ func (f *rebuildUnitFixture) restartIssued(t *testing.T) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
-}
-
-// syncBuffer is a bytes.Buffer safe for the restart child's output copier
-// and the test reading it.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }
 
 func renderedRebuildUnit(extra string) string {

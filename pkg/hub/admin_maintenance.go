@@ -658,8 +658,12 @@ func (s *Server) unitDriftStatus(ctx context.Context) *UnitDriftStatus {
 		return nil
 	}
 	var st UnitDriftStatus
-	if err := json.Unmarshal(setting.Value, &st); err != nil || (st.Status != "match" && st.Status != "drift") {
-		log.Warn("Ignoring an unreadable systemd unit status", "error", err)
+	if err := json.Unmarshal(setting.Value, &st); err != nil {
+		log.Debug("Ignoring an unreadable systemd unit status", "error", err)
+		return nil
+	}
+	if st.Status != "match" && st.Status != "drift" {
+		log.Debug("Ignoring a systemd unit status with an unknown status", "status", st.Status)
 		return nil
 	}
 	return &st

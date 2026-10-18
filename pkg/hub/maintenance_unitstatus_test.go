@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -67,18 +68,18 @@ func seedDriftRecord(t *testing.T, st store.Store) string {
 func TestRebuildServerExecutor_UnitStatusRecordedBeforeRestart(t *testing.T) {
 	f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\nEnvironment=\"API_TOKEN=s3cr3t-value\"\n"))
 	st := newUnitStatusStore(t)
-	e := f.executor(nil)
-	e.store = st
 	var buf syncBuffer
+	order := &orderingStore{Store: st, log: &buf, calls: f.calls}
+	e := f.executor(nil)
+	e.store = order
 	if err := e.Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if !f.restartIssued(t) {
 		t.Fatal("restart not issued")
 	}
-	log := buf.String()
-	if rec, restart := strings.Index(log, "Recorded systemd unit status: drift\n"), strings.Index(log, "==> Restarting service\n"); rec < 0 || restart < 0 || rec > restart {
-		t.Fatalf("the status must be recorded before the restart starts:\n%s", log)
+	if order.upserts != 1 || order.restartBegunAtUpsert {
+		t.Fatalf("the record must be stored once, before the restart begins (upserts %d, restart begun at upsert %v):\n%s", order.upserts, order.restartBegunAtUpsert, buf.String())
 	}
 	v, raw, ok := readUnitStatus(t, st)
 	if !ok {
@@ -149,6 +150,27 @@ func TestRebuildServerExecutor_UnitStatusStructuralSkipClearsDrift(t *testing.T)
 	if v, _, ok := readUnitStatus(t, st); ok {
 		t.Fatalf("a structural skip must remove the record, found %+v", v)
 	}
+}
+
+// orderingStore records, when the unit status is stored, whether the
+// restart had already begun: its log header written or its command run.
+type orderingStore struct {
+	store.Store
+	log                  *syncBuffer
+	calls                string
+	upserts              int
+	restartBegunAtUpsert bool
+}
+
+func (o *orderingStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, by string, rev int64, origin string) (*store.HubSetting, error) {
+	if section == HubSettingSectionUnitDrift {
+		o.upserts++
+		calls, _ := os.ReadFile(o.calls)
+		if strings.Contains(o.log.String(), "==> Restarting service") || strings.Contains(string(calls), "systemctl restart") {
+			o.restartBegunAtUpsert = true
+		}
+	}
+	return o.Store.UpsertHubSetting(ctx, section, value, by, rev, origin)
 }
 
 // failingUnitStatusStore fails every hub setting write.

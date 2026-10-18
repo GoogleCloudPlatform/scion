@@ -125,6 +125,18 @@ describe('admin maintenance unit drift banner', () => {
     expect(text(banner(el)!)).toContain('at the checked-out commit, with the same flags');
   });
 
+  it('names the commit alone when no branch is known', async () => {
+    el = await mount({ ...DRIFT, branch: '' });
+    expect(text(banner(el)!)).toContain('at commit abc1234, with the same flags');
+  });
+
+  it('names the branch when no commit is known', async () => {
+    el = await mount({ ...DRIFT, commit: '' });
+    expect(text(banner(el)!)).toContain(
+      'at the checked-out commit on branch main, with the same flags'
+    );
+  });
+
   it('renders summary markup as text', async () => {
     el = await mount({ ...DRIFT, summary: ['installed: X=<img src=x onerror=alert(1)>'] });
     const summary = banner(el)!.querySelector('.unit-drift-summary')!;
