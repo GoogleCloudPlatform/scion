@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
@@ -85,6 +86,10 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 		BinaryDest:  binaryDest,
 		ServiceName: "test-scion",
 	})
+	// Keep the unit drift check hermetic: never ask the host's systemd.
+	executor.unitLocator = func(context.Context, string) (unitdrift.UnitInfo, error) {
+		return unitdrift.UnitInfo{}, fmt.Errorf("no systemd in tests")
+	}
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)

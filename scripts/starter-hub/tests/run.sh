@@ -216,6 +216,36 @@ test_full_default_writes_caddyfile() {
     assert_contains "$(cat "${STUB_SSH_LOG}")" "SKIP_TLS=false" "remote session keeps Caddy"
 }
 
+# --- gce-start-hub.sh --full unit template (ptone/scion#5293) ---
+
+test_full_unit_matches_golden() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+    if cmp -s "${TESTS_DIR}/testdata/scion-hub.service.golden" "${STUB_SCP_DIR}/scion-hub.service"; then
+        pass
+    else
+        fail "rendered unit differs from testdata/scion-hub.service.golden: $(diff "${TESTS_DIR}/testdata/scion-hub.service.golden" "${STUB_SCP_DIR}/scion-hub.service")"
+    fi
+}
+
+test_full_unit_renders_values_verbatim() {
+    local unit
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}"
+        "HUB_BASE_URL=https://hub.example.test/a&b%sx%%y"
+        REPO_DIR=/srv/src/scion-repo SCION_BIN=/opt/scion/bin/scion)
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy with custom values passes"
+    unit="$(cat "${STUB_SCP_DIR}/scion-hub.service")"
+    assert_contains "$unit" $'\nEnvironment="SCION_SERVER_BASE_URL=https://hub.example.test/a&b%sx%%y"\n' "& and % kept in base URL"
+    assert_contains "$unit" $'\nWorkingDirectory=/srv/src/scion-repo\n' "custom REPO_DIR"
+    assert_contains "$unit" $'\nExecStart=/opt/scion/bin/scion --global server start ' "custom SCION_BIN"
+    assert_not_contains "$unit" "@" "no placeholder left"
+    assert_not_contains "$unit" "##" "template notes dropped"
+}
+
 test_full_no_tls_skips_caddy() {
     local mode
     for mode in flag env; do

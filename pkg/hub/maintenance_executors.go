@@ -36,6 +36,7 @@ import (
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	cloudbuildpb "cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
 	gcstorage "cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/unitdrift"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -274,6 +275,12 @@ type RebuildServerExecutor struct {
 	repoBranch  string // git branch to checkout before building (empty = stay on current)
 	binaryDest  string // install path (e.g., /usr/local/bin/scion)
 	serviceName string // systemd service name (e.g., "scion-hub")
+
+	// unitLocator and unitRevision back the systemd unit drift check;
+	// tests replace them so they never call the host's systemctl or git.
+	unitLocator  unitdrift.Locator
+	unitRevision unitdrift.Revision
+	unitTimeout  time.Duration // zero means unitdrift.DefaultTimeout
 }
 
 // RebuildServerOptions configures a RebuildServerExecutor. Zero values are
@@ -288,10 +295,12 @@ type RebuildServerOptions struct {
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
 	return &RebuildServerExecutor{
-		repoPath:    opts.RepoPath,
-		repoBranch:  opts.RepoBranch,
-		binaryDest:  opts.BinaryDest,
-		serviceName: opts.ServiceName,
+		repoPath:     opts.RepoPath,
+		repoBranch:   opts.RepoBranch,
+		binaryDest:   opts.BinaryDest,
+		serviceName:  opts.ServiceName,
+		unitLocator:  unitdrift.SystemctlLocator,
+		unitRevision: unitdrift.GitRevision,
 	}
 }
 
@@ -343,6 +352,7 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	}
 
 	var steps []step
+	var currentBranch string
 	steps = append(steps, step{"Fetching latest code", "git", []string{"fetch", "origin"}, repoPath})
 	if branch != "" {
 		steps = append(steps, step{"Checking out branch " + branch, "git", []string{"checkout", branch}, repoPath})
@@ -355,7 +365,7 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		if err != nil {
 			return fmt.Errorf("failed to determine current branch: %s", strings.TrimSpace(string(branchOut)))
 		}
-		currentBranch := strings.TrimSpace(string(branchOut))
+		currentBranch = strings.TrimSpace(string(branchOut))
 		steps = append(steps, step{"Resetting to origin/" + currentBranch, "git", []string{"reset", "--hard", "origin/" + currentBranch}, repoPath})
 	}
 	steps = append(steps,
@@ -390,6 +400,32 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 		log.Debug("Step completed", "step", i+1, "name", step.name)
 		_, _ = fmt.Fprintln(logger)
 	}
+
+	// Compare the installed systemd unit with the template in the tree just
+	// checked out. Rebuild from git never rewrites the unit, so a template
+	// change needs a re-provision; tell the admin. The check is read-only,
+	// bounded and never fails, so the restart below always runs. Its report
+	// is written last, after the completion line (also when the restart
+	// fails to start), so it is not buried in the build output.
+	_, _ = fmt.Fprintf(logger, "==> Checking systemd unit against template (result at end of log)\n\n")
+	unitBranch := branch
+	if unitBranch == "" {
+		unitBranch = currentBranch
+	}
+	unitReport := unitdrift.Check(ctx, unitdrift.CheckOptions{
+		RepoPath: repoPath,
+		Branch:   unitBranch,
+		Service:  serviceName,
+		Locate:   e.unitLocator,
+		Revision: e.unitRevision,
+		Timeout:  e.unitTimeout,
+	})
+	if strings.HasPrefix(unitReport, unitdrift.DriftWarning) {
+		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
+	}
+	defer func() {
+		_, _ = fmt.Fprintf(logger, "\n==> Systemd unit check\n%s", unitReport)
+	}()
 
 	// Fire-and-forget: start the restart but don't wait for it to finish.
 	// "systemctl restart" sends SIGTERM to this very process, so cmd.Run()
