@@ -104,6 +104,11 @@ func (r *Relay) CloseOlderIncarnationSessions(kind, id, inc string, epoch int64,
 			e.rec.EndpointIncarnation == inc || e.rec.ConnectionEpoch >= epoch {
 			continue
 		}
+		// Defence only: Serve sets sess before it registers the entry in
+		// r.sessions under r.mu, so a listed entry always has one.
+		if e.sess == nil {
+			continue
+		}
 		select {
 		case <-e.sess.Done():
 			continue
