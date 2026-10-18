@@ -222,17 +222,6 @@ func (r *CloudRunRuntime) SupportsAttach() bool { return false }
 
 var _ AttachCapableRuntime = (*CloudRunRuntime)(nil)
 
-// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run
-// calls both async launch hooks and DeleteResource cleans up a reported
-// instance (ptone/scion#4761), but how the Instances API behaves for a
-// cut-off create, a delete during the create operation and a NotFound is
-// not yet verified against the live API (ptone/scion#4760). Until it is,
-// the broker creates agents on this runtime synchronously; the opt-out is
-// lifted by ptone/scion#4762.
-func (r *CloudRunRuntime) AsyncLaunchUnsupported() bool { return true }
-
-var _ AsyncLaunchUnsupportedRuntime = (*CloudRunRuntime)(nil)
-
 func (r *CloudRunRuntime) ExecUser() string {
 	return "scion"
 }
