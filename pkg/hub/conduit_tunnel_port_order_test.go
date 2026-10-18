@@ -91,7 +91,11 @@ func TestRelayTunnel_PortCheckedAfterAgentState(t *testing.T) {
 // and on a relay-held session, a running agent's unexposed port is refused
 // 403 forbidden. Once the port is exposed the same request passes the
 // port check: it opens on the hub-held path, and on the relay-held path it
-// goes on to the next step (no agent session, 503).
+// goes on to the next step (no agent session, 503). The hub-held case
+// without an agent session never reaches the grant mint, whose own port
+// check would otherwise also refuse the port, so it shows the
+// checkTunnelTarget check alone: 403 for the unexposed port, then 503
+// agent_session_unavailable once the port is exposed.
 func TestConduitTunnel_PortCheckAppliesOnBothPaths(t *testing.T) {
 	t.Run("hub-held session", func(t *testing.T) {
 		tf := newTunnelFixture(t)
@@ -106,6 +110,23 @@ func TestConduitTunnel_PortCheckAppliesOnBothPaths(t *testing.T) {
 		tf.exposePort(t, tf.launched, 3000)
 		r = c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
 		assert.Equal(t, http.StatusOK, r.status, r.body)
+	})
+	t.Run("hub-held session without an agent session", func(t *testing.T) {
+		// No agent is started, so the open fails at session resolution,
+		// before the grant mint (which repeats the port check): only the
+		// checkTunnelTarget port check can refuse the unexposed port here.
+		tf := newTunnelFixture(t)
+		c := tf.ownerClient(t)
+
+		setTunnelTarget(t, tf.store, tf.launched.ID, state.PhaseRunning)
+		r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+		assert.Equal(t, http.StatusForbidden, r.status, r.body)
+		assert.Equal(t, ErrCodeForbidden, r.err.Code, r.body)
+
+		setTunnelTarget(t, tf.store, tf.launched.ID, state.PhaseRunning, 3000)
+		r = c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+		assert.Equal(t, http.StatusServiceUnavailable, r.status, r.body)
+		assert.Equal(t, ErrCodeAgentSessionUnavailable, r.err.Code, r.body)
 	})
 	t.Run("relay-held session", func(t *testing.T) {
 		f, cf := newUserRelayOps(t)
