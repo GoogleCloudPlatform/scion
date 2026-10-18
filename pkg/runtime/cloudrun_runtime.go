@@ -1071,15 +1071,18 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 // List reports (ptone/scion#5270). In order:
 //   - delete_time set: "stopped" (the instance is soft-deleted);
 //   - reconciling: "provisioning" (the system is still acting on it);
-//   - Ready condition succeeded: "running" (for an Instance, succeeded means
-//     serving, not finished);
+//   - Ready condition succeeded: "provisioning" (see below);
 //   - Ready condition failed: "error";
 //   - otherwise (no condition, unspecified, pending, reconciling state):
 //     "provisioning".
 //
-// The API has no run-state field, and how an instance reads after
-// StopInstance is unverified, so no condition is read as a clean stop. An
-// unknown shape maps to a non-terminal phase and is counted as live.
+// A succeeded Ready condition is ambiguous: it is reported for a serving
+// instance, and may also be what a stopped instance reports, since the API
+// has no run-state field and the shape after StopInstance is unverified
+// (ptone/scion#5295). Reporting it as "running" would make Start's
+// pre-clean keep a stopped instance instead of recreating it, so it is
+// reported as "provisioning", a non-terminal phase that is not running,
+// until that shape is known.
 //
 // The container status is the raw condition state ("unknown" without a
 // condition), with ",reconciling" appended while reconciling.
@@ -1100,7 +1103,7 @@ func cloudRunInstancePhase(inst *runpb.Instance) (phase, containerStatus string)
 	case inst.GetReconciling():
 		phase = string(state.PhaseProvisioning)
 	case condState == runpb.Condition_CONDITION_SUCCEEDED:
-		phase = string(state.PhaseRunning)
+		phase = string(state.PhaseProvisioning)
 	case condState == runpb.Condition_CONDITION_FAILED:
 		phase = string(state.PhaseError)
 	default:

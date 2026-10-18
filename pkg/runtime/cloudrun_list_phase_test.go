@@ -27,7 +27,8 @@ import (
 // soft-delete time, reconciling flag and Ready condition state to an agent
 // phase (ptone/scion#5270), in that order of precedence, and keeps the raw
 // condition state as the container status, with ",reconciling" appended
-// while the instance is reconciling.
+// while the instance is reconciling. A succeeded Ready condition, which may
+// be a serving or a stopped instance, is "provisioning", never "running".
 func TestCloudRunList_MapsInstanceConditionToPhase(t *testing.T) {
 	cond := func(s runpb.Condition_State) *runpb.Condition {
 		return &runpb.Condition{Type: "Ready", State: s}
@@ -65,9 +66,9 @@ func TestCloudRunList_MapsInstanceConditionToPhase(t *testing.T) {
 			wantStatus: "CONDITION_RECONCILING",
 		},
 		{
-			name:       "succeeded is running",
+			name:       "succeeded is provisioning, not running",
 			inst:       &runpb.Instance{TerminalCondition: cond(runpb.Condition_CONDITION_SUCCEEDED)},
-			wantPhase:  state.PhaseRunning,
+			wantPhase:  state.PhaseProvisioning,
 			wantStatus: "CONDITION_SUCCEEDED",
 		},
 		{
