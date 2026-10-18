@@ -352,6 +352,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateTestModeRequiresHub(enableHub); err != nil {
 		return err
 	}
+	if err := validateTestModeHubIDPinned(cfg); err != nil {
+		return err
+	}
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
@@ -2479,6 +2482,7 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
 	return hub.ServerConfig{
 		HubID:                        cfg.Hub.ResolveHubID(),
+		HubIDPinned:                  hubIDPinned(cfg),
 		HubName:                      cfg.Hub.ResolveHubName(),
 		DisableLegacyStorageFallback: cfg.Hub.DisableLegacyStorageFallback,
 		Port:                         cfg.Hub.Port,

@@ -358,12 +358,13 @@ A single startup setting, `--test-mode=<level>:<hub id>`, selects which test ide
 | `admin` | `member`, plus test identities with hub-admin authority (see "Test admin identities" below). |
 | `super-admin` | `admin`, plus test identities with super-admin authority. The hub starts only when its test-admin policy classification is complete (see "Test-admin policy" below). |
 
-The level is matched exactly against these four lower-case strings. An empty value means `off`. Any other value, including a different case or a misspelling, refuses to start with an error that lists the four levels. The hub id after the colon is required for every level except `off`, and must equal the hub's resolved hub id (`server.hub.hub_id`, or the persisted id).
+The level is matched exactly against these four lower-case strings. An empty value means `off`. Any other value, including a different case or a misspelling, refuses to start with an error that lists the four levels. The hub id after the colon is required for every level except `off`, and must equal the hub's resolved hub id: `server.hub.hub_id` from the settings file, or `SCION_SERVER_HUB_HUBID`. The resolved hub id identifies the logical hub, so every replica of one hub shares it; replicas are told apart by their instance id, not their hub id.
 
 Every level except `off`, `member` included, requires all of the following. If any one is missing the hub refuses to start with a named error; it never falls back to a lower level.
 
 - The process runs the hub, with a user store, and was not started with `--production` (use `--hosted`).
 - The hub id binding above matches.
+- The hub id is pinned: `server.hub.hub_id` (or `SCION_SERVER_HUB_HUBID`) is set explicitly, to the same value on every replica of the hub. Pin the hub's current resolved id, never a fresh value (see below). A hub id derived from the hostname (persisted in `~/.scion/hub-id`) or from the Cloud Run service name (`K_SERVICE`) is refused with the named error `hub_id_not_pinned`, which names `server.hub.hub_id`. The Helm chart (`hub.hubId`), the Terraform modules and the Cloud Run script already pin it; a single-node VM or workstation hub needs `server.hub.hub_id` added to its settings before it can use test mode. Set it to the hub's current id: the `hub_id` that `GET /healthz` reports, which is also the content of `~/.scion/hub-id`. A different value moves the hub to a new id, which re-scopes its secrets, hub-scoped environment variables, signing keys, storage prefix and test infrastructure marker. The value must match the hub id the marker names.
 - `server.hub.class: test` is set in the settings file or environment. The server-config API refuses this key in every mode, and does not return it.
 - The database carries a test infrastructure marker for this hub id. An operator writes it offline, on the hub host, with `scion server test-infra mark --hub-id <id> --i-understand-this-hub-can-mint-super-admins`; it is never written by the Helm chart or by an agent. `--attested '<json object>'` optionally records the storage bucket, secret-backend project and broker ids as declared facts. The command writes a `test_infra_mark` audit record and refuses if a marker already exists.
 
@@ -376,11 +377,13 @@ These are stricter than the former `--enable-test-identities` flag, which needed
 - The hub is not a workstation hub.
 - No runtime broker other than the hub's co-located broker is registered and active (see below).
 
+`admin` and `super-admin` are single-replica only. A hosted HA hub (Postgres, Cloud Run, or GCS storage with proxy auth) must have a durable shared session secret, and the admin levels refuse any shared signing secret, so they cannot start on a hosted HA hub at any replica count. Run them on a single hub process (for example a single-node VM). `member` has no such limit: every replica of one hub can run it, as long as they all share the one pinned hub id the marker names.
+
 `--enable-test-identities`, `--enable-test-admin-identities` and `--enable-test-super-admin-identities` were replaced by `--test-mode`; starting with any of them fails with an error that names `--test-mode`.
 
 At startup, for any level except `off`, the hub writes one line tagged `[scion-test-admin-audit]` to stdout, whatever `server.log_level` is set to, with the resolved level (`test_mode`), the preconditions that admitted it (`preconditions`) and a `warning`: hub- and broker-scope environment secrets are injected into every member agent, so keep only test-grade secrets on a test hub. `GET /api/v1/admin/health/summary` reports the same as `hub.test_mode` and `hub.test_mode_preconditions`, next to the booleans derived from the level.
 
-The Helm chart renders only the `member` level: `hub.testIdentities.enabled: true` renders `--test-mode=member:<hub.hubId>` and requires `hub.hubClass: test`. No chart value renders `admin` or `super-admin`, and `hub.args` refuses `--test-mode`.
+The Helm chart renders only the `member` level: `hub.testIdentities.enabled: true` renders `--test-mode=member:<hub.hubId>` and requires `hub.hubClass: test`. No chart value renders `admin` or `super-admin`, and `hub.args` refuses `--test-mode`. The chart pins `server.hub.hub_id` to `hub.hubId` in the settings it renders. With `config.existingSecret` the settings file is yours and the chart cannot read it: its `server.hub.hub_id` must be set and equal `hub.hubId`, or every pod refuses to start.
 
 While the test admin tier is on (`--test-mode=admin` or `super-admin`):
 - Federation settings writes are refused (`422`) for every caller.
