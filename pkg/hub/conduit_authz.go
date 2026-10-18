@@ -498,9 +498,18 @@ type conduitRenewalRequest struct {
 	// OpenJTI is the jti of the stream's open grant.
 	OpenJTI string
 	// PrincipalID and Kind, when set, are the user and stream kind the
-	// relay holds for the stream; they must equal the grant's.
+	// holder of the stream's leaf has for it; they must equal the grant's.
 	PrincipalID string
 	Kind        string
+	// RelayHeld marks a request a separate relay presented for a stream on
+	// one of its user sessions (recheckRelayStream). PrincipalID is then
+	// that session's admitted principal, and a grant naming another
+	// principal is a session binding failure: a deny
+	// (errConduitRenewalSessionBinding). On a hub-held stream the hub built
+	// the request from its own state, so a mismatch is an internal
+	// inconsistency: unavailable, logged at error level (design v2.21.40
+	// §3.9, Session binding).
+	RelayHeld bool
 }
 
 // conduitRenewal is a minted renewal grant and the deadline it carries.
@@ -563,6 +572,11 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		return nil, fmt.Errorf("%w: not a user stream", errConduitRenewalUnavailable)
 	}
 	if req.PrincipalID != "" && req.PrincipalID != userID {
+		if req.RelayHeld {
+			return nil, fmt.Errorf("%w: the grant names another principal than the stream's session", errConduitRenewalSessionBinding)
+		}
+		slog.Error("Conduit renewal: the grant names another principal than the stream the hub holds; no renewal minted",
+			"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID)
 		return nil, fmt.Errorf("%w: principal does not match the grant", errConduitRenewalUnavailable)
 	}
 	if req.Kind != "" && req.Kind != c.Stream.Kind {
