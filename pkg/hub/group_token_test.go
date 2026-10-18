@@ -57,6 +57,22 @@ var groupTokenGroupSelectors = []string{
 func newGroupTokenFixture(t *testing.T, prefix string) *groupTokenFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return newGroupTokenFixtureOn(t, prefix, srv, s)
+}
+
+// newGroupTokenFixtureWithStoreFault builds the fixture on a server whose
+// store is wrapped by wrap right after the server is built (see
+// installStoreFault). The wrapper delegates until the test arms it.
+func newGroupTokenFixtureWithStoreFault[W store.Store](t *testing.T, prefix string, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*groupTokenFixture, W, *storeFaultSwitch) {
+	t.Helper()
+	srv, s, wrapped, fault := testServerWithStoreFault(t, wrap)
+	return newGroupTokenFixtureOn(t, prefix, srv, s), wrapped, fault
+}
+
+// newGroupTokenFixtureOn sets up the fixture on srv, writing through the
+// raw store s.
+func newGroupTokenFixtureOn(t *testing.T, prefix string, srv *Server, s store.Store) *groupTokenFixture {
+	t.Helper()
 	ctx := context.Background()
 	f := &groupTokenFixture{srv: srv, s: s, projectID: tid(prefix + "-project"), callerID: tid(prefix + "-caller")}
 	createRS1Project(t, s, f.projectID, tid(prefix+"-owner"))
@@ -657,16 +673,55 @@ func TestGroupMembershipToken_CannotCarryAuthorityBeyondCaller(t *testing.T) {
 	}
 }
 
+// storeFaultWindow bounds a store fault to the requests a test sends while
+// it is open: the fault is injected after open.Arm() and until shut.Arm().
+type storeFaultWindow struct {
+	open, shut *storeFaultSwitch
+}
+
+func newStoreFaultWindow(open *storeFaultSwitch) storeFaultWindow {
+	return storeFaultWindow{open: open, shut: &storeFaultSwitch{}}
+}
+
+func (w storeFaultWindow) active() bool {
+	return w.open != nil && w.open.Active() && !w.shut.Active()
+}
+
 // groupClosureChangingStore adds a role binding on one group, inside the
 // membership transaction, before the handler's transaction body runs, so
 // the closure the transaction sees differs from the one the delegation
-// check read.
+// check read. It does so only while one of its windows is open; the target
+// fields are set before a window opens.
 type groupClosureChangingStore struct {
 	store.Store
+	windows                    []storeFaultWindow
 	groupID, roleID, projectID string
 }
 
+// newGroupTokenFixtureWithClosureChange builds the fixture with a
+// groupClosureChangingStore installed on the server. Its first window opens
+// on the switch installStoreFault returns; extra adds further windows.
+func newGroupTokenFixtureWithClosureChange(t *testing.T, prefix string, extra int) (*groupTokenFixture, *groupClosureChangingStore) {
+	t.Helper()
+	f, cs, _ := newGroupTokenFixtureWithStoreFault(t, prefix, func(inner store.Store, fault *storeFaultSwitch) *groupClosureChangingStore {
+		windows := []storeFaultWindow{newStoreFaultWindow(fault)}
+		for i := 0; i < extra; i++ {
+			windows = append(windows, newStoreFaultWindow(&storeFaultSwitch{}))
+		}
+		return &groupClosureChangingStore{Store: inner, windows: windows}
+	})
+	cs.roleID, cs.projectID = f.roleID, f.projectID
+	return f, cs
+}
+
 func (s *groupClosureChangingStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	open := false
+	for _, w := range s.windows {
+		open = open || w.active()
+	}
+	if !open {
+		return s.Store.WithTx(ctx, fn)
+	}
 	return s.Store.WithTx(ctx, func(tx store.Store) error {
 		if _, err := tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: s.roleID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: s.groupID,
@@ -684,16 +739,17 @@ func (s *groupClosureChangingStore) WithTx(ctx context.Context, fn func(tx store
 // and the membership write, the transaction refuses with 409 and nothing is
 // written. A session's add is not re-checked.
 func TestGroupMembershipToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
-	f := newGroupTokenFixture(t, "gtc")
+	f, cs := newGroupTokenFixtureWithClosureChange(t, "gtc", 1)
 	ctx := context.Background()
 	g := f.group(t, "gtc-group")
 	target := f.user(t, "gtc-target")
 	key := f.mint(t, hubBoundary(), withSelectors([]string{"group:addMember"}, groupTokenRoleSelectors)...)
 
-	orig := f.srv.store
-	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: g.ID, roleID: f.roleID, projectID: f.projectID}
+	cs.groupID = g.ID
+	tokenWindow, sessionWindow := cs.windows[0], cs.windows[1]
+	tokenWindow.open.Arm()
 	rec := doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", addUserBody(target))
-	f.srv.store = orig
+	tokenWindow.shut.Arm()
 
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.False(t, f.isMember(t, g, store.GroupMemberTypeUser, target), "nothing is written")
@@ -702,9 +758,9 @@ func TestGroupMembershipToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, bindings, "the transaction rolled back as a whole")
 
-	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: g.ID, roleID: f.roleID, projectID: f.projectID}
+	sessionWindow.open.Arm()
 	code := f.session(t, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", addUserBody(target))
-	f.srv.store = orig
+	sessionWindow.shut.Arm()
 	assert.Equal(t, http.StatusCreated, code, "a session's add is governed by group roles and not re-checked")
 }
 
@@ -813,16 +869,16 @@ func TestGroupOwnerChangeToken_RequiresDelegationForNewOwner(t *testing.T) {
 // check evaluated: when the group's role bindings change between the check
 // and the write, the request is refused with 409 and nothing is written.
 func TestGroupOwnerChangeToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
-	f := newGroupTokenFixture(t, "got")
+	f, cs := newGroupTokenFixtureWithClosureChange(t, "got", 0)
 	ctx := context.Background()
 	g := f.group(t, "got-group")
 	newOwner := f.user(t, "got-new-owner")
 	key := f.mint(t, hubBoundary(), withSelectors([]string{"group:update"}, groupTokenRoleSelectors)...)
 
-	orig := f.srv.store
-	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: g.ID, roleID: f.roleID, projectID: f.projectID}
+	cs.groupID = g.ID
+	cs.windows[0].open.Arm()
 	rec := doRequestWithUAT(t, f.srv, key, http.MethodPatch, "/api/v1/groups/"+g.ID, map[string]interface{}{"ownerId": newOwner})
-	f.srv.store = orig
+	cs.windows[0].shut.Arm()
 
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.Equal(t, f.callerID, f.ownerOf(t, g), "nothing is written")
@@ -839,7 +895,7 @@ func TestGroupOwnerChangeToken_ClosureChangeBeforeWriteRefused(t *testing.T) {
 // between the check and the write, the request is refused with 409 and no
 // group, child edge, binding or audit record is written.
 func TestGroupCreateToken_ChildWrittenUnderCheckedParentClosure(t *testing.T) {
-	f := newGroupTokenFixture(t, "gcc")
+	f, cs := newGroupTokenFixtureWithClosureChange(t, "gcc", 0)
 	ctx := context.Background()
 	key := f.mint(t, hubBoundary(), withSelectors(groupTokenGroupSelectors, groupTokenRoleSelectors)...)
 	create := func(slug, parentID string) *httptest.ResponseRecorder {
@@ -866,10 +922,10 @@ func TestGroupCreateToken_ChildWrittenUnderCheckedParentClosure(t *testing.T) {
 	assert.Equal(t, f.callerID, audits[0].ActorPrincipalID)
 
 	parent := f.group(t, "gcc-parent")
-	orig := f.srv.store
-	f.srv.store = &groupClosureChangingStore{Store: orig, groupID: parent.ID, roleID: f.roleID, projectID: f.projectID}
+	cs.groupID = parent.ID
+	cs.windows[0].open.Arm()
 	rec = create("gcc-changed-child", parent.ID)
-	f.srv.store = orig
+	cs.windows[0].shut.Arm()
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	_, err := f.s.GetGroupBySlug(ctx, "gcc-changed-child")
 	assert.ErrorIs(t, err, store.ErrNotFound, "no group is written")
@@ -899,14 +955,20 @@ func (s *unresolvedRoleStore) GetRoleDefinition(ctx context.Context, id string) 
 }
 
 // unresolvedRoleTxStore runs each transaction on an unresolvedRoleStore, so
-// only reads inside the transaction see the role as not resolving.
+// only reads inside the transaction see the role as not resolving. It does
+// so only while its window is open; roleID and asNil are set before the
+// window opens.
 type unresolvedRoleTxStore struct {
 	store.Store
+	window storeFaultWindow
 	roleID string
 	asNil  bool
 }
 
 func (s *unresolvedRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !s.window.active() {
+		return s.Store.WithTx(ctx, fn)
+	}
 	return s.Store.WithTx(ctx, func(tx store.Store) error {
 		return fn(&unresolvedRoleStore{Store: tx, roleID: s.roleID, asNil: s.asNil})
 	})
@@ -918,16 +980,18 @@ func (s *unresolvedRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Sto
 // 500, not 404, and writes nothing.
 func TestGroupMemberAddToken_UnresolvedClosureRoleIsInternalError(t *testing.T) {
 	for _, asNil := range []bool{false, true} {
-		f := newGroupTokenFixture(t, "gur")
+		f, us, fault := newGroupTokenFixtureWithStoreFault(t, "gur", func(inner store.Store, fault *storeFaultSwitch) *unresolvedRoleTxStore {
+			return &unresolvedRoleTxStore{Store: inner, window: newStoreFaultWindow(fault)}
+		})
+		us.roleID, us.asNil = f.roleID, asNil
 		g := f.group(t, "gur-group")
 		bindingID := f.bindGroup(t, g, f.roleID, store.RoleScopeProject, f.projectID)
 		target := f.user(t, "gur-target")
 		key := f.mint(t, hubBoundary(), withSelectors([]string{"group:addMember"}, groupTokenRoleSelectors)...)
 
-		orig := f.srv.store
-		f.srv.store = &unresolvedRoleTxStore{Store: orig, roleID: f.roleID, asNil: asNil}
+		fault.Arm()
 		rec := doRequestWithUAT(t, f.srv, key, http.MethodPost, "/api/v1/groups/"+g.ID+"/members", addUserBody(target))
-		f.srv.store = orig
+		us.window.shut.Arm()
 
 		assert.Equal(t, http.StatusInternalServerError, rec.Code, "nil definition %v: %s", asNil, rec.Body.String())
 		assert.NotContains(t, rec.Body.String(), f.roleID, "the response names no role definition")
