@@ -193,7 +193,7 @@
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
-- [user.admin.invite](#useradmininvite) — Invite a user to the platform
+- [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
@@ -226,8 +226,8 @@
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.read](#hubadminmoderead) — Read admin/maintenance mode state
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
-- [hub.allowlist.read](#huballowlistread) — Read the platform email allow list and its domains
-- [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
+- [hub.allowlist.read](#huballowlistread) — Read the platform email allow list and its domains. A token needs hub_allow_list:read on the hub boundary; it does not admit the allow-list writes
+- [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list: add and import create invited records (status invited, placeholder role member, no role binding or group membership); delete removes an invited record under the last-project-owner guard and binding cascade of user.admin.delete. The route guard checks hub.allow_list.read, so a token needs hub_allow_list:read and hub_allow_list:update on the hub boundary
 - [hub.health.read](#hubhealthread) — Read platform health summary and GCP quota status
 - [hub.diagnostics.read](#hubdiagnosticsread) — Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read
 - [hub.scheduler.read](#hubschedulerread) — Read scheduler status and configuration
@@ -7211,7 +7211,7 @@
 
 **Domain:** user.admin
 
-**Description:** Invite a user to the platform
+**Description:** Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 
 ### Entry Points
 
@@ -7220,12 +7220,17 @@
 | http_route | POST | `/api/v1/admin/users/invite` |
 | http_route | POST | `/api/v1/admin/users/invite/bulk` |
 | http_route | GET | `/api/v1/admin/invites` |
+| http_route | POST | `/api/v1/admin/invites` |
+| http_route | GET | `/api/v1/admin/invites/stats` |
 | http_route | GET | `/api/v1/admin/invites/{id}` |
+| http_route | POST | `/api/v1/admin/invites/{id}/revoke` |
 | http_route | DELETE | `/api/v1/admin/invites/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.invite`
 
@@ -7250,6 +7255,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestInviteToken_RequiresInviteSelectorAndHubBoundary`
+- `pkg/hub:TestInvitationToken_CreatesNoRoleBindingOrGroupMembership`
 
 ---
 
@@ -8420,7 +8427,7 @@
 
 **Domain:** hub
 
-**Description:** Read the platform email allow list and its domains
+**Description:** Read the platform email allow list and its domains. A token needs hub_allow_list:read on the hub boundary; it does not admit the allow-list writes
 
 ### Entry Points
 
@@ -8431,7 +8438,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.allow_list.read`
 
@@ -8444,6 +8453,7 @@
 ### Tests
 
 - `pkg/hub:TestHubAdminReadUpdateRoutePermissions`
+- `pkg/hub:TestAllowListReadToken_DoesNotAdmitWrites`
 
 ---
 
@@ -8451,7 +8461,7 @@
 
 **Domain:** hub
 
-**Description:** Manage the platform email allow list
+**Description:** Manage the platform email allow list: add and import create invited records (status invited, placeholder role member, no role binding or group membership); delete removes an invited record under the last-project-owner guard and binding cascade of user.admin.delete. The route guard checks hub.allow_list.read, so a token needs hub_allow_list:read and hub_allow_list:update on the hub boundary
 
 ### Entry Points
 
@@ -8463,7 +8473,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `hub.allow_list.update`
 
@@ -8476,6 +8488,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAllowListReadToken_DoesNotAdmitWrites`
+- `pkg/hub:TestAllowListDeleteToken_LastProjectOwnerProtected`
+- `pkg/hub:TestInvitationToken_CreatesNoRoleBindingOrGroupMembership`
 
 ---
 
