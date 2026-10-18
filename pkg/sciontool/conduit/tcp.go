@@ -83,12 +83,21 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 // the keys fetched from the hub, and consumes its jti. A grant naming an
 // unknown kid gets one more try after fetchForUnknownKid. In enforce mode
 // a user stream's grant must carry an authorization deadline; that is
-// checked before the jti is consumed. It returns the grant's claims, or a
-// refusal reason (the caller rejects with 4403) and the error to log.
+// checked before the jti is consumed, and a key set whose last successful
+// refresh is older than KeyStaleAfter gets one fetch (fetchForUnknownKid)
+// and, if still stale, refuses the grant before any verification. It
+// returns the grant's claims, or a refusal reason (the caller rejects with
+// 4403) and the error to log.
 func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*grant.Claims, string, error) {
 	w := core.WelcomeFromContext(ctx)
 	if w == nil {
 		return nil, reasonGrantInvalid + ": no session binding", errors.New("no session binding")
+	}
+	if a.keysStale() {
+		a.fetchForUnknownKid(ctx)
+		if a.keysStale() {
+			return nil, reasonGrantInvalid, errKeysStale
+		}
 	}
 	v := &target.Verifier{
 		Identity: target.IdentityFromWelcome(grant.TargetKindAgent, a.opts.AgentID, a.opts.ProjectID, w),

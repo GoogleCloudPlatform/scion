@@ -29,6 +29,7 @@ message Frame {
     AuthRefresh auth_refresh = 4;
     Ping ping = 5;
     Pong pong = 6;
+    GrantKeysChanged grant_keys_changed = 7;
 
     RpcRequest rpc_request = 10;
     RpcResponse rpc_response = 11;
@@ -86,7 +87,7 @@ message Capabilities {
   string exec_scope = 4;
   TransportLimits transport_limits = 5;
   // Optional protocol features the endpoint supports, as canonical
-  // lowercase names (for example "stream_renewal": the target enforces
+  // lowercase names (for example "stream_renewal.v2": the target enforces
   // stream authorization deadlines and accepts renewal grants).
   repeated string features = 6;
 }
@@ -227,3 +228,8 @@ message StreamResize {
   uint32 cols = 2;
   uint32 rows = 3;
 }
+
+// GrantKeysChanged tells a target that the hub's published grant keys
+// changed. It carries no keys: the target answers with its own
+// authenticated key fetch.
+message GrantKeysChanged {}

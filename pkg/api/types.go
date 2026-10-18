@@ -689,9 +689,11 @@ type AgentInfo struct {
 	// from the project directory. The Docker, Podman, Apple and Kubernetes
 	// List fill it from the container's scion.project_id label, which
 	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
-	// state entry, which records the same value. Cloud Run List leaves it
-	// empty. The two sources can differ; callers that need the Hub project
-	// ID should read the scion.project_id label (ptone/scion#3020).
+	// state entry, which records the same value, and Cloud Run List from
+	// the instance's GCP-sanitized scion_project_id label (a Hub project ID
+	// is unchanged by the sanitizing). The two sources can differ; callers
+	// that need the Hub project ID should read the scion.project_id label
+	// (ptone/scion#3020).
 	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 

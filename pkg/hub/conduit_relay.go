@@ -69,6 +69,12 @@ type ConduitRelayOptions struct {
 	// testHookAdmission, when set, runs during admission (before the
 	// session is registered). Tests only.
 	testHookAdmission func()
+	// sessionWriteWait, when positive, is the per-write deadline of every
+	// relay session (conduit.Config.WriteWait; 0 = conduit.DefaultWriteWait).
+	// It runs on Clock, so tests that advance a fake Clock set it above
+	// their largest advance. It also stretches the backstop a session arms
+	// when the peer sends GoAway (drain deadline + WriteWait). Tests only.
+	sessionWriteWait time.Duration
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
 	InternalEndpoint string
@@ -220,6 +226,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
+		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
 		Logger:           slog.Default().With("subsystem", "hub.conduit"),
@@ -319,7 +326,7 @@ func (s *Server) conduitWelcomeGrantKeys(ctx context.Context) ([]*conduitv1.Gran
 // token-refresh response, or nil when the experiment is off or the keys are
 // unavailable (the refresh itself must not fail over them).
 func (s *Server) conduitRefreshGrantKeys(ctx context.Context) []grant.WireKey {
-	keys, err := s.ConduitGrantPublicKeys(ctx)
+	keys, err := s.conduitHubDirectGrantKeys(ctx)
 	if err != nil {
 		if !errors.Is(err, errConduitDisabled) {
 			slog.Warn("Conduit grant keys unavailable for the token-refresh response", "error", err)

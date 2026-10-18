@@ -86,6 +86,9 @@ type idFixtures struct {
 	uatRevokePost           string
 	uatRevokeDelete         string
 	runtimeBroker           string
+	runtimeBrokerDel        string
+	brokerEnvKey            string
+	brokerSecretKey         string
 	githubInstallationID    string
 	roleDefinition          string
 	roleDefinitionDel       string
@@ -94,6 +97,8 @@ type idFixtures struct {
 	projectMembershipUpdate string
 	projectVisitor          string
 	projectVisitorUpdate    string
+	projectVisitorRule      string
+	projectVisitorRuleUpd   string
 	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
@@ -334,6 +339,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		uatRevokePost:        tid("li-uat-revoke-post"),
 		uatRevokeDelete:      tid("li-uat-revoke-delete"),
 		runtimeBroker:        tid("li-broker"),
+		runtimeBrokerDel:     tid("li-broker-del"),
+		brokerEnvKey:         "LI_BROKER_ENV_VAR",
+		brokerSecretKey:      "LI_BROKER_SECRET",
 		githubInstallationID: "900000001",
 		roleDefinition:       tid("li-role"),
 		roleDefinitionDel:    tid("li-role-del"),
@@ -472,6 +480,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{ID: f.uatRevokeDelete, UserID: DevUserID, Name: "li-uat-revoke-delete", Prefix: "li_d", KeyHash: "li-uat-revoke-delete-key-hash", ProjectID: f.project, Scopes: []string{"project:read"}, ExpiresAt: &expiry, Created: now}))
 
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBroker, Name: "li-broker", Slug: "li-broker", Status: "offline", ConnectionState: "disconnected"}))
+	// DELETE /runtime-brokers/{id} deregisters the broker, so it takes its
+	// own disposable broker.
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBrokerDel, Name: "li-broker-del", Slug: "li-broker-del", Status: "offline", ConnectionState: "disconnected"}))
+	// A sensitive broker-scoped variable: reads of it return a masked value.
+	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: tid("li-broker-envvar"), Key: f.brokerEnvKey, Value: "1", Sensitive: true, Scope: store.ScopeRuntimeBroker, ScopeID: f.runtimeBroker, Created: now, Updated: now}))
 
 	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{InstallationID: 900000001, AccountLogin: "li-account", AccountType: "Organization", AppID: 1, Status: store.GitHubInstallationStatusActive, CreatedAt: now, UpdatedAt: now}))
 
@@ -516,6 +529,19 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		_, err = s.CreateVisitorRoleBinding(ctx, &store.RoleBinding{PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: acct.ID, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user})
 		require.NoError(t, err)
 		*v.dst = acct.ID
+	}
+	// project.visitors.rules.update / .remove address a visitor rule of
+	// f.project by ID; update gets its own rule so remove's is still there.
+	for _, v := range []struct {
+		domain string
+		dst    *string
+	}{
+		{"li-rule.example", &f.projectVisitorRule},
+		{"li-rule-update.example", &f.projectVisitorRuleUpd},
+	} {
+		rule := &store.ProjectVisitorRule{ProjectID: f.project, Issuer: "https://li-issuer.example.com", Domain: v.domain, CreatedBy: f.user}
+		require.NoError(t, s.CreateProjectVisitorRule(ctx, rule))
+		*v.dst = rule.ID
 	}
 
 	// Maintenance operations and migrations are seeded once, by key, during
@@ -753,6 +779,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
 		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
 		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
+		{"broker.delete", "/api/v1/runtime-brokers/{id}"}:                         {"id": f.runtimeBrokerDel},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
@@ -763,6 +790,8 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
 		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
+		// Visitor rule update takes its own rule; remove takes the other.
+		{"project.visitors.rules.update", "/api/v1/projects/{id}/visitors/rules/{ruleId}"}: {"id": f.project, "ruleId": f.projectVisitorRuleUpd},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -870,11 +899,15 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- project family ---
 		"/api/v1/projects/{id}":                      {"id": f.project},
+		"/api/v1/projects/{id}/agents":               {"id": f.project},
 		"/api/v1/projects/{id}/members":              {"id": f.project},
 		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
 		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
 		"/api/v1/projects/{id}/visitors":             {"id": f.project},
 		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
+		// Visitor rules (the item pattern addresses the rule remove takes).
+		"/api/v1/projects/{id}/visitors/rules":          {"id": f.project},
+		"/api/v1/projects/{id}/visitors/rules/{ruleId}": {"id": f.project, "ruleId": f.projectVisitorRule},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},
@@ -979,8 +1012,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/auth/tokens/{id}":        {"id": f.uatRevokeDelete},
 
 		// --- invite family ---
-		"/api/v1/admin/invites/{id}":       {"id": f.invite},
-		"/api/v1/admin/allow-list/{email}": {"email": f.allowListEmail},
+		"/api/v1/admin/invites/{id}":        {"id": f.invite},
+		"/api/v1/admin/invites/{id}/revoke": {"id": f.invite},
+		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
 		"/api/v1/env/{key}": {"key": f.envVarKey},
@@ -988,6 +1022,12 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- runtime broker family ---
 		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
 		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
 

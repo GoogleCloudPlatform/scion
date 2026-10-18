@@ -57,6 +57,7 @@ const (
 func tiaGateServerConfig() ServerConfig {
 	cfg := testServerConfig()
 	cfg.HubID = tiaHubID
+	cfg.HubIDPinned = true
 	cfg.EnableTestIdentities = true
 	cfg.Workstation = false
 	cfg.WebSessionKeySource = signingKeySourceGenerated

@@ -162,7 +162,7 @@ func TestProjectVisitors_RemoveVisitorRefusesOtherBindings(t *testing.T) {
 	require.NotEmpty(t, memberBindings)
 
 	t.Run("project member", func(t *testing.T) {
-		_, err := svc.RemoveVisitor(ctx, f.projectID, f.member.ID)
+		_, err := svc.RemoveVisitor(ctx, f.projectID, f.member.ID, f.admin.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		after, err := f.st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.member.ID)
 		require.NoError(t, err)
@@ -170,7 +170,7 @@ func TestProjectVisitors_RemoveVisitorRefusesOtherBindings(t *testing.T) {
 	})
 
 	t.Run("visitor of another project", func(t *testing.T) {
-		_, err := svc.RemoveVisitor(ctx, otherProject, v.ID)
+		_, err := svc.RemoveVisitor(ctx, otherProject, v.ID, f.admin.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		assert.Contains(t, f.visitorBindingIDs(t), v.BindingID)
 	})
@@ -201,7 +201,7 @@ func TestProjectVisitors_RemoveVisitorRefusesOtherBindings(t *testing.T) {
 			rec.rewrite = tc.rewrite
 			t.Cleanup(func() { rec.rewrite = nil })
 
-			_, err := svc.RemoveVisitor(ctx, f.projectID, v.ID)
+			_, err := svc.RemoveVisitor(ctx, f.projectID, v.ID, f.admin.ID)
 			assert.ErrorIs(t, err, store.ErrVisitorBindingRefused)
 			assert.Contains(t, f.visitorBindingIDs(t), v.BindingID, "the binding remains")
 			assert.Empty(t, f.audits(t, mutationTypeProjectVisitorRevoke))
