@@ -515,6 +515,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'hub_allow_list:read',
+    label: 'hub_allow_list:read',
+    description: 'Read allow list',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_allow_list:update',
+    label: 'hub_allow_list:update',
+    description: 'Update allow list',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:
@@ -667,6 +681,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'scheduled_event:create',
+    label: 'scheduled_event:create',
+    description: 'Create scheduled events and schedules',
+    resource: 'scheduled_event',
+    isAlias: false,
+  },
+  {
     value: 'scheduled_event:delete',
     label: 'scheduled_event:delete',
     description: 'Cancel scheduled events and delete schedules',
@@ -690,7 +711,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
   {
     value: 'scheduled_event:update',
     label: 'scheduled_event:update',
-    description: 'Pause schedules',
+    description: 'Update, pause and resume schedules',
     resource: 'scheduled_event',
     isAlias: false,
   },
