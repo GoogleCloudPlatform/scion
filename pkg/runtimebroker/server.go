@@ -2614,13 +2614,18 @@ func dedupeAgentEntries(agents []api.AgentInfo) []api.AgentInfo {
 	return out
 }
 
+// agentsForProject keeps the entries positively identified as belonging to
+// projectID: by the scion.project_id label, else by the ProjectID field
+// (agentInProjectStrict). The field covers a runtime whose labels are
+// stored under other keys, such as Cloud Run's GCP-sanitized
+// scion_project_id (ptone/scion#5268); every other runtime sets both.
 func agentsForProject(agents []api.AgentInfo, projectID string) []api.AgentInfo {
 	if projectID == "" {
 		return agents
 	}
 	filtered := make([]api.AgentInfo, 0, len(agents))
 	for _, agent := range agents {
-		if projectkeys.ProjectIDFromLabels(agent.Labels) == projectID {
+		if agentInProjectStrict(agent, projectID) {
 			filtered = append(filtered, agent)
 		}
 	}
