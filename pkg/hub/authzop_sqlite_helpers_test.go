@@ -899,6 +899,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 
 		// --- project family ---
 		"/api/v1/projects/{id}":                      {"id": f.project},
+		"/api/v1/projects/{id}/agents":               {"id": f.project},
 		"/api/v1/projects/{id}/members":              {"id": f.project},
 		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
 		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
@@ -1011,8 +1012,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/auth/tokens/{id}":        {"id": f.uatRevokeDelete},
 
 		// --- invite family ---
-		"/api/v1/admin/invites/{id}":       {"id": f.invite},
-		"/api/v1/admin/allow-list/{email}": {"email": f.allowListEmail},
+		"/api/v1/admin/invites/{id}":        {"id": f.invite},
+		"/api/v1/admin/invites/{id}/revoke": {"id": f.invite},
+		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
 		"/api/v1/env/{key}": {"key": f.envVarKey},
