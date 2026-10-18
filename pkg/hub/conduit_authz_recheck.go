@@ -347,7 +347,7 @@ func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStre
 		return verdict, reason
 	}
 	// The flat placement guard, as at open (mintConduitGrant) and renewal
-	// (conduitRenewalPlacement), after the authorization verdict: a pinned
+	// (conduitStreamPlacement), after the authorization verdict: a pinned
 	// agent whose saved placement is inconsistent, or whose placement
 	// cannot be read, is not a deny (design v2.21.36 §3.5, Refusal
 	// meaning). It is unavailable: the stream is not closed early and ends
