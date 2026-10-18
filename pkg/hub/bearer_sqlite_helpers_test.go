@@ -67,6 +67,17 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	ensureHubMembership(ctx, s, adminID)
+	// Broker material reads need the owner relationship or broker.update,
+	// and a token carries no broker.update, so the super-admin owns the
+	// fixture broker; its secret sits in the same backend.
+	owned, err := s.SetRuntimeBrokerCreatedByIfEmpty(ctx, ids.runtimeBroker, adminID)
+	require.NoError(t, err)
+	require.True(t, owned, "the fixture broker has no owner before the matrix assigns one")
+	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.brokerSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeRuntimeBroker, ScopeID: ids.runtimeBroker,
+	})
+	require.NoError(t, err)
 
 	other := tid("bdm-other-project")
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: other, Name: "BDM Other", Slug: "bdm-other"}))

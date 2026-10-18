@@ -63,15 +63,16 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 			rec.ObserveMessageStuck(ctx, int64(count))
 		}
 
-		expireCutoff := time.Now().UTC().Add(-stuckMessageExpireTTL)
-		expired, err := s.store.ExpireStuckPendingMessages(ctx, expireCutoff, store.MessageExpiredStuckPendingReason)
+		expireNow := time.Now().UTC()
+		expireCutoff := expireNow.Add(-stuckMessageExpireTTL)
+		// A failed expiry is logged and does not stop the sweep: the
+		// missing-recipient step below must still run (ptone/scion#5211).
+		expired, err := s.store.ExpireAndListStuckPendingMessages(ctx, expireCutoff, store.MessageExpiredStuckPendingReason)
 		if err != nil {
 			s.agentLifecycleLog.Error("sweep: expire stuck pending messages failed", "error", err)
-			return
-		}
-		if expired > 0 {
+		} else if len(expired) > 0 {
 			s.agentLifecycleLog.Info("sweep: expired stuck pending messages",
-				"expired", expired, "ttl", stuckMessageExpireTTL.String())
+				expiredPendingLogAttrs(expired, expireNow, expiredMessageLogIDCap)...)
 		}
 
 		// Fail pending messages early when their recipient agent has already
@@ -137,5 +138,39 @@ func (s *Server) failedMessageRetentionHandler() func(ctx context.Context) {
 					"count", orphans)
 			}
 		}
+	}
+}
+
+// expiredMessageLogIDCap bounds how many expired messages the TTL-expiry
+// sweep line names (ptone/scion#5211). The count on the line is always the
+// full number expired; message_ids_truncated says when more were expired
+// than named.
+const expiredMessageLogIDCap = 20
+
+// expiredPendingLogAttrs builds the attributes of the "sweep: expired stuck
+// pending messages" line: the number expired, the TTL, and for up to limit
+// of the expired rows (oldest first) the message ID, the recipient and how
+// long the row was pending at now. The three lists are index-aligned. Only
+// identifiers and the routing target are logged, never a body.
+func expiredPendingLogAttrs(expired []store.ExpiredPendingMessage, now time.Time, limit int) []any {
+	named := expired
+	if len(named) > limit {
+		named = named[:limit]
+	}
+	ids := make([]string, 0, len(named))
+	recipients := make([]string, 0, len(named))
+	durations := make([]string, 0, len(named))
+	for _, m := range named {
+		ids = append(ids, m.ID)
+		recipients = append(recipients, m.Recipient)
+		durations = append(durations, now.Sub(m.CreatedAt).Round(time.Second).String())
+	}
+	return []any{
+		"expired", len(expired),
+		"ttl", stuckMessageExpireTTL.String(),
+		"message_ids", ids,
+		"recipients", recipients,
+		"pending_durations", durations,
+		"message_ids_truncated", len(expired) > len(named),
 	}
 }

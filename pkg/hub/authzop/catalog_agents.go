@@ -260,9 +260,10 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.list",
 		Domain:      "agent",
-		Description: "List agents within the caller's authorized project scope",
+		Description: "List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/agents", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -294,7 +295,11 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestRS2_ConstraintChangeCursorReplay"},
 			{Package: "pkg/hub", Function: "TestRS2_TransitiveGroupAccess"},
 			{Package: "pkg/hub", Function: "TestRS2_FilterCompositionMatrix"},
+			{Package: "pkg/hub", Function: "TestListCaveats_ProjectBoundaryRequiresListPermissionInCeiling"},
+			{Package: "pkg/hub", Function: "TestProjectAgentListToken_RequiresAgentListOnTheProject"},
+			{Package: "pkg/hub", Function: "TestListFilters_CannotEnlargeTokenResults"},
 		},
+		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.update",

@@ -526,7 +526,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.list",
 		Domain:      "project",
-		Description: "List projects within the caller's authorized scope",
+		Description: "List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "GET"},
 		},
@@ -563,7 +563,9 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestRS2_TransferredOwnership"},
 			{Package: "pkg/hub", Function: "TestRS2_TransitiveGroupAccess"},
 			{Package: "pkg/hub", Function: "TestRS2_FilterCompositionMatrix"},
+			{Package: "pkg/hub", Function: "TestProjectListToken_RequiresProjectListSelector"},
 		},
+		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "project.update",
@@ -620,10 +622,11 @@ var projectOperations = []OperationSpec{
 	},
 
 	// =====================================================================
-	// Domain: schedule — scheduled events and recurring schedules. Reads,
-	// cancellation, deletion and pause admit tokens. Authoring (create,
-	// update, resume) refuses every user access token before any target
-	// lookup (authorizeScheduleAuthoringCredential).
+	// Domain: schedule — scheduled events and recurring schedules. Every
+	// operation admits a token with its exact scheduled_event selector on
+	// the project. Authoring (create, update, resume) also runs the event
+	// type's target checks, and the revision records the token's ceiling
+	// and boundary (revisionAuthorityCeiling), which bound each fire.
 	// =====================================================================
 	{
 		ID:          "schedule.event.list",
@@ -667,21 +670,21 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "schedule.event.create",
 		Domain:      "schedule",
-		Description: "Create a scheduled event or recurring schedule of any event type. Every user access token is refused before any target lookup",
+		Description: "Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/scheduled-events", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.create",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
 		DelegationKind:   DelegationNonAmplification,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduledMessageAuthoring_RefusesTokensBeforeTargetLookup"}},
-		Bearer:           SessionOnly(ReasonGovernancePending),
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleAuthoringToken_RequiresCreateSelector"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "Only the dispatch_agent event type grants authority. Authoring any event type records the author's frozen effect ceiling " +
 			"(revisionAuthorityCeiling); a dispatch_agent event or schedule then creates an agent at fire time, with a delegation edge from the recorded principal, " +
 			"after CanDelegate for that principal. A message event or schedule grants no authority. " +
@@ -699,7 +702,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "schedule.event.update",
 		Domain:      "schedule",
-		Description: "Update or resume a recurring schedule of any event type. Every user access token is refused, including one holding scheduled_event:update",
+		Description: "Update or resume a recurring schedule of any event type. A user access token needs scheduled_event:update and passes the event type's target checks",
 		EntryPoints: []EntryPoint{
 			// handleSchedules (handlers_schedules.go) dispatches on
 			// r.Method: PATCH, not PUT.
@@ -707,15 +710,15 @@ var projectOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/schedules/{id}/resume", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialAgentJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "scheduled_event.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleUpdateSelector_DoesNotAdmitAuthoring"}},
-		Bearer:           SessionOnly(ReasonGovernancePending),
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestScheduleResumeToken_RechecksTarget"}},
+		Bearer:           AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "schedule.event.pause",
@@ -759,6 +762,36 @@ var projectOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
 		Bearer:      AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "schedule.event.fire",
+		Domain:      "schedule",
+		Description: "Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:dispatch_agent"},
+			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:dispatch_agent"},
+			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:message"},
+		},
+		Principals:       []PrincipalKind{PrincipalSystem},
+		Credentials:      []CredentialKind{CredentialSystemInternal},
+		ResourceResolver: "event-project",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
+			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenBoundary"},
+		},
+		Exemptions: []Exemption{{
+			Kind: ExemptionInternalOnly,
+			Reason: "The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, " +
+				"and the fire is bounded by the revision's recorded ceiling and boundary",
+			Scope:  "scheduler fire",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerNonUser, Pin: "TestScheduledFire_UsesRecordedTokenCeiling"},
 	},
 
 	// =====================================================================

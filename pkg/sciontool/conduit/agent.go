@@ -181,6 +181,9 @@ type Options struct {
 	// onRenewal, when set, receives the outcome of every renewal grant
 	// once it has been applied or refused (test hook).
 	onRenewal func(streamID uint32, err error)
+	// keyJitter, when set, replaces the ±10% key refresh jitter (test
+	// hook).
+	keyJitter func(time.Duration) time.Duration
 }
 
 // Agent is the agent's conduit dialer and stream target (TCP, PTY).
@@ -199,6 +202,10 @@ type Agent struct {
 	enforceDeadlines atomic.Bool
 	// keyKick asks the key refresh loop for an immediate fetch.
 	keyKick chan struct{}
+	// fetchMu serializes key fetches; lastKeyRefresh is when the last
+	// successful one completed (Unix nanoseconds, 0 before the first).
+	fetchMu        sync.Mutex
+	lastKeyRefresh atomic.Int64
 	// renewals holds renewals waiting for a key fetch (renewalWorker).
 	renewals chan pendingRenewal
 	// unknownKidMu serializes fetches made for unknown kids;
@@ -272,7 +279,7 @@ func New(opts Options) (*Agent, error) {
 		keyKick:  make(chan struct{}, 1),
 		renewals: make(chan pendingRenewal, renewalQueueSize),
 	}
-	a.deadlines = &target.Deadlines{Keys: &a.keys, Replay: a.replay, Clock: clk, Grace: opts.deadlineGrace}
+	a.deadlines = &target.Deadlines{Keys: freshKeys{a}, Replay: a.replay, Clock: clk, Grace: opts.deadlineGrace}
 	return a, nil
 }
 
@@ -310,6 +317,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	cfg.Clock = a.clk
 	cfg.StreamHandler = core.StreamHandlerFunc(a.handleStream)
 	cfg.OnStreamRenewal = a.handleRenewal
+	cfg.OnGrantKeysChanged = a.handleGrantKeysChanged
 	r := &core.Reconnector{
 		Dialer: &ws.Dialer{URL: a.url, Header: a.header, WS: a.opts.WS},
 		Config: cfg,
