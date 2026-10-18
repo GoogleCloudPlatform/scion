@@ -266,7 +266,7 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Conduit (hub.conduit experiment) ───────────────────────────────
 	"/api/v1/conduit/grant-keys": "authenticated", // GET: public grant verification keys only; any signed-in identity; 404 when the experiment is off
-	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
+	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): conduit sessions; agent JWT (own agent row, agent:port:forward) or runtime broker HMAC (the shared /runtime-brokers/connect verifier; carries broker RPCs); 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
 	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off

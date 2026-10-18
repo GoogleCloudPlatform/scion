@@ -299,6 +299,10 @@ type Server struct {
 	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
 	projectWorkspaceStat func(path string) (os.FileInfo, error)
 	projectPathAbs       func(path string) (string, error)
+	// projectConfigsRemove, when set (tests), replaces
+	// removeProjectConfigsSubtree for a project delete's project-configs
+	// entry (removeProjectConfigs).
+	projectConfigsRemove func(globalDir, path string) error
 
 	// Hub connections (replaces single hubClient, heartbeat, controlChannel, etc.)
 	hubConnections map[string]*HubConnection // keyed by connection name

@@ -115,6 +115,9 @@ func (s *Server) handleAgentLogs(w http.ResponseWriter, r *http.Request, agentID
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
 			return
 		}
+		if writeBrokerRoutedUnavailable(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadGateway, ErrCodeInternalError,
 			"Failed to retrieve logs from broker: "+err.Error(), nil)
 		return

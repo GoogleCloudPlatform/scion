@@ -2677,6 +2677,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
 	}
 
+	if brokerRPCRec, err := hub.NewOTelConduitBrokerRPCMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit broker rpc metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitBrokerRPCMetrics(brokerRPCRec)
+	}
+
 	if conflictRec, err := hub.NewOTelQuotaScopeConflictMetrics(mp); err != nil {
 		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
 	} else {
