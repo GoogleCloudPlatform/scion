@@ -170,7 +170,7 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	return agent, nil
 }
 
-func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, runID string) error {
+func (m *mockManager) Stop(ctx context.Context, agentID, projectPath, projectID, runID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopCalls++
@@ -190,7 +190,7 @@ func (m *mockManager) StopTarget(ctx context.Context, ref runtime.RunRef) error 
 	return m.stopErr
 }
 
-func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *mockManager) Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath, projectID string, removeBranch bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastDeleteProjectPath = projectPath

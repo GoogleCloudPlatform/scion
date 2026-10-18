@@ -222,7 +222,7 @@ func TestStop_UnlabelledSameNameInTwoProjects_StopsRequestedProject(t *testing.T
 		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}}
 
-	if err := mgr.Stop(context.Background(), "dev", pathB, ""); err != nil {
+	if err := mgr.Stop(context.Background(), "dev", pathB, "", ""); err != nil {
 		t.Fatalf("Stop: %v, want cid-b stopped", err)
 	}
 	if len(stopped) != 1 || stopped[0] != "cid-b" {
@@ -238,7 +238,7 @@ func TestStop_ProjectScopedNoEntry_StopsNothing(t *testing.T) {
 		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}}
 
-	err := mgr.Stop(context.Background(), "dev", pathB, "")
+	err := mgr.Stop(context.Background(), "dev", pathB, "", "")
 
 	if !errors.Is(err, ErrStopTargetNotFound) {
 		t.Fatalf("Stop err=%v, want ErrStopTargetNotFound", err)
@@ -257,7 +257,7 @@ func TestDelete_UnlabelledOnlyInOtherProject_NothingDeleted(t *testing.T) {
 		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}}
 
-	if _, err := mgr.Delete(context.Background(), "dev", false, pathB, false); err != nil {
+	if _, err := mgr.Delete(context.Background(), "dev", false, pathB, "", false); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if len(deleted) != 0 {
@@ -276,7 +276,7 @@ func TestStop_IDOnlyEntryOfOtherProject_StopsNothing(t *testing.T) {
 		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}}
 
-	err := mgr.Stop(context.Background(), "dev", pathB, "")
+	err := mgr.Stop(context.Background(), "dev", pathB, "", "")
 
 	if !errors.Is(err, ErrStopTargetNotFound) || len(stopped) != 0 {
 		t.Fatalf("Stop err=%v stopped=%v, want ErrStopTargetNotFound and none", err, stopped)
@@ -293,7 +293,7 @@ func TestStop_NameLabelAlone_StopsNothing(t *testing.T) {
 		StopFunc: func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}}
 
-	err := mgr.Stop(context.Background(), "dev", pathB, "")
+	err := mgr.Stop(context.Background(), "dev", pathB, "", "")
 
 	if !errors.Is(err, ErrStopTargetNotFound) || len(stopped) != 0 {
 		t.Fatalf("Stop err=%v stopped=%v, want ErrStopTargetNotFound and none", err, stopped)
@@ -379,5 +379,111 @@ func TestHasRuntimeEntry_UnlabelledEntries_OnlyOwnProject(t *testing.T) {
 	}
 	if !own.hasRuntimeEntry(context.Background(), opts) {
 		t.Fatal("hasRuntimeEntry = false for this project's unlabelled entry, want true")
+	}
+}
+
+// Launch recovery's run-scoped selection scopes by the run's dispatched
+// project ID first, so it finds the run's entry when the recorded path holds
+// no project ID (an external project config dir) or a different, local one.
+func TestSelectExactRunTarget_ScopesByDispatchedProjectID(t *testing.T) {
+	noIDPath := filepath.Join(t.TempDir(), "project-configs", "proj__abcd1234", config.DotScion)
+	if err := os.MkdirAll(noIDPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	localIDPath := identityTestProjectPath(t, identityProjA)
+	entry := func(projectID string) api.AgentInfo {
+		return api.AgentInfo{Name: "dev", ContainerID: "cid-run", RunID: "run-1", ProjectID: projectID,
+			Labels: map[string]string{"scion.name": "dev", "scion.project_id": projectID}}
+	}
+	cases := []struct {
+		name  string
+		path  string
+		entry api.AgentInfo
+		found bool
+	}{
+		{"path records no project ID", noIDPath, entry(identityProjB), true},
+		{"path records a different local ID", localIDPath, entry(identityProjB), true},
+		{"entry of another project", noIDPath, entry(identityProjA), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found, err := SelectExactRunTarget([]api.AgentInfo{tc.entry}, "dev", tc.path, identityProjB, "run-1")
+			if err != nil || found != tc.found || (found && got.ContainerID != "cid-run") {
+				t.Fatalf("SelectExactRunTarget = (%q, %v, %v), want found=%v", got.ContainerID, found, err, tc.found)
+			}
+		})
+	}
+}
+
+// An owned manager's post-start match by name accepts only an entry of the
+// start's project: a stopped unlabelled entry recorded under another
+// project's path is not taken for the new container.
+func TestStart_OwnedPostStartMatch_IgnoresUnlabelledEntryOfOtherProject(t *testing.T) {
+	scionDir, projectID := startPreCleanFixture(t)
+	otherPath := identityTestProjectPath(t, identityProjA)
+	var deleted []string
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{ContainerID: "other-id", Name: "worker", Phase: "stopped", ContainerStatus: "Exited (0)",
+				ProjectPath: otherPath, Labels: map[string]string{"scion.name": "worker", api.LabelRuntimeBrokerID: "broker-a"}}}, nil
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) { return "new-id", nil },
+		DeleteFunc: func(_ context.Context, ref runtime.RunRef) error {
+			deleted = append(deleted, ref.ID)
+			return nil
+		},
+	}
+	m := NewManager(rt).(*AgentManager)
+	m.SetOwner(OwnerScope{RuntimeBrokerID: "broker-a"})
+
+	_, err := m.Start(context.Background(), api.StartOptions{Name: "worker", ProjectPath: scionDir, HarnessConfig: "claude", NoAuth: true,
+		Env: map[string]string{"SCION_PROJECT_ID": projectID, "SCION_AGENT_ID": "agent-1"}})
+
+	if err != nil {
+		t.Fatalf("Start: %v, want the new container kept", err)
+	}
+	for _, id := range deleted {
+		if id == "new-id" {
+			t.Fatalf("deleted=%v: the new container was taken for the other project's stopped entry", deleted)
+		}
+	}
+}
+
+// The manager's name-based stop and delete scope by a given project ID
+// first, as launch recovery does, so a path that records no project ID
+// still finds the project's entry.
+func TestStopDelete_ScopeByGivenProjectID(t *testing.T) {
+	noIDPath := filepath.Join(t.TempDir(), "project-configs", "proj__abcd1234", config.DotScion)
+	if err := os.MkdirAll(noIDPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		entryID   string
+		wantFound bool
+	}{
+		{"entry of the given project", identityProjB, true},
+		{"entry of another project", identityProjA, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stopped, deleted []string
+			mgr := &AgentManager{Runtime: &runtime.MockRuntime{
+				ListFunc: listAll(api.AgentInfo{Name: "dev", ContainerID: "cid-dev", ProjectID: tc.entryID,
+					Labels: map[string]string{"scion.name": "dev", "scion.project_id": tc.entryID}}),
+				StopFunc:   func(_ context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
+				DeleteFunc: func(_ context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
+			}}
+
+			err := mgr.Stop(context.Background(), "dev", noIDPath, identityProjB, "")
+			if tc.wantFound != (err == nil && len(stopped) == 1) || (!tc.wantFound && !errors.Is(err, ErrStopTargetNotFound)) {
+				t.Fatalf("Stop err=%v stopped=%v, want found=%v", err, stopped, tc.wantFound)
+			}
+			if _, err := mgr.Delete(context.Background(), "dev", false, noIDPath, identityProjB, false); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if tc.wantFound != (len(deleted) == 1) {
+				t.Fatalf("deleted=%v, want found=%v", deleted, tc.wantFound)
+			}
+		})
 	}
 }

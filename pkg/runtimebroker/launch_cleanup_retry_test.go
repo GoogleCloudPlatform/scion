@@ -147,7 +147,7 @@ func TestRecoverLaunches_FailedCleanupKeptForRetry(t *testing.T) {
 // recovery sends no report (the hub already answered), retries the
 // clean-up, and removes the record once it succeeds.
 func TestRecoverLaunches_CleanupPendingRetried(t *testing.T) {
-	mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR2", ContainerID: "c-run", RunID: "run-LR2"})}
+	mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR2", ContainerID: "c-run", RunID: "run-LR2", ProjectID: "proj"})}
 	srv, rtb := newAsyncTestServer(t, mgr)
 	rtb.launchReportFunc = appliedReports
 	jr := launchingRecord("LR2")
@@ -234,7 +234,7 @@ func TestRecoverLaunches_CleanupRetryBound(t *testing.T) {
 // for a retry, with failure class run_delete.
 func TestRecoverLaunches_RunDeleteFailureKeptForRetry(t *testing.T) {
 	mgr := &failingCleanupManager{
-		recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR4", ContainerID: "c-run", RunID: "run-LR4"}),
+		recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR4", ContainerID: "c-run", RunID: "run-LR4", ProjectID: "proj"}),
 		deleteErr:      errors.New("container rm: " + cleanupCanary),
 	}
 	srv, rtb := newAsyncTestServer(t, mgr)
@@ -392,7 +392,7 @@ func TestLaunchCleanup_ResourcesOnlyScope(t *testing.T) {
 		}
 	})
 	t.Run("recovery retries only the resources", func(t *testing.T) {
-		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR5", ContainerID: "c-run", RunID: "run-LR5"})}
+		mgr := &failingCleanupManager{recFakeManager: newRecFakeManager(api.AgentInfo{Name: "agent-LR5", ContainerID: "c-run", RunID: "run-LR5", ProjectID: "proj"})}
 		srv, rtb := newAsyncTestServer(t, mgr)
 		rtb.launchReportFunc = appliedReports
 		jr := launchingRecord("LR5")

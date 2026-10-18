@@ -98,7 +98,7 @@ func TestDelete_AmbiguousSlugFailsClosed(t *testing.T) {
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err == nil {
+	if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err == nil {
 		t.Fatal("expected ambiguity error, got nil")
 	}
 	if len(deleted) != 0 || len(stopped) != 0 {
@@ -118,7 +118,7 @@ func TestStop_AmbiguousSlugFailsClosed(t *testing.T) {
 		StopFunc: func(ctx context.Context, ref runtime.RunRef) error { stopped = append(stopped, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if err := mgr.Stop(context.Background(), "dev", "", ""); err == nil {
+	if err := mgr.Stop(context.Background(), "dev", "", "", ""); err == nil {
 		t.Fatal("expected ambiguity error, got nil")
 	}
 	if len(stopped) != 0 {

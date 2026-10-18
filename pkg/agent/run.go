@@ -176,6 +176,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
 	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if listErr == nil {
+		// projectName is never empty here, so the match is always scoped:
+		// without a project ID it accepts no entry.
 		matchID := scopeProjectID(projectID, projectDir)
 		for _, a := range agents {
 			// Skip entries that are not this project's (matchAgentProject):

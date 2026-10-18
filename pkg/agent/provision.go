@@ -2935,6 +2935,8 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 	if err != nil {
 		return true
 	}
+	// projectName is a slug, "global" or "unknown", never empty, so the
+	// match is scoped: without a project ID it accepts no entry.
 	for _, e := range entries {
 		if matchAgentProject(e, projectName, scopeProjectID(projectID, opts.ProjectPath)) {
 			return true
