@@ -29,6 +29,7 @@ import type {
   PageData,
   Agent,
   AgentAppliedConfig,
+  AgentLaunch,
   AgentInlineConfig,
   TelemetryConfig,
   GCPIdentityConfig,
@@ -48,6 +49,7 @@ import {
   isAgentRunning,
   isAgentLaunching,
   isIncompleteCreate,
+  isFailedStartLaunch,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
@@ -103,15 +105,16 @@ import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
+import {
+  launchCodeLabel,
+  launchFailedTitle,
+  launchKindTitle,
+  launchStepLabel,
+} from '../../shared/agent-launch-labels.js';
 
 /** Display text for a launch failure cause (api.BrokerRuntimeCause*). */
 function launchCauseLabel(cause: string): string {
   return cause.replace(/_/g, ' ');
-}
-
-/** Display text for a launch step the broker reported. */
-function launchStepLabel(step: string): string {
-  return step.replace(/_/g, ' ');
 }
 
 /**
@@ -395,7 +398,8 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
     }
-    .agent-error-banner .error-cause {
+    .agent-error-banner .error-cause,
+    .agent-error-banner .error-step {
       font-size: 0.8125rem;
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
@@ -1404,7 +1408,8 @@ export class ScionPageAgentDetail extends LitElement {
 
   /**
    * The banner under the header: a create that did not complete, an async
-   * launch in progress, or the generic error banner.
+   * launch in progress, a start or restart that did not complete, or the
+   * generic error banner.
    */
   private renderStateBanner(): TemplateResult | typeof nothing {
     const agent = this.agent!;
@@ -1416,7 +1421,9 @@ export class ScionPageAgentDetail extends LitElement {
       const step = agent.launch?.step;
       const stepText = step ? `Step: ${launchStepLabel(step)}` : '';
       const stepEl = step
-        ? html`<div class="launch-step" data-testid="launch-step">${stepText}</div>`
+        ? html`<div class="launch-step" data-testid="launch-step" data-step=${step}>
+            ${stepText}
+          </div>`
         : nothing;
       const messageEl = message
         ? html`<div class="launch-message" data-testid="launch-message">${message}</div>`
@@ -1425,11 +1432,14 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="agent-launch-banner" data-testid="agent-launch-banner">
           <sl-spinner></sl-spinner>
           <div class="launch-content">
-            <div class="launch-title">Launching</div>
+            <div class="launch-title">${launchKindTitle(agent.launch?.kind)}</div>
             ${stepEl} ${messageEl}
           </div>
         </div>
       `;
+    }
+    if (isFailedStartLaunch(agent)) {
+      return this.renderFailedStartBanner(agent, message);
     }
     if (agent.phase === 'error' && message) {
       return html`
@@ -1452,33 +1462,15 @@ export class ScionPageAgentDetail extends LitElement {
    */
   private renderIncompleteCreateBanner(agent: Agent, message?: string): TemplateResult {
     const launch = agent.launch!;
-    const code = launch.error;
     const reason = launch.state === 'active' ? 'stopping' : launchEndReasonLabel(launch.endReason);
     const task = agent.appliedConfig?.task;
     const canDelete = can(agent._capabilities, 'delete') && !this.deletionLease.isDeleting(agent);
-    const codeEl = code ? html`<span data-testid="launch-code">${code}</span>` : nothing;
-    const messageEl = message
-      ? html`<div class="error-message" data-testid="launch-error-message">${message}</div>`
-      : nothing;
-    const reasonEl = reason
-      ? html`<span data-testid="launch-end-reason">${reason}</span>`
-      : nothing;
     return html`
       <div class="agent-error-banner" data-testid="incomplete-create-banner">
         <sl-icon name="exclamation-octagon"></sl-icon>
         <div class="error-content">
-          <div class="error-title">Agent create did not complete</div>
-          ${code || reason
-            ? html`<div class="error-code" data-testid="launch-error-code">
-                ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
-              </div>`
-            : nothing}
-          ${launch.cause
-            ? html`<div class="error-cause" data-testid="launch-error-cause">
-                Cause: ${launchCauseLabel(launch.cause)}
-              </div>`
-            : nothing}
-          ${messageEl}
+          <div class="error-title">${launchFailedTitle(launch.kind)}</div>
+          ${this.renderLaunchFailureDetails(launch, reason, message)}
           <div class="error-hint">
             This agent cannot be started or resumed. Delete it and create it again.
           </div>
@@ -1523,6 +1515,69 @@ export class ScionPageAgentDetail extends LitElement {
               </sl-button>
             </a>
           </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /**
+   * The failure lines a failed-launch banner shows: the code with its label
+   * and how the launch ended, the runtime cause, the step the launch failed
+   * in, and the message. launch-code keeps the raw code for automation.
+   */
+  private renderLaunchFailureDetails(
+    launch: AgentLaunch,
+    reason: string | undefined,
+    message?: string
+  ): TemplateResult {
+    const code = launch.error;
+    const codeEl = code
+      ? html`<span data-testid="launch-code">${code}</span>:
+          <span data-testid="launch-code-label">${launchCodeLabel(code)}</span>`
+      : nothing;
+    const reasonEl = reason
+      ? html`<span data-testid="launch-end-reason">${reason}</span>`
+      : nothing;
+    return html`
+      ${code || reason
+        ? html`<div class="error-code" data-testid="launch-error-code">
+            ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
+          </div>`
+        : nothing}
+      ${launch.cause
+        ? html`<div class="error-cause" data-testid="launch-error-cause">
+            Cause: ${launchCauseLabel(launch.cause)}
+          </div>`
+        : nothing}
+      ${code && launch.step
+        ? html`<div class="error-step" data-testid="launch-failed-step" data-step=${launch.step}>
+            Failed at: ${launchStepLabel(launch.step)}
+          </div>`
+        : nothing}
+      ${message
+        ? html`<div class="error-message" data-testid="launch-error-message">${message}</div>`
+        : nothing}
+    `;
+  }
+
+  /**
+   * A start or restart launch that failed (ptone/scion#4669). Unlike a
+   * create that did not complete, the hub still accepts a start or resume,
+   * so the header keeps those actions and the banner offers no delete.
+   */
+  private renderFailedStartBanner(agent: Agent, message?: string): TemplateResult {
+    const launch = agent.launch!;
+    return html`
+      <div class="agent-error-banner" data-testid="failed-start-banner">
+        <sl-icon name="exclamation-octagon"></sl-icon>
+        <div class="error-content">
+          <div class="error-title">${launchFailedTitle(launch.kind)}</div>
+          ${this.renderLaunchFailureDetails(
+            launch,
+            launchEndReasonLabel(launch.endReason),
+            message
+          )}
+          <div class="error-hint">Start or resume the agent to try again.</div>
         </div>
       </div>
     `;

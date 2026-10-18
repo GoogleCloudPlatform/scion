@@ -1000,8 +1000,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/auth/tokens/{id}":        {"id": f.uatRevokeDelete},
 
 		// --- invite family ---
-		"/api/v1/admin/invites/{id}":       {"id": f.invite},
-		"/api/v1/admin/allow-list/{email}": {"email": f.allowListEmail},
+		"/api/v1/admin/invites/{id}":        {"id": f.invite},
+		"/api/v1/admin/invites/{id}/revoke": {"id": f.invite},
+		"/api/v1/admin/allow-list/{email}":  {"email": f.allowListEmail},
 
 		// --- env var family ---
 		"/api/v1/env/{key}": {"key": f.envVarKey},

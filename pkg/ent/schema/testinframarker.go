@@ -53,7 +53,7 @@ func (TestInfraMarker) Fields() []ent.Field {
 		field.String("hub_id").
 			NotEmpty().
 			Immutable().
-			Comment("Resolved hub id (PersistentHubID or server.hub.hub_id) this database is designated for"),
+			Comment("Resolved logical hub id (server.hub.hub_id, shared by every replica of the hub) this database is designated for"),
 		field.String("class").
 			NotEmpty().
 			Immutable().

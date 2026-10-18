@@ -331,36 +331,56 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 
 // --- resume re-authorizes every schedule type ------------------------------
 
-func TestResumeScopedUATDenied_DispatchAgent(t *testing.T) {
+// A scoped UAT resuming a dispatch_agent schedule must also carry
+// agent:create: with scheduled_event:update alone it is refused and the
+// revision stays as it was.
+func TestResumeScopedUATWithoutAgentCreateDenied_DispatchAgent(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("resume-uat-da-owner"))
 	id := createOwnerSchedule(t, srv, owner, projectID, "resume-uat-da", "dispatch_agent")
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// The authoring credential gate refuses a UAT on the resume route
-	// before the schedule is read, so the revision stays as it was.
 	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assertScheduleAuthoringRefused(t, rec)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
-func TestResumeScopedUATDenied_Message(t *testing.T) {
+// A scoped UAT resuming a message schedule is re-checked against the stored
+// target: with scheduled_event:update alone it may not message the target
+// and is refused, with the schedule still paused and its revision as it
+// was; with agent:message too it resumes the schedule, and the revision
+// records the token's attribution and bounded ceiling with its boundary.
+func TestResumeScopedUATRecordsTokenCeiling_Message(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("resume-uat-msg-owner"))
 	id := createOwnerSchedule(t, srv, owner, projectID, "resume-uat-msg", "message")
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// Refused by the authoring credential gate, as above.
-	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:message"})
-	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assertScheduleAuthoringRefused(t, rec)
+	updateOnly := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
+	rec := doAuthoredScheduleRequest(t, srv, updateOnly, projectID, id+"/resume", http.MethodPost, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 	sc, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
+
+	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:message"})
+	rec = doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	after := loadScheduleRevision(t, s, id)
+	assert.Equal(t, store.InitiatorCredentialKindUAT, after.Attribution.InitiatorCredentialKind)
+	assert.Equal(t, owner.ID(), after.Attribution.InitiatorPrincipalID)
+	assert.Equal(t, before.Attribution.AuthorizationRevision+1, after.Attribution.AuthorizationRevision)
+	assert.Equal(t, store.EffectCeilingBounded, after.Ceiling.Kind)
+	assert.Equal(t, scoped.Ceiling().PermissionIDs, after.Ceiling.PermissionIDs)
+	assert.Equal(t, string(BoundaryKindProject), after.Ceiling.BoundaryKind)
+	assert.Equal(t, projectID, after.Ceiling.BoundaryProjectID)
+	sc, err = s.GetSchedule(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleStatusActive, sc.Status)
 }
 
 // nonAdmittedScheduleUser returns a stored, active user with no binding in
