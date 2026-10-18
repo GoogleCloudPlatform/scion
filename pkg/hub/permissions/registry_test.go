@@ -100,12 +100,15 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_metrics:read":                {"hub.metrics.read"},
 	"hub_github_app:read":             {"hub.github_app.read"},
 	"hub_github_app:update":           {"hub.github_app.update"},
+	"hub_allow_list:read":             {"hub.allow_list.read"},
+	"hub_allow_list:update":           {"hub.allow_list.update"},
 	"inbox:read":                      {"inbox.read"},
 	"inbox:write":                     {"inbox.write"},
 	"project:clone":                   {"project.clone"},
 	"project:manage":                  {"project.manage"},
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
+	"project:list":                    {"project.list"},
 	"skill:create":                    {"skill.create"},
 	"skill:delete":                    {"skill.delete"},
 	"skill:list":                      {"skill.list"},
@@ -127,11 +130,12 @@ var expectedSelectorRegistry = map[string][]string{
 	// Project messaging policy (owner rule applies on top of the selector).
 	"project:set_messaging_policy": {"project.set_messaging_policy"},
 
-	// scheduled_event selectors (reads, cancellation and pause).
+	// scheduled_event selectors (reads, cancellation, pause and authoring).
 	"scheduled_event:delete": {"scheduled_event.delete"},
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+	"scheduled_event:create": {"scheduled_event.create"},
 
 	// Identity governance reads and hub audit (hub boundary only).
 	"role:read":              {"role.read"},

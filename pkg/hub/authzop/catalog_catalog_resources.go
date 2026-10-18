@@ -20,11 +20,31 @@ var catalogResourceOperations = []OperationSpec{
 	// Domain: skill — skill CRUD
 	// =====================================================================
 	{
-		ID:          "skill.read",
+		ID:          "skill.list",
 		Domain:      "skill",
-		Description: "Read skill definitions or list/discover skills",
+		Description: "List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "skill.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestSkillListToken_CountsOnlyAuthorizedRows"},
+		},
+		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "skill.read",
+		Domain:      "skill",
+		Description: "Read skill definitions or discover skills",
+		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "GET"},
 			// handleSkillsDiscoverDirectory (handlers_skills_discover.go)
 			// is POST-only: it reads a filter/query body, it does not list
@@ -35,7 +55,7 @@ var catalogResourceOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "skill.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
@@ -143,11 +163,31 @@ var catalogResourceOperations = []OperationSpec{
 	// Domain: template — template CRUD
 	// =====================================================================
 	{
+		ID:          "template.list",
+		Domain:      "template",
+		Description: "List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "template.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestCatalogWideList_UsesListSelectorThroughEvidence"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
 		ID:          "template.read",
 		Domain:      "template",
 		Description: "Read template definitions or discover available templates",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "GET"},
 			// handleResourcesDiscover (handlers_resource_import.go) is
 			// POST-only: it reads a discovery filter body.
@@ -157,7 +197,7 @@ var catalogResourceOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "template.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
@@ -237,18 +277,38 @@ var catalogResourceOperations = []OperationSpec{
 	// Domain: harnessconfig — harness configuration CRUD
 	// =====================================================================
 	{
-		ID:          "harnessconfig.read",
+		ID:          "harnessconfig.list",
 		Domain:      "harnessconfig",
-		Description: "Read harness configurations or list available configs",
+		Description: "List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "harness_config.list",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestCatalogWideList_UsesListSelectorThroughEvidence"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "harnessconfig.read",
+		Domain:      "harnessconfig",
+		Description: "Read harness configurations",
+		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "project-from-url",
 		BasePermission:   "harness_config.read",
-		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},

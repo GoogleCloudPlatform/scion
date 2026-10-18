@@ -117,6 +117,15 @@ func (s *Server) resolveFederatedVisitor(ctx context.Context, identity Federated
 	return NewVisitorIdentity(u.ID, fu.IssuerURL(), fu.Subject(), email, fu.DisplayName()), nil
 }
 
+// federationHubUserTokensEnabled is the auth middleware's per-request gate
+// for user access credentials from hub issuers
+// (AuthConfig.FederationHubUserTokensEnabled): true while the
+// federation.project_visitors experiment is enabled. It is read on every
+// request, so a change to the experiment applies to the next request.
+func (s *Server) federationHubUserTokensEnabled() bool {
+	return s.experimentEnabled(experiments.FederationProjectVisitors)
+}
+
 // visitorTokenEmail returns the normalized issuer and email of a verified
 // issuer token of a federated user whose email a visitor grant or rule may match, and
 // true, when all of these hold:

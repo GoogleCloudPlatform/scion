@@ -1552,8 +1552,8 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 // newScopedUATInitiatorContext builds a live-request context carrying a
 // scoped UAT identity/credential (kind=uat), for tests that exercise
 // InitiatorAttribution capture directly rather than through the
-// scheduled-event/schedule HTTP authoring path, which refuses every UAT at
-// the authoring credential gate. Its only user is
+// scheduled-event/schedule HTTP authoring path (covered for real tokens by
+// TestScheduleAuthoringToken_RequiresCreateSelector). Its only user is
 // TestCaptureInitiatorAttribution_ScopedUATFixture below.
 func newScopedUATInitiatorContext(userID, tokenID, projectID string, scopes []string) context.Context {
 	user := NewAuthenticatedUser(userID, userID+"@example.com", "Test User", "member", "api")
