@@ -511,7 +511,8 @@ func TestVersionedEnvKeyMapper_DeepServerNesting(t *testing.T) {
 		// Hub server keys
 		{"SCION_SERVER_HUB_PORT", "server.hub.port"},
 		{"SCION_SERVER_HUB_HOST", "server.hub.host"},
-		{"SCION_SERVER_HUB_PUBLIC_URL", "server.hub.public_url"},
+		{"SCION_SERVER_HUB_ENDPOINT", "server.hub.public_url"},
+		{"SCION_SERVER_HUB_PUBLIC_URL", ""}, // inert (ptone/scion#3905)
 		{"SCION_SERVER_HUB_READ_TIMEOUT", "server.hub.read_timeout"},
 		{"SCION_SERVER_HUB_WRITE_TIMEOUT", "server.hub.write_timeout"},
 		// Broker keys
@@ -715,6 +716,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					IssuerType:       "hub",
 					DefaultRole:      "",
 					AllowedEmails:    nil,
+					AcceptUserTokens: true,
 					// AllowVisitorGrants applies to hub and user issuers.
 					AllowVisitorGrants: true,
 				},
@@ -761,6 +763,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, ti0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, ti0.DefaultScopes)
 	assert.Equal(t, "hub", ti0.IssuerType)
+	assert.True(t, ti0.AcceptUserTokens)
+	assert.False(t, gc.Federation.TrustedIssuers[1].AcceptUserTokens)
 	assert.True(t, ti0.AllowVisitorGrants)
 
 	ti1 := gc.Federation.TrustedIssuers[1]
@@ -796,6 +800,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, vi0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, vi0.DefaultScopes)
 	assert.Equal(t, "hub", vi0.IssuerType)
+	assert.True(t, vi0.AcceptUserTokens)
+	assert.False(t, v1Back.Federation.TrustedIssuers[1].AcceptUserTokens)
 	assert.True(t, vi0.AllowVisitorGrants)
 
 	vi1 := v1Back.Federation.TrustedIssuers[1]

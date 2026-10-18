@@ -1643,28 +1643,28 @@
         "broker_id": {
           "type": "string",
           "description": "Unique broker identifier (UUID). Auto-generated if empty.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_ID"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERID"
         },
         "auto_provide": {
           "type": "boolean",
           "description": "Automatically add as provider for new projects.",
-          "x-env-var": "SCION_SERVER_BROKER_AUTO_PROVIDE"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_AUTOPROVIDE"
         },
         "broker_name": {
           "type": "string",
           "description": "Human-readable broker name.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_NAME"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERNAME"
         },
         "broker_nickname": {
           "type": "string",
           "description": "Human-readable display name for the broker. Defaults to hostname.",
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_NICKNAME"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERNICKNAME"
         },
         "broker_token": {
           "type": "string",
           "description": "Token received when registering this broker with the Hub.",
           "x-sensitive": true,
-          "x-env-var": "SCION_SERVER_BROKER_BROKER_TOKEN"
+          "x-env-var": "SCION_SERVER_RUNTIMEBROKER_BROKERTOKEN"
         },
         "allow_container_script_harnesses": {
           "type": "boolean",
@@ -2650,6 +2650,10 @@
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
         "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "accept_user_tokens": {
+          "type": "boolean",
+          "description": "issuer_type hub only: accept user access credentials (scion_token_kind user) from this peer hub. Default false."
+        },
         "allow_visitor_grants": {
           "type": "boolean",
           "description": "Let project owners grant visitor access to users of this issuer (issuer_type user or hub). Default false."

@@ -263,11 +263,15 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
 	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
 	"hub.settings.update": {BoundaryKindHub},
+	// The allow list (invited users) is a hub-wide record, so its
+	// selectors are hub-only.
+	"hub.allow_list.read": {BoundaryKindHub}, "hub.allow_list.update": {BoundaryKindHub},
 
-	// scheduled_event.* reads, cancellation and pause act on one project's
-	// schedules. Authoring (scheduled_event.create) has no selector.
+	// scheduled_event.* act on one project's schedules: reads, cancellation,
+	// authoring, update, pause and resume.
 	"scheduled_event.read": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.list": {BoundaryKindProject, BoundaryKindHub},
 	"scheduled_event.update": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.delete": {BoundaryKindProject, BoundaryKindHub},
+	"scheduled_event.create": {BoundaryKindProject, BoundaryKindHub},
 
 	// hub.* integration and observability permissions act on the hub
 	// itself, so their selectors are hub-only.
@@ -453,10 +457,12 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
 	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
 	"hub.settings.update": {TargetClassKindHubResource},
+	"hub.allow_list.read": {TargetClassKindHubResource}, "hub.allow_list.update": {TargetClassKindHubResource},
 
 	// scheduled_event.* target a project's schedules.
 	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},
 	"scheduled_event.update": {TargetClassKindProjectScoped}, "scheduled_event.delete": {TargetClassKindProjectScoped},
+	"scheduled_event.create": {TargetClassKindProjectScoped},
 
 	// hub.* integration and observability permissions target the hub
 	// instance.
