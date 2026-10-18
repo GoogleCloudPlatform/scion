@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
@@ -423,8 +424,14 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	if strings.HasPrefix(unitReport, unitdrift.DriftWarning) {
 		log.Warn("Installed systemd unit differs from template; re-provision needed", "service_name", serviceName)
 	}
+	// The restart child's output and everything written after Start go
+	// through a Write-only, mutex-guarded writer. Handing the child a
+	// *bytes.Buffer directly would let exec copy with Buffer.ReadFrom, which
+	// trims the buffer back to its length at Start when the child exits,
+	// dropping the lines below; it would also race with them.
+	tail := &restartLogWriter{w: logger}
 	defer func() {
-		_, _ = fmt.Fprintf(logger, "\n==> Systemd unit check\n%s", unitReport)
+		_, _ = fmt.Fprintf(tail, "\n==> Systemd unit check\n%s", unitReport)
 	}()
 
 	// Fire-and-forget: start the restart but don't wait for it to finish.
@@ -436,16 +443,30 @@ func (e *RebuildServerExecutor) Run(ctx context.Context, logger io.Writer, param
 	log.Debug("Initiating service restart (fire-and-forget)",
 		"cmd", "sudo", "args", fmt.Sprintf("[systemctl restart %s]", serviceName))
 	restartCmd := exec.Command("sudo", "systemctl", "restart", serviceName)
-	restartCmd.Stdout = logger
-	restartCmd.Stderr = logger
+	restartCmd.Stdout = tail
+	restartCmd.Stderr = tail
 	if err := restartCmd.Start(); err != nil {
 		log.Error("Failed to initiate service restart", "error", err)
 		return fmt.Errorf("restarting service failed: %w", err)
 	}
 
 	log.Info("Server rebuild complete, restart initiated")
-	_, _ = fmt.Fprintln(logger, "\nServer rebuild complete, restart initiated.")
+	_, _ = fmt.Fprintln(tail, "\nServer rebuild complete, restart initiated.")
 	return nil
+}
+
+// restartLogWriter serialises writes to w. It implements only Write (not
+// io.ReaderFrom), so os/exec copies a child's output with its own buffer
+// and calls Write as data arrives.
+type restartLogWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *restartLogWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
 
 // RebuildWebExecutor rebuilds the web frontend assets from source.

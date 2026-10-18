@@ -194,16 +194,16 @@ func TestCompare_RegexpMetaIsLiteral(t *testing.T) {
 
 func TestCompare_DiffElidesValues(t *testing.T) {
 	inst := strings.Replace(defaultRender(), `Environment="HOME=/home/scion"`,
-		"Environment=\"HOME=/home/scion\"\nEnvironment=\"API_TOKEN=s3cr3t-value\"\nEnvironmentFile=/root/private.env\nApiKey=k3y-value", 1)
+		"Environment=\"HOME=/home/scion\"\nEnvironment=\"API_TOKEN=s3cr3t-value\"\nEnvironmentFile=/root/private.env\nApiKey=k3y-value\nEnvironment = \"SPACED_TOKEN=sp4ced-value\"", 1)
 	res := compareStr(sampleTemplate, inst)
 	wantStatus(t, res, Drift)
 	joined := strings.Join(res.Diff, "\n")
-	for _, secret := range []string{"s3cr3t-value", "/root/private.env", "k3y-value"} {
+	for _, secret := range []string{"s3cr3t-value", "/root/private.env", "k3y-value", "sp4ced-value"} {
 		if strings.Contains(joined, secret) {
 			t.Errorf("diff shows value %q:\n%s", secret, joined)
 		}
 	}
-	for _, want := range []string{`installed: Environment="API_TOKEN=…"`, "installed: EnvironmentFile=…", "installed: ApiKey=…"} {
+	for _, want := range []string{`installed: Environment="API_TOKEN=…"`, "installed: EnvironmentFile=…", "installed: ApiKey=…", `installed: Environment="SPACED_TOKEN=…"`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("diff missing %q:\n%s", want, joined)
 		}

@@ -256,6 +256,8 @@ func elide(line string) string {
 	if !ok {
 		return line
 	}
+	// systemd allows spaces around "=".
+	key, value = strings.TrimSpace(key), strings.TrimSpace(value)
 	switch {
 	case key == "Environment":
 		v := strings.Trim(value, `"'`)

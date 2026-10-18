@@ -71,6 +71,15 @@ func TestCheck_DriftReportIsExact(t *testing.T) {
 	}
 }
 
+func TestCheck_ServiceSuffixInDropInPath(t *testing.T) {
+	inst := strings.Replace(defaultRender(), "Restart=always", "Restart=no", 1)
+	repo, loc := setupRepo(t, sampleTemplate, inst)
+	got := Check(context.Background(), CheckOptions{RepoPath: repo, Service: "scion-hub.service", Locate: loc})
+	if !strings.Contains(got, "Drop-ins under scion-hub.service.d ") {
+		t.Fatalf("drop-in path should not repeat .service:\n%s", got)
+	}
+}
+
 func TestCheck_DriftWithoutRevision(t *testing.T) {
 	inst := strings.Replace(defaultRender(), "Restart=always", "Restart=no", 1)
 	repo, loc := setupRepo(t, sampleTemplate, inst)
@@ -135,6 +144,10 @@ func TestCheck_SkippedCases(t *testing.T) {
 		"nil locator": func(t *testing.T) CheckOptions {
 			repo, _ := setupRepo(t, sampleTemplate, defaultRender())
 			return CheckOptions{RepoPath: repo}
+		},
+		"oversized fragment": func(t *testing.T) CheckOptions {
+			repo, loc := setupRepo(t, sampleTemplate, defaultRender()+strings.Repeat("#", maxUnitBytes))
+			return CheckOptions{RepoPath: repo, Locate: loc}
 		},
 		"other unit": func(t *testing.T) CheckOptions {
 			repo, loc := setupRepo(t, sampleTemplate, "[Unit]\nDescription=Something else\n")

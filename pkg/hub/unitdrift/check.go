@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,7 +119,7 @@ func Check(ctx context.Context, opts CheckOptions) (report string) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	template, err := os.ReadFile(filepath.Join(opts.RepoPath, TemplatePath))
+	template, err := readLimited(filepath.Join(opts.RepoPath, TemplatePath))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return skipped("no unit template in the checked-out tree (" + TemplatePath + ")")
@@ -135,7 +136,7 @@ func Check(ctx context.Context, opts CheckOptions) (report string) {
 	if info.FragmentPath == "" {
 		return skipped(fmt.Sprintf("%s is not loaded from a unit file", opts.Service))
 	}
-	installed, err := os.ReadFile(info.FragmentPath)
+	installed, err := readLimited(info.FragmentPath)
 	if err != nil {
 		return skipped(fmt.Sprintf("cannot read the installed unit: %v", err))
 	}
@@ -195,6 +196,26 @@ func locateBounded(ctx context.Context, locate Locator, service string) (UnitInf
 	}
 }
 
+// maxUnitBytes bounds how much of a unit file is read.
+const maxUnitBytes = 1 << 20
+
+// readLimited reads at most maxUnitBytes of path; a larger file is an error.
+func readLimited(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxUnitBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxUnitBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxUnitBytes)
+	}
+	return b, nil
+}
+
 func skipped(reason string) string {
 	return "Systemd unit check skipped: " + reason + ".\n"
 }
@@ -213,7 +234,7 @@ func writeDrift(b *strings.Builder, service, branch, commit string, diff []strin
 	b.WriteString("  1. On the workstation and checkout used to provision this hub (not on the hub VM), check out that commit.\n")
 	b.WriteString("  2. Run scripts/starter-hub/gce-start-hub.sh --full with the same flags and environment used at provisioning (for example --no-tls, HUB_BASE_URL and any hub-config.sh overrides). Running it without the original flags can reconfigure the hub (for example enable TLS on a --no-tls hub).\n")
 	b.WriteString("  3. Note that --full also re-applies settings.yaml, hub.env (if present on the workstation), the Caddyfile and the sudoers rules from that workstation, then pulls, builds and restarts the hub.\n")
-	fmt.Fprintf(b, "Drop-ins under %s.service.d can still override template keys after re-provisioning.\n", service)
+	fmt.Fprintf(b, "Drop-ins under %s.service.d can still override template keys after re-provisioning.\n", strings.TrimSuffix(service, ".service"))
 	b.WriteString("Differences (values of Environment and credential-like keys elided):\n")
 	for _, d := range diff {
 		fmt.Fprintf(b, "  %s\n", d)

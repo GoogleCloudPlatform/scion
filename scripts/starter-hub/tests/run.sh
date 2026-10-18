@@ -234,12 +234,12 @@ test_full_unit_renders_values_verbatim() {
     local unit
     fresh_state
     EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}"
-        "HUB_BASE_URL=https://hub.example.test/a&b%sx%%y"
+        "HUB_BASE_URL=https://hub.example.test/a&b%sx%%y\\z/"
         REPO_DIR=/srv/src/scion-repo SCION_BIN=/opt/scion/bin/scion)
     run_script gce-start-hub.sh --full
     assert_eq 0 "$RC" "full deploy with custom values passes"
     unit="$(cat "${STUB_SCP_DIR}/scion-hub.service")"
-    assert_contains "$unit" $'\nEnvironment="SCION_SERVER_BASE_URL=https://hub.example.test/a&b%sx%%y"\n' "& and % kept in base URL"
+    assert_contains "$unit" $'\nEnvironment="SCION_SERVER_BASE_URL=https://hub.example.test/a&b%sx%%y\\z/"\n' "&, %, \\ and / kept in base URL"
     assert_contains "$unit" $'\nWorkingDirectory=/srv/src/scion-repo\n' "custom REPO_DIR"
     assert_contains "$unit" $'\nExecStart=/opt/scion/bin/scion --global server start ' "custom SCION_BIN"
     assert_not_contains "$unit" "@" "no placeholder left"

@@ -86,10 +86,13 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 		BinaryDest:  binaryDest,
 		ServiceName: "test-scion",
 	})
-	// Keep the unit drift check hermetic: never ask the host's systemd.
+	// The temp repo has no unit template, so the drift check stops before
+	// locating the unit. Stub both lookups anyway so the command count above
+	// never depends on the host's systemctl or on extra git calls.
 	executor.unitLocator = func(context.Context, string) (unitdrift.UnitInfo, error) {
 		return unitdrift.UnitInfo{}, fmt.Errorf("no systemd in tests")
 	}
+	executor.unitRevision = func(context.Context, string) (string, error) { return "", nil }
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)

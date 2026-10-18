@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -69,7 +70,9 @@ func newRebuildUnitFixture(t *testing.T, installed string) *rebuildUnitFixture {
 		t.Fatal(err)
 	}
 	for _, cmd := range []string{"git", "make", "go", "sudo"} {
-		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\n", cmd, f.calls)
+		// Each stub records its call and, as its very last action, that it
+		// is exiting, so a test can wait for the restart child to be gone.
+		script := fmt.Sprintf("#!/bin/sh\necho '%s' \"$@\" >> '%s'\necho 'exited %s' \"$@\" >> '%s'\n", cmd, f.calls, cmd, f.calls)
 		if err := os.WriteFile(filepath.Join(f.stubDir, cmd), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -96,18 +99,41 @@ func (f *rebuildUnitFixture) executor(locate unitdrift.Locator) *RebuildServerEx
 	return e
 }
 
-// restartIssued waits briefly for the fire-and-forget restart stub to log.
+// restartIssued waits for the fire-and-forget restart stub to run and exit,
+// then gives exec's output copier a moment to see EOF, so the log is read
+// only after the child is gone (the case where a buffer handed straight to
+// the child would be trimmed).
 func (f *rebuildUnitFixture) restartIssued(t *testing.T) bool {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, _ := os.ReadFile(f.calls)
-		if strings.Contains(string(data), "sudo systemctl restart scion-hub") {
+		if strings.Contains(string(data), "exited sudo systemctl restart scion-hub") {
+			time.Sleep(200 * time.Millisecond)
 			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// syncBuffer is a bytes.Buffer safe for the restart child's output copier
+// and the test reading it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func renderedRebuildUnit(extra string) string {
@@ -158,6 +184,9 @@ func TestRebuildServerExecutor_UnitMatch(t *testing.T) {
 	var buf bytes.Buffer
 	if err := f.executor(nil).Run(context.Background(), &buf, nil); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if !f.restartIssued(t) {
+		t.Fatal("restart not issued")
 	}
 	log := buf.String()
 	if !strings.HasSuffix(log, "==> Systemd unit check\nSystemd unit matches template.\n") {
@@ -217,5 +246,33 @@ func TestRebuildServerExecutor_UnitReportWrittenWhenRestartFails(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "\n==> Systemd unit check\n"+unitdrift.DriftWarning+"\n") {
 		t.Fatalf("drift block missing on the restart-failure path:\n%s", buf.String())
+	}
+}
+
+// The restart child writes to the run log too. Its output and the lines
+// written after it starts must all survive the child's exit.
+func TestRebuildServerExecutor_RestartOutputKeepsUnitReport(t *testing.T) {
+	f := newRebuildUnitFixture(t, renderedRebuildUnit("ExecStartPre=/bin/true\n"))
+	sudo := fmt.Sprintf("#!/bin/sh\necho 'sudo' \"$@\" >> '%s'\necho \"restart-stub-output $*\"\necho 'exited sudo' \"$@\" >> '%s'\n", f.calls, f.calls)
+	if err := os.WriteFile(filepath.Join(f.stubDir, "sudo"), []byte(sudo), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf syncBuffer
+	if err := f.executor(nil).Run(context.Background(), &buf, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !f.restartIssued(t) {
+		t.Fatal("restart not issued")
+	}
+	log := buf.String()
+	for _, want := range []string{
+		"restart-stub-output systemctl restart scion-hub",
+		"\nServer rebuild complete, restart initiated.\n",
+		"\n==> Systemd unit check\n" + unitdrift.DriftWarning + "\n",
+		"  installed: ExecStartPre=/bin/true\n",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q:\n%s", want, log)
+		}
 	}
 }
