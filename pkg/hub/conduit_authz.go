@@ -801,11 +801,11 @@ func (s *Server) conduitUserStreamAuthzInterval() time.Duration {
 func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (grant.Target, error) {
 	// The registry of whichever conduit runtime runs on this node: the
 	// in-process one, or the shared registry of external relay mode.
-	_, reg, _ := s.conduitRegistry()
-	if reg == nil {
+	_, st, _ := s.conduitRegistry()
+	if st == nil {
 		return grant.Target{}, fmt.Errorf("%w: no conduit registry on this node", errConduitAuthzUnavailable)
 	}
-	ps, found, err := reg.ListPrincipalSessionsBySession(ctx, sessionID)
+	ps, found, err := st.ListPrincipalSessionsBySession(ctx, sessionID)
 	if err != nil {
 		return grant.Target{}, fmt.Errorf("%w: registry: %v", errConduitAuthzUnavailable, err)
 	}
