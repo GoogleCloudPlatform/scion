@@ -143,6 +143,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"artifact.update":       testAdminPolicyAllow,
 	"artifact.delete":       testAdminPolicyAllow,
 	"artifact.manage":       testAdminPolicyAllow,
+	"artifact.steward":      testAdminPolicyAllow,
 	"skill.create":          testAdminPolicyAllow,
 	"skill.create_global":   testAdminPolicyAllow,
 	"skill.read":            testAdminPolicyAllow,
@@ -374,6 +375,9 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
+	"handlers_env_secrets.go:authorizeBrokerMaterial":             {Policy: testAdminPolicyDeny, Reason: "runtime broker environment variables and secrets, matching the material root scopes"},
+	"handlers_runtime_brokers.go:updateRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker update, except a broker the test identity registered (the co-located broker)"},
+	"handlers_runtime_brokers.go:deleteRuntimeBroker":             {Policy: testAdminPolicyDeny, Reason: "runtime broker deregistration, except a broker the test identity registered (the co-located broker)"},
 	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)"},
 	"passthrough_gate.go:authorizePassthroughIdentity":            {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
 	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},
@@ -382,12 +386,12 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"authorize_message.go:authorizeAgentMessage":                  {Policy: testAdminPolicyAllow, Reason: "messaging agents"},
 	"handlers_agent_message_mode.go:handleSetMessageMode":         {Policy: testAdminPolicyAllow, Reason: "agent message mode"},
 	"deletion_redact.go:callerSeesDeletionDetail":                 {Policy: testAdminPolicyAllow, Reason: "deletion detail display"},
-	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "the role-claim shortcut runs after refuseTestAdminDeniedGrant, which refuses any grant by an admin kind holding a deny-classified permission (census-pinned); forced expiry of what remains is phase A3"},
+	"authz_candelegate.go:CanDelegate":                            {Policy: testAdminPolicyAllow, Reason: "the role-claim shortcut runs after refuseTestAdminDeniedGrant, which refuses any grant by an admin kind holding a deny-classified permission (census-pinned), and refuseTestAdminUnshapedGrant; what remains is forced to expire with the identity by the store's grant shaping (A3)"},
 	// System-admin binding checks outside decide (IsSystemAdmin, IsHubAdmin).
 	"handlers_agent_create_helpers.go:brokerProviderHasOwnerConsent": {Policy: testAdminPolicyAllow, Reason: "reads whether the broker provider's linker (not the caller) is a system admin"},
 	"handlers_brokers.go:brokerRemintTargetAuthorized":               {Policy: testAdminPolicyDeny, Reason: "runtime broker credential remint (key material)"},
 	"handlers_brokers.go:authorizedForBrokerRotate":                  {Policy: testAdminPolicyDeny, Reason: "runtime broker secret rotation (key material)"},
-	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; grant shaping for test admins is phase A3"},
+	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; an agent rooted at a test admin is issued no scope covering a deny-classified permission (clampTestAdminRootedScopes, A3)"},
 	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
 	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
 	// Test identity issuance and management: deny states the intent; each
@@ -396,6 +400,9 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_test_admin_identities.go:canIssueTestAdmin":                  {Policy: testAdminPolicyDeny, Reason: "test identities never issue (design 3.6.1: test_identity.issue* are deny); also refused by kind in testAdminIssuer"},
 	"handlers_test_admin_identities.go:handleRevokeAllTestAdminIdentities": {Policy: testAdminPolicyDeny, Reason: "revoke-all is for human super-admins only (design 3.3); also refused by kind first"},
 	"handlers_test_identities.go:testIdentityCallerSeesAll":                {Policy: testAdminPolicyDeny, Reason: "issuance and list visibility of every test identity (test_identity.issue routes are deny)"},
+	"handlers_test_admin_identities.go:recheckTestAdminDelegationGrantor":  {Policy: testAdminPolicyAllow, Reason: "reads the super-admin binding of a workload delegation's grantor (not of the caller, a workload) inside the issuance transaction, after requiring the grantor's stored kind to be human; test kinds never hold a delegation (delegation create refuses them)"},
+	"test_admin_purge.go:canPurgeTestAdminIdentity":                        {Policy: testAdminPolicyDeny, Reason: "purging an admin-kind identity is for its issuer or a human super-admin (A3); test identities are also refused as purge callers by testIdentityCaller"},
+	"test_admin_residue.go:handleTestAdminResidue":                         {Policy: testAdminPolicyDeny, Reason: "the residue report is for human super-admins only (A3); also refused by kind first"},
 	// The role-claim fast path itself, moved to pkg/hub/internal/principal
 	// (GoogleCloudPlatform/scion#3316) and scanned there since
 	// GoogleCloudPlatform/scion#3472. testAdminRoleAdminCensus labels it a
@@ -549,6 +556,8 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.ChatThreadGroups:             testAdminPolicyDeny,
+	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
+	experiments.AgentPlugins:                 testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

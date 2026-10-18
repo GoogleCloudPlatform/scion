@@ -187,6 +187,12 @@ Register, re-register, rotate, link and unlink events in the audit log record th
 
 With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
 
+With the experiment on, a Runtime Broker's Conduit session also carries the Hub's short requests to it: agent logs, `exec`, image status, pull and removal, and project cleanup. The session lists the requests it serves when it connects, and any Hub instance can reach it, not only the one that holds the control channel. A request that no Conduit session serves uses the control channel, and then the broker's HTTP endpoint; this path is the fallback only. Agent creation, start, stop, delete, messages, keys and attach do not change.
+
+- An `exec` whose request reached the Runtime Broker but whose result was lost (for example, the session closed while it ran) returns `502` with code `outcome_unknown`. The command may have run. The Hub does not retry it, and `error.details` carries `operation`, `broker_id` and `request_id`. A failure the Runtime Broker reports still returns `502 runtime_error`.
+- A request that is safe to repeat (logs, image status, image pull and project cleanup) is retried on another session of the same Runtime Broker when it loses its session. When no session serves it, logs return `503 unavailable`, and project cleanup, image status and image pull fail. Image removal is not retried.
+- Project cleanup on the Runtime Broker removes the project's directory under `~/.scion/project-configs` even when the project directory itself is already gone, and reports success only once both are gone, so repeating it finishes any step that failed. The Hub's Conduit path reports a cleanup failure as a failure.
+
 ## Headless registration with a hub token
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
@@ -236,6 +242,27 @@ Related rules:
 - **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
 - **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted. A withdrawn standalone Runtime Broker keeps its project directory when the project is later deleted (see [What remains after a project delete](/scion/hosted/ha/kubernetes/#what-remains-after-a-project-delete)).
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
+
+## Scaling a Broker Host: inotify Limits
+
+On a Linux host whose Runtime Broker runs agents with Docker or Podman, every agent runs as the broker's own host user, so the file watchers of all agents' harness processes count against that one user's inotify limits. Scion itself creates no inotify watchers. The kernel default of `fs.inotify.max_user_instances=128` can run out at around 150 agents; after that, watchers fail with "Too many open files", and the first errors often come from the host's own per-user services rather than from Scion.
+
+At startup, a Runtime Broker in hosted mode with a Docker or Podman runtime (or a flat Runtime Broker host in hosted mode with a `docker` instance) reads `/proc/sys/fs/inotify/max_user_instances` and `max_user_watches`. If either is below what about 100 agents need, it logs one `WARNING` line with the values and the fix. 100 agents is the Hub's default `max_agents_per_broker`; the broker does not see a different per-broker limit at startup, so the warning assumes the default. The thresholds are 1 instance and 1024 watches per agent, plus 128 instances and 8192 watches for the user's other processes: at least 228 instances and 110592 watches. They are estimates, based on one running Claude Code agent that held 1 instance and about 1000 watches, roughly one watch per directory of its workspace; agents on workspaces with many more directories need more watches. A workstation server does not log the warning. The check only reads the limits; it never changes them, and it never stops the broker.
+
+`scion doctor` shows the same limits on any Linux host as the `inotify-limits` check, together with the approximate number of inotify instances and watches held by processes running as your user. It judges them (pass or warn) only on a host configured as a server whose Runtime Broker runs agents with Docker or Podman; elsewhere the line is shown as skipped. On other operating systems, or when `/proc/sys/fs/inotify` cannot be read, the check is reported as not applicable.
+
+To raise the limits, as root:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288
+```
+
+To keep them across reboots, put them in a file under `/etc/sysctl.d/`, for example `/etc/sysctl.d/99-scion-inotify.conf`:
+
+```text
+fs.inotify.max_user_instances=8192
+fs.inotify.max_user_watches=524288
+```
 
 ## Broker Health Monitoring
 

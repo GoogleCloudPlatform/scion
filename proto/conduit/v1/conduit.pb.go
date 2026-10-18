@@ -166,6 +166,7 @@ type Frame struct {
 	//	*Frame_AuthRefresh
 	//	*Frame_Ping
 	//	*Frame_Pong
+	//	*Frame_GrantKeysChanged
 	//	*Frame_RpcRequest
 	//	*Frame_RpcResponse
 	//	*Frame_RpcCancel
@@ -266,6 +267,15 @@ func (x *Frame) GetPong() *Pong {
 	if x != nil {
 		if x, ok := x.Body.(*Frame_Pong); ok {
 			return x.Pong
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetGrantKeysChanged() *GrantKeysChanged {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_GrantKeysChanged); ok {
+			return x.GrantKeysChanged
 		}
 	}
 	return nil
@@ -380,6 +390,10 @@ type Frame_Pong struct {
 	Pong *Pong `protobuf:"bytes,6,opt,name=pong,proto3,oneof"`
 }
 
+type Frame_GrantKeysChanged struct {
+	GrantKeysChanged *GrantKeysChanged `protobuf:"bytes,7,opt,name=grant_keys_changed,json=grantKeysChanged,proto3,oneof"`
+}
+
 type Frame_RpcRequest struct {
 	RpcRequest *RpcRequest `protobuf:"bytes,10,opt,name=rpc_request,json=rpcRequest,proto3,oneof"`
 }
@@ -427,6 +441,8 @@ func (*Frame_AuthRefresh) isFrame_Body() {}
 func (*Frame_Ping) isFrame_Body() {}
 
 func (*Frame_Pong) isFrame_Body() {}
+
+func (*Frame_GrantKeysChanged) isFrame_Body() {}
 
 func (*Frame_RpcRequest) isFrame_Body() {}
 
@@ -536,7 +552,7 @@ type Capabilities struct {
 	ExecScope           string                 `protobuf:"bytes,4,opt,name=exec_scope,json=execScope,proto3" json:"exec_scope,omitempty"`
 	TransportLimits     *TransportLimits       `protobuf:"bytes,5,opt,name=transport_limits,json=transportLimits,proto3" json:"transport_limits,omitempty"`
 	// Optional protocol features the endpoint supports, as canonical
-	// lowercase names (for example "stream_renewal": the target enforces
+	// lowercase names (for example "stream_renewal.v2": the target enforces
 	// stream authorization deadlines and accepts renewal grants).
 	Features      []string `protobuf:"bytes,6,rep,name=features,proto3" json:"features,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1658,18 +1674,58 @@ func (x *StreamResize) GetRows() uint32 {
 	return 0
 }
 
+// GrantKeysChanged tells a target that the hub's published grant keys
+// changed. It carries no keys: the target answers with its own
+// authenticated key fetch.
+type GrantKeysChanged struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GrantKeysChanged) Reset() {
+	*x = GrantKeysChanged{}
+	mi := &file_conduit_v1_conduit_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GrantKeysChanged) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GrantKeysChanged) ProtoMessage() {}
+
+func (x *GrantKeysChanged) ProtoReflect() protoreflect.Message {
+	mi := &file_conduit_v1_conduit_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GrantKeysChanged.ProtoReflect.Descriptor instead.
+func (*GrantKeysChanged) Descriptor() ([]byte, []int) {
+	return file_conduit_v1_conduit_proto_rawDescGZIP(), []int{19}
+}
+
 var File_conduit_v1_conduit_proto protoreflect.FileDescriptor
 
 const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\n" +
-	"\x18conduit/v1/conduit.proto\x12\x10scion.conduit.v1\"\xaa\a\n" +
+	"\x18conduit/v1/conduit.proto\x12\x10scion.conduit.v1\"\xfe\a\n" +
 	"\x05Frame\x12/\n" +
 	"\x05hello\x18\x01 \x01(\v2\x17.scion.conduit.v1.HelloH\x00R\x05hello\x125\n" +
 	"\awelcome\x18\x02 \x01(\v2\x19.scion.conduit.v1.WelcomeH\x00R\awelcome\x123\n" +
 	"\ago_away\x18\x03 \x01(\v2\x18.scion.conduit.v1.GoAwayH\x00R\x06goAway\x12B\n" +
 	"\fauth_refresh\x18\x04 \x01(\v2\x1d.scion.conduit.v1.AuthRefreshH\x00R\vauthRefresh\x12,\n" +
 	"\x04ping\x18\x05 \x01(\v2\x16.scion.conduit.v1.PingH\x00R\x04ping\x12,\n" +
-	"\x04pong\x18\x06 \x01(\v2\x16.scion.conduit.v1.PongH\x00R\x04pong\x12?\n" +
+	"\x04pong\x18\x06 \x01(\v2\x16.scion.conduit.v1.PongH\x00R\x04pong\x12R\n" +
+	"\x12grant_keys_changed\x18\a \x01(\v2\".scion.conduit.v1.GrantKeysChangedH\x00R\x10grantKeysChanged\x12?\n" +
 	"\vrpc_request\x18\n" +
 	" \x01(\v2\x1c.scion.conduit.v1.RpcRequestH\x00R\n" +
 	"rpcRequest\x12B\n" +
@@ -1788,7 +1844,8 @@ const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\fStreamResize\x12\x1b\n" +
 	"\tstream_id\x18\x01 \x01(\rR\bstreamId\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12\x12\n" +
-	"\x04rows\x18\x03 \x01(\rR\x04rows*\x9c\x01\n" +
+	"\x04rows\x18\x03 \x01(\rR\x04rows\"\x12\n" +
+	"\x10GrantKeysChanged*\x9c\x01\n" +
 	"\rPrincipalKind\x12\x1e\n" +
 	"\x1aPRINCIPAL_KIND_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15PRINCIPAL_KIND_BROKER\x10\x01\x12\x18\n" +
@@ -1817,32 +1874,33 @@ func file_conduit_v1_conduit_proto_rawDescGZIP() []byte {
 }
 
 var file_conduit_v1_conduit_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_conduit_v1_conduit_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_conduit_v1_conduit_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_conduit_v1_conduit_proto_goTypes = []any{
-	(PrincipalKind)(0),      // 0: scion.conduit.v1.PrincipalKind
-	(StreamKind)(0),         // 1: scion.conduit.v1.StreamKind
-	(*Frame)(nil),           // 2: scion.conduit.v1.Frame
-	(*Hello)(nil),           // 3: scion.conduit.v1.Hello
-	(*Capabilities)(nil),    // 4: scion.conduit.v1.Capabilities
-	(*TransportLimits)(nil), // 5: scion.conduit.v1.TransportLimits
-	(*Welcome)(nil),         // 6: scion.conduit.v1.Welcome
-	(*GrantKey)(nil),        // 7: scion.conduit.v1.GrantKey
-	(*GoAway)(nil),          // 8: scion.conduit.v1.GoAway
-	(*AuthRefresh)(nil),     // 9: scion.conduit.v1.AuthRefresh
-	(*Ping)(nil),            // 10: scion.conduit.v1.Ping
-	(*Pong)(nil),            // 11: scion.conduit.v1.Pong
-	(*RpcRequest)(nil),      // 12: scion.conduit.v1.RpcRequest
-	(*RpcResponse)(nil),     // 13: scion.conduit.v1.RpcResponse
-	(*RpcCancel)(nil),       // 14: scion.conduit.v1.RpcCancel
-	(*StreamOpen)(nil),      // 15: scion.conduit.v1.StreamOpen
-	(*StreamAccept)(nil),    // 16: scion.conduit.v1.StreamAccept
-	(*StreamData)(nil),      // 17: scion.conduit.v1.StreamData
-	(*StreamWindow)(nil),    // 18: scion.conduit.v1.StreamWindow
-	(*StreamClose)(nil),     // 19: scion.conduit.v1.StreamClose
-	(*StreamResize)(nil),    // 20: scion.conduit.v1.StreamResize
-	nil,                     // 21: scion.conduit.v1.RpcRequest.HeadersEntry
-	nil,                     // 22: scion.conduit.v1.RpcResponse.HeadersEntry
-	nil,                     // 23: scion.conduit.v1.StreamOpen.ParamsEntry
+	(PrincipalKind)(0),       // 0: scion.conduit.v1.PrincipalKind
+	(StreamKind)(0),          // 1: scion.conduit.v1.StreamKind
+	(*Frame)(nil),            // 2: scion.conduit.v1.Frame
+	(*Hello)(nil),            // 3: scion.conduit.v1.Hello
+	(*Capabilities)(nil),     // 4: scion.conduit.v1.Capabilities
+	(*TransportLimits)(nil),  // 5: scion.conduit.v1.TransportLimits
+	(*Welcome)(nil),          // 6: scion.conduit.v1.Welcome
+	(*GrantKey)(nil),         // 7: scion.conduit.v1.GrantKey
+	(*GoAway)(nil),           // 8: scion.conduit.v1.GoAway
+	(*AuthRefresh)(nil),      // 9: scion.conduit.v1.AuthRefresh
+	(*Ping)(nil),             // 10: scion.conduit.v1.Ping
+	(*Pong)(nil),             // 11: scion.conduit.v1.Pong
+	(*RpcRequest)(nil),       // 12: scion.conduit.v1.RpcRequest
+	(*RpcResponse)(nil),      // 13: scion.conduit.v1.RpcResponse
+	(*RpcCancel)(nil),        // 14: scion.conduit.v1.RpcCancel
+	(*StreamOpen)(nil),       // 15: scion.conduit.v1.StreamOpen
+	(*StreamAccept)(nil),     // 16: scion.conduit.v1.StreamAccept
+	(*StreamData)(nil),       // 17: scion.conduit.v1.StreamData
+	(*StreamWindow)(nil),     // 18: scion.conduit.v1.StreamWindow
+	(*StreamClose)(nil),      // 19: scion.conduit.v1.StreamClose
+	(*StreamResize)(nil),     // 20: scion.conduit.v1.StreamResize
+	(*GrantKeysChanged)(nil), // 21: scion.conduit.v1.GrantKeysChanged
+	nil,                      // 22: scion.conduit.v1.RpcRequest.HeadersEntry
+	nil,                      // 23: scion.conduit.v1.RpcResponse.HeadersEntry
+	nil,                      // 24: scion.conduit.v1.StreamOpen.ParamsEntry
 }
 var file_conduit_v1_conduit_proto_depIdxs = []int32{
 	3,  // 0: scion.conduit.v1.Frame.hello:type_name -> scion.conduit.v1.Hello
@@ -1851,28 +1909,29 @@ var file_conduit_v1_conduit_proto_depIdxs = []int32{
 	9,  // 3: scion.conduit.v1.Frame.auth_refresh:type_name -> scion.conduit.v1.AuthRefresh
 	10, // 4: scion.conduit.v1.Frame.ping:type_name -> scion.conduit.v1.Ping
 	11, // 5: scion.conduit.v1.Frame.pong:type_name -> scion.conduit.v1.Pong
-	12, // 6: scion.conduit.v1.Frame.rpc_request:type_name -> scion.conduit.v1.RpcRequest
-	13, // 7: scion.conduit.v1.Frame.rpc_response:type_name -> scion.conduit.v1.RpcResponse
-	14, // 8: scion.conduit.v1.Frame.rpc_cancel:type_name -> scion.conduit.v1.RpcCancel
-	15, // 9: scion.conduit.v1.Frame.stream_open:type_name -> scion.conduit.v1.StreamOpen
-	16, // 10: scion.conduit.v1.Frame.stream_accept:type_name -> scion.conduit.v1.StreamAccept
-	17, // 11: scion.conduit.v1.Frame.stream_data:type_name -> scion.conduit.v1.StreamData
-	18, // 12: scion.conduit.v1.Frame.stream_window:type_name -> scion.conduit.v1.StreamWindow
-	19, // 13: scion.conduit.v1.Frame.stream_close:type_name -> scion.conduit.v1.StreamClose
-	20, // 14: scion.conduit.v1.Frame.stream_resize:type_name -> scion.conduit.v1.StreamResize
-	0,  // 15: scion.conduit.v1.Hello.principal_kind:type_name -> scion.conduit.v1.PrincipalKind
-	4,  // 16: scion.conduit.v1.Hello.capabilities:type_name -> scion.conduit.v1.Capabilities
-	5,  // 17: scion.conduit.v1.Capabilities.transport_limits:type_name -> scion.conduit.v1.TransportLimits
-	7,  // 18: scion.conduit.v1.Welcome.grant_keys:type_name -> scion.conduit.v1.GrantKey
-	21, // 19: scion.conduit.v1.RpcRequest.headers:type_name -> scion.conduit.v1.RpcRequest.HeadersEntry
-	22, // 20: scion.conduit.v1.RpcResponse.headers:type_name -> scion.conduit.v1.RpcResponse.HeadersEntry
-	1,  // 21: scion.conduit.v1.StreamOpen.kind:type_name -> scion.conduit.v1.StreamKind
-	23, // 22: scion.conduit.v1.StreamOpen.params:type_name -> scion.conduit.v1.StreamOpen.ParamsEntry
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	21, // 6: scion.conduit.v1.Frame.grant_keys_changed:type_name -> scion.conduit.v1.GrantKeysChanged
+	12, // 7: scion.conduit.v1.Frame.rpc_request:type_name -> scion.conduit.v1.RpcRequest
+	13, // 8: scion.conduit.v1.Frame.rpc_response:type_name -> scion.conduit.v1.RpcResponse
+	14, // 9: scion.conduit.v1.Frame.rpc_cancel:type_name -> scion.conduit.v1.RpcCancel
+	15, // 10: scion.conduit.v1.Frame.stream_open:type_name -> scion.conduit.v1.StreamOpen
+	16, // 11: scion.conduit.v1.Frame.stream_accept:type_name -> scion.conduit.v1.StreamAccept
+	17, // 12: scion.conduit.v1.Frame.stream_data:type_name -> scion.conduit.v1.StreamData
+	18, // 13: scion.conduit.v1.Frame.stream_window:type_name -> scion.conduit.v1.StreamWindow
+	19, // 14: scion.conduit.v1.Frame.stream_close:type_name -> scion.conduit.v1.StreamClose
+	20, // 15: scion.conduit.v1.Frame.stream_resize:type_name -> scion.conduit.v1.StreamResize
+	0,  // 16: scion.conduit.v1.Hello.principal_kind:type_name -> scion.conduit.v1.PrincipalKind
+	4,  // 17: scion.conduit.v1.Hello.capabilities:type_name -> scion.conduit.v1.Capabilities
+	5,  // 18: scion.conduit.v1.Capabilities.transport_limits:type_name -> scion.conduit.v1.TransportLimits
+	7,  // 19: scion.conduit.v1.Welcome.grant_keys:type_name -> scion.conduit.v1.GrantKey
+	22, // 20: scion.conduit.v1.RpcRequest.headers:type_name -> scion.conduit.v1.RpcRequest.HeadersEntry
+	23, // 21: scion.conduit.v1.RpcResponse.headers:type_name -> scion.conduit.v1.RpcResponse.HeadersEntry
+	1,  // 22: scion.conduit.v1.StreamOpen.kind:type_name -> scion.conduit.v1.StreamKind
+	24, // 23: scion.conduit.v1.StreamOpen.params:type_name -> scion.conduit.v1.StreamOpen.ParamsEntry
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_conduit_v1_conduit_proto_init() }
@@ -1887,6 +1946,7 @@ func file_conduit_v1_conduit_proto_init() {
 		(*Frame_AuthRefresh)(nil),
 		(*Frame_Ping)(nil),
 		(*Frame_Pong)(nil),
+		(*Frame_GrantKeysChanged)(nil),
 		(*Frame_RpcRequest)(nil),
 		(*Frame_RpcResponse)(nil),
 		(*Frame_RpcCancel)(nil),
@@ -1903,7 +1963,7 @@ func file_conduit_v1_conduit_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_conduit_v1_conduit_proto_rawDesc), len(file_conduit_v1_conduit_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

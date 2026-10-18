@@ -336,8 +336,9 @@ func (ts *conduitTunnelSession) remove(key conduitTunnelKey) {
 // open serves one tunnel request. Checks run in the order the agent routes
 // use: the credential, the user's status, the request shape, the session's
 // cap, the agent's existence (404), authorization (403), and only then the
-// agent's state (409), its broker (503) and its session (503), so a caller
-// who may not use the agent learns nothing about it.
+// agent's state (409), the tcp target port (403), its broker (503) and its
+// session (503), so a caller who may not use the agent learns nothing
+// about it.
 func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSession, body []byte) (*conduitTunnelResponse, error) {
 	info := ls.Info()
 	log := slog.Default().With("subsystem", "hub.conduit", "user_id", ts.identity.ID(), "session_id", info.SessionID)
@@ -442,9 +443,11 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 // checkTunnelTarget runs a tunnel request's checks on its target agent, in
 // the order design §3.8 rule 7 fixes for every tunnel path: the agent
 // exists (404), the user may open the kind on it (403, or 503 when that
-// cannot be evaluated), it is running (409 agent_not_running), and its
-// runtime broker is connected (503). It returns the agent, the TCP port
-// the kind names (0 for other kinds) and log with the agent added.
+// cannot be evaluated), it is running (409 agent_not_running), a tcp
+// target port is one the agent exposes (403, checked after the agent's
+// state, so a stopped agent is reported 409 rather than refused the port),
+// and its runtime broker is connected (503). It returns the agent, the TCP
+// port the kind names (0 for other kinds) and log with the agent added.
 func (ts *conduitTunnelSession) checkTunnelTarget(ctx context.Context, log *slog.Logger, agentID, kind string, params map[string]string) (*store.Agent, int, *slog.Logger, error) {
 	s := ts.s
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -479,6 +482,15 @@ func (ts *conduitTunnelSession) checkTunnelTarget(ctx context.Context, log *slog
 	switch state.Phase(agent.Phase) {
 	case state.PhaseStopped, state.PhaseHalted, state.PhaseStopping, state.PhaseSuspended:
 		return nil, 0, log, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
+	}
+	// The tcp target port is checked after the agent's state: a stopped
+	// agent no longer exposes its ports, and a caller who may use the
+	// agent is told it is not running rather than refused the port.
+	if kind == grant.StreamKindTCP {
+		if err := s.authorizeConduitTCPTarget(agent, port); err != nil {
+			log.Info("Conduit tunnel refused", "cause", "forbidden", "error", err)
+			return nil, 0, log, tunnelRefusal(tunnelForbidden, "not permitted")
+		}
 	}
 	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)
 	if err != nil {
@@ -567,11 +579,13 @@ func parseConduitTunnelRequest(body []byte) (*conduitTunnelRequest, string, map[
 // authorizeConduitTunnel decides a tunnel request (§3.5) with
 // authorizeConduitUserStream, the decision every re-check of the tunnel's
 // stream repeats: the user's status, ActionTunnel and the kind's action
-// (ActionPortAccess on an authorized agent-local target for tcp,
-// ActionAttach for pty and ssh). It returns the tcp port (0 for other
-// kinds). mintConduitGrant repeats these checks when it mints; deciding
-// here first keeps a refused caller from learning the agent's state or
-// session.
+// (ActionPortAccess for tcp, ActionAttach for pty and ssh). The tcp
+// target port is left to the caller (DeferTCPTarget), which checks it
+// with authorizeConduitTCPTarget after the agent's state; re-checks
+// include it. It returns the tcp port (0 for other kinds).
+// mintConduitGrant repeats every check, the port included, when it mints;
+// deciding here first keeps a refused caller from learning the agent's
+// state or session.
 //
 // A deny by the user-status rule is the *conduitTunnelError userActive
 // returns; a user lookup that fails wraps errConduitUserStatusUnavailable
@@ -585,11 +599,12 @@ func (s *Server) authorizeConduitTunnel(ctx context.Context, identity UserIdenti
 		}
 	}
 	verdict, reason, err := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:  identity,
-		Agent:     agent,
-		Kind:      kind,
-		ViaTunnel: true,
-		Port:      port,
+		Identity:       identity,
+		Agent:          agent,
+		Kind:           kind,
+		ViaTunnel:      true,
+		Port:           port,
+		DeferTCPTarget: true,
 	})
 	switch {
 	case verdict == conduitAuthzAllowed:
@@ -759,7 +774,7 @@ func conduitTunnelOpenError(err error) error {
 func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity, forRelay bool) (conduitAdmission, bool) {
 	rt := s.conduit.Load()
 	if rt == nil && !forRelay {
-		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
+		s.writeConduitRelayNotRunning(w)
 		return conduitAdmission{}, false
 	}
 	expiry, err := s.conduitCredentialExpiry(r)

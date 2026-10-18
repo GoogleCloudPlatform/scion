@@ -429,6 +429,7 @@ func (s *Server) runAgentPTY(ctx context.Context, conn *websocket.Conn, identity
 	cols, rows := ptyInitialSize(q)
 	up := &agentPTYUpstream{s: s, identity: identity, agent: agent}
 	session := newPTYSessionWithUpstream(ctx, agent.Slug, conn, up, cols, rows)
+	session.credentialCheck = s.ptyTokenCredentialCheck(ctx, agent)
 	defer session.Close()
 
 	slog.Info("PTY session started", "agent_id", agent.ID, "slug", agent.Slug, "user", identity.ID(), "path", string(ptyPathAgent))

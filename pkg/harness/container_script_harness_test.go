@@ -1414,6 +1414,46 @@ func TestContainerScriptHarness_ProvisionReferencesMCPInputInManifest(t *testing
 	}
 }
 
+// The manifest names inputs.agent_plugins only when the control plane
+// staged inputs/plugins.json.
+func TestContainerScriptHarness_ManifestAgentPluginsInput(t *testing.T) {
+	read := func(t *testing.T, agentHome string) ProvisionManifest {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m ProvisionManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	for _, staged := range []bool{false, true} {
+		h, _ := newTestContainerScriptHarness(t)
+		agentHome := t.TempDir()
+		if staged {
+			inputs := filepath.Join(agentHome, ".scion", "harness", "inputs")
+			if err := os.MkdirAll(inputs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(inputs, "plugins.json"), []byte(`{"schema_version":1,"plugins":[]}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := h.Provision(context.Background(), "a", agentHome, agentHome, "/workspace"); err != nil {
+			t.Fatal(err)
+		}
+		got := read(t, agentHome).Inputs.AgentPlugins
+		if staged && !strings.HasSuffix(got, "/inputs/plugins.json") {
+			t.Errorf("staged: manifest.Inputs.AgentPlugins=%q", got)
+		}
+		if !staged && got != "" {
+			t.Errorf("not staged: manifest.Inputs.AgentPlugins=%q, want empty", got)
+		}
+	}
+}
+
 func TestSetManifestAgentWorkspace(t *testing.T) {
 	h, _ := newTestContainerScriptHarness(t)
 	agentHome := t.TempDir()

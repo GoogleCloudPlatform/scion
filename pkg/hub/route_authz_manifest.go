@@ -203,6 +203,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off
+	"/api/v1/admin/conduit/grant-keys/revoke":    "admin", // POST {kid}: revoke a conduit grant key at once; returns the kid only; 404 when hub.conduit is off
 	"/api/v1/admin/limits":                       "admin", // Admin limits
 	"/api/v1/admin/limits/":                      "admin", // Admin limit by ID
 	"/api/v1/admin/entitlements/":                "admin", // Admin entitlement by ID
@@ -265,7 +266,7 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Conduit (hub.conduit experiment) ───────────────────────────────
 	"/api/v1/conduit/grant-keys": "authenticated", // GET: public grant verification keys only; any signed-in identity; 404 when the experiment is off
-	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): the agent's own conduit session; agent:port:forward; 404 when the experiment is off
+	"/api/v1/conduit":            "agent-token",   // GET (WebSocket): conduit sessions; agent JWT (own agent row, agent:port:forward) or runtime broker HMAC (the shared /runtime-brokers/connect verifier; carries broker RPCs); 404 when the experiment is off
 
 	// ── Artifacts (hub.artifacts experiment) ──────────────────────────
 	"/api/v1/artifacts":         "authenticated", // Artifact collection (publish; ?mine=1 list filtered per row); service checks artifact.* through artifacts.Host; 404 when the experiment is off
@@ -303,6 +304,7 @@ var routeAuthzManifest = map[string]string{
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
+	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity
 	"POST /api/v1/test-identity-delegations":           "authenticated", // Create a workload issuer delegation (session only)
 	"GET /api/v1/test-identity-delegations":            "authenticated", // List workload issuer delegations (session only)
 	"DELETE /api/v1/test-identity-delegations/{id}":    "authenticated", // Revoke a workload issuer delegation (session only)

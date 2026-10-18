@@ -17,8 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,4 +198,143 @@ func TestAgentHeartbeatTimeoutHandler_SchedulerIntegration(t *testing.T) {
 	time.Sleep(130 * time.Millisecond)
 
 	scheduler.Stop()
+}
+
+// createHeartbeatTestBroker creates an online broker whose last heartbeat is
+// lastHeartbeat (zero leaves it unset, as the create path of the co-located
+// registration does).
+func createHeartbeatTestBroker(t *testing.T, s store.Store, slug string, lastHeartbeat time.Time) *store.RuntimeBroker {
+	t.Helper()
+	b := &store.RuntimeBroker{
+		ID:            api.NewUUID(),
+		Name:          slug,
+		Slug:          slug,
+		Status:        store.BrokerStatusOnline,
+		LastHeartbeat: lastHeartbeat,
+	}
+	if err := s.CreateRuntimeBroker(context.Background(), b); err != nil {
+		t.Fatalf("failed to create broker %s: %v", slug, err)
+	}
+	return b
+}
+
+func getHeartbeatTestBroker(t *testing.T, s store.Store, id string) *store.RuntimeBroker {
+	t.Helper()
+	b, err := s.GetRuntimeBroker(context.Background(), id)
+	if err != nil {
+		t.Fatalf("failed to get broker %s: %v", id, err)
+	}
+	return b
+}
+
+// A stateless co-located broker has no heartbeat of its own. After a restart
+// its last heartbeat is the registration time, so once the timeout has passed
+// the reaper must keep it online rather than mark it offline.
+func TestBrokerHeartbeatTimeoutHandler_StatelessBrokerStaysOnlineAfterRestart(t *testing.T) {
+	srv, s, _ := setupHeartbeatTestServer(t)
+	ctx := context.Background()
+
+	stateless := createHeartbeatTestBroker(t, s, "hosted-broker", time.Now().Add(-10*time.Minute))
+	srv.SetStatelessEmbeddedBrokerID(stateless.ID)
+
+	before := time.Now()
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	got := getHeartbeatTestBroker(t, s, stateless.ID)
+	if got.Status != store.BrokerStatusOnline {
+		t.Errorf("stateless broker status = %q after the timeout, want %q", got.Status, store.BrokerStatusOnline)
+	}
+	if got.LastHeartbeat.Before(before.Add(-time.Second)) {
+		t.Errorf("stateless broker last heartbeat = %v, want refreshed at or after %v", got.LastHeartbeat, before)
+	}
+
+	// A second sweep long after the first must still leave it online.
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+	if got := getHeartbeatTestBroker(t, s, stateless.ID); got.Status != store.BrokerStatusOnline {
+		t.Errorf("stateless broker status = %q after a second sweep, want %q", got.Status, store.BrokerStatusOnline)
+	}
+}
+
+// On first boot the co-located registration leaves the last heartbeat unset.
+// The sweep must treat that the same as a restart: online, with a heartbeat.
+func TestBrokerHeartbeatTimeoutHandler_StatelessBrokerFirstBootGetsHeartbeat(t *testing.T) {
+	srv, s, _ := setupHeartbeatTestServer(t)
+	ctx := context.Background()
+
+	stateless := createHeartbeatTestBroker(t, s, "hosted-broker", time.Time{})
+	srv.SetStatelessEmbeddedBrokerID(stateless.ID)
+
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	got := getHeartbeatTestBroker(t, s, stateless.ID)
+	if got.Status != store.BrokerStatusOnline {
+		t.Errorf("stateless broker status = %q, want %q", got.Status, store.BrokerStatusOnline)
+	}
+	if got.LastHeartbeat.IsZero() {
+		t.Error("stateless broker last heartbeat is unset after the sweep, want it set")
+	}
+}
+
+// Only the hub's own stateless broker is kept fresh: other stale brokers are
+// still marked offline in the same sweep.
+func TestBrokerHeartbeatTimeoutHandler_OtherStaleBrokersStillReaped(t *testing.T) {
+	srv, s, _ := setupHeartbeatTestServer(t)
+	ctx := context.Background()
+
+	stateless := createHeartbeatTestBroker(t, s, "hosted-broker", time.Now().Add(-10*time.Minute))
+	remote := createHeartbeatTestBroker(t, s, "remote-broker", time.Now().Add(-10*time.Minute))
+	fresh := createHeartbeatTestBroker(t, s, "fresh-broker", time.Now())
+	srv.SetStatelessEmbeddedBrokerID(stateless.ID)
+
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	if got := getHeartbeatTestBroker(t, s, stateless.ID); got.Status != store.BrokerStatusOnline {
+		t.Errorf("stateless broker status = %q, want %q", got.Status, store.BrokerStatusOnline)
+	}
+	if got := getHeartbeatTestBroker(t, s, remote.ID); got.Status != store.BrokerStatusOffline {
+		t.Errorf("stale remote broker status = %q, want %q", got.Status, store.BrokerStatusOffline)
+	}
+	if got := getHeartbeatTestBroker(t, s, fresh.ID); got.Status != store.BrokerStatusOnline {
+		t.Errorf("fresh broker status = %q, want %q", got.Status, store.BrokerStatusOnline)
+	}
+}
+
+// Without a stateless broker the sweep reaps as before, including a stale
+// stateful co-located broker (it has its own heartbeat loop).
+func TestBrokerHeartbeatTimeoutHandler_NoStatelessBrokerReapsNormally(t *testing.T) {
+	srv, s, _ := setupHeartbeatTestServer(t)
+	ctx := context.Background()
+
+	colocated := createHeartbeatTestBroker(t, s, "colocated-broker", time.Now().Add(-10*time.Minute))
+	srv.SetEmbeddedBrokerID(colocated.ID)
+
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	if got := getHeartbeatTestBroker(t, s, colocated.ID); got.Status != store.BrokerStatusOffline {
+		t.Errorf("stale stateful co-located broker status = %q, want %q", got.Status, store.BrokerStatusOffline)
+	}
+}
+
+// A failed refresh is logged and the sweep still runs.
+func TestBrokerHeartbeatTimeoutHandler_RefreshErrorDoesNotBlockSweep(t *testing.T) {
+	srv, s, _ := setupHeartbeatTestServer(t)
+	ctx := context.Background()
+
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	remote := createHeartbeatTestBroker(t, s, "remote-broker", time.Now().Add(-10*time.Minute))
+	// A stateless broker ID with no row makes the refresh fail.
+	srv.SetStatelessEmbeddedBrokerID(api.NewUUID())
+
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	if got := getHeartbeatTestBroker(t, s, remote.ID); got.Status != store.BrokerStatusOffline {
+		t.Errorf("stale remote broker status = %q after a failed refresh, want %q", got.Status, store.BrokerStatusOffline)
+	}
+	if !strings.Contains(logs.String(), "failed to refresh stateless co-located broker heartbeat") {
+		t.Errorf("refresh failure not logged; logs:\n%s", logs.String())
+	}
 }

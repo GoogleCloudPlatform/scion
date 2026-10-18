@@ -123,6 +123,9 @@ type CascadeSummary struct {
 	ProjectProviders  int `json:"project_providers_deleted"`
 	ProjectSyncStates int `json:"project_sync_states_deleted"`
 	DelegationEdges   int `json:"delegation_edges_deactivated"`
+	// ProjectVisitorRules is the number of project visitor rules deleted;
+	// their bindings and exclusions are deleted with them.
+	ProjectVisitorRules int `json:"project_visitor_rules_deleted"`
 	// DelegationEdgeOpID is the operation ID stamped on every edge
 	// deactivated by the delete; empty when no edge was deactivated.
 	DelegationEdgeOpID string `json:"delegation_edge_op_id,omitempty"`
@@ -615,6 +618,20 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 		}
 	}
 
+	// 1b. Project visitor rules — each rule, with the bindings it created
+	// and its exclusions. The rule rows have no foreign key to the project;
+	// a rule left behind would bind matching visitors at the deleted
+	// project's ID again on their next request. Bindings are deleted here
+	// before the rules are locked, while removing or changing one rule
+	// locks the rule before its bindings; both take the project row lock
+	// first (Delete step 6, purgeFixtureProject), so they do not run
+	// interleaved.
+	if n, err := tx.DeleteProjectVisitorRulesByProject(ctx, projectID); err != nil {
+		return cs, fmt.Errorf("cascade project visitor rules: %w", err)
+	} else {
+		cs.ProjectVisitorRules = n
+	}
+
 	// 2. Groups — project-scoped groups (which may carry role bindings).
 	// Paginate to ensure completeness for projects with many groups.
 	for {
@@ -764,6 +781,8 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// | Table                  | Mechanism                                              | Security |
 	// |------------------------|---------------------------------------------------------|----------|
 	// | role_bindings          | Transactional: DeleteRoleBindingsForScope (step 1)      | Auth     |
+	// | project_visitor_rules  | Transactional: DeleteProjectVisitorRulesByProject (1b)   | Auth     |
+	// |   (+ project_visitor_exclusions and the rules' role_bindings)                       |          |
 	// | groups                 | Transactional: ListGroups + DeleteGroup (step 2)         | Auth     |
 	// | secrets                | Transactional: DeleteSecretsByScope (step 3)             | Cred     |
 	// | env_vars               | Transactional: DeleteEnvVarsByScope (step 4)             | Config   |

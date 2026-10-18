@@ -1,0 +1,390 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+)
+
+// Grant key retention, seed removal and revocation on the hub (design §3.5,
+// Target-side deadlines, Re-check).
+
+const conduitGrantKeyRevokePath = "/api/v1/admin/conduit/grant-keys/revoke"
+
+// TestAdminConduitGrantKeyRevoke covers the revoke route: who may call it,
+// the experiment gate, the method, the refusals, and the effect on the
+// published and re-check key sets.
+func TestAdminConduitGrantKeyRevoke(t *testing.T) {
+	srv, _, hubAdmin, member := setupScopedAdminTest(t)
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	srv.conduitGrants = newConduitGrantKeys(&memoryConduitGrantKeyStore{}, clock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	first, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	body := map[string]string{"kid": first.KeyID}
+
+	t.Run("refused callers", func(t *testing.T) {
+		assert.Equal(t, http.StatusUnauthorized, doRequestNoAuth(t, srv, http.MethodPost, conduitGrantKeyRevokePath, body).Code)
+		assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, member, http.MethodPost, conduitGrantKeyRevokePath, body).Code)
+		assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, hubAdmin, http.MethodPost, conduitGrantKeyRevokePath, body).Code)
+	})
+	t.Run("method and experiment gate", func(t *testing.T) {
+		assert.Equal(t, http.StatusMethodNotAllowed, doRequest(t, srv, http.MethodGet, conduitGrantKeyRevokePath, nil).Code)
+		setConduitExperiment(t, srv, false)
+		assert.Equal(t, http.StatusNotFound, doRequest(t, srv, http.MethodPost, conduitGrantKeyRevokePath, body).Code)
+		setConduitExperiment(t, srv, true)
+	})
+	t.Run("missing and unknown kid", func(t *testing.T) {
+		assert.Equal(t, http.StatusBadRequest, doRequest(t, srv, http.MethodPost, conduitGrantKeyRevokePath, map[string]string{}).Code)
+		assert.Equal(t, http.StatusNotFound, doRequest(t, srv, http.MethodPost, conduitGrantKeyRevokePath, map[string]string{"kid": "cg-unknown"}).Code)
+	})
+	t.Run("the active signing key is refused", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost, conduitGrantKeyRevokePath, body)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		pubs, err := srv.ConduitGrantPublicKeys(ctx)
+		require.NoError(t, err)
+		require.Len(t, pubs, 1)
+		assert.Equal(t, first.KeyID, pubs[0].KeyID)
+	})
+	t.Run("a rotated-out key is revoked at once", func(t *testing.T) {
+		rot := rotateConduitGrantKeyAsAdmin(t, srv)
+		clock.Advance(rot.ActivateAt.Sub(clock.Now()) + time.Second)
+		rec := doRequest(t, srv, http.MethodPost, conduitGrantKeyRevokePath, body)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		assert.ElementsMatch(t, []string{"kid"}, jsonFieldNames(raw))
+
+		pubs, err := srv.ConduitGrantPublicKeys(ctx)
+		require.NoError(t, err)
+		for _, pk := range pubs {
+			assert.NotEqual(t, first.KeyID, pk.KeyID, "revoked key still published")
+		}
+		recheck, err := srv.conduitGrants.recheckKeys(ctx)
+		require.NoError(t, err)
+		_, ok := recheck.Lookup(first.KeyID)
+		assert.False(t, ok, "revoked key still in the re-check key set")
+		_, ok = recheck.Lookup(rot.KeyID)
+		assert.True(t, ok, "the current key is in the re-check key set")
+	})
+}
+
+// TestConduitGrantRingDropsOutgoingSeedOnLoad: once the rotated-in key has
+// activated, the next ring load stores the ring without the outgoing key's
+// seed; the outgoing key is still published until its not_after and stays
+// in the re-check key set, but never signs again.
+func TestConduitGrantRingDropsOutgoingSeedOnLoad(t *testing.T) {
+	srv, _ := testServer(t)
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, clock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	first, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+
+	rot := rotateConduitGrantKeyAsAdmin(t, srv)
+	clock.Advance(rot.ActivateAt.Sub(clock.Now()) + conduitGrantKeyRefresh)
+	s, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, rot.KeyID, s.KeyID)
+
+	ring, _, err := mem.Load(ctx)
+	require.NoError(t, err)
+	var found bool
+	for _, k := range ring.Keys {
+		if k.KeyID == first.KeyID {
+			found = true
+			assert.Empty(t, k.Seed, "the stored ring still holds the outgoing key's seed")
+			assert.Len(t, k.PublicKey, 32)
+		}
+	}
+	require.True(t, found, "the outgoing key is still in the ring within the overlap")
+	pubs, err := srv.ConduitGrantPublicKeys(ctx)
+	require.NoError(t, err)
+	assert.Len(t, pubs, 2, "the outgoing key is still published within the overlap")
+	recheck, err := srv.conduitGrants.recheckKeys(ctx)
+	require.NoError(t, err)
+	_, ok := recheck.Lookup(first.KeyID)
+	assert.True(t, ok)
+}
+
+// TestConduitGrantKeyRetentionFollowsInterval: retention is the user stream
+// authorization interval plus 30s, with the 8h default.
+func TestConduitGrantKeyRetentionFollowsInterval(t *testing.T) {
+	srv, _ := testServer(t)
+	assert.Equal(t, defaultConduitUserStreamAuthzMax+30*time.Second, srv.conduitGrantKeyRetention())
+	srv.config.ConduitUserStreamAuthzMax = 2 * time.Hour
+	assert.Equal(t, 2*time.Hour+30*time.Second, srv.conduitGrantKeyRetention())
+}
+
+// TestConduitGrantRingSettledWithoutTraffic: with no grant traffic at all,
+// the stored ring loses the outgoing key's seed within one settle period
+// (conduitGrantKeyRefresh) after the rotated-in key activates.
+func TestConduitGrantRingSettledWithoutTraffic(t *testing.T) {
+	srv, _ := testServer(t)
+	keyClock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, keyClock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	first, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	rot := rotateConduitGrantKeyAsAdmin(t, srv)
+
+	start := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	loopClock := clock.NewFake(start)
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	_, stop, err := srv.startConduitStreamAuthz(runCtx, loopClock, -1)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	seed := func() []byte {
+		ring, _, err := mem.Load(ctx)
+		require.NoError(t, err)
+		for _, k := range ring.Keys {
+			if k.KeyID == first.KeyID {
+				return k.Seed
+			}
+		}
+		t.Fatal("the outgoing key left the ring")
+		return nil
+	}
+	require.NotEmpty(t, seed(), "the stored ring holds the outgoing seed before activation")
+	keyClock.Advance(rot.ActivateAt.Sub(keyClock.Now()) + time.Second)
+	require.True(t, loopClock.WaitForTimer(5*time.Second, start.Add(conduitGrantKeyRefresh)), "the settle is not armed")
+	loopClock.Advance(conduitGrantKeyRefresh)
+	require.Eventually(t, func() bool { return len(seed()) == 0 }, 5*time.Second, 10*time.Millisecond,
+		"the stored ring still holds the outgoing seed one settle period after activation")
+}
+
+// TestConduitGrantRingSingleKeyNotRewritten: a stored ring with one active
+// key and no successor is never written back by loading or settling it, so
+// a hub upgraded onto an existing ring writes nothing.
+func TestConduitGrantRingSingleKeyNotRewritten(t *testing.T) {
+	srv, _ := testServer(t)
+	keyClock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, keyClock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	_, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	_, rev, err := mem.Load(ctx)
+	require.NoError(t, err)
+	for range 3 {
+		keyClock.Advance(conduitGrantKeyRefresh)
+		require.NoError(t, srv.conduitGrants.settleNow(ctx))
+		_, err := srv.ConduitGrantPublicKeys(ctx)
+		require.NoError(t, err)
+	}
+	_, after, err := mem.Load(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, rev, after, "the single-key ring was rewritten")
+}
+
+// racingGrantKeyStore runs beforeCAS once, just before the first
+// compare-and-swap reaches the store: a concurrent writer that gets there
+// first.
+type racingGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	beforeCAS func()
+}
+
+func (r *racingGrantKeyStore) CompareAndSwap(ctx context.Context, ring *grant.KeyRing, rev int) (bool, error) {
+	if f := r.beforeCAS; f != nil {
+		r.beforeCAS = nil
+		f()
+	}
+	return r.memoryConduitGrantKeyStore.CompareAndSwap(ctx, ring, rev)
+}
+
+// TestConduitGrantRingLostSettleWriteRereads: when a node's write of a
+// settled ring loses to another node's revocation, the node uses the newer
+// stored ring, not the one it settled from the superseded revision, so it
+// does not cache the revoked kid.
+func TestConduitGrantRingLostSettleWriteRereads(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	a := newConduitGrantKeys(mem, clk.Now)
+	first, err := a.signer(ctx)
+	require.NoError(t, err)
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	clk.Advance(rot.ActivateAt.Sub(clk.Now()) + time.Second) // b's next load settles the ring
+
+	racing := &racingGrantKeyStore{memoryConduitGrantKeyStore: mem}
+	racing.beforeCAS = func() { require.NoError(t, a.revoke(ctx, first.KeyID)) }
+	b := newConduitGrantKeys(racing, clk.Now)
+	pubs, err := b.publicKeys(ctx)
+	require.NoError(t, err)
+	require.Nil(t, racing.beforeCAS, "b's load did not try to store a settled ring")
+	for _, k := range pubs {
+		assert.NotEqual(t, first.KeyID, k.KeyID, "b caches the kid revoked while its settle write was in flight")
+	}
+	recheck, err := b.recheckKeys(ctx)
+	require.NoError(t, err)
+	_, ok := recheck.Lookup(first.KeyID)
+	assert.False(t, ok)
+}
+
+// gatedGrantKeyStore holds every Load while gated, until released.
+type gatedGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	gated   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	if g.gated.Load() {
+		g.entered <- struct{}{}
+		<-g.release
+	}
+	return g.memoryConduitGrantKeyStore.Load(ctx)
+}
+
+// TestConduitGrantFreshFetchDoesNotHoldSigning: a hub-direct key fetch
+// whose store read is in progress does not hold up signing, and the fetch
+// returns a ring at least as new as the request: a rotation stored while
+// the fetch waited to read is in its answer.
+func TestConduitGrantFreshFetchDoesNotHoldSigning(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	gated := &gatedGrantKeyStore{memoryConduitGrantKeyStore: mem, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	b := newConduitGrantKeys(gated, clk.Now)
+	_, err := b.signer(ctx) // creates and caches the ring
+	require.NoError(t, err)
+
+	gated.gated.Store(true)
+	type result struct {
+		keys []grant.PublicKey
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		keys, err := b.freshPublicKeys(ctx)
+		done <- result{keys, err}
+	}()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch did not read the store")
+	}
+	signed := make(chan error, 1)
+	go func() {
+		_, err := b.signer(ctx)
+		signed <- err
+	}()
+	select {
+	case err := <-signed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("signing waited for a key fetch's store read")
+	}
+
+	a := newConduitGrantKeys(mem, clk.Now)
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	gated.gated.Store(false)
+	close(gated.release)
+	r := <-done
+	require.NoError(t, r.err)
+	var found bool
+	for _, k := range r.keys {
+		found = found || k.KeyID == rot.KeyID
+	}
+	assert.True(t, found, "the fetch's answer predates a rotation stored before its read")
+}
+
+// heldReadGrantKeyStore reads the stored ring at once, then, while held,
+// holds the result until released.
+type heldReadGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	held    atomic.Bool
+	read    chan struct{}
+	release chan struct{}
+}
+
+func (h *heldReadGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int, error) {
+	ring, rev, err := h.memoryConduitGrantKeyStore.Load(ctx)
+	if h.held.Load() {
+		h.read <- struct{}{}
+		<-h.release
+	}
+	return ring, rev, err
+}
+
+// TestConduitGrantFreshFetchDoesNotUndoInvalidate: a hub-direct fetch that
+// read the ring before a revocation, and finishes after the change event
+// dropped the cache, does not put the ring it read back into the cache; the
+// node's next use reads the revoked state.
+func TestConduitGrantFreshFetchDoesNotUndoInvalidate(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	a := newConduitGrantKeys(mem, clk.Now)
+	_, err := a.signer(ctx)
+	require.NoError(t, err)
+	// The rotated-in key stays pending: it can be revoked, and there is
+	// nothing to settle.
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	held := &heldReadGrantKeyStore{memoryConduitGrantKeyStore: mem, read: make(chan struct{}, 1), release: make(chan struct{})}
+	b := newConduitGrantKeys(held, clk.Now)
+	_, err = b.publicKeys(ctx)
+	require.NoError(t, err)
+
+	held.held.Store(true)
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.freshPublicKeys(ctx)
+		done <- err
+	}()
+	select {
+	case <-held.read:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fetch did not read the store")
+	}
+	// Stored after the fetch's read; then the change event reaches b.
+	require.NoError(t, a.revoke(ctx, rot.KeyID))
+	b.invalidate()
+	held.held.Store(false)
+	close(held.release)
+	require.NoError(t, <-done)
+
+	pubs, err := b.publicKeys(ctx)
+	require.NoError(t, err)
+	for _, k := range pubs {
+		assert.NotEqual(t, rot.KeyID, k.KeyID, "the fetch put the ring it read before the revocation back into the cache")
+	}
+}

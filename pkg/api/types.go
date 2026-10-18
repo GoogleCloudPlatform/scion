@@ -540,6 +540,11 @@ type ScionConfig struct {
 	// Skills declares skill references to resolve at provision time.
 	Skills []SkillReference `json:"skills,omitempty" yaml:"skills,omitempty" koanf:"skills"`
 
+	// AgentPlugins declares Agent Plugins bundles to install natively into the
+	// harness (experiment hub.agent_plugins). Phase 1 resolves only
+	// template-relative paths.
+	AgentPlugins []AgentPluginReference `json:"agent_plugins,omitempty" yaml:"agent_plugins,omitempty" koanf:"agent_plugins"`
+
 	// Agnostic template fields
 	AgentInstructions    string `json:"agent_instructions,omitempty" yaml:"agent_instructions,omitempty"`
 	SystemPrompt         string `json:"system_prompt,omitempty" yaml:"system_prompt,omitempty"`
@@ -684,9 +689,11 @@ type AgentInfo struct {
 	// from the project directory. The Docker, Podman, Apple and Kubernetes
 	// List fill it from the container's scion.project_id label, which
 	// carries the Hub project ID; Cloud Run Sandbox List fills it from its
-	// state entry, which records the same value. Cloud Run List leaves it
-	// empty. The two sources can differ; callers that need the Hub project
-	// ID should read the scion.project_id label (ptone/scion#3020).
+	// state entry, which records the same value, and Cloud Run List from
+	// the instance's GCP-sanitized scion_project_id label (a Hub project ID
+	// is unchanged by the sanitizing). The two sources can differ; callers
+	// that need the Hub project ID should read the scion.project_id label
+	// (ptone/scion#3020).
 	ProjectID   string `json:"projectId,omitempty"`
 	ProjectPath string `json:"projectPath,omitempty"` // Filesystem path (solo mode)
 
@@ -803,6 +810,16 @@ type SkillReference struct {
 	// Scope indicates the injection source of this skill reference.
 	// Valid values: "hub", "user", "project", "template", "platform", "" (empty = lowest precedence).
 	// Used for destination-name collision resolution: higher-scope skills win.
+	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
+}
+
+// AgentPluginReference declares an Agent Plugins bundle to install natively.
+// Phase 1: Path is template-relative only (relative to the directory of the
+// template whose scion-agent.yaml declares it).
+type AgentPluginReference struct {
+	Path     string `json:"path" yaml:"path" koanf:"path"`
+	Optional bool   `json:"optional,omitempty" yaml:"optional,omitempty" koanf:"optional"`
+	// Scope is annotated by MergeScionConfig ("template"); informational in Phase 1.
 	Scope string `json:"scope,omitempty" yaml:"scope,omitempty" koanf:"scope"`
 }
 

@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
 // uploadRecordingStorage records every Upload call, so a test can assert
@@ -116,7 +117,10 @@ func TestHandleHarnessConfigFileWrite_RejectsUnusableProvisioner(t *testing.T) {
 			if err != nil {
 				t.Fatalf("get harness config: %v", err)
 			}
-			_, written := stor.content[hc.StoragePath+"/config.yaml"]
+			// The write stores config.yaml as a blob under the row's
+			// content base (ptone/scion#4219 part 2).
+			blobHex, _ := templateBlobHex(transfer.HashBytes([]byte(tc.configYAML)))
+			_, written := stor.content[templateBlobPath(srv.harnessConfigContentBase(hc), blobHex)]
 			if tc.wantStatus == http.StatusOK {
 				if !written || len(stored.Files) != 1 {
 					t.Errorf("expected config.yaml written and recorded: written=%v files=%+v", written, stored.Files)

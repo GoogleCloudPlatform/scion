@@ -169,7 +169,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// artifacts.Host checks each permission against that project
 	// (Resource{Type: artifact, ParentType: project}).
 	"artifact.read": true, "artifact.create": true, "artifact.update": true,
-	"artifact.delete": true, "artifact.manage": true,
+	"artifact.delete": true, "artifact.manage": true, "artifact.steward": true,
 
 	// scheduled_event.* — always scoped to a project.
 	"scheduled_event.read": true, "scheduled_event.list": true, "scheduled_event.create": true,
@@ -222,12 +222,15 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
+	// project.list's selector lists projects on either boundary; a project
+	// token lists only its boundary project.
+	"project.list": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
 	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
-	"artifact.manage": {BoundaryKindProject, BoundaryKindHub},
+	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
 	"template.create": {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
 	"template.update": {BoundaryKindProject, BoundaryKindHub}, "template.delete": {BoundaryKindProject, BoundaryKindHub},
 	"template.list":         {BoundaryKindProject, BoundaryKindHub},
@@ -263,11 +266,15 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
 	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
 	"hub.settings.update": {BoundaryKindHub},
+	// The allow list (invited users) is a hub-wide record, so its
+	// selectors are hub-only.
+	"hub.allow_list.read": {BoundaryKindHub}, "hub.allow_list.update": {BoundaryKindHub},
 
-	// scheduled_event.* reads, cancellation and pause act on one project's
-	// schedules. Authoring (scheduled_event.create) has no selector.
+	// scheduled_event.* act on one project's schedules: reads, cancellation,
+	// authoring, update, pause and resume.
 	"scheduled_event.read": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.list": {BoundaryKindProject, BoundaryKindHub},
 	"scheduled_event.update": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.delete": {BoundaryKindProject, BoundaryKindHub},
+	"scheduled_event.create": {BoundaryKindProject, BoundaryKindHub},
 
 	// hub.* integration and observability permissions act on the hub
 	// itself, so their selectors are hub-only.
@@ -374,11 +381,14 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
+	// project.list is a hub-level collection action (false in
+	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
+	"project.list": {TargetClassKindHubResource},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
 	"artifact.update": {TargetClassKindProjectScoped}, "artifact.delete": {TargetClassKindProjectScoped},
-	"artifact.manage": {TargetClassKindProjectScoped},
+	"artifact.manage": {TargetClassKindProjectScoped}, "artifact.steward": {TargetClassKindProjectScoped},
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level
@@ -453,10 +463,12 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
 	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
 	"hub.settings.update": {TargetClassKindHubResource},
+	"hub.allow_list.read": {TargetClassKindHubResource}, "hub.allow_list.update": {TargetClassKindHubResource},
 
 	// scheduled_event.* target a project's schedules.
 	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},
 	"scheduled_event.update": {TargetClassKindProjectScoped}, "scheduled_event.delete": {TargetClassKindProjectScoped},
+	"scheduled_event.create": {TargetClassKindProjectScoped},
 
 	// hub.* integration and observability permissions target the hub
 	// instance.
