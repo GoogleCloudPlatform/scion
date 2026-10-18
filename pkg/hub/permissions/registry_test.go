@@ -100,6 +100,8 @@ var expectedSelectorRegistry = map[string][]string{
 	"hub_metrics:read":                {"hub.metrics.read"},
 	"hub_github_app:read":             {"hub.github_app.read"},
 	"hub_github_app:update":           {"hub.github_app.update"},
+	"hub_allow_list:read":             {"hub.allow_list.read"},
+	"hub_allow_list:update":           {"hub.allow_list.update"},
 	"inbox:read":                      {"inbox.read"},
 	"inbox:write":                     {"inbox.write"},
 	"project:clone":                   {"project.clone"},

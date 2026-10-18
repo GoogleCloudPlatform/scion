@@ -263,6 +263,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
 	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
 	"hub.settings.update": {BoundaryKindHub},
+	// The allow list (invited users) is a hub-wide record, so its
+	// selectors are hub-only.
+	"hub.allow_list.read": {BoundaryKindHub}, "hub.allow_list.update": {BoundaryKindHub},
 
 	// scheduled_event.* act on one project's schedules: reads, cancellation,
 	// authoring, update, pause and resume.
@@ -454,6 +457,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
 	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
 	"hub.settings.update": {TargetClassKindHubResource},
+	"hub.allow_list.read": {TargetClassKindHubResource}, "hub.allow_list.update": {TargetClassKindHubResource},
 
 	// scheduled_event.* target a project's schedules.
 	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},

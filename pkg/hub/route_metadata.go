@@ -756,21 +756,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
