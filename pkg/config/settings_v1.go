@@ -1696,15 +1696,16 @@ type V1TrustedIssuerConfig struct {
 	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
 	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
 	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
-	// AllowedGCPProjects, AllowedDomains and AllowVisitorGrants must stay
-	// the last three fields, in the same position and order as on
-	// TrustedIssuerConfig (federation_config.go): this file's own
-	// GlobalConfig<->V1Settings conversions do a direct struct type
-	// conversion between the two (TrustedIssuerConfig(vi) and
+	// AllowedGCPProjects, AllowedDomains, AcceptUserTokens and
+	// AllowVisitorGrants must stay the last four fields, in the same
+	// position and order as on TrustedIssuerConfig (federation_config.go):
+	// this file's own GlobalConfig<->V1Settings conversions do a direct
+	// struct type conversion between the two (TrustedIssuerConfig(vi) and
 	// V1TrustedIssuerConfig(ti), below), which requires identical field
 	// name/type/order (struct tags aside).
 	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
 	AllowedDomains     []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+	AcceptUserTokens   bool     `json:"accept_user_tokens,omitempty" yaml:"accept_user_tokens,omitempty" koanf:"accept_user_tokens"`
 	AllowVisitorGrants bool     `json:"allow_visitor_grants,omitempty" yaml:"allow_visitor_grants,omitempty" koanf:"allow_visitor_grants"`
 }
 
@@ -3115,6 +3116,12 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+
+	// AgentPluginsSidecar is the agent_plugins capability read from the
+	// bundle's agent-plugins.yaml (AgentPluginsSidecarFile), nil when the
+	// bundle has none. It is not part of config.yaml. Read the effective value
+	// with AgentPluginsCapability.
+	AgentPluginsSidecar *api.CapabilityField `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessThinkingConfig maps the canonical 0-100 thinking level
@@ -3990,13 +3997,9 @@ func versionedEnvKeyMapper(s string) string {
 	if strings.HasPrefix(key, "cli_") {
 		return "cli." + strings.TrimPrefix(key, "cli_")
 	}
-	// Handle nested server keys — deep nesting requires mapping compound field names
+	// Server keys go through the env mapping table (server_env_table.go).
 	if strings.HasPrefix(key, "server_") {
-		rest := strings.TrimPrefix(key, "server_")
-		if a, ok := lookupServerEnvPathAlias(rest); ok {
-			return a.Path
-		}
-		return "server." + mapServerEnvKey(rest)
+		return serverEnvToVersionedKey(s)
 	}
 	// Handle nested telemetry keys — deep nesting with compound field names
 	if strings.HasPrefix(key, "telemetry_") {
@@ -4018,209 +4021,26 @@ var conduitV1EnvListKeys = []string{
 	"server.hub.conduit.tcp_allowed_ports",
 }
 
-// serverEnvPathAliases is the seed of the single env mapping table
-// (ptone/scion#3911): each entry names one server setting by its exact
-// settings path and the same setting's GlobalConfig koanf path. Both env
-// spellings of the setting, the canonical one (underscores inside a field
-// removed: SCION_SERVER_HUB_CONDUIT_PEERSECRET) and the underscored one
-// (SCION_SERVER_HUB_CONDUIT_PEER_SECRET), map to it in every env consumer:
-// versionedEnvKeyMapper, serverEnvToOpsettingsKey and envKeyToConfigKey
-// consult this table before their generic splitting. Entries match by the
-// whole path, never by a bare field name. The other server settings still
-// go through knownCompoundFields and the per-segment tables until #3911
-// moves them here.
-var serverEnvPathAliases = []serverEnvPathAlias{
-	{Path: "server.hub.conduit.peer_secret", GlobalConfig: "hub.conduit.peerSecret"},
-	{Path: "server.hub.conduit.relay_mode", GlobalConfig: "hub.conduit.relayMode"},
-	{Path: "server.relay.hub_internal_url", GlobalConfig: "relay.hubInternalUrl"},
-	{Path: "server.relay.public_url", GlobalConfig: "relay.publicUrl"},
-}
-
-// serverEnvPathAlias is one serverEnvPathAliases entry.
-type serverEnvPathAlias struct {
-	// Path is the settings (VersionedSettings, opsettings) key.
-	Path string
-	// GlobalConfig is the GlobalConfig koanf path of the same setting.
-	GlobalConfig string
-}
-
-// envSpellings returns the two env spellings of a.Path after SCION_SERVER_,
-// lower-cased: the canonical one and the underscored one.
-func (a serverEnvPathAlias) envSpellings() (canonical, underscored string) {
-	segs := strings.Split(strings.TrimPrefix(a.Path, "server."), ".")
-	underscored = strings.Join(segs, "_")
-	for i, s := range segs {
-		segs[i] = strings.ReplaceAll(s, "_", "")
-	}
-	return strings.Join(segs, "_"), underscored
-}
-
-// lookupServerEnvPathAlias returns the serverEnvPathAliases entry that rest,
-// an env name after SCION_SERVER_ (any case), spells.
-func lookupServerEnvPathAlias(rest string) (serverEnvPathAlias, bool) {
-	r := strings.ToLower(rest)
-	for _, a := range serverEnvPathAliases {
-		if c, u := a.envSpellings(); r == c || r == u {
-			return a, true
-		}
-	}
-	return serverEnvPathAlias{}, false
-}
-
-// knownCompoundFields lists multi-word snake_case field names used in server config.
-// These must be recognized as single fields rather than split into nested keys.
-// IMPORTANT: Sorted longest-first so that "dev_token_file" matches before "dev_token".
-var knownCompoundFields = []string{
-	"start_create_unconfirmed_hold",
-	"response_header_timeout",
-	"require_trusted_proxy_ip",
-	"soft_delete_retain_files",
-	"start_unconfirmed_hold",
-	"authz_recheck_interval",
-	"proxy_session_max_age",
-	"start_claim_lease_ttl",
-	"stream_authz_max",
-	"soft_delete_retention",
-	"peer_service_accounts",
-	"grant_key_activation",
-	"missing_agent_grace",
-	"internal_advertise",
-	"start_max_duration",
-	"tcp_allowed_ports",
-	"stalled_threshold",
-	"reconnect_window",
-	"internal_listen",
-	"shutdown_grace",
-	"peer_audience",
-	"lifetime_cap",
-	"instance_id",
-	"port_proxy",
-	"peer_auth",
-	"authorized_domains",
-	"platform_auth_sa",
-	"interval_seconds",
-	"public_key_file",
-	"metrics_enabled",
-	"tracing_enabled",
-	"max_concurrency",
-	"oidc_audience",
-	"jwks_url",
-	"jwks_file",
-	"broker_nickname",
-	"allowed_origins",
-	"allowed_methods",
-	"allowed_headers",
-	"dev_token_file",
-	"agent_endpoint",
-	"gcp_project_id",
-	"gcp_credentials",
-	"client_secret",
-	"write_timeout",
-	"read_timeout",
-	"display_name",
-	"broker_token",
-	"admin_emails",
-	"hub_endpoint",
-	"container_hub_endpoint",
-	"broker_name",
-	"public_url",
-	"local_path",
-	"log_format",
-	"broker_id",
-	"client_id",
-	"dev_token",
-	"log_level",
-	"dev_mode",
-	"max_age",
-}
-
-// collapsedCompoundFields maps the canonical env spelling of a compound
-// field, which drops the field's underscores (METRICSENABLED), to the field
-// name. Only fields listed here accept that spelling in this mapper; the
-// underscored spelling (METRICS_ENABLED) is accepted through
-// knownCompoundFields.
-var collapsedCompoundFields = map[string]string{
-	"metricsenabled": "metrics_enabled",
-	"tracingenabled": "tracing_enabled",
-}
-
-// mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
-// known multi-word snake_case fields so they are not incorrectly split.
-// For example: "hub_read_timeout" -> "hub.read_timeout"
-//
-//	"broker_broker_id" -> "broker.broker_id"
-//	"oauth_web_google_client_id" -> "oauth.web.google.client_id"
-func mapServerEnvKey(key string) string {
-	return mapEnvKeyRecursive(key)
-}
-
-// mapEnvKeyRecursive splits an env key fragment into dotted segments, recognizing
-// compound field names at each position.
-func mapEnvKeyRecursive(key string) string {
-	if key == "" {
+// serverEnvToVersionedKey maps a SCION_SERVER_* name to its VersionedSettings
+// key through the env mapping table: a canonical name or an alias of a
+// server setting lands on the setting's path. A name the table does not
+// hold resolves against V1ServerConfig by koanf tag (serverEnvResidue),
+// else to server. plus its lower-case segments joined with ".".
+func serverEnvToVersionedKey(name string) string {
+	if isServerEnvInert(name) {
 		return ""
 	}
-
-	// Check if the entire remaining key is a known compound field
-	for _, compound := range knownCompoundFields {
-		if key == compound {
-			return key
+	if e, _, ok := lookupServerEnv(name); ok && strings.HasPrefix(e.Path, "server.") {
+		if e, ok := resolveServerEnv(name, false); ok {
+			return e.Path
 		}
+		return "" // an alias the canonical name (or an earlier alias) overrides
 	}
-	if field, ok := collapsedCompoundFields[key]; ok {
-		return field
+	if directServerEnvNames[strings.ToUpper(name)] {
+		return "" // read directly with os.Getenv
 	}
-
-	// Try to match the longest known compound field at the end,
-	// treating the prefix as nesting segments.
-	// We scan for underscores and try to split at each one.
-	for i := 0; i < len(key); i++ {
-		if key[i] == '_' {
-			prefix := key[:i]
-			rest := key[i+1:]
-
-			// Check if the rest starts with a known compound field
-			matched := false
-			for _, compound := range knownCompoundFields {
-				if strings.HasPrefix(rest, compound) {
-					if len(rest) == len(compound) {
-						// Exact match for the rest
-						return prefix + "." + compound
-					}
-					if rest[len(compound)] == '_' {
-						// Compound field followed by more segments
-						return prefix + "." + compound + "." + mapEnvKeyRecursive(rest[len(compound)+1:])
-					}
-				}
-			}
-
-			if !matched {
-				// The prefix could be a section name (hub, broker, database, auth, oauth, storage, secrets, cors)
-				// Try recursively
-				subResult := mapEnvKeyRecursive(rest)
-				if subResult != rest || isSectionName(prefix) {
-					return prefix + "." + subResult
-				}
-			}
-		}
-	}
-
-	// No compound match found — the key is a simple single-word field
-	return key
-}
-
-// isSectionName checks if a name is a known section in the server config hierarchy.
-func isSectionName(name string) bool {
-	switch name {
-	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
-		"transport", "scheduler",
-		// relay: server.relay keys that serverEnvPathAliases does not list
-		// (future ones) map generically, like the other sections.
-		"relay":
-		return true
-	}
-	return false
+	rest := strings.ToLower(name[len(serverEnvPrefix):])
+	return settingsEnvResidue(strings.Split(rest, "_"), true, false)
 }
 
 // knownTelemetryCompoundFields lists multi-word snake_case field names used in telemetry config.

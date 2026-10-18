@@ -28,7 +28,7 @@ import (
 // the opsettings registry (not camelCase like LoadEnvKoanf).
 func TestLoadSeedEnvKoanf(t *testing.T) {
 	// SCION_SEED_SERVER_HUB_ADMINEMAILS → strip prefix → SERVER_HUB_ADMINEMAILS
-	// → envKeyToOpsettingsKey → server.hub.admin_emails (snake_case)
+	// → seedEnvToOpsettingsKey → server.hub.admin_emails (snake_case)
 	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
 	t.Setenv("SCION_SEED_SERVER_AUTH_USERACCESSMODE", "invite")
 	t.Setenv("SCION_SEED_SERVER_HUB_PORT", "9999")
@@ -103,10 +103,12 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 		{"GITHUBAPP_APPID", "server.github_app.app_id"},
 		{"LOGLEVEL", "server.log_level"},
 		{"LOGFORMAT", "server.log_format"},
-		{"NOTIFICATIONCHANNELS", "server.notification_channels"},
+		// A list of objects: no single env string sets it, so the name
+		// lands on no setting (as server.federation.trusted_issuers).
+		{"NOTIFICATIONCHANNELS", "server.notificationchannels"},
 		{"STORAGE_PROVIDER", "server.storage.provider"},
 		{"SECRETS_BACKEND", "server.secrets.backend"},
-		{"OAUTH_CLI_GOOGLE_CLIENTID", "server.oauth.cli.google.clientid"},
+		{"OAUTH_CLI_GOOGLE_CLIENTID", "server.oauth.cli.google.client_id"},
 		// Non-server keys pass through unchanged.
 		{"TELEMETRY_ENABLED", "telemetry.enabled"},
 		{"DEFAULTTEMPLATE", "default_template"},
@@ -155,7 +157,7 @@ func TestServerEnvToOpsettingsKey(t *testing.T) {
 }
 
 // TestSeedEnvToOpsettingsKey_MappedNames verifies SCION_SEED_* spellings,
-// which go through envKeyToOpsettingsKey with an explicit SERVER_ segment for
+// which go through seedEnvToOpsettingsKey with an explicit SERVER_ segment for
 // server keys: the federation, project_defaults and harness_configs keys
 // (ptone/scion#3836) and the remaining server keys (ptone/scion#3859).
 func TestSeedEnvToOpsettingsKey_MappedNames(t *testing.T) {
@@ -172,29 +174,25 @@ func TestSeedEnvToOpsettingsKey_MappedNames(t *testing.T) {
 		"SERVER_HOMESTORAGE":         "server.home_storage",
 		"SERVER_OIDCLOGIN_ENABLED":   "server.oidc_login.enabled",
 		// Unchanged existing mappings.
-		"SERVER_HUB_ADMINEMAILS":     "server.hub.admin_emails",
-		"AUTOEXPOSEPORTS_ENABLED":    "auto_expose_ports.enabled",
-		"SERVER_HUB_RECONNECTWINDOW": "server.hub.reconnect_window",
+		"SERVER_HUB_ADMINEMAILS":             "server.hub.admin_emails",
+		"AUTOEXPOSEPORTS_ENABLED":            "auto_expose_ports.enabled",
+		"SERVER_HUB_CONDUIT_RECONNECTWINDOW": "server.hub.conduit.reconnect_window",
 	} {
-		if got := envKeyToOpsettingsKey(envKey); got != want {
-			t.Errorf("envKeyToOpsettingsKey(%q) = %q, want %q", envKey, got, want)
+		if got := seedEnvToOpsettingsKey(envKey); got != want {
+			t.Errorf("seedEnvToOpsettingsKey(%q) = %q, want %q", envKey, got, want)
 		}
 	}
 }
 
-// TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey checks that every
-// top-level V1ServerConfig koanf tag is a server sub-key and that its
-// flat-lowercased env segment maps back to it, so SCION_SERVER_<KEY>_* lands
-// under server.<key>.* (ptone/scion#3859).
+// TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey checks that the
+// flat-lowercased env segment of every top-level V1ServerConfig koanf tag
+// maps back to it, so SCION_SERVER_<KEY>_* lands under server.<key>.*
+// (ptone/scion#3859).
 func TestServerEnvToOpsettingsKey_CoversEveryServerConfigKey(t *testing.T) {
 	typ := reflect.TypeOf(V1ServerConfig{})
 	for i := 0; i < typ.NumField(); i++ {
 		tag, _, _ := strings.Cut(typ.Field(i).Tag.Get("koanf"), ",")
 		if tag == "" || tag == "-" {
-			continue
-		}
-		if !serverSubKeys[tag] {
-			t.Errorf("V1ServerConfig key %q is missing from serverSubKeys", tag)
 			continue
 		}
 		segment := strings.ToUpper(strings.ReplaceAll(tag, "_", ""))

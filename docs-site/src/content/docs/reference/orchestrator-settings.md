@@ -123,6 +123,8 @@ runtimes:
 | `kubernetes_block_service_account` | string | (Kubernetes) Kubernetes ServiceAccount the agent pod runs as when its GCP identity mode is `block`. Use a dedicated ServiceAccount with no Workload Identity annotation and no IAM grants; Scion does not create or check it. Unset or empty: the pod runs as the namespace's default ServiceAccount. A profile's value wins over this. Read from global settings only. See [block](/scion/hosted/ha/kubernetes/#block). |
 | `env` | map | Environment variables to set for the runtime. |
 
+The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.workspace_storage.backend`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
+
 :::note
 The `tmux` field is now deprecated. All agent sessions are wrapped in tmux by default.
 :::

@@ -35,6 +35,8 @@ func baseRenewal() RenewalClaims {
 		Subject:    "user:u1",
 		ProjectID:  "proj-1",
 		Target:     baseTarget(),
+		Stream:     baseClaims().Stream,
+		Via:        ViaProxy,
 		StreamID:   3,
 		OpenJTI:    testOpenJTI,
 		AuthzUntil: t0.Add(2 * time.Hour),
@@ -48,6 +50,8 @@ func baseRenewalExpect() RenewalExpectation {
 		Target:    baseTarget(),
 		ProjectID: "proj-1",
 		Subject:   "user:u1",
+		Stream:    baseClaims().Stream,
+		Via:       ViaProxy,
 		StreamID:  3,
 		OpenJTI:   testOpenJTI,
 		After:     t0.Add(time.Hour),
@@ -97,6 +101,13 @@ func TestVerifyRenewal_Refusals(t *testing.T) {
 		{name: "other subject", claims: func(c *RenewalClaims) { c.Subject = "user:u2" }, want: ErrSubject},
 		{name: "other stream id", claims: func(c *RenewalClaims) { c.StreamID = 5 }, want: ErrStreamBinding},
 		{name: "other open jti", claims: func(c *RenewalClaims) { c.OpenJTI = "open-jti-2" }, want: ErrStreamBinding},
+		// The tunnel origin carries pty, so the renewal differs from the
+		// expectation in its stream first (Stream is compared before Via).
+		{name: "other stream kind", claims: func(c *RenewalClaims) { c.Stream, c.Via = StreamHeader{Kind: StreamKindPTY}, ViaTunnel }, want: ErrStream},
+		{name: "other via", claims: func(c *RenewalClaims) { c.Via = ViaTunnel }, want: ErrVia},
+		{name: "other stream params", claims: func(c *RenewalClaims) {
+			c.Stream = StreamHeader{Kind: StreamKindTCP, Params: map[string]string{ParamHost: "127.0.0.1", ParamPort: "9090"}}
+		}, want: ErrStream},
 		{name: "wrong issuer", expect: func(e *RenewalExpectation) { e.Issuer = "other-hub" }, want: ErrIssuer},
 		{name: "does not extend", claims: func(c *RenewalClaims) { c.AuthzUntil = t0.Add(time.Hour) }, want: ErrAuthzUntil},
 		{name: "earlier than current", claims: func(c *RenewalClaims) { c.AuthzUntil = t0.Add(30 * time.Minute) }, want: ErrAuthzUntil},
@@ -214,20 +225,31 @@ func TestVerifyRenewal_Keys(t *testing.T) {
 
 func TestMintRenewal_RejectsInvalidClaims(t *testing.T) {
 	f := newFixture(t)
-	tests := map[string]func(*RenewalClaims){
-		"missing stream id":      func(c *RenewalClaims) { c.StreamID = 0 },
-		"missing open jti":       func(c *RenewalClaims) { c.OpenJTI = "" },
-		"missing authz_until":    func(c *RenewalClaims) { c.AuthzUntil = time.Time{} },
-		"authz_until before nbf": func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) },
-		"validity over 60s":      func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) },
-		"incomplete target":      func(c *RenewalClaims) { c.Target.SessionID = "" },
+	// Each row names the error and the validation message it must fail
+	// with, so a row cannot pass on an earlier, unrelated check.
+	tests := map[string]struct {
+		mut  func(*RenewalClaims)
+		want error
+		msg  string
+	}{
+		"missing stream id":      {func(c *RenewalClaims) { c.StreamID = 0 }, ErrInvalidClaims, "missing stream_id"},
+		"missing open jti":       {func(c *RenewalClaims) { c.OpenJTI = "" }, ErrInvalidClaims, "missing open_jti"},
+		"missing stream":         {func(c *RenewalClaims) { c.Stream = StreamHeader{} }, ErrInvalidClaims, "missing or unknown stream kind"},
+		"missing via":            {func(c *RenewalClaims) { c.Via = "" }, ErrInvalidClaims, "missing or unknown via"},
+		"unknown via":            {func(c *RenewalClaims) { c.Via = "elsewhere" }, ErrInvalidClaims, "missing or unknown via"},
+		"proxy via, pty stream":  {func(c *RenewalClaims) { c.Stream = StreamHeader{Kind: StreamKindPTY} }, ErrVia, "does not carry stream kind"},
+		"missing authz_until":    {func(c *RenewalClaims) { c.AuthzUntil = time.Time{} }, ErrInvalidClaims, "missing nbf, exp or authz_until"},
+		"authz_until before nbf": {func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) }, ErrInvalidClaims, "authz_until must be after nbf"},
+		"validity over 60s":      {func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) }, ErrValidityWindow, "exp-nbf"},
+		"incomplete target":      {func(c *RenewalClaims) { c.Target.SessionID = "" }, ErrInvalidClaims, "incomplete target"},
 	}
-	for name, mut := range tests {
+	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
 			c := baseRenewal()
-			mut(&c)
-			if _, err := MintRenewal(f.signer, c); err == nil {
-				t.Fatal("MintRenewal accepted invalid claims")
+			tt.mut(&c)
+			_, err := MintRenewal(f.signer, c)
+			if !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.msg) {
+				t.Fatalf("MintRenewal: %v, want %v (%q)", err, tt.want, tt.msg)
 			}
 		})
 	}
@@ -339,12 +361,25 @@ func TestVerify_RequireDeadlineFor(t *testing.T) {
 			t.Fatalf("the same grant without the requirement: %v", err)
 		}
 	})
-	t.Run("user grant with authz_until accepted", func(t *testing.T) {
+	t.Run("user grant with authz_until and via accepted", func(t *testing.T) {
 		c := baseClaims()
 		c.Subject = SubjectUserPrefix + "u1"
-		c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+		c.AuthzUntil, c.AuthzInterval, c.Via = t0.Add(time.Hour), time.Hour, ViaProxy
 		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, newCache(), now); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("user grant with authz_until but no via refused, jti kept", func(t *testing.T) {
+		cache := newCache()
+		c := baseClaims()
+		c.Subject, c.JTI = SubjectUserPrefix+"u1", "jti-novia"
+		c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, cache, now); !errors.Is(err, ErrVia) {
+			t.Fatalf("err = %v, want ErrVia", err)
+		}
+		c.Via = ViaTunnel
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, cache, now); err != nil {
+			t.Fatalf("the same jti with a via: %v", err)
 		}
 	})
 	t.Run("other subject not affected", func(t *testing.T) {
@@ -361,4 +396,132 @@ func TestVerify_RequireDeadlineFor(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// TestVerifyRenewal_StreamClaimRequired: a renewal token without the stream
+// claim (signed with a valid key) is refused and does not consume its jti
+// (design v2.21.26 §3.5).
+func TestVerifyRenewal_StreamClaimRequired(t *testing.T) {
+	f := newFixture(t)
+	now := t0.Add(time.Second)
+	c := baseRenewal()
+	c.JTI = "renewal-jti-fixed"
+	tok := f.mintRenewal(t, c)
+	pl := payloadOf(t, tok)
+	delete(pl, "stream")
+	forged := forge(f.signer.Key, header{Algorithm, RenewalTokenType, f.signer.KeyID}, pl)
+	cache := newCache()
+	if _, err := VerifyRenewal(context.Background(), forged, f.keys, baseRenewalExpect(), cache, now); err == nil {
+		t.Fatal("renewal without a stream claim accepted")
+	}
+	if _, err := VerifyRenewal(context.Background(), tok, f.keys, baseRenewalExpect(), cache, now); err != nil {
+		t.Fatalf("the same jti with the stream claim: %v", err)
+	}
+}
+
+// TestGrantViaClaim: via round-trips on a stream grant, is omitted when
+// empty, and an unknown value cannot be minted (design v2.21.29 §3.5).
+func TestGrantViaClaim(t *testing.T) {
+	f := newFixture(t)
+	c := baseClaims()
+	c.Via = ViaTunnel
+	got, err := Verify(context.Background(), f.mint(t, c), f.keys, baseExpect(), newCache(), t0.Add(time.Second))
+	if err != nil || got.Via != ViaTunnel {
+		t.Fatalf("via round trip: %+v, %v", got, err)
+	}
+	if pl := payloadOf(t, f.mint(t, baseClaims())); pl["via"] != nil {
+		t.Fatal("a grant without via carries the key")
+	}
+	c.Via = "elsewhere"
+	if _, err := Mint(f.signer, c); err == nil {
+		t.Fatal("an unknown via was minted")
+	}
+}
+
+// resignReplacing returns tok with old replaced by repl in its payload,
+// signed again with priv under the same header: a grant Mint would refuse
+// to sign, with canonical encoding.
+func resignReplacing(t *testing.T, priv ed25519.PrivateKey, tok []byte, old, repl string) []byte {
+	t.Helper()
+	parts := strings.Split(string(tok), ".")
+	payload, err := b64.DecodeString(parts[1])
+	if err != nil || strings.Count(string(payload), old) != 1 {
+		t.Fatalf("payload %s does not hold %q once", payload, old)
+	}
+	in := parts[0] + "." + b64.EncodeToString([]byte(strings.Replace(string(payload), old, repl, 1)))
+	return []byte(in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in))))
+}
+
+// TestViaAllows is the origin and kind table (design v2.21.29 §3.5).
+func TestViaAllows(t *testing.T) {
+	want := map[string][]string{
+		ViaTunnel: {StreamKindTCP, StreamKindSSH, StreamKindPTY},
+		ViaProxy:  {StreamKindTCP},
+		ViaPTY:    {StreamKindPTY},
+	}
+	for _, via := range []string{ViaTunnel, ViaProxy, ViaPTY, "", "elsewhere"} {
+		for _, kind := range []string{StreamKindTCP, StreamKindSSH, StreamKindPTY, StreamKindLogs, StreamKindEvents, "", "other"} {
+			allowed := false
+			for _, k := range want[via] {
+				allowed = allowed || k == kind
+			}
+			if got := ViaAllows(via, kind); got != allowed {
+				t.Errorf("ViaAllows(%q, %q) = %v, want %v", via, kind, got, allowed)
+			}
+		}
+	}
+}
+
+// TestViaOutsideTableRefused: a grant or renewal whose via does not carry
+// its stream kind cannot be minted, and one signed anyway is refused by
+// Verify, VerifyRenewal and VerifyRecheck with ErrVia, without consuming
+// its jti.
+func TestViaOutsideTableRefused(t *testing.T) {
+	f := newFixture(t)
+	now := t0.Add(time.Second)
+
+	open := baseClaims()
+	open.Via = ViaPTY // tcp stream
+	if _, err := Mint(f.signer, open); !errors.Is(err, ErrVia) {
+		t.Fatalf("Mint: %v, want ErrVia", err)
+	}
+	ren := baseRenewal()
+	ren.Via = ViaPTY
+	if _, err := MintRenewal(f.signer, ren); !errors.Is(err, ErrVia) {
+		t.Fatalf("MintRenewal: %v, want ErrVia", err)
+	}
+
+	open.Via = ViaTunnel
+	open.JTI = "open-table"
+	forgedOpen := resignReplacing(t, f.signer.Key, f.mint(t, open), `"via":"tunnel"`, `"via":"pty"`)
+	cache := newCache()
+	if _, err := Verify(context.Background(), forgedOpen, f.keys, baseExpect(), cache, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("Verify: %v, want ErrVia", err)
+	}
+	if cache.Len() != 0 {
+		t.Fatal("Verify consumed the jti of a refused grant")
+	}
+
+	ren.Via = ViaTunnel
+	ren.JTI = "renewal-table"
+	forgedRen := resignReplacing(t, f.signer.Key, f.mintRenewal(t, ren), `"via":"tunnel"`, `"via":"pty"`)
+	expect := baseRenewalExpect()
+	expect.Via = ViaPTY
+	if _, err := VerifyRenewal(context.Background(), forgedRen, f.keys, expect, cache, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRenewal: %v, want ErrVia", err)
+	}
+	if cache.Len() != 0 {
+		t.Fatal("VerifyRenewal consumed the jti of a refused renewal")
+	}
+
+	rx := RecheckExpectation{Issuer: "scion-hub", Target: baseTarget(), OpenJTI: testOpenJTI, StreamID: 3}
+	if _, err := VerifyRecheck(forgedRen, f.keys, rx, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRecheck renewal: %v, want ErrVia", err)
+	}
+	rc := recheckOpenClaims()
+	rc.Via = ViaTunnel
+	forgedRecheckOpen := resignReplacing(t, f.signer.Key, f.mint(t, rc), `"via":"tunnel"`, `"via":"pty"`)
+	if _, err := VerifyRecheck(forgedRecheckOpen, f.keys, rx, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRecheck open grant: %v, want ErrVia", err)
+	}
 }

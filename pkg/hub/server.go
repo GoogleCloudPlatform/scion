@@ -317,6 +317,12 @@ type ServerConfig struct {
 	// HubID is the unique hub instance ID used for secret namespacing.
 	// If empty, secrets are looked up/stored with an empty scope ID.
 	HubID string
+	// HubIDPinned is true when HubID was configured explicitly
+	// (server.hub.hub_id or SCION_SERVER_HUB_HUBID) rather than derived from
+	// the hostname, the persisted ~/.scion/hub-id file or K_SERVICE. Every
+	// replica of one logical hub must share one pinned id. Every --test-mode
+	// level but off requires it (ValidateTestModeConfig).
+	HubIDPinned bool
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
 	// MonitoringDashboardURL is the optional external monitoring dashboard
@@ -1707,10 +1713,18 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitBrokerRPCMetrics counts routed broker requests that fell back
+	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
+	// until SetConduitBrokerRPCMetrics.
+	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
-	conduitAuthzBindMu     sync.Mutex
-	conduitAuthzUnbind     func()
+	conduitAuthzBindMu sync.Mutex
+	conduitAuthzUnbind func()
+	// conduitGrantKeysBindMu guards conduitGrantKeysUnbind, which releases
+	// the grant key change subscription (conduit_grant_notify.go).
+	conduitGrantKeysBindMu sync.Mutex
+	conduitGrantKeysUnbind func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -1952,6 +1966,11 @@ type Server struct {
 	// testAdminAudit is the synchronous, level-independent stdout writer
 	// for test admin tier events (test_admin_audit_sink.go).
 	testAdminAudit *testAdminAuditSink
+	// testAdminPolicyClassified is true when New found the test-admin
+	// policy classification complete (TestAdminPolicyComplete) on a hub
+	// running an admin level. Admin-tier workload delegation scopes need it
+	// (workloadAdminScopeAvailable). Set once in New.
+	testAdminPolicyClassified bool
 
 	// signingKeySources records the source label of each signing key
 	// resolved at startup (signingKeySource). Labels only, never keys.
@@ -2260,6 +2279,11 @@ type Server struct {
 	// directly. Per-Server rather than a package var so a test can shorten
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
+
+	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
+	// authorizeConduitUserStream instead of authorizeConduitAction. Only
+	// tests set it, on their own Server; production code never does.
+	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2327,9 +2351,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateTestAdminWebSessionsConfig(cfg); err != nil {
 		return nil, err
 	}
-	// Workload issuer allowlist and issuer audience (X2): refuse a
-	// malformed allowlist, an admin-tier entry, a missing hub id, or an
-	// issuer audience shared with another accepted token audience.
+	// Workload issuer allowlist and issuer audience (X2, X4): refuse a
+	// malformed allowlist, an admin-tier entry below --test-mode=admin, a
+	// missing hub id, or an issuer audience shared with another accepted
+	// token audience.
 	if err := validateTestIdentityWorkloadIssuers(cfg); err != nil {
 		return nil, err
 	}
@@ -2626,7 +2651,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.proxyDrivers = newDriverPrincipalSet(cfg.ProxyDriverPrincipals)
 	srv.logTestIdentityWebSessionState()
 	srv.testAdminIssuance = newTestAdminIssuanceState()
-	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() })
+	srv.workloadIssuer = newWorkloadIssuerAuthenticator(cfg, s, func() time.Time { return srv.testIdentities.clock() }, srv.workloadAdminScopeAvailable)
 	if srv.workloadIssuer != nil && !cfg.EnableTestIdentities {
 		slog.Warn("Test identity workload issuers are configured but test identities are off; workload delegation stays unavailable")
 	}
@@ -2712,6 +2737,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
+	if cfg.TestAdminGate.requested() {
+		srv.testAdminPolicyClassified = TestAdminPolicyComplete() == nil
+	}
 	testModeCfg := cfg.TestMode
 	if cfg.TestAdminGate.requested() {
 		// verifyTestAdminSigningKeys passed above.
@@ -3058,6 +3086,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Federated visitors: a verified user token linked to an active
 		// federated account; off while federation.project_visitors is off.
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
+		// User access credentials from peer hub issuers: refused while
+		// federation.project_visitors is off.
+		FederationHubUserTokensEnabled: srv.federationHubUserTokensEnabled,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
 
@@ -4539,6 +4570,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
+	s.bindConduitGrantKeyEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
@@ -4699,6 +4731,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.controlChannel != nil {
 		hbc := NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
 		hbc.SetAffinityLookup(StoreAffinityLookup(s.store, 0))
+		// Transient broker operations go through the conduit Router when
+		// hub.conduit is on and the broker's session lists them.
+		hbc.SetConduitRouting(s.newRoutedBrokerTunnel())
 		if statelessBrokerID := s.GetStatelessEmbeddedBrokerID(); statelessBrokerID != "" {
 			hbc.SetStatelessLocalBrokers([]string{statelessBrokerID})
 		}
@@ -7002,6 +7037,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))

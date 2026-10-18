@@ -450,8 +450,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
-	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
-	// tokens with agent:port:forward only; the handler reads the agent row.
+	// Conduit sessions (WebSocket), behind hub.conduit. Agent principals
+	// authenticate with an agent token carrying agent:port:forward (the
+	// handler reads the agent row); runtime broker principals authenticate
+	// with broker HMAC through the shared /runtime-brokers/connect verifier,
+	// and their sessions carry the hub's transient broker RPCs.
 	"/api/v1/conduit": {
 		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
 		Classification: RouteAgentToken,
@@ -753,21 +756,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
@@ -811,6 +818,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
 		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Conduit grant key revocation, behind hub.conduit. Removes a key at
+	// once; returns the kid only.
+	"/api/v1/admin/conduit/grant-keys/revoke": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/revoke", RouteID: "admin.conduit.grantKeys.revoke",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
@@ -1133,7 +1148,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// only by super-admin. The handlers return 404 unless the hub started
 	// with --test-mode=admin or above, and re-check the issuer (human, live
 	// super-admin, the requested kind's capability, exact-scope hub token at
-	// most 8 h old).
+	// most 8 h old). A workload issuer delegation of the kind's scope (X4)
+	// reaches issuance too, as its grantor within that one scope.
 	"POST /api/v1/test-identities/admin": {
 		Pattern: "POST /api/v1/test-identities/admin", RouteID: "testIdentities.admin.create",
 		Classification: RouteHubAdmin,
@@ -1157,11 +1173,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
-	// Workload-bound issuer delegations (phase X2): test_identity.issue at
-	// hub scope from an interactive session only (no PAT, agent or
+	// Workload-bound issuer delegations (phases X2, X4): test_identity.issue
+	// at hub scope from an interactive session only (no PAT, agent or
 	// workload credential). The handlers further require a live human
-	// user row and limit list and revoke to the grantor or an unscoped
-	// platform admin session.
+	// user row, for an admin scope also the scope's capability and a live
+	// super-admin grantor, and limit list and revoke to the grantor or an
+	// unscoped platform admin session.
 	"POST /api/v1/test-identity-delegations": {
 		Pattern: "POST /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.create",
 		Classification: RouteHubAdmin,

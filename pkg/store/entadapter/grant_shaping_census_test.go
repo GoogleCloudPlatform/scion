@@ -269,6 +269,7 @@ func TestGrantShapingBuilderCensus(t *testing.T) {
 		"pkg/store/entadapter/allowlist_store.go:CreateInviteCode",
 		"pkg/store/entadapter/brokersecret_store.go:CreateJoinToken",
 		"pkg/store/entadapter/brokersecret_store.go:upsertJoinToken",
+		"pkg/store/entadapter/composite_visitor_rules.go:UpdateProjectVisitorRuleWindow",
 	} {
 		assert.True(t, shaped[want], "shaped grant write %s found", want)
 	}
