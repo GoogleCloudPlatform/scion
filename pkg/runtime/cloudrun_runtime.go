@@ -40,6 +40,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -1049,11 +1050,7 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 			continue
 		}
 
-		status := "unknown"
-		// map state to status
-		if inst.TerminalCondition != nil {
-			status = inst.TerminalCondition.State.String()
-		}
+		phase, status := cloudRunInstancePhase(inst)
 
 		agents = append(agents, api.AgentInfo{
 			ID:              inst.Labels["agent_id"],
@@ -1062,11 +1059,54 @@ func (r *CloudRunRuntime) List(ctx context.Context, labelFilter map[string]strin
 			Name:            cloudRunAgentName(inst),
 			ProjectID:       inst.Labels[sanitizeGCPLabelKey(projectkeys.LabelProjectID)],
 			ContainerStatus: status,
+			Phase:           phase,
 			Labels:          inst.Labels,
 		})
 	}
 
 	return agents, nil
+}
+
+// cloudRunInstancePhase maps inst to the agent phase and container status
+// List reports (ptone/scion#5270). In order:
+//   - delete_time set: "stopped" (the instance is soft-deleted);
+//   - reconciling: "provisioning" (the system is still acting on it);
+//   - Ready condition succeeded: "running" (for an Instance, succeeded means
+//     serving, not finished);
+//   - Ready condition failed: "error";
+//   - otherwise (no condition, unspecified, pending, reconciling state):
+//     "provisioning".
+//
+// The API has no run-state field, and how an instance reads after
+// StopInstance is unverified, so no condition is read as a clean stop. An
+// unknown shape maps to a non-terminal phase and is counted as live.
+//
+// The container status is the raw condition state ("unknown" without a
+// condition), with ",reconciling" appended while reconciling.
+func cloudRunInstancePhase(inst *runpb.Instance) (phase, containerStatus string) {
+	containerStatus = "unknown"
+	condState := runpb.Condition_STATE_UNSPECIFIED
+	if tc := inst.GetTerminalCondition(); tc != nil {
+		condState = tc.GetState()
+		containerStatus = condState.String()
+	}
+	if inst.GetReconciling() {
+		containerStatus += ",reconciling"
+	}
+
+	switch {
+	case inst.GetDeleteTime() != nil:
+		phase = string(state.PhaseStopped)
+	case inst.GetReconciling():
+		phase = string(state.PhaseProvisioning)
+	case condState == runpb.Condition_CONDITION_SUCCEEDED:
+		phase = string(state.PhaseRunning)
+	case condState == runpb.Condition_CONDITION_FAILED:
+		phase = string(state.PhaseError)
+	default:
+		phase = string(state.PhaseProvisioning)
+	}
+	return phase, containerStatus
 }
 
 // cloudRunAgentName is the agent name List reports for inst: the agent slug
