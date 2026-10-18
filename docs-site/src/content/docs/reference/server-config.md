@@ -169,7 +169,7 @@ Asynchronous create is the `hub.async_agent_launch` [experiment](/scion/referenc
 - **Turning it off.** Creates sent after the experiment is turned off are synchronous. Launches the broker has already accepted are not cancelled: they finish, or are ended by `launch_timeout` or broker loss, as before.
 - **Starts during a launch.** While a launch is in progress and before its deadline, a start or restart of that agent returns the launching agent with HTTP 200 instead of starting it again (a restart adds the warning `agent is launching; restart not performed`), and `scion start` keeps waiting. Restore, reincarnate, and wake are refused with `agent_launching`.
 
-**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate` and `cloudrun`) also falls back to the synchronous create.
+**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate`) also falls back to the synchronous create.
 
 **Broker restarts during a launch.** The Runtime Broker keeps each asynchronous launch it has accepted in a launch journal on disk, so a launch is not left waiting for the Hub's `broker_lost` or `launch_timeout` when the broker stops or crashes:
 
@@ -202,6 +202,10 @@ server:
 
 - **Launch timeout.** Set `launch_timeout` to at least `"60s"`. A sandbox start may not finish within a shorter budget, and the launch is then ended with `launch_timeout`.
 - **CPU after the create response (not verified).** Async on this runtime assumes the Cloud Run Instance keeps CPU allocated while the broker finishes the launch in the background after the create response. This has not been verified on a live Instance. If the Instance does not keep CPU allocated, launches stall after the create response and the Hub ends them with `broker_lost` or `launch_timeout`; the synchronous create (the experiment off, the default) is not affected. To return to it, turn the experiment off; no restart is needed. The startup warning above covers Cloud Run services only and is not logged on an Instance.
+
+**Brokers using the `cloudrun` runtime.** The `cloudrun` runtime starts each agent as a Cloud Run Instance. With the `hub.async_agent_launch` experiment on, eligible creates that opt in are asynchronous, as on other runtimes. If a launch fails or is ended, the broker deletes the Instance the launch created, including one whose create request was cut off but which the platform created anyway.
+
+- **Launch timeout.** Set `launch_timeout` to at least `"120s"`; the default (`"5m"`) is above this. The figure comes from measurements on the live Instances API: an Instance whose image was already cached was ready about 8 seconds after the create was accepted (worst of the cached runs), and the single start measured with an image not yet pulled took about 46 seconds. The broker waits for the create to finish and stops the launch 20 seconds before its deadline, so an uncached start needs a deadline of about 66 seconds. Allowing about 54 seconds more, close to double, for the work the broker does before the create and for larger images and slower pulls than the single uncached start measured, gives 120 seconds. Raise it further for large agent images.
 
 #### Request performance tracing
 
