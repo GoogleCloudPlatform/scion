@@ -724,10 +724,10 @@ func (f *groupTokenFixture) ownerOf(t *testing.T, g *store.Group) string {
 }
 
 // TestGroupOwnerChangeToken_RequiresDelegationForNewOwner pins that a user
-// access token changes a group's owner only when it could add the new owner
-// as a member of the group: the token needs the holder's live update
-// authority on the group, and the delegation check runs against the
-// group's closure for the new owner. Every refusal is the same 403 with the
+// access token that changes a group's owner needs the holder's live update
+// authority on the group and, for the new owner, the delegation check of a
+// member add against the group's closure; group:addMember and the group
+// role hierarchy do not apply. Every refusal is the same 403 with the
 // same body: for a token without the closure's authority, for an unknown
 // group, for a token without group:update, and for a token whose holder
 // lost the update authority after the token was issued. Other fields are
