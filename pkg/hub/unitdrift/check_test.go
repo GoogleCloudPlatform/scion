@@ -155,19 +155,20 @@ func TestCheck_SkippedCases(t *testing.T) {
 
 func TestCheck_BlockingLocatorTimesOut(t *testing.T) {
 	repo, _ := setupRepo(t, sampleTemplate, defaultRender())
+	// The locator ignores ctx on purpose and only returns after 3 s, so
+	// Check must give up at its own 50 ms deadline.
 	release := make(chan struct{})
-	defer close(release)
+	time.AfterFunc(3*time.Second, func() { close(release) })
 	start := time.Now()
 	got := Check(context.Background(), CheckOptions{
 		RepoPath: repo, Service: "scion-hub", Timeout: 50 * time.Millisecond,
-		// Ignores ctx on purpose: Check must still return at the deadline.
 		Locate: func(context.Context, string) (UnitInfo, error) {
 			<-release
 			return UnitInfo{}, nil
 		},
 	})
-	if time.Since(start) > 5*time.Second {
-		t.Fatal("Check did not honour its timeout")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Check did not honour its timeout (took %v)", elapsed)
 	}
 	if !strings.HasPrefix(got, "Systemd unit check skipped: ") || !strings.Contains(got, "timed out") {
 		t.Fatalf("report = %q", got)
