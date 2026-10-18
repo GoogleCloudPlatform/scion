@@ -90,7 +90,6 @@ capabilities:
     sse: { support: "yes", reason: "Copilot maps SSE to its http transport type" }
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP (.mcp.json) not implemented; entries demoted to global" }
-  agent_plugins: { support: "yes" }
 
 no_auth:
   behavior: drop-to-shell

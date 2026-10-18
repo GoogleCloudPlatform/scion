@@ -156,7 +156,7 @@ func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, 
 	_, _ = rand.Read(peerSecret)
 	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: peerSecret, SelfID: "hub-a"})
 	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: registry.New(f.regStore, registry.Config{}), Clock: clock.NewFake(time.Now())}
+	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: registry.New(f.regStore, registry.Config{}), Clock: clock.NewFake(time.Now()), sessionWriteWait: conduitFixtureWriteWait}
 	if mod != nil {
 		mod(&opts)
 	}
@@ -170,6 +170,15 @@ func newBrokerConduitFixture(t *testing.T, target *api.RuntimeTargetDescriptor, 
 	t.Cleanup(f.public.Close)
 	return f
 }
+
+// conduitFixtureWriteWait is the relay session write deadline of the conduit
+// fixtures. The deadline runs on the fixtures' fake relay clock, so it sits
+// far above any single Advance a test makes: an advance of
+// conduit.DefaultWriteWait or more would otherwise fire the deadline of a
+// write in flight and close the session (ptone/scion#5210). It also
+// stretches the relay's backstop after a GoAway from the agent (drain
+// deadline + WriteWait); no fixture test relies on that backstop.
+const conduitFixtureWriteWait = 7 * 24 * time.Hour
 
 // setConduitExperiment overrides hub.conduit on srv the way an admin toggle
 // would; every other experiment keeps its production registry value.
@@ -242,6 +251,9 @@ var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret
 func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
 	t.Helper()
 	for _, k := range ring.Keys {
+		if len(k.Seed) == 0 {
+			continue // the seed was dropped; only the public half remains
+		}
 		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
 			assert.NotContains(t, s, enc)
 		}
@@ -435,7 +447,7 @@ func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture
 	_, _ = rand.Read(secret)
 	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: secret, SelfID: "hub-a"})
 	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}
+	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()), sessionWriteWait: conduitFixtureWriteWait}
 	if mod != nil {
 		mod(&opts)
 	}

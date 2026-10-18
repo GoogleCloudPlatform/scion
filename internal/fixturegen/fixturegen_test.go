@@ -35,7 +35,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 83
+const expectedTableCount = 85
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -140,6 +140,41 @@ func TestFixtureLoadable(t *testing.T) {
 	require.True(t, found)
 	assert.Empty(t, ps.Sessions[0].Session.ProjectID)
 	assert.Empty(t, ps.Sessions[0].Session.ExecScope)
+
+	// The project visitor rule, its role binding and the exclusion must be
+	// readable through the real store adapters (field.UUID ids and
+	// source_rule_id, the rule window, the seeded visitor role).
+	composite := entadapter.NewCompositeStore(client)
+	rules, err := composite.ListProjectVisitorRules(ctx, projectID)
+	require.NoError(t, err, "project_visitor_rules fixture row must be readable via the store")
+	require.Len(t, rules, 1)
+	assert.Equal(t, visitorRuleID, rules[0].ID)
+	assert.Equal(t, store.NormalizeFederatedIssuer(visitorIssuer), rules[0].Issuer)
+	assert.Equal(t, store.NormalizeVisitorRuleDomain(visitorDomain), rules[0].Domain)
+	assert.True(t, store.ValidVisitorRuleDomain(rules[0].Domain))
+	require.NotNil(t, rules[0].NotBefore)
+	require.NotNil(t, rules[0].ExpiresAt)
+	assert.True(t, rules[0].ActiveAt(baseTime))
+
+	open, err := composite.GetProjectVisitorRule(ctx, minimalVisitorRuleID)
+	require.NoError(t, err)
+	assert.Nil(t, open.NotBefore)
+	assert.Nil(t, open.ExpiresAt)
+	assert.Empty(t, open.CreatedBy)
+
+	bindings, err := entadapter.NewRoleStore(client).ListVisitorRoleBindings(ctx, projectID)
+	require.NoError(t, err, "project-visitor role binding fixture row must be readable via RoleStore")
+	require.Len(t, bindings, 1)
+	assert.Equal(t, federatedUserID, bindings[0].PrincipalID)
+	require.NotNil(t, bindings[0].SourceRuleID)
+	assert.Equal(t, visitorRuleID, *bindings[0].SourceRuleID)
+
+	excluded, err := composite.IsProjectVisitorExcluded(ctx, minimalVisitorRuleID, federatedUserID)
+	require.NoError(t, err, "project_visitor_exclusions fixture row must be readable via the store")
+	assert.True(t, excluded)
+	excluded, err = composite.IsProjectVisitorExcluded(ctx, visitorRuleID, federatedUserID)
+	require.NoError(t, err)
+	assert.False(t, excluded)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

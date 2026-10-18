@@ -139,13 +139,22 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 | :--- | :--- | :--- | :--- | :--- |
 | `codex` | partial | 0.147.0 | 0.162.1 | Installed through a Scion-owned local marketplace. Codex skips `sse` MCP servers. |
 | `copilot` | yes | 1.0.74 | 1.0.97 | Installed with `copilot plugin install <dir>`. See the [copilot notes](#copilot). |
-| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7 | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
+| `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7; 1.4.9 (live check) | Skills install natively with `muse plugins install`. muse 1.4.9 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
 | `claude` | partial | 2.1.157 (approximate) | 2.1.296 | Installed as a skills-dir plugin with a generated manifest. See the [claude notes](#claude). |
 | `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
 
 ¹ CLI-level smoke tests: the real harness CLI driven by Scion's installer with staged inputs. None of the four harnesses has yet been verified end to end in a Scion-provisioned agent; for claude in particular, the path through `scion start` is not yet verified.
 
 If the harness CLI in the image is older than the minimum, the harness skips plugin install with a warning and changes nothing. The claude minimum is approximate: only 2.1.296 has been tested.
+
+Each harness-config declares its support level in an `agent-plugins.yaml` file next to its `config.yaml`, for example:
+
+```yaml
+support: "partial"
+reason: "Native install via local marketplace; Codex skips sse MCP servers"
+```
+
+The file belongs to the harness-config's provisioner: `scion harness-config reset` and `scion harness-config upgrade` refresh it together with `provision.py`. A harness-config without it (and without the deprecated key below) is reported as predating Agent Plugins support. If the file cannot be read, does not parse or has a support level this Scion version does not know, Scion logs a warning and treats the harness as not supporting Agent Plugins, with the error as the reason; the harness itself stays usable. Harness-configs from the first Agent Plugins release declared the level as `capabilities.agent_plugins` in `config.yaml`; Scion still reads that key when there is no `agent-plugins.yaml`, but it is deprecated, because hubs, brokers and CLIs built before Agent Plugins reject a `config.yaml` that contains it.
 
 ### codex
 
@@ -275,7 +284,7 @@ These lines are logged at INFO level, so `SCION_LOG_LEVEL=warn` hides them; see 
 
 ### Old harness-configs
 
-Harness-configs installed before plugin support have no plugin code in their provisioner and no `agent_plugins` capability. Scion stages the bundles but does not install them, and the start prints:
+Harness-configs installed before plugin support have no plugin code in their provisioner and do not declare Agent Plugins support. Scion stages the bundles but does not install them, and the start prints:
 
 ```text
 agent_plugins: harness-config "codex" predates Agent Plugins support; plugins staged but not installed (run scion harness-config reset codex for the bundled defaults, or scion harness-config upgrade codex to keep local edits)
@@ -283,7 +292,7 @@ agent_plugins: harness-config "codex" predates Agent Plugins support; plugins st
 
 To fix this:
 
-- For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts (with a backup) and adds the capability, but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
+- For a bundled harness-config in `~/.scion/harness-configs/<name>`, run `scion harness-config reset <name>`, which restores the embedded version (it overwrites local edits). `scion harness-config upgrade <name>` is the additive alternative: it replaces the provisioner scripts and `agent-plugins.yaml` (with a backup), but it keeps your existing `provisioner.timeout`. For codex, copilot and muse-code, raise that to `60s` by hand.
 - Harness-configs stored on a Hub must be updated there: install an updated source over it with `scion harness-config install --force <source>`, or upload a fixed local copy with `scion harness-config sync <name>`.
 - Copies of a harness-config bundled inside templates must be updated too.
 

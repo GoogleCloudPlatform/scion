@@ -45,6 +45,7 @@ func tiaValidInputs() testModeInputs {
 		HubEnabled:    true,
 		HasUserStore:  true,
 		ResolvedHubID: tiaCmdHubID,
+		HubIDPinned:   true,
 		Workstation:   false,
 		HubClass:      config.HubClassTest,
 		ReadMarker:    tiaMarker,
@@ -94,7 +95,8 @@ func TestValidateTestAdminIdentities_EachConditionRefused(t *testing.T) {
 	}{
 		{"G1 no user store", func(in *testModeInputs) { in.HasUserStore = false }, hub.ErrTestAdminRequiresUserStore},
 		{"G1 no hub", func(in *testModeInputs) { in.HubEnabled = false }, hub.ErrTestAdminRequiresHub},
-		{"G2 value differs from PersistentHubID", func(in *testModeInputs) { in.BindingHubID = "another-hub" }, hub.ErrTestAdminHubIDMismatch},
+		{"G2 value differs from the resolved hub id", func(in *testModeInputs) { in.BindingHubID = "another-hub" }, hub.ErrTestAdminHubIDMismatch},
+		{"G2 hub id not pinned", func(in *testModeInputs) { in.HubIDPinned = false }, hub.ErrTestModeHubIDNotPinned},
 		{"G2 empty value", func(in *testModeInputs) { in.BindingHubID = "" }, hub.ErrTestAdminHubIDMismatch},
 		{"G2 whitespace value", func(in *testModeInputs) { in.BindingHubID = " " + tiaCmdHubID }, hub.ErrTestAdminHubIDMismatch},
 		{"G3 super-admin level with an incomplete policy", func(in *testModeInputs) {

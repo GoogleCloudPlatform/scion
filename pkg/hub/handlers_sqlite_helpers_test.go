@@ -45,7 +45,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -4559,34 +4558,6 @@ func setupScopedDispatchAgentOwner(t *testing.T, srv *Server, s store.Store, pro
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, userID))
 
 	return ownerUser
-}
-
-// assertScheduledEventBoundaryIneligible checks that identity is refused
-// scheduled_event.<action> on projectID at bearer gate stage 3b.
-// scheduled_event.create is not eligible for a project boundary.
-// TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
-// dispatch_agent authoring precondition itself for every credential shape.
-func assertScheduledEventBoundaryIneligible(t *testing.T, srv *Server, identity Identity, projectID string, action Action) {
-	t.Helper()
-	decision := srv.authzService.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: credentialContextForIdentity(identity),
-		Resource:   Resource{Type: "scheduled_event", ParentType: "project", ParentID: projectID},
-		Action:     action,
-		Permission: "scheduled_event." + string(action),
-	})
-	assert.False(t, decision.Allowed)
-	assert.Equal(t, bearerReasonBoundaryIneligible, decision.Reason)
-}
-
-// assertScheduleAuthoringRefused checks that rec is the authoring credential
-// gate's refusal: 403 with the GOV_PENDING session-only reason.
-func assertScheduleAuthoringRefused(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, string(authzop.ReasonGovernancePending), reason, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, rec.Body.String())
 }
 
 // checkJSONError asserts that the response body is a valid JSON ErrorResponse.

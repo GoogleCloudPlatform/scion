@@ -1544,7 +1544,12 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 // store.ErrVisitorBindingRefused. The caller publishes the conduit
 // authorization change once RemoveVisitor returns, as the callers of
 // RemoveMember do.
-func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID string) (*store.RoleBinding, error) {
+//
+// Removing a binding a visitor rule created also records an exclusion of
+// the visitor from that rule, by actorID, in the same transaction, so the
+// rule does not create the binding again; the rule's other visitors are
+// unchanged.
+func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID, actorID string) (*store.RoleBinding, error) {
 	var removed *store.RoleBinding
 	err := svc.store.WithTx(ctx, func(tx store.Store) error {
 		u, rb, err := projectVisitorBinding(ctx, tx, projectID, visitorID)
@@ -1553,6 +1558,17 @@ func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectI
 		}
 		if err := requireProjectVisitorBinding(ctx, tx, rb, projectID); err != nil {
 			return err
+		}
+		if rb.SourceRuleID != nil {
+			// The exclusion is recorded before the binding is deleted. The rule
+			// read is plain and the exclusion table has no foreign key, so the
+			// revoke locks no rule or project row and cannot wait in a cycle
+			// with a rule change or a project deletion. A binding whose rule no
+			// longer exists is still removed, with no rule to exclude them from.
+			err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actorID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
 		}
 		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
 			return err

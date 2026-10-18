@@ -219,8 +219,12 @@ hub:
   # The member level is refused at startup unless every precondition holds:
   # server.hub.class is test (set hub.hubClass: test; the render fails without
   # it), the database carries a test infrastructure marker for this hub id, the
-  # hub id binding matches (the chart renders hub.hubId), and the hub does not
-  # run with --production. The marker is written offline by an operator with
+  # hub id binding matches (the chart renders hub.hubId), the hub id is pinned
+  # (the chart renders server.hub.hub_id from hub.hubId, so every replica
+  # shares it), and the hub does not run with --production. With
+  # config.existingSecret the chart cannot read your settings file: its
+  # server.hub.hub_id must be set and equal hub.hubId, or every pod refuses to
+  # start. The marker is written offline by an operator with
   # `scion server test-infra mark`, never by the chart or an agent.
   testIdentities:
     enabled: false

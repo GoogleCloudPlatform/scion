@@ -297,6 +297,9 @@ func (_u *RoleBindingUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	if _u.mutation.MembershipKindCleared() {
 		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
 	}
+	if _u.mutation.SourceRuleIDCleared() {
+		_spec.ClearField(rolebinding.FieldSourceRuleID, field.TypeUUID)
+	}
 	if _u.mutation.IssuanceIDCleared() {
 		_spec.ClearField(rolebinding.FieldIssuanceID, field.TypeString)
 	}
@@ -645,6 +648,9 @@ func (_u *RoleBindingUpdateOne) sqlSave(ctx context.Context) (_node *RoleBinding
 	}
 	if _u.mutation.MembershipKindCleared() {
 		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
+	}
+	if _u.mutation.SourceRuleIDCleared() {
+		_spec.ClearField(rolebinding.FieldSourceRuleID, field.TypeUUID)
 	}
 	if _u.mutation.IssuanceIDCleared() {
 		_spec.ClearField(rolebinding.FieldIssuanceID, field.TypeString)

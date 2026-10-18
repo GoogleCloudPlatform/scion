@@ -67,6 +67,17 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	adminID := tid("bdm-super-admin")
 	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
 	ensureHubMembership(ctx, s, adminID)
+	// Broker material reads need the owner relationship or broker.update,
+	// and a token carries no broker.update, so the super-admin owns the
+	// fixture broker; its secret sits in the same backend.
+	owned, err := s.SetRuntimeBrokerCreatedByIfEmpty(ctx, ids.runtimeBroker, adminID)
+	require.NoError(t, err)
+	require.True(t, owned, "the fixture broker has no owner before the matrix assigns one")
+	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
+		Name: ids.brokerSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
+		Scope: secret.ScopeRuntimeBroker, ScopeID: ids.runtimeBroker,
+	})
+	require.NoError(t, err)
 
 	other := tid("bdm-other-project")
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: other, Name: "BDM Other", Slug: "bdm-other"}))
@@ -328,6 +339,13 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		// Streams of the fixture agent and project.
+		"/api/v1/agents/{id}/cloud-logs/stream":                        {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages/stream":                          {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs/stream":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs/stream": {"projectId": f.project, "id": f.agent},
+		"/api/v1/projects/{id}/message-logs/stream":                    {"id": f.project},
 	}
 }
 
