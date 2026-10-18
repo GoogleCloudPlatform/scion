@@ -568,10 +568,10 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	ownerChanged := req.OwnerID != "" && req.OwnerID != group.OwnerID
 
-	// The owner of a group adds its members, so a user access token
-	// changes the owner only when it could add the new owner as a member:
-	// the same delegation check, against the group's closure, with the
-	// grantee being the new owner.
+	// The owner of a group adds its members, so a user access token that
+	// changes the owner must also pass, for the new owner, the delegation
+	// check of a member add against the group's closure. group:addMember
+	// and the group role hierarchy do not apply.
 	var ownerClosure string
 	if ownerChanged && tokenSetsOwner {
 		var ok bool
