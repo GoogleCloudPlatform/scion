@@ -57,9 +57,9 @@ func newInviteTokenFixture(t *testing.T, prefix string) *inviteTokenFixture {
 	return f
 }
 
-// uniqueName returns prefix with a random suffix, for records a test
+// itfUniqueName returns prefix with a random suffix, for records a test
 // creates more than once.
-func uniqueName(prefix string) string {
+func itfUniqueName(prefix string) string {
 	return prefix + "-" + uuid.NewString()[:8]
 }
 
@@ -78,8 +78,34 @@ func (f *inviteTokenFixture) mintFails(userID string, boundary TokenBoundary, sc
 	return err != nil
 }
 
-// inviteCodeExpiry is the expiry of the invitation codes the tests store.
-var inviteCodeExpiry = time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+// formerAdminToken creates a second hub admin and mints a real hub token
+// with scopes for that admin. The returned func removes the admin's hub
+// admin role binding through the store, so the token's holder lacks
+// the authority the token was minted with.
+func (f *inviteTokenFixture) formerAdminToken(t *testing.T, name string, scopes ...string) (string, func()) {
+	t.Helper()
+	ctx := context.Background()
+	id := hubConfigTokenUser(t, f.s, name, store.SystemRoleHubAdmin)
+	key := mintHubConfigToken(t, f.srv, id, hubBoundary(), scopes...)
+	return key, func() {
+		t.Helper()
+		rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+		require.NoError(t, err)
+		bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, id)
+		require.NoError(t, err)
+		removed := 0
+		for _, b := range bindings {
+			if b.RoleDefinitionID == rd.ID {
+				require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+				removed++
+			}
+		}
+		require.Equal(t, 1, removed, "the holder's hub admin role binding is removed")
+	}
+}
+
+// itfInviteCodeExpiry is the expiry of the invitation codes the tests store.
+var itfInviteCodeExpiry = time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 // inviteCode stores a fresh invitation code created by the hub admin.
 func (f *inviteTokenFixture) inviteCode(t *testing.T) string {
@@ -87,7 +113,7 @@ func (f *inviteTokenFixture) inviteCode(t *testing.T) string {
 	id := uuid.NewString()
 	require.NoError(t, f.s.CreateInviteCode(context.Background(), &store.InviteCode{
 		ID: id, CodeHash: id + "-hash", CodePrefix: "itf", MaxUses: 1,
-		ExpiresAt: inviteCodeExpiry, CreatedBy: f.admin.ID,
+		ExpiresAt: itfInviteCodeExpiry, CreatedBy: f.admin.ID,
 	}))
 	return id
 }
@@ -109,24 +135,24 @@ func (f *inviteTokenFixture) inviteCodeCount(t *testing.T) int {
 	return res.TotalCount
 }
 
-// tokenRouteCase is one request: prep returns the path and body for a
+// itfRouteCase is one request: prep returns the path and body for a
 // fresh target, and wrote reports whether the request changed anything
 // (nil for a read).
-type tokenRouteCase struct {
+type itfRouteCase struct {
 	name   string
 	method string
 	want   int
 	prep   func(t *testing.T) (path string, body interface{}, wrote func() bool)
 }
 
-func (f *inviteTokenFixture) inviteRoutes() []tokenRouteCase {
-	return []tokenRouteCase{
+func (f *inviteTokenFixture) inviteRoutes() []itfRouteCase {
+	return []itfRouteCase{
 		{"invite", http.MethodPost, http.StatusCreated, func(t *testing.T) (string, interface{}, func() bool) {
-			email := uniqueName("itf-one") + "@example.com"
+			email := itfUniqueName("itf-one") + "@example.com"
 			return "/api/v1/admin/users/invite", UserInviteRequest{Email: email}, func() bool { return f.userExists(t, email) }
 		}},
 		{"invite bulk", http.MethodPost, http.StatusOK, func(t *testing.T) (string, interface{}, func() bool) {
-			email := uniqueName("itf-bulk") + "@example.com"
+			email := itfUniqueName("itf-bulk") + "@example.com"
 			return "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{Emails: []UserInviteRequest{{Email: email}}},
 				func() bool { return f.userExists(t, email) }
 		}},
@@ -166,9 +192,9 @@ func (f *inviteTokenFixture) inviteRoutes() []tokenRouteCase {
 	}
 }
 
-// expectRefused sends the route with a fresh target and requires 403 with
+// itfExpectRefused sends the route with a fresh target and requires 403 with
 // nothing written.
-func expectRefused(t *testing.T, rc tokenRouteCase, send func(path string, body interface{}) int, who string) {
+func itfExpectRefused(t *testing.T, rc itfRouteCase, send func(path string, body interface{}) int, who string) {
 	t.Helper()
 	path, body, wrote := rc.prep(t)
 	assert.Equal(t, http.StatusForbidden, send(path, body), "%s: %s %s", who, rc.method, path)
@@ -177,9 +203,9 @@ func expectRefused(t *testing.T, rc tokenRouteCase, send func(path string, body 
 	}
 }
 
-// expectAdmitted sends the route with a fresh target and requires the
+// itfExpectAdmitted sends the route with a fresh target and requires the
 // route's status and, for a write, its effect.
-func expectAdmitted(t *testing.T, rc tokenRouteCase, send func(path string, body interface{}) int, who string) {
+func itfExpectAdmitted(t *testing.T, rc itfRouteCase, send func(path string, body interface{}) int, who string) {
 	t.Helper()
 	path, body, wrote := rc.prep(t)
 	assert.Equal(t, rc.want, send(path, body), "%s: %s %s", who, rc.method, path)
@@ -205,9 +231,10 @@ func (f *inviteTokenFixture) asUser(t *testing.T, u *store.User, method string) 
 // stats, read, revoke and delete) for user access tokens: the route checks
 // user.invite on the hub instance target, so a token is admitted only with
 // user:invite, on the hub boundary, and with the holder's live user.invite
-// authority. Refused requests write nothing. Sessions are decided on the
-// same permission: a hub admin's session is admitted and a hub member's is
-// refused.
+// authority, checked at each request: a token is refused once its holder
+// loses user.invite. Refused requests write nothing. Sessions are decided
+// on the same permission: a hub admin's session is admitted and a hub
+// member's is refused.
 func TestInviteToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	f := newInviteTokenFixture(t, "itok")
 
@@ -222,21 +249,28 @@ func TestInviteToken_RequiresInviteSelectorAndHubBoundary(t *testing.T) {
 	// A stored project-boundary row carrying the hub-only selector, as a
 	// legacy token would: refused at request time for the boundary.
 	legacy := uatpInsertLegacyToken(t, f.s, f.admin.ID, f.project, []string{"user:invite"})
+	// A token minted while its holder held user.invite, used after the
+	// holder lost it: refused at request time.
+	former, demote := f.formerAdminToken(t, "itok-former", "user:invite")
+	require.Equal(t, http.StatusOK, doRequestWithToken(t, f.srv, former, http.MethodGet, "/api/v1/admin/invites", nil).Code,
+		"the token is admitted while its holder holds user.invite")
+	demote()
 
 	for _, rc := range f.inviteRoutes() {
 		t.Run(rc.name, func(t *testing.T) {
-			expectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without user:invite")
-			expectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
-			expectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with user:invite")
-			expectRefused(t, rc, f.asUser(t, f.member, rc.method), "hub member session")
-			expectAdmitted(t, rc, f.withToken(t, admitted, rc.method), "hub token with user:invite")
-			expectAdmitted(t, rc, f.asUser(t, f.admin, rc.method), "hub admin session")
+			itfExpectRefused(t, rc, f.withToken(t, former, rc.method), "hub token whose holder lost user.invite")
+			itfExpectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without user:invite")
+			itfExpectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
+			itfExpectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with user:invite")
+			itfExpectRefused(t, rc, f.asUser(t, f.member, rc.method), "hub member session")
+			itfExpectAdmitted(t, rc, f.withToken(t, admitted, rc.method), "hub token with user:invite")
+			itfExpectAdmitted(t, rc, f.asUser(t, f.admin, rc.method), "hub admin session")
 		})
 	}
 }
 
-func (f *inviteTokenFixture) allowListRoutes() (reads, writes []tokenRouteCase) {
-	reads = []tokenRouteCase{
+func (f *inviteTokenFixture) allowListRoutes() (reads, writes []itfRouteCase) {
+	reads = []itfRouteCase{
 		{"allow-list get", http.MethodGet, http.StatusOK, func(t *testing.T) (string, interface{}, func() bool) {
 			return "/api/v1/admin/allow-list", nil, nil
 		}},
@@ -244,18 +278,18 @@ func (f *inviteTokenFixture) allowListRoutes() (reads, writes []tokenRouteCase) 
 			return "/api/v1/admin/allow-list/domains", nil, nil
 		}},
 	}
-	writes = []tokenRouteCase{
+	writes = []itfRouteCase{
 		{"allow-list add", http.MethodPost, http.StatusCreated, func(t *testing.T) (string, interface{}, func() bool) {
-			email := uniqueName("itf-add") + "@example.com"
+			email := itfUniqueName("itf-add") + "@example.com"
 			return "/api/v1/admin/allow-list", AllowListAddRequest{Email: email}, func() bool { return f.userExists(t, email) }
 		}},
 		{"allow-list import", http.MethodPost, http.StatusOK, func(t *testing.T) (string, interface{}, func() bool) {
-			email := uniqueName("itf-import") + "@example.com"
+			email := itfUniqueName("itf-import") + "@example.com"
 			return "/api/v1/admin/allow-list/import", AllowListBulkAddRequest{Emails: []AllowListAddRequest{{Email: email}}},
 				func() bool { return f.userExists(t, email) }
 		}},
 		{"allow-list delete", http.MethodDelete, http.StatusOK, func(t *testing.T) (string, interface{}, func() bool) {
-			email := uniqueName("itf-del") + "@example.com"
+			email := itfUniqueName("itf-del") + "@example.com"
 			newInvitedUser(t, f.s, email, email)
 			return "/api/v1/admin/allow-list/" + email, nil, func() bool { return !f.userExists(t, email) }
 		}},
@@ -270,8 +304,9 @@ func (f *inviteTokenFixture) allowListRoutes() (reads, writes []tokenRouteCase) 
 //   - hub_allow_list:update alone admits nothing, because the guard needs
 //     the read selector;
 //   - both selectors admit the writes;
-//   - both selectors are hub-only and need the holder's live authority;
-//     project tokens and project-boundary rows are refused.
+//   - both selectors are hub-only and need the holder's live authority,
+//     checked at each request; project tokens, project-boundary rows and
+//     tokens whose holder lost the permissions are refused.
 //
 // Sessions follow the same two permissions: a session holding only
 // hub.allow_list.read reads the list and is refused every write, and one
@@ -291,6 +326,12 @@ func TestAllowListReadToken_DoesNotAdmitWrites(t *testing.T) {
 	unrelated := f.mint(t, hubBoundary(), "user:invite")
 	projectToken := f.mint(t, projectBoundary(f.project), "project:read")
 	legacy := uatpInsertLegacyToken(t, f.s, f.admin.ID, f.project, []string{"hub_allow_list:read", "hub_allow_list:update"})
+	// A token minted while its holder held both permissions, used after the
+	// holder lost them: refused at request time.
+	former, demote := f.formerAdminToken(t, "altok-former", "hub_allow_list:read", "hub_allow_list:update")
+	require.Equal(t, http.StatusOK, doRequestWithToken(t, f.srv, former, http.MethodGet, "/api/v1/admin/allow-list", nil).Code,
+		"the token is admitted while its holder holds hub.allow_list.read")
+	demote()
 
 	readSessionID := tid("altok-read-session")
 	systemRoleUserWithPermissions(t, f.s, readSessionID, []string{"hub.allow_list.read"})
@@ -306,26 +347,28 @@ func TestAllowListReadToken_DoesNotAdmitWrites(t *testing.T) {
 	reads, writes := f.allowListRoutes()
 	for _, rc := range reads {
 		t.Run(rc.name, func(t *testing.T) {
-			expectRefused(t, rc, f.withToken(t, updateOnly, rc.method), "hub token with hub_allow_list:update only")
-			expectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without hub_allow_list:read")
-			expectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
-			expectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with both selectors")
-			expectRefused(t, rc, f.asUser(t, f.member, rc.method), "hub member session")
-			expectAdmitted(t, rc, f.withToken(t, readOnly, rc.method), "hub token with hub_allow_list:read")
-			expectAdmitted(t, rc, f.withToken(t, both, rc.method), "hub token with both selectors")
-			expectAdmitted(t, rc, f.asUser(t, readSession, rc.method), "session with hub.allow_list.read")
+			itfExpectRefused(t, rc, f.withToken(t, former, rc.method), "hub token whose holder lost the allow-list permissions")
+			itfExpectRefused(t, rc, f.withToken(t, updateOnly, rc.method), "hub token with hub_allow_list:update only")
+			itfExpectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without hub_allow_list:read")
+			itfExpectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
+			itfExpectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with both selectors")
+			itfExpectRefused(t, rc, f.asUser(t, f.member, rc.method), "hub member session")
+			itfExpectAdmitted(t, rc, f.withToken(t, readOnly, rc.method), "hub token with hub_allow_list:read")
+			itfExpectAdmitted(t, rc, f.withToken(t, both, rc.method), "hub token with both selectors")
+			itfExpectAdmitted(t, rc, f.asUser(t, readSession, rc.method), "session with hub.allow_list.read")
 		})
 	}
 	for _, rc := range writes {
 		t.Run(rc.name, func(t *testing.T) {
-			expectRefused(t, rc, f.withToken(t, readOnly, rc.method), "hub token with hub_allow_list:read only")
-			expectRefused(t, rc, f.withToken(t, updateOnly, rc.method), "hub token with hub_allow_list:update only")
-			expectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without the allow-list selectors")
-			expectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
-			expectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with both selectors")
-			expectRefused(t, rc, f.asUser(t, readSession, rc.method), "session with hub.allow_list.read only")
-			expectAdmitted(t, rc, f.withToken(t, both, rc.method), "hub token with both selectors")
-			expectAdmitted(t, rc, f.asUser(t, writeSession, rc.method), "session with both permissions")
+			itfExpectRefused(t, rc, f.withToken(t, former, rc.method), "hub token whose holder lost the allow-list permissions")
+			itfExpectRefused(t, rc, f.withToken(t, readOnly, rc.method), "hub token with hub_allow_list:read only")
+			itfExpectRefused(t, rc, f.withToken(t, updateOnly, rc.method), "hub token with hub_allow_list:update only")
+			itfExpectRefused(t, rc, f.withToken(t, unrelated, rc.method), "hub token without the allow-list selectors")
+			itfExpectRefused(t, rc, f.withToken(t, projectToken, rc.method), "project token")
+			itfExpectRefused(t, rc, f.withToken(t, legacy, rc.method), "project-boundary row with both selectors")
+			itfExpectRefused(t, rc, f.asUser(t, readSession, rc.method), "session with hub.allow_list.read only")
+			itfExpectAdmitted(t, rc, f.withToken(t, both, rc.method), "hub token with both selectors")
+			itfExpectAdmitted(t, rc, f.asUser(t, writeSession, rc.method), "session with both permissions")
 		})
 	}
 }
@@ -355,6 +398,8 @@ func TestAllowListDeleteToken_LastProjectOwnerProtected(t *testing.T) {
 	requireSingleOwnerBinding(t, f.s, project.ID, carol.ID)
 
 	requireLastOwnerDenial(t, doRequestAsUser(t, f.srv, f.admin, http.MethodDelete, path, nil), project)
+	_, err = f.s.GetUser(ctx, carol.ID)
+	require.NoError(t, err, "a refused delete keeps the invited user")
 	requireSingleOwnerBinding(t, f.s, project.ID, carol.ID)
 
 	createOwnerBinding(t, f.s, f.admin.ID, project.ID, nil, nil)
@@ -411,7 +456,7 @@ func TestInvitationToken_CreatesNoRoleBindingOrGroupMembership(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			email := uniqueName("inauth") + "@example.com"
+			email := itfUniqueName("inauth") + "@example.com"
 			rec := doRequestWithToken(t, f.srv, key, http.MethodPost, tc.path, tc.body(email))
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			u, err := f.s.GetUserByEmail(ctx, email)
