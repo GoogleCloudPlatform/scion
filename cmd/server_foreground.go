@@ -268,15 +268,29 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// would leave /healthz degraded. Hosted mode keeps failing fast at
 	// broker start (step 13). The broker cannot be started in place later,
 	// so the fix is a restart.
+	//
+	// A registry saved through the wizard lives in the hub database, which
+	// is not open yet. When the env and file check fails and the hub is
+	// enabled, the decision is deferred until the store is open (step 8)
+	// and completes there, before the hub is created (step 11)
+	// (ptone/scion#3916).
+	registryDecisionDeferred := false
+	registryFromHubDB := false
 	if !hostedMode {
 		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
 		if err != nil {
 			return err
 		}
-		if disableBroker {
-			slog.Warn("image_registry is not configured; starting without the runtime broker. Set the registry in the setup wizard or with 'scion config set --global image_registry <registry>', then run 'scion server restart'.")
-			fmt.Fprintln(os.Stderr, "Warning: "+brokerSkippedNotice)
+		switch {
+		case disableBroker && enableHub:
+			// Off until step 8b decides, so the checks before it (the
+			// port check included) treat the broker as not started, as
+			// they did before the deferral; 8b re-checks its port if it
+			// turns the broker back on.
+			registryDecisionDeferred = true
 			cfg.RuntimeBroker.Enabled = false
+		case disableBroker:
+			disableWorkstationBrokerForRegistry(cfg)
 		}
 	}
 
@@ -367,6 +381,23 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		if closer, ok := s.(io.Closer); ok {
 			defer func() { _ = closer.Close() }()
+		}
+	}
+
+	// 8b. Complete the deferred workstation registry decision (step 4b):
+	// a saved hub value, or a hub file-tier value (SCION_SERVER_* /
+	// SCION_SEED_*), keeps the broker; otherwise it is not started.
+	if registryDecisionDeferred {
+		settingStore, _ := s.(store.HubSettingStore)
+		active := colocatedActiveProfile()
+		if managedImageRegistryConfigured(ctx, settingStore, active) || bootstrapImageRegistryConfigured(serverConfigPath, active) {
+			registryFromHubDB = true
+			cfg.RuntimeBroker.Enabled = true
+			if err := checkBrokerPort(cfg); err != nil {
+				return err
+			}
+		} else {
+			disableWorkstationBrokerForRegistry(cfg)
 		}
 	}
 
@@ -626,8 +657,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// allocated outside requests (ptone/scion#4763). No-op elsewhere.
 	cloudrunruntime.WarnCPUAllocationIfNeeded(slog.Default(), os.Getenv, cfg.RuntimeBroker.Enabled)
 	if cfg.RuntimeBroker.Enabled {
-		if err := requireImageRegistryForBroker(); err != nil {
-			return err
+		if !registryFromHubDB {
+			if err := requireImageRegistryForBroker(); err != nil {
+				return err
+			}
 		}
 		if err := startRuntimeBroker(ctx, cmd, cfg, hubSrv, webSrv, s, hubEndpoint, hubEndpointSrc, devAuthToken, brokerSettings, brokerDefaultProfile, globalDir, requestLogger, messageLogger, &wg, errCh); err != nil {
 			return err
@@ -1636,12 +1669,8 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 		}
 	}
 	if cfg.RuntimeBroker.Enabled {
-		status := checkPort(cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
-		if status.inUse {
-			if status.isScionServer {
-				return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.RuntimeBroker.Port)
-			}
-			return fmt.Errorf("runtime broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
+		if err := checkBrokerPort(cfg); err != nil {
+			return err
 		}
 	}
 	if enableWeb {
@@ -1656,6 +1685,18 @@ func checkServerPorts(cfg *config.GlobalConfig) error {
 			}
 			return fmt.Errorf("web frontend port %d is already in use by another process", webPort)
 		}
+	}
+	return nil
+}
+
+// checkBrokerPort checks that the runtime broker's port is free.
+func checkBrokerPort(cfg *config.GlobalConfig) error {
+	status := checkPort(cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
+	if status.inUse {
+		if status.isScionServer {
+			return fmt.Errorf("a scion server is already running on port %d\nUse 'scion server status' to check or 'scion server stop' to stop it", cfg.RuntimeBroker.Port)
+		}
+		return fmt.Errorf("runtime broker port %d is already in use by another process", cfg.RuntimeBroker.Port)
 	}
 	return nil
 }
@@ -2587,6 +2628,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 			},
 		},
 		MaintenanceConfig:       resolveMaintenanceConfig(cfg),
+		NodeImageRegistry:       config.ImageRegistryFromEnv(),
 		SecretBackend:           secretBackend,
 		GCPIAMCheckMode:         cfg.Hub.GCPIAMCheckMode,
 		GCPIAMDenyUnknownPolicy: cfg.Hub.GCPIAMDenyUnknownPolicy,
@@ -3197,6 +3239,12 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hub.ApplyMaintenanceFromSnapshot(hubSrv, snap)
 
 	hubSrv.SetOperationalSettings(ops)
+
+	// One-time image_registry warnings (ptone/scion#3916): a maintenance
+	// registry that no longer applies to agent images, and settings-file
+	// values a saved hub value now beats.
+	hubSrv.WarnMaintenanceImageRegistryDrift()
+	hubSrv.WarnShadowedImageRegistries(flatInstanceImageRegistries())
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",
@@ -4536,7 +4584,8 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 
 	// Pull from versioned settings if available.
 	if vs, err := config.LoadVersionedSettings(""); err == nil {
-		mc.ImageRegistry = vs.ResolveImageRegistry("")
+		// The maintenance build registry is resolved at build time
+		// (hub.Server.maintenanceImageRegistry), not here.
 		// Collect harness names from configured harness configs.
 		for name := range vs.HarnessConfigs {
 			mc.Harnesses = append(mc.Harnesses, name)
@@ -4569,8 +4618,10 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	// Environment variable overrides.
-	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); v != "" {
-		mc.ImageRegistry = v
+	// SCION_MAINTENANCE_IMAGE_REGISTRY applies to maintenance builds only
+	// (ptone/scion#3916).
+	if v := os.Getenv(config.EnvMaintenanceImageRegistry); v != "" {
+		mc.ImageRegistryOverride = v
 	}
 	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_TAG"); v != "" {
 		mc.ImageTag = v
@@ -4629,37 +4680,12 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 // opaque 404 errors at dispatch time. This check fails fast at startup with an
 // actionable error instead.
 //
-// Sources checked (in priority order):
-//  1. SCION_IMAGE_REGISTRY env var
-//  2. SCION_MAINTENANCE_IMAGE_REGISTRY env var
-//  3. image_registry in versioned settings (settings.yaml)
+// Sources checked: the node env (SCION_IMAGE_REGISTRY) and image_registry in
+// the settings file. SCION_MAINTENANCE_IMAGE_REGISTRY applies to maintenance
+// builds only and is not a source. A workstation server also counts a saved
+// hub value (deferred check in runServerForeground, step 8).
 func requireImageRegistryForBroker() error {
 	return requireImageRegistryForBrokerAt("")
-}
-
-// requireImageRegistryForBrokerAt is requireImageRegistryForBroker with the
-// settings resolved for projectPath (see config.LoadEffectiveSettings) instead
-// of the project found from the working directory.
-func requireImageRegistryForBrokerAt(projectPath string) error {
-	if v := os.Getenv("SCION_IMAGE_REGISTRY"); v != "" {
-		return nil
-	}
-	if v := os.Getenv("SCION_MAINTENANCE_IMAGE_REGISTRY"); v != "" {
-		return nil
-	}
-	vs, _, err := config.LoadEffectiveSettings(projectPath)
-	if err != nil {
-		slog.Debug("Failed to load settings while checking image registry", "error", err)
-	}
-	if err == nil && vs != nil && vs.IsImageRegistryConfigured("") {
-		return nil
-	}
-	return fmt.Errorf("image_registry is not configured, but the runtime broker requires it.\n\n" +
-		"The runtime broker pulls container images to run agents. Without a registry,\n" +
-		"image pulls will fail. To fix this:\n\n" +
-		"  Option 1: scion config set --global image_registry <your-registry>\n" +
-		"  Option 2: export SCION_IMAGE_REGISTRY=<your-registry>\n\n" +
-		"See image-build/README.md for instructions on building and pushing images")
 }
 
 // stripSecretKeys returns a copy of the config map with all secret config keys removed.

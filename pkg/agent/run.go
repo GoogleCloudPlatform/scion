@@ -826,7 +826,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		if provenance != nil {
 			registryProfile = provenance.Profile
 		}
-		imageRegistry := settings.ResolveImageRegistry(registryProfile)
+		// The node env (this broker's SCION_IMAGE_REGISTRY) beats every
+		// settings layer (ptone/scion#3916).
+		imageRegistry := config.ResolveImageRegistryLayers(
+			settings.ImageRegistryLayers(registryProfile, config.ImageRegistryFromEnv())).Value
 		if imageRegistry != "" && imagecheck.IsBareImageName(resolvedImage) {
 			runtimeName := ""
 			if m.Runtime != nil {

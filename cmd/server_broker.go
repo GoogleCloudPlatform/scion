@@ -155,7 +155,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			AutoProvide:                autoProvide,
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
-			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt)),
+			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt, config.ImageRegistryFromEnv())),
 			Profiles:                   profiles,
 			DefaultProfile:             defaultProfile,
 			WorkspaceStorage:           workspaceStorage,
@@ -192,7 +192,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// path) never runs for the embedded broker. That produced a
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
-		broker.Capabilities = storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
+		broker.Capabilities = storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt, config.ImageRegistryFromEnv()))
 		// A nil descriptor (not reported) keeps the stored one; the
 		// broker's heartbeats refresh it either way.
 		if workspaceStorage != nil {
