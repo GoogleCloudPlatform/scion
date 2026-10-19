@@ -1387,7 +1387,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
     const where = st.commit ? `commit ${st.commit}` : 'the checked-out commit';
     const rev = st.branch ? `${where} on branch ${st.branch}` : where;
-    const checked = st.checkedAt ? new Date(st.checkedAt).toLocaleString() : 'unknown time';
+    const checked = this.formatDateTime(st.checkedAt) || 'unknown time';
     const summary = st.summary ?? [];
     return html`
       <div class="update-available-banner unit-drift-banner">
