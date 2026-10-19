@@ -381,8 +381,8 @@ grantor is still an active human super-admin holding the scope's capability. If 
 demoted or suspended, or the delegation is revoked, the next mint gets `403` and nothing is
 created.
 
-**Not through a delegation.** An admin delegation does not list, delete or purge identities, and
-does not issue member identities (`403`). A member delegation reaches no admin identity. So
+**Not through a delegation.** An admin delegation does not list, delete or purge identities, does
+not run the issuer cleanup or the provenance route, and does not issue member identities (`403`). A member delegation reaches no admin identity. So
 `delete --as <admin alias>` is refused by the CLI, and `teardown` reports an admin alias as
 `left-to-expire` and removes its cache file: the identity ends at its expiry (at most an hour),
 or earlier through `POST /api/v1/test-identities/admin/revoke-all` by a human super-admin, a

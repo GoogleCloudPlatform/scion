@@ -650,6 +650,14 @@ func TestWorkloadAdminCredentials_StillRefused(t *testing.T) {
 			"delete a member": func() *httptest.ResponseRecorder {
 				return e.workload(t, http.MethodDelete, "/api/v1/test-identities/"+member, e.adminWorkloadToken(t), d.ID, nil, nil)
 			},
+			// The issuer cleanup and provenance routes (Phase 3c) refuse an
+			// admin-scope delegation too (testIdentityCaller).
+			"cleanup": func() *httptest.ResponseRecorder {
+				return e.workload(t, http.MethodPost, "/api/v1/test-identities/cleanup", e.adminWorkloadToken(t), d.ID, nil, nil)
+			},
+			"provenance": func() *httptest.ResponseRecorder {
+				return e.workload(t, http.MethodGet, "/api/v1/test-identities/provenance", e.adminWorkloadToken(t), d.ID, nil, nil)
+			},
 		} {
 			got := call()
 			assert.Equal(t, http.StatusForbidden, got.Code, "%s %s: %s", tc.role, name, got.Body.String())
