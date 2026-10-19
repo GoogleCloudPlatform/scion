@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -346,8 +347,8 @@ func TestProjectRegisterToken_EnforcesProjectCreate(t *testing.T) {
 
 // TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly pins that a
 // user access token is refused the embedded-broker form of project
-// register, on an existing project and on a new one, even with
-// project:create, project:update and broker:create: 403 with the
+// register, on an existing project and on a new one, with or without
+// broker:create beside project:create and project:update: 403 with the
 // session-only reason, and no broker, provider link, project change or
 // broker secret. The holder's session sends the same request and is
 // admitted.
@@ -375,35 +376,49 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 	before, err := f.s.GetProject(ctx, f.home)
 	require.NoError(t, err)
 
-	// Existing project, named by id.
-	rec := doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/projects/register",
-		RegisterProjectRequest{ID: f.home, Name: "pct emb home", Broker: broker("pct-emb-broker-1")})
-	assertSessionOnly(rec)
-	assertNoBroker("pct-emb-broker-1")
-	providers, err := f.s.GetProjectProviders(ctx, f.home)
-	require.NoError(t, err)
-	assert.Empty(t, providers, "no provider link")
-	after, err := f.s.GetProject(ctx, f.home)
-	require.NoError(t, err)
-	assert.Equal(t, before.DefaultRuntimeBrokerID, after.DefaultRuntimeBrokerID)
-	assert.Equal(t, before.Updated, after.Updated, "project not written")
-
-	// New project.
-	rec = doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/projects/register",
-		RegisterProjectRequest{Name: "pct emb new", Broker: broker("pct-emb-broker-2")})
-	assertSessionOnly(rec)
-	assertNoBroker("pct-emb-broker-2")
-	assert.Nil(t, pctProjectBySlug(t, f.s, api.Slugify("pct emb new")), "no project")
+	// The refusal keys on the embedded broker in the body, not on any
+	// broker selector: tokens with and without broker:create are refused.
+	createOnly := projectOpsMint(t, f.srv, f.holder, hubBoundary(), "project:create")
+	createUpdate := projectOpsMint(t, f.srv, f.holder, hubBoundary(), "project:create", "project:update")
+	n := 0
+	for _, tc := range []struct {
+		name     string
+		key      string
+		existing bool
+	}{
+		{"all selectors, existing project", key, true},
+		{"all selectors, new project", key, false},
+		{"project:create and project:update, existing project", createUpdate, true},
+		{"project:create only, new project", createOnly, false},
+	} {
+		n++
+		brokerName := fmt.Sprintf("pct-emb-broker-t%d", n)
+		req := RegisterProjectRequest{Name: fmt.Sprintf("pct emb new %d", n), Broker: broker(brokerName)}
+		if tc.existing {
+			req.ID = f.home
+		}
+		rec := doRequestWithToken(t, f.srv, tc.key, http.MethodPost, "/api/v1/projects/register", req)
+		assertSessionOnly(rec)
+		assertNoBroker(brokerName)
+		assert.Nil(t, pctProjectBySlug(t, f.s, api.Slugify(req.Name)), "%s: no project", tc.name)
+		providers, err := f.s.GetProjectProviders(ctx, f.home)
+		require.NoError(t, err)
+		assert.Empty(t, providers, "%s: no provider link", tc.name)
+		after, err := f.s.GetProject(ctx, f.home)
+		require.NoError(t, err)
+		assert.Equal(t, before.DefaultRuntimeBrokerID, after.DefaultRuntimeBrokerID, tc.name)
+		assert.Equal(t, before.Updated, after.Updated, "%s: project not written", tc.name)
+	}
 
 	// The holder's session sends the existing-project request and is
 	// admitted: the broker is created and linked.
-	rec = projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects/register",
+	rec := projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects/register",
 		RegisterProjectRequest{ID: f.home, Name: "pct emb home", Broker: broker("pct-emb-broker-3")})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	b, err := f.s.GetRuntimeBrokerByName(ctx, "pct-emb-broker-3")
 	require.NoError(t, err)
 	assert.Equal(t, f.holder, b.CreatedBy)
-	providers, err = f.s.GetProjectProviders(ctx, f.home)
+	providers, err := f.s.GetProjectProviders(ctx, f.home)
 	require.NoError(t, err)
 	require.Len(t, providers, 1)
 	assert.Equal(t, b.ID, providers[0].BrokerID)
