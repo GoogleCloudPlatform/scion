@@ -1001,6 +1001,16 @@ return an error rather than a partial, reformatted, or unmasked value.
 resolved from on-disk harness-config directories, not merged into `settings.yaml`;
 use `scion harness-config` to inspect them instead.
 
+`config set` writes the project's own settings, or the global settings
+(`~/.scion/settings.yaml`) with `--global`. It refuses a key the settings file
+would accept but never read, and leaves the file unchanged:
+`hub.token`, `hub.apiKey`, `hub.lastSyncedAt`, `bucket.provider`, `bucket.name`,
+`bucket.prefix` and `hub_connections.<name>.<field>` at either layer, and
+`server.auth.display_name`, `server.auth.email` and `server.auth.username` at the
+project layer (they are read only from the global settings). The error names the key
+and does not include the value. After a successful write, the value of a
+credential-like key (for example `hub.brokerToken`) is shown masked.
+
 ### `scion cd-config`
 
 Open a new shell in the active Scion configuration directory.
