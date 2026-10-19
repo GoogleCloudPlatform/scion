@@ -26,8 +26,8 @@
   (now computed by `staticCacheControl`). Sibling names (`*.br`, `*.gz`) are
   never served by their own name. The disk fallback opens through `os.Root`
   (`webassets.DirFileSystem`), so no path or symlink leaves the directory.
-- Decoded paths that are not clean (an encoded slash or dot segments, which
-  the mux does not clean) now get a 404 under `/assets/` and `/shoelace/`, and
+- Decoded paths that are not clean (empty or dot segments produced by
+  %2F/%2E encoding, which the mux does not clean) now get a 404 under `/assets/` and `/shoelace/`, and
   the SPA shell at root level. The embedded fallback file server goes
   through `webassets.FSFileSystem`, which never opens a sibling name.
 
