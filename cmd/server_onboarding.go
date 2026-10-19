@@ -42,6 +42,9 @@ var errOnboardingStatusNotAsked = errors.New("onboarding status not requested: s
 type onboardingStatusResult struct {
 	Complete         bool   `json:"complete"`
 	EmbeddedBrokerID string `json:"embeddedBrokerID,omitempty"`
+	// ImageRegistry is the hub's resolved registry, which counts a value
+	// saved in the hub database (ptone/scion#3916).
+	ImageRegistry string `json:"imageRegistry,omitempty"`
 }
 
 // fetchOnboardingStatus asks the hub at baseURL (no trailing slash) for its
@@ -109,6 +112,12 @@ func brokerSkippedForRegistry(brokerEnabled bool, status onboardingStatusResult,
 		return false
 	}
 	if statusErr == nil && status.EmbeddedBrokerID != "" {
+		return false
+	}
+	// The hub resolves a registry (for example one saved through the
+	// wizard, which the local check cannot read): the broker was not
+	// skipped for lack of one.
+	if statusErr == nil && status.ImageRegistry != "" {
 		return false
 	}
 	return localCheck() != nil

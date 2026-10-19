@@ -89,3 +89,66 @@ func TestBrokerIncarnationReferenceIsNewestSession(t *testing.T) {
 	_, _, err := New(viewStore{}, Config{}).BrokerIncarnation(context.Background(), "", now)
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
+
+// TestBrokerSessionSuperseded: a broker session is superseded only when
+// the broker has a reference session and the session has another
+// incarnation and a lower epoch; the reference's epoch is reported with
+// its incarnation.
+func TestBrokerSessionSuperseded(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	live := &RelayInstance{InstanceID: "r1", Generation: 1, LastSeen: now}
+	live2 := &RelayInstance{InstanceID: "r2", Generation: 1, LastSeen: now}
+	stale := &RelayInstance{InstanceID: "r3", Generation: 1, LastSeen: now.Add(-time.Hour)}
+	view := func(id string, relay *RelayInstance, epoch int64, inc string) SessionView {
+		return SessionView{Relay: relay, Session: SessionRecord{
+			SessionID: id, PrincipalKind: PrincipalBroker, PrincipalID: "b1",
+			RelayInstanceID: relay.InstanceID, RelayGeneration: 1,
+			EndpointIncarnation: inc, ConnectionEpoch: epoch, LastSeen: now,
+		}}
+	}
+	sessions := []SessionView{
+		view("old", live, 3, "inc-1"),
+		view("old-dead", stale, 2, "inc-1"),
+		view("same", live, 4, "inc-2"),
+		view("ref", live2, 6, "inc-2"),
+		view("newer-other", stale, 9, "inc-3"), // dead: not the reference
+	}
+	ps := PrincipalSessions{PrincipalKind: PrincipalBroker, PrincipalID: "b1", CurrentEpoch: 9, Sessions: sessions}
+	r := New(viewStore{ps: ps}, Config{Clock: ClockFunc(func() time.Time { return now })})
+
+	ref, ok, err := r.BrokerReference(context.Background(), "b1", now)
+	assert.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, BrokerReference{Incarnation: "inc-2", ConnectionEpoch: 6}, ref)
+
+	for _, tc := range []struct {
+		session string
+		want    bool
+	}{
+		{"old", true},
+		{"old-dead", true},
+		{"same", false},
+		{"ref", false},
+		{"newer-other", false}, // a higher epoch than the reference
+		{"unknown", false},
+	} {
+		got, err := r.BrokerSessionSuperseded(context.Background(), "b1", tc.session, now)
+		assert.NoError(t, err)
+		assert.Equal(t, tc.want, got, tc.session)
+	}
+
+	// Without a reference (the newest live session has no incarnation),
+	// nothing is superseded.
+	none := PrincipalSessions{PrincipalKind: PrincipalBroker, PrincipalID: "b1", CurrentEpoch: 5, Sessions: []SessionView{
+		view("old", live, 3, "inc-1"), view("blank", live2, 5, ""),
+	}}
+	r = New(viewStore{ps: none}, Config{Clock: ClockFunc(func() time.Time { return now })})
+	got, err := r.BrokerSessionSuperseded(context.Background(), "b1", "old", now)
+	assert.NoError(t, err)
+	assert.False(t, got)
+
+	_, err = r.BrokerSessionSuperseded(context.Background(), "b1", "", now)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+	_, _, err = r.BrokerReference(context.Background(), "", now)
+	assert.ErrorIs(t, err, ErrInvalidInput)
+}

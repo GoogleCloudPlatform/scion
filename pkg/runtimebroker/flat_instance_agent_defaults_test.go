@@ -113,7 +113,7 @@ func TestFlatDefaults_ServerReadsFlatView(t *testing.T) {
 	if view.Profiles != nil || view.ActiveProfile != "" {
 		t.Fatalf("the flat view has a profile tier: %+v", view)
 	}
-	if got := view.ResolveImageRegistry(""); got != "r" {
+	if got := view.SettingsImageRegistry(""); got != "r" {
 		t.Fatalf("the flat view does not carry the instance policy (registry %q)", got)
 	}
 }

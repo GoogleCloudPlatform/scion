@@ -68,7 +68,7 @@ func installOverlayProfiles(t *testing.T, profiles map[string]config.V1ProfileCo
 	o.Update(
 		map[string]config.V1RuntimeConfig{"kubernetes": {Type: "kubernetes"}},
 		profiles,
-		nil, "")
+		nil)
 	config.SetGlobalSettingsOverlay(o)
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
 }
@@ -449,7 +449,7 @@ func installEmptyStoredCatalogOverlay(t *testing.T) {
 	prev := config.GetGlobalSettingsOverlay()
 	o := config.NewSettingsOverlay()
 	o.Update(map[string]config.V1RuntimeConfig{}, map[string]config.V1ProfileConfig{},
-		map[string]config.HarnessConfigEntry{}, "")
+		map[string]config.HarnessConfigEntry{})
 	config.SetGlobalSettingsOverlay(o)
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
 }

@@ -229,7 +229,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
-		Logger:           slog.Default().With("subsystem", "hub.conduit"),
+		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
+		},
+		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)

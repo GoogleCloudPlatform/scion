@@ -82,6 +82,13 @@ const (
 type ServerConfig struct {
 	// Port is the HTTP port to listen on.
 	Port int
+	// NodeImageRegistry is this hub process's SCION_IMAGE_REGISTRY
+	// (config.ImageRegistryFromEnv, read once at startup): the node env
+	// layer of hub-scope image_registry reads (setup status, image pull,
+	// harness image status, maintenance builds). It never applies to a
+	// dispatch, which uses the target broker's reported value
+	// (ptone/scion#3916).
+	NodeImageRegistry string
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
 	Host string
 	// ReadTimeout is the maximum duration for reading the entire request.
@@ -506,8 +513,11 @@ type ServerConfig struct {
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
 type MaintenanceConfig struct {
-	// ImageRegistry is the container image registry prefix (e.g., "ghcr.io/myorg").
-	ImageRegistry string
+	// ImageRegistryOverride is SCION_MAINTENANCE_IMAGE_REGISTRY: the
+	// registry of maintenance image builds when set. It applies to those
+	// builds only; otherwise they use the hub-scope image_registry,
+	// resolved at build time (maintenanceImageRegistry, ptone/scion#3916).
+	ImageRegistryOverride string
 	// ImageTag is the default image tag to pull (default: "latest").
 	ImageTag string
 	// Harnesses is the list of harness names whose images should be pulled (e.g., ["claude", "antigravity", "opencode", "codex"]).
@@ -1707,6 +1717,11 @@ type Server struct {
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
 	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
+	// conduitBrokerIncarnationMetrics counts broker sessions closed with
+	// 4409 superseded_incarnation and broker incarnation flaps
+	// (conduit_broker_incarnation.go); nil until
+	// SetConduitBrokerIncarnationMetrics.
+	conduitBrokerIncarnationMetrics atomic.Pointer[OTelConduitBrokerIncarnationMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu sync.Mutex
@@ -2323,6 +2338,9 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
+	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
 	// The test-identity expiry and feature checks run in the auth
@@ -4848,7 +4866,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// Set image registry so bare image names are rewritten before dispatch.
 	// It is read per dispatch, so a saved image_registry applies to the
 	// next agent (ptone/scion#3904).
-	dispatcher.SetImageRegistryProvider(s.resolveImageRegistry)
+	dispatcher.SetImageRegistryProvider(s.dispatchImageRegistryFor)
 
 	return dispatcher
 }
