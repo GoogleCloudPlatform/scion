@@ -80,11 +80,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	}
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
-		renews, canRenew := conduitTargetRenews(res), conduitRouteCanRenew(res)
+		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
 		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
-		tok, _, err := s.mintConduitGrant(ctx, conduitGrantRequest{
+		tok, claims, err := s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: identity,
 			Agent:    agent,
 			Stream:   grant.StreamHeader{Kind: grant.StreamKindTCP, Params: params},
@@ -112,7 +112,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		}
 		sc := newStreamConn(st, agent.ID, port)
 		target := conduitLeafTarget(res, st, bridge)
-		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
+		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindTCP,
 			Identity:  identity,
 			AgentID:   agent.ID,
@@ -121,9 +121,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			SessionID: target.SessionID,
 			StreamID:  target.StreamID,
 			Close:     sc.closeWithCode,
-			Renew:     conduitStreamRenewal(res, st.ID()),
 			Bridge:    bridge,
-		})
+		}
+		applyConduitOpenGrant(tracked, tok, claims)
+		tracked.Renew = conduitStreamRenewal(res, st, !tracked.AuthzUntil.IsZero())
+		sc.untrack = s.trackConduitUserStream(tracked)
 		conn = sc
 		return nil
 	})
@@ -131,18 +133,6 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		return nil, err
 	}
 	return conn, nil
-}
-
-// conduitStreamRenewal returns the sender of the hub-originated
-// AuthRefresh{stream_id} renewal notice for a stream opened on res, or nil
-// when this node does not hold the target's session (the notice is not
-// forwarded across nodes; the deadline is enforced here regardless).
-func conduitStreamRenewal(res router.Resolved, streamID uint32) func() error {
-	ls, ok := res.Session.(conduit.LocalSession)
-	if !res.Local || !ok {
-		return nil
-	}
-	return func() error { return ls.RefreshAuth(nil, streamID) }
 }
 
 // conduitTargetOf returns the stream's ids on the target's own session: on

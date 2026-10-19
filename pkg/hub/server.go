@@ -1717,8 +1717,11 @@ type Server struct {
 	conduitOpenRefusedMetrics atomic.Pointer[conduitOpenRefusedMetrics]
 	// conduitScopeOfTest, when set (tests only, never in production),
 	// replaces conduitScopeFor in the open mint (conduitScopeOf).
-	conduitScopeOfTest  conduitScopeFunc
-	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
+	conduitScopeOfTest conduitScopeFunc
+	// conduitRouteCanRenewTest, when set (tests only, never in production),
+	// replaces conduitRouteCanRenew's decision.
+	conduitRouteCanRenewTest conduitRouteRenewFunc
+	conduitBrokerRevoke      atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
 	portProxyMetrics atomic.Pointer[portProxyMetrics]

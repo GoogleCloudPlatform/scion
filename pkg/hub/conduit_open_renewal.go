@@ -107,15 +107,27 @@ func conduitTargetRenews(res router.Resolved) bool {
 	return res.Record.Capabilities.HasFeature(conduit.FeatureStreamRenewal)
 }
 
-// conduitRouteCanRenew reports whether this node can deliver renewal grants
-// for a user stream opened on res. The hub's renewal driver for hub-held
-// streams lands in a follow-up change, and relay-held streams are renewed
-// through the relay's re-check, which is not wired yet; until then no
-// route can, so with enforce every user stream to a renewal-capable target
-// is refused rather than left to end at its first deadline.
-func conduitRouteCanRenew(res router.Resolved) bool {
-	_ = res
-	return false
+// conduitRouteCanRenew reports whether this node delivers renewal grants to
+// the target of a hub-held user stream opened on res (the renewal driver,
+// conduit_stream_renewal.go). In an in-process profile it does: on a
+// session this node holds, AuthRefresh goes on that session; on a session
+// another hub node's relay holds, the stream's renewer sends it across the
+// internal hop, and the owner relay forwards it to the target stream. In
+// external relay mode a hub-held leaf reaches the target through a bridge
+// to a separate relay. Renewal delivery over that bridge is not proven end
+// to end yet, so it reports false there until 6.6b-3: with enforce such a
+// stream is refused (503 stream_renewal_unavailable) rather than left to
+// end at its first deadline. A legacy broker session never renews.
+// Relay-held streams (openForRelay) never call it; their renewals are the
+// relay's (6.6b-3).
+func (s *Server) conduitRouteCanRenew(res router.Resolved) bool {
+	if f := s.conduitRouteCanRenewTest; f != nil {
+		return f(res)
+	}
+	if res.Session == nil || res.Legacy != nil {
+		return false
+	}
+	return s.conduitExternal.Load() == nil
 }
 
 // conduitTargetStreamDeadlines returns the configured target-side stream
@@ -252,3 +264,6 @@ func (s *Server) conduitScopeOf(identity Identity) (*grant.Scope, error) {
 
 // conduitScopeFunc computes an identity's scope claim.
 type conduitScopeFunc func(Identity) (*grant.Scope, error)
+
+// conduitRouteRenewFunc decides whether a route delivers renewals.
+type conduitRouteRenewFunc func(router.Resolved) bool
