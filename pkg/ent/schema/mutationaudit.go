@@ -98,6 +98,17 @@ func (MutationAudit) Fields() []ent.Field {
 			Optional(),
 		field.String("agent_delegation_code").
 			Optional(),
+
+		// Test identity cleanup (ptone/scion#4240, Phase 3c). A JSON
+		// object naming the creation-time provenance stamp a delete
+		// relied on (fixture_root_id, fixture_issuer_id, the column it was
+		// selected by and the run). Written on every delete of the test
+		// identity purge (3b), the purge of admin kinds (A3) and the
+		// issuer cleanup (3c); empty, default "", for every other row.
+		// Immutable: an audit row is never rewritten.
+		field.String("provenance_basis").
+			Optional().
+			Immutable(),
 	}
 }
 

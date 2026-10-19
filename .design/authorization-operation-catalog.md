@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 321
+**Operations:** 323
 
 ## Table of Contents
 
@@ -315,6 +315,8 @@
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
 - [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven; for an admin-kind identity (purged by its issuer or a super-admin) it first removes every grant stamped with its issuance and reports its residue
+- [testidentity.cleanup](#testidentitycleanup) — Remove the agents, schedules, groups and projects stamped as created under the caller's expired or deleted test identities (and the expired identities themselves), with the purge engine; the hub selects the targets from the provenance stamps, the request names none (no body; ?dryRun=true lists the targets and writes nothing). An issuer reaches its own identities, a workload delegation only the identities issued through it, an unscoped platform admin session every issuer's; a live identity is never touched
+- [testidentity.provenance](#testidentityprovenance) — Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: remove every grant stamped with its issuance, then delete it (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
 - [testidentity.admin.residue](#testidentityadminresidue) — Read the residue report of an admin-kind test identity, live or purged: the grants and resources stamped with it, and its changes to rows without its stamp, for a human super-admin session
@@ -11596,6 +11598,96 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentity_Delete`
+
+---
+
+## testidentity.cleanup
+
+**Domain:** testidentity
+
+**Description:** Remove the agents, schedules, groups and projects stamped as created under the caller's expired or deleted test identities (and the expired identities themselves), with the purge engine; the hub selects the targets from the provenance stamps, the request names none (no body; ?dryRun=true lists the targets and writes nothing). An issuer reaches its own identities, a workload delegation only the identities issued through it, an unscoped platform admin session every issuer's; a live identity is never touched
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/test-identities/cleanup` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Bounded by the stamp's fixture_issuer_id: the caller's own identities, its own delegation's, or every issuer's for an unscoped platform admin session; each identity is admitted by the purge route's rules; test identities of every kind are refused as callers
+
+### Audit
+
+- **Event Type:** `test_identity_cleanup`
+- **Context Fields:** actor_id, credential_id, credential_kind, correlation_id
+- **Before Fields:** provenance_basis
+- **After Fields:** identities, deleted, not_done, unproven
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestFixtureCleanup_IssuerIsolation`
+- `pkg/hub:TestFixtureCleanup_DelegationIsolation`
+- `pkg/hub:TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive`
+- `pkg/hub:TestFixtureCleanup_AdminKindTargets`
+- `pkg/hub:TestFixtureCleanup_DelegationCannotReachAdminKind`
+- `pkg/hub:TestFixtureCleanup_AdminScopeDelegationRefused`
+
+---
+
+## testidentity.provenance
+
+**Domain:** testidentity
+
+**Description:** Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/test-identities/provenance` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `test_identity.issue`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Only stamps and deletion records in the caller's issuer scope are proven; unproven, missing and out-of-scope resources are indistinguishable and carry no owner or creator fields; test identities of every kind are refused as callers
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestFixtureProvenance_Route`
+- `pkg/hub:TestFixtureProvenance_ScopeAndDeletionRecords`
 
 ---
 

@@ -79,6 +79,18 @@ type TestIdentityService interface {
 	// /api/v1/test-identities/admin/{id}/residue). Human super-admin on an
 	// interactive session only.
 	AdminResidue(ctx context.Context, id string) (*TestAdminResidueReport, error)
+
+	// Cleanup removes the resources stamped as created under the caller's
+	// expired or deleted test identities (POST
+	// /api/v1/test-identities/cleanup, no body); dryRun lists them and
+	// writes nothing. An incomplete run returns its report with the error.
+	// See test_identity_cleanup.go.
+	Cleanup(ctx context.Context, dryRun bool) (*TestIdentityCleanupReport, error)
+
+	// Provenance answers whether the hub recorded one resource
+	// ("<type>:<id>") as created under a test identity (GET
+	// /api/v1/test-identities/provenance).
+	Provenance(ctx context.Context, resource string) (*TestIdentityProvenance, error)
 }
 
 // TestIdentityPurgeCounts counts what a purge removed.

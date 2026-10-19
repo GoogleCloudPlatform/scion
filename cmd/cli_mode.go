@@ -167,6 +167,10 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
 	"hub.test-identity.web-code": true,
+	// Issuer cleanup and provenance (Phase 3c, DEC-7): the same gate, so
+	// an agent runner can verify a run by absence on a target hub.
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
 
 	// Project thread groups (ptone/scion#4424, design section 4 and
 	// decision Q3): agents may list, read, create, rename and re-file
