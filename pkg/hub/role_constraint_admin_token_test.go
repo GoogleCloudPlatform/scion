@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,49 @@ import (
 // relaxed only over permissions the token carries. No token creates a
 // system-scoped role binding or a system-scoped custom role, and no token
 // deletes a super-admin binding.
+
+// governanceWriteSelectorPins maps every role, role binding and access
+// constraint write selector to the tests that pin its guards: the hub
+// boundary, the token ceiling and the holder's live authority, and for role
+// bindings the system-scope and super-admin binding refusals.
+var governanceWriteSelectorPins = map[string][]string{
+	"role:create": {"TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute", "TestCustomRoleCreateToken_ProjectScopeJudgedOnHubAuthority", "TestCustomRoleDelegation_ProjectBoundaryTokenRefused"},
+	"role:update": {"TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute"},
+	"role:delete": {"TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute"},
+	"role_binding:create": {"TestRoleBindingCreateToken_SystemScopeAlwaysDenied", "TestCustomRoleBindingToken_NeedsCreateSelectorAndProjectAccess",
+		"TestRoleBindingToken_ChangeAndAuditCommitTogether"},
+	"role_binding:delete": {"TestRoleBindingDeleteToken_SuperAdminBindingDenied", "TestRoleBindingDeleteToken_SystemBindingNeedsDeleteSelector",
+		"TestRoleBindingToken_ChangeAndAuditCommitTogether"},
+	"access_constraint:admin": {"TestConstraintAdminToken_RequiresConstraintAdminSelector", "TestConstraintRelaxToken_SessionOnly",
+		"TestConstraintCommit_AppliesTokenSelectors"},
+}
+
+// TestGovernanceWriteSelectors_EachPinnedByTest requires every mintable
+// selector of a role, role binding or access constraint permission other
+// than a read to be mapped in governanceWriteSelectorPins to declared tests,
+// and every mapped selector to be mintable.
+func TestGovernanceWriteSelectors_EachPinnedByTest(t *testing.T) {
+	declared := declaredTestFunctions(t)
+	valid := permissions.UATValidScopes()
+	seen := map[string]bool{}
+	for _, p := range permissions.Registry {
+		if p.UATScope == "" || p.Action == permissions.ActionRead {
+			continue
+		}
+		if p.Resource != permissions.ResourceRole && p.Resource != permissions.ResourceRoleBinding && p.Resource != permissions.ResourceAccessConstraint {
+			continue
+		}
+		seen[p.UATScope] = true
+		assert.NotEmpty(t, governanceWriteSelectorPins[p.UATScope], "%s (%s) has no test mapped in governanceWriteSelectorPins", p.UATScope, p.ID)
+	}
+	for sel, pins := range governanceWriteSelectorPins {
+		assert.True(t, seen[sel], "%s is mapped but is not a write selector of a role, role binding or access constraint permission", sel)
+		assert.True(t, valid[sel], "%s is mapped but is not mintable", sel)
+		for _, pin := range pins {
+			assert.True(t, declared[pin], "%s: mapped test %s is not declared", sel, pin)
+		}
+	}
+}
 
 // rcaUser creates an active user with hub membership.
 func rcaUser(t *testing.T, s store.Store, name string) *store.User {
