@@ -218,13 +218,57 @@ func TestWebAPI_AgentListGzip(t *testing.T) {
 	assert.Empty(t, plain.Header.Get("Content-Encoding"))
 	identity, err := io.ReadAll(plain.Body)
 	require.NoError(t, err)
-	assert.JSONEq(t, string(body), string(identity))
+	// Compare by agent ID (list ordering and per-request fields may differ
+	// between two calls): the same 20 agents, each with the same name and
+	// project, which must be the ones created above.
+	gz, plainList := agentListByID(t, body), agentListByID(t, identity)
+	assert.Equal(t, gz, plainList)
+	names := make([]string, 0, len(gz))
+	for _, a := range gz {
+		assert.Equal(t, project.ID, a.ProjectID)
+		names = append(names, a.Name)
+	}
+	want := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		want = append(want, fmt.Sprintf("gzip-agent-%02d", i))
+	}
+	assert.ElementsMatch(t, want, names)
+}
+
+// agentListEntry holds the stable fields of one agent list item.
+type agentListEntry struct {
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	ProjectID string `json:"projectId"`
+}
+
+// agentListByID decodes an agent list response body into stable per-agent
+// fields keyed by agent ID, and requires 20 distinct agents.
+func agentListByID(t *testing.T, body []byte) map[string]agentListEntry {
+	t.Helper()
+	var list struct {
+		Agents []struct {
+			ID string `json:"id"`
+			agentListEntry
+		} `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(body, &list), "list body: %.200s", body)
+	out := make(map[string]agentListEntry, len(list.Agents))
+	for _, a := range list.Agents {
+		out[a.ID] = a.agentListEntry
+	}
+	require.Len(t, list.Agents, 20)
+	require.Len(t, out, 20, "agent IDs must be distinct")
+	return out
 }
 
 func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
 	env := newCompressHubEnv(t, nil)
 	ctx := context.Background()
 	agent := createTestAgent(t, env.store)
+	// A known phase: metadata fields are editable in every known phase, and
+	// a fixture agent with no phase refuses PATCH edits.
+	agent.Phase = string(state.PhaseStopped)
 	agent.Annotations = map[string]string{"note": strings.Repeat("a", 1500)}
 	require.NoError(t, env.store.UpdateAgent(ctx, agent))
 
