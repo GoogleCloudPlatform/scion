@@ -37,7 +37,8 @@ func TestSanitizeFailureCause(t *testing.T) {
 			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`,
 			`pods "agent-pod-4555" is forbidden: User "system:serviceaccount:team-ns:scion-sa" cannot get resource "pods"`},
 		{"long lower-case name kept", "pod scion-agent-a-rather-long-generated-name-0001 failed", "pod scion-agent-a-rather-long-generated-name-0001 failed"},
-		{"env value blanked, key kept", "run failed: FOO=bar BAZ=qux done", "run failed: FOO=[REDACTED] BAZ=[REDACTED] done"},
+		{"env value blanked, key kept", "run failed: FOO=bar BAZ=qux", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
+		{"unquoted value with spaces", "env KEY=a b c, next", "env KEY=[REDACTED], next"},
 		{"quoted value blanked", `bad env X="a b c"`, "bad env X=[REDACTED]"},
 		{"flag value blanked", "unknown flag --env=FOO=bar", "unknown flag --env=[REDACTED]"},
 		{"credential-named JSON key", `spec {"DB_PASSWORD": "hunter2-value"}`, `spec {"DB_PASSWORD": [REDACTED]}`},
@@ -50,10 +51,10 @@ func TestSanitizeFailureCause(t *testing.T) {
 		{"long hex run", "container 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef exited", "container [REDACTED] exited"},
 		{"single-quoted key", "spec {'password': 'hunter2-value'}", "spec {'password': [REDACTED]}"},
 		{"passphrase key", "key_passphrase: hunter2-value", "key_passphrase: [REDACTED]"},
-		{"lower-case colon key", "spec password: hunter2-value end", "spec password: [REDACTED] end"},
-		{"hyphenated header key", "header x-api-key: abc123 sent", "header x-api-key: [REDACTED] sent"},
+		{"lower-case colon key", "spec password: hunter2-value; end", "spec password: [REDACTED]; end"},
+		{"hyphenated header key", "header x-api-key: abc123, sent", "header x-api-key: [REDACTED], sent"},
 		{"capitalized key, no space", "Password:hunter2", "Password:[REDACTED]"},
-		{"auth as a whole key word", "auth-header: abc123 and X_AUTH=xyz", "auth-header: [REDACTED] and X_AUTH=[REDACTED]"},
+		{"auth as a whole key word", "auth-header: abc123 X_AUTH=xyz", "auth-header: [REDACTED] X_AUTH=[REDACTED]"},
 		{"registry refusal kept", "unauthorized: authentication required", "unauthorized: authentication required"},
 		{"EnvVar JSON value", `env [{"name":"GITHUB_PAT","value":"hunter2"}]`, `env [{"name":"GITHUB_PAT","value":[REDACTED]}]`},
 		{"EnvVar %+v value", "env {Name:GITHUB_PAT Value:hunter2 ValueFrom:nil}", "env {Name:GITHUB_PAT Value:[REDACTED] ValueFrom:nil}"},
@@ -134,9 +135,10 @@ var sanitizedCauseLogSites = []string{
 }
 
 // assertSanitizedCauseRecord checks logs hold exactly one msg record, that
-// its cause and error fields are sanitized and truncated, and that no
-// record holds any credential-shaped value.
-func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
+// its agent_id, runtime and profile fields equal want's, that its cause and
+// error fields are sanitized and truncated, and that no record holds any
+// credential-shaped value.
+func assertSanitizedCauseRecord(t *testing.T, logs, msg string, want map[string]string) {
 	t.Helper()
 	var recs []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(logs), "\n") {
@@ -149,8 +151,8 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 		t.Fatalf("%d %q records, want exactly 1; logs: %s", len(recs), msg, logs)
 	}
 	for _, field := range []string{"agent_id", "runtime", "profile"} {
-		if _, ok := recs[0][field].(string); !ok {
-			t.Errorf("%s = %#v, want a string field", field, recs[0][field])
+		if got, ok := recs[0][field].(string); !ok || got != want[field] {
+			t.Errorf("%s = %#v, want %q", field, recs[0][field], want[field])
 		}
 	}
 	for _, field := range []string{"cause", "error"} {
@@ -217,7 +219,7 @@ func assertStartOpSanitized(t *testing.T, op, msg string) {
 	if status != http.StatusInternalServerError || body != plainBody {
 		t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
 	}
-	assertSanitizedCauseRecord(t, logs, msg)
+	assertSanitizedCauseRecord(t, logs, msg, map[string]string{"agent_id": "test-agent-1", "runtime": "mock", "profile": ""})
 }
 
 // TestCreateFailureCause_SanitizedAtEveryLogSite: a create, start or
@@ -234,7 +236,7 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 			if status != http.StatusInternalServerError || body != plainBody {
 				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
 			}
-			assertSanitizedCauseRecord(t, logs, "Agent create failed")
+			assertSanitizedCauseRecord(t, logs, "Agent create failed", map[string]string{"agent_id": name, "runtime": "mock", "profile": ""})
 		},
 		"runLaunch: agent start failed": func(t *testing.T) {
 			const name = "agent-async-sanitize"
@@ -251,7 +253,7 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 					t.Errorf("report contains %q", v)
 				}
 			}
-			assertSanitizedCauseRecord(t, logs, "runLaunch: agent start failed")
+			assertSanitizedCauseRecord(t, logs, "runLaunch: agent start failed", map[string]string{"agent_id": name, "runtime": "mock", "profile": ""})
 		},
 		"Agent create failed: preflight": func(t *testing.T) {
 			status, body, logs := asyncPreflightFailure(t, "agent-preflight-sanitize", credentialShapedStartError())
@@ -259,7 +261,7 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 			if status != http.StatusInternalServerError || body != plainBody {
 				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
 			}
-			assertSanitizedCauseRecord(t, logs, "Agent create failed: preflight")
+			assertSanitizedCauseRecord(t, logs, "Agent create failed: preflight", map[string]string{"agent_id": "agent-preflight-sanitize", "runtime": "mock", "profile": ""})
 		},
 		"Agent start failed": func(t *testing.T) {
 			assertStartOpSanitized(t, "start", "Agent start failed")
@@ -282,7 +284,7 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 					if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"Failed to start agent"`) {
 						t.Errorf("response = %d %s, want 500 with the fixed text", w.Code, w.Body.String())
 					}
-					assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed")
+					assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed", map[string]string{"agent_id": "agent-ctx-sanitize", "runtime": "docker", "profile": "default"})
 				})
 			}
 		},
