@@ -211,9 +211,15 @@ func TestConduitRelay_ReconnectWindowWired(t *testing.T) {
 // 4401, deletes its rows on every relay and forgets its epoch.
 func TestConduitForgetAgent(t *testing.T) {
 	f := newRelayFixture(t, nil)
-	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
+	sess, wel, err := f.dial(t, f.agentToken(t, f.launched), f.launched.RunID)
 	require.NoError(t, err)
 	ctx := context.Background()
+	// The Welcome goes out before Serve registers the session, and the
+	// local close only reaches registered sessions (the agent row is not
+	// deleted here, so the post-registration re-check does not close it
+	// either). Local waits for the admitted session to register.
+	_, _, ok := f.srv.conduit.Load().relay.Local(ctx, wel.GetSessionId())
+	require.True(t, ok, "the agent's session registers on the relay")
 	// A row of the same agent on another (stale) relay.
 	_, err = f.regStore.InsertSessionWithNextEpoch(ctx, registry.SessionRecord{
 		SessionID: "remote-row", PrincipalKind: registry.PrincipalAgent, PrincipalID: f.launched.ID,
