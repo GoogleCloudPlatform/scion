@@ -1027,6 +1027,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/settings/resolved":                 {"id": f.project},
 		"/api/v1/projects/{id}/messaging-policy":                  {"id": f.project},
 		"/api/v1/projects/{id}/set-template":                      {"id": f.project},
+		"/api/v1/projects/{id}/clone":                             {"id": f.project},
 		"/api/v1/projects/{id}/discover-templates":                {"id": f.project},
 		"/api/v1/projects/{id}/import-templates":                  {"id": f.project},
 		"/api/v1/projects/{id}/discover-harness-configs":          {"id": f.project},
