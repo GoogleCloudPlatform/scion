@@ -172,6 +172,70 @@ describe('notification tray: event reactions', () => {
     expect(listFetches()).toBe(0);
   });
 
+  it('a list fetch sent before an upsert keeps the upserted row and pops it once', async () => {
+    const tray = await mountTray([notif('old')]);
+
+    // A fetch is in flight when the event for a new row arrives.
+    let release: () => void = () => {};
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = (): void =>
+            resolve(new Response(JSON.stringify([notif('old')]), { status: 200 }));
+        })
+    );
+    emitBare();
+    expect(listFetches()).toBe(1);
+    emitUserScoped(userEventPayload('new'));
+    expect(ids(tray)).toEqual(['new', 'old']);
+
+    // Its answer predates the new row: the row stays.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ids(tray)).toEqual(['new', 'old']);
+
+    // A later fetch that lists it does not pop it again.
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify([userEventPayload('new'), notif('old')]), { status: 200 })
+      )
+    );
+    await tray.fetchNotifications();
+    expect(ids(tray)).toEqual(['new', 'old']);
+    expect(popups).toEqual(['new']);
+
+    // A fetch sent after the upsert is authoritative: acknowledged
+    // elsewhere, the row goes.
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([notif('old')]), { status: 200 }))
+    );
+    await tray.fetchNotifications();
+    expect(ids(tray)).toEqual(['old']);
+  });
+
+  it('a user change drops the previous user queued fetch and the next event fetches at once', async () => {
+    const tray = await mountTray([]);
+
+    // u1: the first event fetches, the second is queued for a trailing fetch.
+    emitBare();
+    emitBare();
+    expect(listFetches()).toBe(1);
+
+    // Switch to u2 before the trailing run: u2's own first fetch.
+    tray.user = { id: 'u2', email: 'u2@example.com', displayName: 'u2' };
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(2);
+
+    // The queued u1 fetch never fires.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(listFetches()).toBe(2);
+
+    // u2's first event fetches at once (leading).
+    emitBare();
+    expect(listFetches()).toBe(3);
+  });
+
   it('bare notification.created burst fetches once', async () => {
     const tray = await mountTray([]);
     apiFetch.mockImplementation(() =>

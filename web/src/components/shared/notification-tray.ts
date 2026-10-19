@@ -132,6 +132,16 @@ export class ScionNotificationTray extends LitElement {
    * Fetches for events that carry no usable notification: the first of a
    * burst fetches at once, the rest collapse into one trailing fetch.
    */
+  /** Counts list requests sent; each request knows its own number. */
+  private fetchSeq = 0;
+
+  /**
+   * Rows an event added, with the fetchSeq when it was added. A list request
+   * sent at or before that number may have been answered before the row
+   * existed, so its response must not drop the row.
+   */
+  private upsertedAtSeq = new Map<string, number>();
+
   private eventFetch: CoalescedRefresh = coalescedRefresh(() => this.fetchNotifications(), {
     waitMs: 500,
     maxWaitMs: 3000,
@@ -215,6 +225,7 @@ export class ScionNotificationTray extends LitElement {
     this.stateUserId = id;
     this.notifications = [];
     this.seenIds = new Set();
+    this.upsertedAtSeq.clear();
     this.initialFetchDone = false;
     // The next user's first fetch answers any event the previous user's
     // coalescer held, and their first event fetches at once.
@@ -333,6 +344,7 @@ export class ScionNotificationTray extends LitElement {
       this.dispatchBrowserNotification(n);
       this.seenIds.add(n.id);
     }
+    this.upsertedAtSeq.set(n.id, this.fetchSeq);
     // The list is newest first, as the endpoint returns it.
     const at = this.notifications.findIndex((x) => x.id === n.id);
     this.notifications =
@@ -345,6 +357,7 @@ export class ScionNotificationTray extends LitElement {
 
   private async fetchNotifications(): Promise<void> {
     const requestUserId = this.user?.id ?? null;
+    const seq = ++this.fetchSeq;
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;
@@ -365,10 +378,21 @@ export class ScionNotificationTray extends LitElement {
         }
       }
 
+      // Rows an event added after this request was sent are newer than its
+      // answer: keep them (they are already seen). Older ones are answered.
+      const incomingIds = new Set(incoming.map((n) => n.id));
+      const kept = this.notifications.filter(
+        (n) => !incomingIds.has(n.id) && (this.upsertedAtSeq.get(n.id) ?? -1) >= seq
+      );
+      for (const [id, at] of this.upsertedAtSeq) {
+        if (at < seq) this.upsertedAtSeq.delete(id);
+      }
+      const next = [...kept, ...incoming];
+
       // Update seen set to current snapshot
-      this.seenIds = new Set(incoming.map((n) => n.id));
+      this.seenIds = new Set(next.map((n) => n.id));
       this.initialFetchDone = true;
-      this.notifications = incoming;
+      this.notifications = next;
     } catch {
       // Silently ignore network errors during polling
     }
@@ -412,6 +436,7 @@ export class ScionNotificationTray extends LitElement {
       await apiFetch(`/api/v1/notifications/${id}/ack`, { method: 'POST' });
       if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
+      this.upsertedAtSeq.delete(id);
     } catch {
       // Ignore
     }
@@ -423,6 +448,7 @@ export class ScionNotificationTray extends LitElement {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
       if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = [];
+      this.upsertedAtSeq.clear();
     } catch {
       // Ignore
     }

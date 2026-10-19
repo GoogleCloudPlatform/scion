@@ -94,8 +94,7 @@ export function coalescedRefresh(
       inWindow = false;
       return;
     }
-    run();
-    armQuiet();
+    runThenArm();
   };
 
   const armQuiet = (): void => {
@@ -106,8 +105,16 @@ export function coalescedRefresh(
   const onMaxWait = (): void => {
     maxTimer = null;
     if (!pending) return;
-    run();
-    armQuiet();
+    runThenArm();
+  };
+
+  /** Runs fn and opens the next window, even if fn throws synchronously. */
+  const runThenArm = (): void => {
+    try {
+      run();
+    } finally {
+      armQuiet();
+    }
   };
 
   return {
@@ -116,8 +123,7 @@ export function coalescedRefresh(
       newest = Math.max(newest, at);
       if (!inWindow && leading) {
         inWindow = true;
-        run();
-        armQuiet();
+        runThenArm();
         return;
       }
       inWindow = true;

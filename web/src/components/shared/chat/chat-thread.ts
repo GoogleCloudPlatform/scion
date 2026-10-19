@@ -2192,12 +2192,15 @@ export class ScionChatThread extends LitElement {
     if (eventKey && eventKey !== this.conversationKey) {
       return; // Not for this conversation
     }
-    // No conversation key, but routed to another project: a conversation
-    // belongs to one project, so it cannot be this one.
+    // No conversation key, but routed to another project: a space thread
+    // belongs to one project, so it cannot be this one. Not applied to a DM:
+    // its projectId is inherited from the view it was opened from, while
+    // its messages carry the sender agent's project (or none).
     if (
       !eventKey &&
       eventData.projectId &&
       this.projectId &&
+      !this.conversationKey.startsWith('dm:') &&
       eventData.projectId !== this.projectId
     ) {
       return;

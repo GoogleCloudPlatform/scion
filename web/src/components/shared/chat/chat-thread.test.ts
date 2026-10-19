@@ -2444,13 +2444,18 @@ describe('scion-chat-thread SSE message filtering', () => {
     await el.updateComplete;
     apiFetch.mockClear();
 
-    // Another conversation by key, and a keyless event routed to another
-    // project (no conversation of another project can be this one).
-    emitChatMessage({ threadId: 'some-other-topic', id: 'm1' });
-    emitChatMessage({ projectId: 'project-other', id: 'm2' });
-    await new Promise((r) => setTimeout(r, 400));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // Another conversation by key, and a keyless event routed to another
+      // project (no conversation of another project can be this one).
+      emitChatMessage({ threadId: 'some-other-topic', id: 'm1' });
+      emitChatMessage({ projectId: 'project-other', id: 'm2' });
+      await vi.advanceTimersByTimeAsync(3000);
 
-    expect(historyCalls()).toBe(0);
+      expect(historyCalls()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a keyless event of its own project still backfills', async () => {
@@ -2460,6 +2465,20 @@ describe('scion-chat-thread SSE message filtering', () => {
     apiFetch.mockClear();
 
     emitChatMessage({ projectId: 'project-mine', id: 'm1' });
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('a DM thread backfills for a keyless event of another project', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:agent-1:user:user-me';
+    el.projectId = 'project-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+    await vi.waitFor(() => expect((el as unknown as { loading: boolean }).loading).toBe(false));
+    apiFetch.mockClear();
+
+    emitChatMessage({ projectId: 'project-of-agent', id: 'm1' });
     await vi.waitFor(() => expect(historyCalls()).toBe(1));
   });
 

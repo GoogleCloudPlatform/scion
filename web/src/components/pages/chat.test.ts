@@ -2983,14 +2983,17 @@ describe('chat page — startup after the page is removed', () => {
 
     it('refreshes the rail when the SSE feed reconnects after a drop, until removed', async () => {
       const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         stateManager.dispatchEvent(new CustomEvent('agents-resync'));
-        await vi.waitFor(() => expect(el.refreshRail).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(250);
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
         el.remove();
         stateManager.dispatchEvent(new CustomEvent('agents-resync'));
-        await new Promise((r) => setTimeout(r, 400));
+        await vi.advanceTimersByTimeAsync(5000);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
       } finally {
+        vi.useRealTimers();
         el.remove();
       }
     });
@@ -3001,13 +3004,15 @@ describe('chat page — startup after the page is removed', () => {
       let now = 5_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         visibility = 'hidden';
         document.dispatchEvent(new Event('visibilitychange'));
         now += RESUME_REFRESH_AFTER_MS;
         visibility = 'visible';
         document.dispatchEvent(new Event('visibilitychange'));
-        await vi.waitFor(() => expect(el.refreshRail).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(250);
+        expect(el.refreshRail).toHaveBeenCalledTimes(1);
 
         el.remove();
         visibility = 'hidden';
@@ -3015,9 +3020,10 @@ describe('chat page — startup after the page is removed', () => {
         now += RESUME_REFRESH_AFTER_MS;
         visibility = 'visible';
         document.dispatchEvent(new Event('visibilitychange'));
-        await new Promise((r) => setTimeout(r, 400));
+        await vi.advanceTimersByTimeAsync(5000);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
       } finally {
+        vi.useRealTimers();
         el.remove();
       }
     });
@@ -3028,6 +3034,7 @@ describe('chat page — startup after the page is removed', () => {
       let now = 5_000_000;
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       const el = await startedPage();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       try {
         // A PWA resume: the page becomes visible after a long time hidden,
         // and the feed it had lost reconnects moments later.
@@ -3036,13 +3043,14 @@ describe('chat page — startup after the page is removed', () => {
         now += RESUME_REFRESH_AFTER_MS;
         visibility = 'visible';
         document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(100);
         stateManager.dispatchEvent(new CustomEvent('agents-resync'));
 
-        await vi.waitFor(() => expect(el.refreshRail).toHaveBeenCalledTimes(1));
-        // Well past the coalescing window: still one.
-        await new Promise((r) => setTimeout(r, 600));
+        // Well past the coalescing window: one refresh.
+        await vi.advanceTimersByTimeAsync(5000);
         expect(el.refreshRail).toHaveBeenCalledTimes(1);
       } finally {
+        vi.useRealTimers();
         el.remove();
       }
     });

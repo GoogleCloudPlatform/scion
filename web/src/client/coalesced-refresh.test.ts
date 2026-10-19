@@ -162,6 +162,21 @@ describe('coalescedRefresh', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
+  it('a synchronous throw still closes the window after a quiet period', () => {
+    let calls = 0;
+    const fn = vi.fn(() => {
+      calls++;
+      if (calls === 1) throw new Error('boom');
+    });
+    const r = coalescedRefresh(fn, { waitMs: 500, maxWaitMs: 2000, leading: true });
+
+    expect(() => r.schedule()).toThrow('boom');
+    vi.advanceTimersByTime(5000);
+    // The window closed on its quiet timer, so the next call leads.
+    r.schedule();
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
   it('swallows a rejected refresh', async () => {
     const fn = vi.fn(() => Promise.reject(new Error('offline')));
     const r = coalescedRefresh(fn, { waitMs: 500, maxWaitMs: 2000 });
