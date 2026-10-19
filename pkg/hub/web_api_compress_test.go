@@ -225,7 +225,7 @@ func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
 	env := newCompressHubEnv(t, nil)
 	ctx := context.Background()
 	agent := createTestAgent(t, env.store)
-	agent.Labels = map[string]string{"note": strings.Repeat("a", 1500)}
+	agent.Annotations = map[string]string{"note": strings.Repeat("a", 1500)}
 	require.NoError(t, env.store.UpdateAgent(ctx, agent))
 
 	for _, p := range []string{
@@ -244,7 +244,7 @@ func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
 	}
 
 	t.Run("PATCH", func(t *testing.T) {
-		patch, err := json.Marshal(map[string]any{"labels": map[string]string{"note": strings.Repeat("b", 1500)}})
+		patch, err := json.Marshal(map[string]any{"annotations": map[string]string{"note": strings.Repeat("b", 1500)}})
 		require.NoError(t, err)
 		req, err := http.NewRequest(http.MethodPatch, env.ts.URL+"/api/v1/agents/"+agent.ID, strings.NewReader(string(patch)))
 		require.NoError(t, err)
@@ -325,16 +325,20 @@ func TestWebAPI_AgentCreateNotCompressed(t *testing.T) {
 
 func TestIsAgentCollectionPath(t *testing.T) {
 	for p, want := range map[string]bool{
-		"/api/v1/agents":                true,
-		"/api/v1/agents/":               true,
-		"/api/v1/projects/p1/agents":    true,
-		"/api/v1/projects/p1/agents/":   true,
-		"/api/v1/agents/a1":             false,
-		"/api/v1/projects/p1/agents/a1": false,
-		"/api/v1/projects//agents":      false,
-		"/api/v1/projects":              false,
-		"/api/v1/agent":                 false,
-		"/agents":                       false,
+		"/api/v1/agents":                      true,
+		"/api/v1/agents/":                     true,
+		"/api/v1/projects/p1/agents":          true,
+		"/api/v1/projects/p1/agents/":         true,
+		"/api/v1/agents/a1":                   false,
+		"/api/v1/projects/p1/agents/a1":       false,
+		"/api/v1/projects//agents":            false,
+		"/api/v1/projects":                    false,
+		"/api/v1/agent":                       false,
+		"/api/v1/agentsX":                     false,
+		"/api/v1/projects/p1/agentsX":         false,
+		"/api/v1/projects/p1/agents/a1/start": false,
+		"/api/v1/brokers/b1/agents":           false,
+		"/agents":                             false,
 	} {
 		assert.Equal(t, want, isAgentCollectionPath(p), p)
 	}
@@ -569,7 +573,8 @@ func TestWebAPI_ErrorJSONNotCompressed(t *testing.T) {
 		})
 	}))
 	q := strings.Repeat("abcdefgh", 400)
-	for _, p := range []string{"/api/v1/agents/bad", "/api/v1/agents/missing", "/api/v1/agents/denied", "/api/v1/agents/conflict"} {
+	for _, p := range []string{"/api/v1/projects/bad", "/api/v1/projects/missing", "/api/v1/projects/denied", "/api/v1/projects/conflict"} {
+		require.False(t, isCompressBypassPath(p), "%s must be a compressible path for this test to be meaningful", p)
 		t.Run(p, func(t *testing.T) {
 			resp := compressGet(t, context.Background(), ts.URL+p+"?q="+q, nil)
 			require.GreaterOrEqual(t, resp.StatusCode, 400)

@@ -35,6 +35,10 @@ and phase A2.
     exchange, broker registration, join and secret rotation, project
     registration, invites, test identities, and env and secrets routes;
   - agent item responses (`/api/v1/agents/{id}` and the project-scoped form).
+  `MountHubAPI` also sends non-GET requests to the agent collection paths
+  (`/api/v1/agents`, `/api/v1/projects/{projectId}/agents`; matched by
+  `isAgentCollectionPath`) to the hub handler without the wrapper, so agent
+  create responses stay uncompressed while the GET agent list is compressed.
 - `/events` and the SPA shell are mounted on the web mux, outside `/api/v1/`,
   so the wrapper never sees them.
 
@@ -45,9 +49,10 @@ and phase A2.
   `TestWrap_UpgradeNotWrapped`, `TestWrap_SmallJSONUncompressed`,
   `TestWrap_FlushForcesDecision`, `TestWrap_PatchJSONControlNotBypassed`, and
   the rest), plus Accept-Encoding parsing, Vary, non-JSON and panic paths.
-- `pkg/hub/web_api_compress_test.go`, all in hubshard shard 1:
+- `pkg/hub/web_api_compress_test.go`, all in one hubshard shard (6 at this head):
   - real hub handlers through `buildHandler()`: the agent list is gzipped,
-    agent item GET/PATCH responses are identity, small public JSON is
+    agent item GET/PATCH and agent create (POST, both collection forms)
+    responses are identity, small public JSON is
     identity, and the log and message streams deliver their first event
     unencoded before the handler ends;
   - PTY/tunnel upgrades, the port proxy, `/events` and the SPA shell;
