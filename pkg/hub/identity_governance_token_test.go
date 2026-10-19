@@ -643,6 +643,8 @@ func TestSelfIdentityReadsToken_AnyTokenReads(t *testing.T) {
 // broker acting for the user, a hub delivery credential, a workload
 // delegation and a federation credential are refused; an agent JWT is
 // refused on the selector catalog, admin-status and the caller's groups.
+// The caller's own profile also refuses a federated agent and a federated
+// service identity carrying the federation kind.
 func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 	srv, s := testServer(t)
 	user := seedRoleUser(t, s, tid("ig-kind-user"), "", true)
@@ -683,6 +685,19 @@ func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())
 		})
 	}
+	federated := []struct {
+		name     string
+		identity Identity
+	}{
+		{"profile federated agent", NewFederatedAgentIdentity("https://issuer.example", "agent-1", "proj-1", "a", "root", nil, nil)},
+		{"profile federated service", NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@example.com", nil)},
+	}
+	for _, f := range federated {
+		t.Run(f.name, func(t *testing.T) {
+			rec := igRequestWithCredential(srv.handleAuthMe, f.identity, CredentialKindFederation, http.MethodGet, "/api/v1/auth/me", "")
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s", rec.Body.String())
+		})
+	}
 }
 
 // TestSelfReadCredential_FollowsCatalogCredentials pins that the self-read
@@ -691,7 +706,8 @@ func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 // dev credential, a scoped token names a user access token, an agent JWT
 // is declared only on the caller's own profile and explain, and a
 // federated user credential (the federation kind) only on the caller's own
-// profile, where selfReadCredential also requires a visitor identity. An explain for another principal admits no agent JWT.
+// profile, where selfReadCredential also requires a visitor identity. An
+// explain for another principal admits no agent JWT.
 func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 	kinds := []CredentialKind{
 		CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT,
@@ -756,11 +772,9 @@ func TestSelfReadCredential_VisitorIdentityOnly(t *testing.T) {
 		})
 	}
 	for _, op := range []authzop.OperationID{"user.self.adminstatus", "user.self.groups", "user.self.explain", "user.self.scopes", "hub.audit.explain"} {
-		for _, identity := range []Identity{visitor} {
-			ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: CredentialKindFederation})
-			_, ok := selfReadCredential(ctx, identity, op)
-			assert.False(t, ok, "%s refuses %T", op, identity)
-		}
+		ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: CredentialKindFederation})
+		_, ok := selfReadCredential(ctx, visitor, op)
+		assert.False(t, ok, "%s refuses a visitor", op)
 	}
 }
 

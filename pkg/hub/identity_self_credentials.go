@@ -80,9 +80,10 @@ func operationAdmitsRequestKind(op authzop.OperationID, kind CredentialKind) boo
 // only with a visitor identity (a federated account linked by a grant or
 // a rule), and a federated identity only when it is a visitor with the
 // federation kind: an unlinked federated user, and a federated agent or
-// service identity, are refused whatever the recorded kind. token is the caller's token identity
-// when the request carries a user access token, and nil otherwise; a
-// token reads its holder's records limited to its ceiling and boundary.
+// service identity, are refused whatever the recorded kind. token is the
+// caller's token identity when the request carries a user access token,
+// and nil otherwise; a token reads its holder's records limited to its
+// ceiling and boundary.
 func selfReadCredential(ctx context.Context, identity Identity, op authzop.OperationID) (token *ScopedUserIdentity, ok bool) {
 	if isNilIdentity(identity) {
 		return nil, false
