@@ -16,8 +16,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"regexp"
 	"time"
@@ -45,44 +43,10 @@ func startupSnapshotPatterns() []string {
 	return []string{fkSnapshotLabelPattern(), utcSnapshotLabelPattern()}
 }
 
-// utcTimestampAutoRunIncompleteKey is the key in the utc-timestamp-normalize
-// maintenance operation's metadata that marks an automatic run that started
-// and has not completed.
-//
-// replaced by entadapter.UTCTimestampAutoRunIncompleteKey (ptone/scion#5194)
-const utcTimestampAutoRunIncompleteKey = "autoRunIncomplete"
-
-// utcTimestampNormalizeIncomplete reports whether an automatic run of the
-// timestamp normalizer started and has not completed, so its snapshot may
-// be the only copy of the values it rewrites: the utc-timestamp-normalize
-// maintenance operation exists, is not completed, and its metadata is a
-// JSON object whose autoRunIncomplete key is true. A missing operation is
-// complete; any other read error is returned.
-//
-// replaced by entadapter.UTCTimestampNormalizeIncomplete (ptone/scion#5194)
-func utcTimestampNormalizeIncomplete(ctx context.Context, s store.Store) (bool, error) {
-	op, err := s.GetMaintenanceOperation(ctx, entadapter.UTCTimestampNormalizeKey)
-	if errors.Is(err, store.ErrNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if op == nil || op.Status == store.MaintenanceStatusCompleted {
-		return false, nil
-	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(op.Metadata), &meta); err != nil {
-		return false, nil
-	}
-	incomplete, ok := meta[utcTimestampAutoRunIncompleteKey].(bool)
-	return ok && incomplete, nil
-}
-
 // timestampNormalizeIncomplete and pruneStartupSnapshots are variables so
 // tests can observe them.
 var (
-	timestampNormalizeIncomplete = utcTimestampNormalizeIncomplete
+	timestampNormalizeIncomplete = entadapter.UTCTimestampNormalizeIncomplete
 	pruneStartupSnapshots        = func(file string, patterns, keep []string, now time.Time) []string {
 		return entadapter.PruneSQLiteSnapshots(file, patterns, keep, entadapter.SnapshotRetention, now)
 	}
