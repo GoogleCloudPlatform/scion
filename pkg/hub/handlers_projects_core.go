@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1557,6 +1558,17 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterProjectRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// SECURITY-GATE: the embedded-broker form of register (req.Broker set)
+	// creates or re-registers a broker and returns its secret, so a user
+	// access token is refused it before any lookup or write. A token
+	// registers brokers through POST /api/v1/brokers.
+	if req.Broker != nil && IsScopedUserIdentity(GetIdentityFromContext(ctx)) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			"registering a project with an embedded broker requires an interactive session; register the broker with POST /api/v1/brokers",
+			authzop.ReasonCredentialManagement)
 		return
 	}
 

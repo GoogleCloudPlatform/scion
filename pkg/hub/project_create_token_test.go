@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -341,6 +342,71 @@ func TestProjectRegisterToken_EnforcesProjectCreate(t *testing.T) {
 		rec = projectOpsSession(t, f.srv, plain.ID, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "pct reg plain"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct reg plain"), "session without project.create")
 	})
+}
+
+// TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly pins that a
+// user access token is refused the embedded-broker form of project
+// register, on an existing project and on a new one, even with
+// project:create, project:update and broker:create: 403 with the
+// session-only reason, and no broker, provider link, project change or
+// broker secret. The holder's session sends the same request and is
+// admitted.
+func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
+	f := newPCTFixture(t, "pct-emb")
+	ctx := context.Background()
+	key := projectOpsMint(t, f.srv, f.holder, hubBoundary(), "project:create", "project:update", "project:read", "agent:read", "broker:create")
+	broker := func(name string) *RegisterProjectBrokerInfo {
+		return &RegisterProjectBrokerInfo{Name: name, Version: "1.0.0"}
+	}
+	assertNoBroker := func(name string) {
+		t.Helper()
+		_, err := f.s.GetRuntimeBrokerByName(ctx, name)
+		assert.ErrorIs(t, err, store.ErrNotFound, "no broker %s", name)
+	}
+	assertSessionOnly := func(rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		code, details := errorCodeAndDetails(t, rec)
+		assert.Equal(t, ErrCodeForbidden, code, rec.Body.String())
+		assert.Equal(t, string(authzop.ReasonCredentialManagement), details["reason"], rec.Body.String())
+		assert.Equal(t, sessionRequiredCredential, details["credential"], rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "secretKey")
+	}
+	before, err := f.s.GetProject(ctx, f.home)
+	require.NoError(t, err)
+
+	// Existing project, named by id.
+	rec := doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{ID: f.home, Name: "pct emb home", Broker: broker("pct-emb-broker-1")})
+	assertSessionOnly(rec)
+	assertNoBroker("pct-emb-broker-1")
+	providers, err := f.s.GetProjectProviders(ctx, f.home)
+	require.NoError(t, err)
+	assert.Empty(t, providers, "no provider link")
+	after, err := f.s.GetProject(ctx, f.home)
+	require.NoError(t, err)
+	assert.Equal(t, before.DefaultRuntimeBrokerID, after.DefaultRuntimeBrokerID)
+	assert.Equal(t, before.Updated, after.Updated, "project not written")
+
+	// New project.
+	rec = doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{Name: "pct emb new", Broker: broker("pct-emb-broker-2")})
+	assertSessionOnly(rec)
+	assertNoBroker("pct-emb-broker-2")
+	assert.Nil(t, pctProjectBySlug(t, f.s, api.Slugify("pct emb new")), "no project")
+
+	// The holder's session sends the existing-project request and is
+	// admitted: the broker is created and linked.
+	rec = projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects/register",
+		RegisterProjectRequest{ID: f.home, Name: "pct emb home", Broker: broker("pct-emb-broker-3")})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	b, err := f.s.GetRuntimeBrokerByName(ctx, "pct-emb-broker-3")
+	require.NoError(t, err)
+	assert.Equal(t, f.holder, b.CreatedBy)
+	providers, err = f.s.GetProjectProviders(ctx, f.home)
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	assert.Equal(t, b.ID, providers[0].BrokerID)
 }
 
 // TestBuiltInRoles_SuperAdminRevision pins the super-admin revision and its

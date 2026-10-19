@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -273,54 +274,73 @@ func TestHubUAT_FormerMemberRetainedAncestryDenied(t *testing.T) {
 // broker: the request is denied with 403 and creates neither a broker nor
 // a project.
 //
-// The project.create authorization at the top of the register handler
-// denies this request first: a hub token cannot resolve the target of a
-// project resource without an ID, so the embedded broker path and its
-// authorizeBrokerCreate gate are never reached. The test asserts that the
-// project.create deny is the one recorded.
+// Without project:create, the project.create authorization at the top of
+// the register handler denies the request at the token ceiling, and that
+// is the only deny recorded. With project:create, the project.create
+// authorization admits the token and the embedded-broker form is refused
+// as session-only (CREDENTIAL_MANAGEMENT) before any lookup or write.
 func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	projectID := tid("embedded-hubuat-project")
-	ownerID := tid("embedded-hubuat-owner")
-	createRS1Project(t, s, projectID, ownerID)
-	grantPermissionViaRoleBinding(t, s, ownerID, "broker.create", store.RoleScopeSystem, "")
-	grantPermissionViaRoleBinding(t, s, ownerID, "project.create", store.RoleScopeSystem, "")
+	for _, tc := range []struct {
+		name        string
+		scopes      []string
+		ceilingDeny bool
+	}{
+		{"without project:create", []string{"broker:create"}, true},
+		{"with project:create", []string{"broker:create", "project:create"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			projectID := tid("embedded-hubuat-project")
+			ownerID := tid("embedded-hubuat-owner")
+			createRS1Project(t, s, projectID, ownerID)
+			grantPermissionViaRoleBinding(t, s, ownerID, "broker.create", store.RoleScopeSystem, "")
+			grantPermissionViaRoleBinding(t, s, ownerID, "project.create", store.RoleScopeSystem, "")
 
-	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
-		UserID: ownerID, Name: "embedded-hubuat", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"broker:create"},
-	})
-	require.NoError(t, err)
+			key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
+				UserID: ownerID, Name: "embedded-hubuat", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: tc.scopes,
+			})
+			require.NoError(t, err)
 
-	emitter := &capturingAuditEmitter{}
-	srv.authzService.SetDecisionAuditEmitter(emitter)
+			emitter := &capturingAuditEmitter{}
+			srv.authzService.SetDecisionAuditEmitter(emitter)
 
-	const brokerName = "embedded-hubuat-broker"
-	const projectName = "embedded-hubuat-new-project"
-	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
-		Name:   projectName,
-		Broker: &RegisterProjectBrokerInfo{Name: brokerName, Version: "1.0.0"},
-	})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "secretKey", "a denied response carries no secret")
+			const brokerName = "embedded-hubuat-broker"
+			const projectName = "embedded-hubuat-new-project"
+			rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:   projectName,
+				Broker: &RegisterProjectBrokerInfo{Name: brokerName, Version: "1.0.0"},
+			})
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "secretKey", "a denied response carries no secret")
 
-	emitter.mu.Lock()
-	var denies []*store.DecisionAuditRecord
-	for _, r := range emitter.records {
-		if r.Result == "deny" {
-			denies = append(denies, r)
-		}
+			emitter.mu.Lock()
+			var denies []*store.DecisionAuditRecord
+			for _, r := range emitter.records {
+				if r.Result == "deny" {
+					denies = append(denies, r)
+				}
+			}
+			emitter.mu.Unlock()
+			if tc.ceilingDeny {
+				require.Len(t, denies, 1, "the project.create authorization records the only deny")
+				assert.Equal(t, "project", denies[0].ResourceType)
+				assert.Equal(t, string(ActionCreate), denies[0].Permission)
+				assert.Equal(t, "token does not have scope: project:create", denies[0].Reason)
+			} else {
+				assert.Empty(t, denies, "project.create admits the token")
+				code, details := errorCodeAndDetails(t, rec)
+				assert.Equal(t, ErrCodeForbidden, code, rec.Body.String())
+				assert.Equal(t, string(authzop.ReasonCredentialManagement), details["reason"], rec.Body.String())
+				assert.Equal(t, sessionRequiredCredential, details["credential"], rec.Body.String())
+			}
+
+			_, err = s.GetRuntimeBrokerByName(ctx, brokerName)
+			assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no broker")
+			_, err = s.GetProjectBySlugCaseInsensitive(ctx, api.Slugify(projectName))
+			assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no project")
+		})
 	}
-	emitter.mu.Unlock()
-	require.Len(t, denies, 1, "the project.create authorization records the only deny")
-	assert.Equal(t, "project", denies[0].ResourceType)
-	assert.Equal(t, string(ActionCreate), denies[0].Permission)
-	assert.Equal(t, bearerReasonOutsideProject, denies[0].Reason)
-
-	_, err = s.GetRuntimeBrokerByName(ctx, brokerName)
-	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no broker")
-	_, err = s.GetProjectBySlugCaseInsensitive(ctx, api.Slugify(projectName))
-	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no project")
 }
 
 // TestHubUAT_CeilingWithoutPermissionDenies pins that a hub token can do

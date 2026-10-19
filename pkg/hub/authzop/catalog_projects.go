@@ -726,7 +726,8 @@ var projectOperations = []OperationSpec{
 		ID:     "project.register",
 		Domain: "project",
 		Description: "Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; " +
-			"a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it",
+			"a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. " +
+			"The embedded-broker form (a broker in the request body) is session-only for a token (CREDENTIAL_MANAGEMENT): it is refused before any lookup or write",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/register", Method: "POST"},
 		},
@@ -755,6 +756,7 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestOwnerGrantCoverageCheck"},
 			{Package: "pkg/hub", Function: "TestOwnerBindingAuditFailureRollsBack"},
 			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EnforcesProjectCreate"},
+			{Package: "pkg/hub", Function: "TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly"},
 		},
 		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubCollection,
 			Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestProjectRegisterToken_EnforcesProjectCreate"},

@@ -249,6 +249,8 @@ The same per-request checks apply, with these limits:
   project owner role; with the built-in owner role, which includes permissions that have no
   selector (such as `project.delete`), a token is refused and you create projects with an
   interactive sign-in. Naming an existing project by id also needs `project:update` on it.
+  Registering a project with an embedded broker needs an interactive sign-in; a token registers
+  brokers with `POST /api/v1/brokers`.
   Cloning a project also needs `project:read` on the source project and `project:clone`; only a
   super-admin can select `project:clone`.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
