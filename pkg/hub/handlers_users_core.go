@@ -879,7 +879,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// This response applies the same per-viewer preferences visibility rule
 	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
 	// A token's capabilities are computed on the hub-scoped user record;
-	// other callers' on the user record.
+	// other callers' on the user record. The token branch builds the shape
+	// hubScopedResource builds, written as a literal so the resource-type
+	// guard resolves its type.
 	var cap *Capabilities
 	if token != nil {
 		cap = s.authzService.ComputeCapabilities(ctx, actor,
