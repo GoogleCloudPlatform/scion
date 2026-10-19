@@ -43,15 +43,7 @@ var harnessConfigListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List available harness configurations",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		configs, err := config.ListHarnessConfigDirs(gp)
 		if err != nil {
@@ -85,7 +77,7 @@ var harnessConfigListCmd = &cobra.Command{
 
 		// Include Hub results if requested or when running in hub context (agent containers)
 		if includeHub {
-			hubCtx, err := requireHub(gp)
+			hubCtx, err := requireHubForUpload(projectPath)
 			if err == nil {
 				hubResp, err := hubCtx.Client.HarnessConfigs().List(context.Background(), &hubclient.ListHarnessConfigsOptions{
 					Status: "active",
@@ -311,15 +303,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		// Find the local harness-config
 		hcDir, err := config.FindHarnessConfigDir(name, gp)
@@ -327,7 +311,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
 
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -356,17 +340,7 @@ var harnessConfigPullCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
-
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -408,15 +382,7 @@ var harnessConfigShowCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
+		gp := localProjectDir()
 
 		// Try local first
 		hcDir, localErr := config.FindHarnessConfigDir(name, gp)
@@ -439,7 +405,7 @@ var harnessConfigShowCmd = &cobra.Command{
 		}
 
 		// Try Hub
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return fmt.Errorf("harness-config %q not found locally and Hub unavailable: %w", name, err)
 		}
@@ -484,17 +450,7 @@ var harnessConfigDeleteCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 
-		var gp string
-		if projectPath != "" {
-			resolved, err := config.GetResolvedProjectDir(projectPath)
-			if err == nil {
-				gp = resolved
-			}
-		} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-			gp = projectDir
-		}
-
-		hubCtx, err := requireHub(gp)
+		hubCtx, err := requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}

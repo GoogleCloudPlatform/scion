@@ -1516,9 +1516,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			}
 			slog.Warn("provision: failed before completing; removing the agent directory it created",
 				"agent", agentName, "agent_dir", agentDir, "error", retErr)
-			removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace, agentWorkspace != "")
+			removeAgentDirAndWorktreeEntry(agentDir, agentWorkspace)
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
-				removeAgentDirAndPruneWorktrees(agentHome, "", false)
+				removeAgentDirAndWorktreeEntry(agentHome, "")
 				if newAgentHomeParent {
 					// os.Remove only removes an empty directory.
 					_ = os.Remove(filepath.Dir(agentHome))
@@ -1666,16 +1666,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// a shared workspace: agentWorkspace is empty in shared mode, so the
 		// agent's existing worktree is the only workspace it can reuse.
 		//
-		// Prune first, so a registration whose directory was removed out of
-		// band is dropped and the create path below recreates the worktree,
-		// and only attach to a worktree whose directory still exists.
+		// Only attach to a worktree that is still in place: its directory
+		// and its .git entry exist. A registration that fails this is not
+		// pruned here: it may be another agent's worktree that this process
+		// cannot see. The create path below removes the entry at this
+		// agent's own workspace path, and git refuses to check the branch
+		// out while any other worktree still holds it (ptone/scion#5071).
 		usedExistingWorktree := false
 		repoRoot, repoRootErr := util.RepoRootDir(projectDir)
-		if repoRootErr == nil {
-			_ = util.PruneWorktreesIn(repoRoot)
-		}
 		if repoRootErr == nil && util.BranchExistsIn(repoRoot, targetBranch) {
-			if existingPath, err := util.FindWorktreeByBranchIn(repoRoot, targetBranch); err == nil && existingPath != "" && dirExists(existingPath) {
+			if existingPath, err := util.FindWorktreeByBranchIn(repoRoot, targetBranch); err == nil && existingPath != "" && worktreeInPlace(existingPath) {
 				workspaceSource = existingPath
 				agentWorkspace = "" // Using external worktree
 				usedExistingWorktree = true
@@ -1747,14 +1747,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// Remove existing workspace dir if it exists to allow worktree add
 		_ = util.MakeWritableRecursive(agentWorkspace)
 		_ = os.RemoveAll(agentWorkspace)
-		// Prune worktrees to clean up any stale entries.
-		// Use repo-root-aware prune so it works when the process CWD is
-		// outside the repository (e.g. runtime broker).
-		// agentWorkspace is non-empty here (refused above), so the fallback
-		// only runs when no repository holds the workspace.
-		if !pruneWorktreesForWorkspace(agentWorkspace) {
-			_ = util.PruneWorktrees()
-		}
+		// Remove a stale entry for this agent's own workspace path, so git
+		// lets the worktree be added there again. Only that entry is
+		// touched; when no repository holds the workspace there is nothing
+		// of this agent's to remove (ptone/scion#5071).
+		removeWorkspaceWorktreeEntry(agentWorkspace)
 
 		worktreeBranch := branch
 		if worktreeBranch == "" {
@@ -3289,8 +3286,8 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //     once the soft-delete retention window has passed, it is removed
 //     without inspecting the workspace (ptone/scion#4742, see
 //     kept_agent_dir.go).
-//   - Any other dir with no home state is stale: it is removed, and
-//     worktrees are pruned, so the caller re-provisions it.
+//   - Any other dir with no home state is stale: it is removed, with git's
+//     entry for its own worktree, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
 	if _, err := os.Stat(agentDir); err != nil {
 		return nil
@@ -3355,19 +3352,20 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 	// (ptone/scion#4460). Keep the dir when it does, or when that cannot be
 	// checked. A shared-workspace agent has no workspace path, but its state
 	// dir can be the one an earlier worktree-per-agent life used, so the
-	// in-dir workspace/ is checked too (ptone/scion#4526). The prune below
-	// gets the original path, so an empty one prunes nothing, except for a
-	// clean leftover worktree that git inspected as one of the project
-	// repository's: it is pruned through its in-dir path, whose parent is
-	// agentDir, so the repository resolves from the agent dir and never
-	// from the process's current directory (ptone/scion#4511). Otherwise
-	// the project repository would keep the removed worktree registered,
-	// and its branch would stay "in use" until a manual git worktree prune.
+	// in-dir workspace/ is checked too (ptone/scion#4526). The entry
+	// removal below gets the original path, so an empty one removes
+	// nothing, except for a clean leftover worktree that git inspected as
+	// one of the project repository's: its entry is removed through its
+	// in-dir path, whose parent is agentDir, so the repository resolves
+	// from the agent dir and never from the process's current directory
+	// (ptone/scion#4511). Otherwise the project repository would keep the
+	// removed worktree registered, and its branch would stay "in use" until
+	// its entry was removed by hand.
 	inDirWorkspace := agentWorkspace
 	if inDirWorkspace == "" {
 		inDirWorkspace = filepath.Join(agentDir, "workspace")
 	}
-	prunePath := agentWorkspace
+	entryPath := agentWorkspace
 	if pathWithin(inDirWorkspace, agentDir) {
 		hasWork, inspected, err := worktreeMayHoldWork(agentDir, inDirWorkspace)
 		if err != nil {
@@ -3382,14 +3380,14 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceMayHoldWork)
 			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
-		if prunePath == "" && inspected {
-			prunePath = inDirWorkspace
+		if entryPath == "" && inspected {
+			entryPath = inDirWorkspace
 		}
 	}
 
 	slog.Info("GetAgent: stale agent directory (no config file, no home state); removing it",
 		"agent", agentName, "agent_dir", agentDir)
-	removeAgentDirAndPruneWorktrees(agentDir, prunePath, true)
+	removeAgentDirAndWorktreeEntry(agentDir, entryPath)
 	return nil
 }
 
@@ -3442,7 +3440,7 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 //     applied, so it cannot hide an untracked file. The number of ignored
 //     status entries (a fully ignored directory counts once) and a few
 //     paths are logged at Warn before the removal.
-//   - The idle per-worktree admin state goes with the prune: the HEAD
+//   - The idle per-worktree admin state goes with the entry removal: the HEAD
 //     reflog, ORIG_HEAD, FETCH_HEAD and AUTO_MERGE. Commits reachable only
 //     from them are lost.
 func worktreeMayHoldWork(agentDir, ws string) (hasWork, inspected bool, err error) {
@@ -3924,14 +3922,14 @@ func worktreeGitEnv() []string {
 	return append(env, "LC_ALL=C")
 }
 
-// removeAgentDirAndPruneWorktrees removes agentDir and, when prune is set,
-// prunes the worktrees of the repository holding agentWorkspace, so git
-// forgets any worktree that pointed into the removed directory and a later
-// provision can recreate it. An empty agentWorkspace (a shared-workspace
-// agent) has no worktree of its own, so nothing is pruned: resolving the
-// repository from an empty path would pick the process's current directory,
-// which is unrelated to the agent (ptone/scion#4511).
-func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
+// removeAgentDirAndWorktreeEntry removes agentDir and then git's entry for
+// the worktree at agentWorkspace, so git forgets a worktree that pointed
+// into the removed directory and a later provision can recreate it.
+// agentWorkspace is the path git registered the worktree under, which can
+// differ from a path inside agentDir (agentDir may have been moved before
+// removal). An empty agentWorkspace (a shared-workspace agent, or a
+// directory with no worktree of its own) removes no entry.
+func removeAgentDirAndWorktreeEntry(agentDir, agentWorkspace string) {
 	// chmod to ensure we can remove root-owned files left by containers.
 	// Links are skipped, so their targets are left unchanged; RemoveAll
 	// removes the link itself.
@@ -3946,29 +3944,29 @@ func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool
 		return nil
 	})
 	_ = os.RemoveAll(agentDir)
-	if !prune {
-		return
-	}
-	pruneWorktreesForWorkspace(agentWorkspace)
+	removeWorkspaceWorktreeEntry(agentWorkspace)
 }
 
-// pruneWorktreesForWorkspace prunes the worktrees of the repository holding
-// agentWorkspace and reports whether it found that repository. Prune errors
-// are ignored, as at every call site. An empty agentWorkspace (a
-// shared-workspace agent) has no worktree of its own, so nothing is pruned
-// and it reports false: resolving the repository from an empty path would
-// pick the process's current directory, which is unrelated to the agent
-// (ptone/scion#4511).
-func pruneWorktreesForWorkspace(agentWorkspace string) bool {
+// removeWorkspaceWorktreeEntry removes git's entry for the worktree at
+// agentWorkspace from the repository holding it, once its directory is
+// gone. Only that one entry is touched: a repository-wide prune would also
+// drop the entries of other agents' worktrees whose directories this
+// process cannot see (ptone/scion#5071). An empty agentWorkspace (a
+// shared-workspace agent) has no worktree of its own, so nothing is done:
+// resolving the repository from an empty path would pick the process's
+// current directory, which is unrelated to the agent (ptone/scion#4511).
+// Failures are logged; there is no fallback.
+func removeWorkspaceWorktreeEntry(agentWorkspace string) {
 	if agentWorkspace == "" {
-		return false
+		return
 	}
 	root, err := util.RepoRootDir(filepath.Dir(agentWorkspace))
 	if err != nil {
-		return false
+		return
 	}
-	_ = util.PruneWorktreesIn(root)
-	return true
+	if err := util.RemoveWorktreeEntryIn(root, agentWorkspace); err != nil {
+		slog.Warn("could not remove the worktree entry", "path", agentWorkspace, "error", err)
+	}
 }
 
 // claimDir creates dir with os.Mkdir and reports whether this call created
@@ -4119,9 +4117,10 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 				if targetBranch == "" {
 					targetBranch = api.Slugify(agentName)
 				}
-				pruneWorktreesForWorkspace(agentWorkspace)
+				removeWorkspaceWorktreeEntry(agentWorkspace)
 				if err := util.CreateWorktree(agentWorkspace, targetBranch); err != nil {
-					util.Debugf("GetAgent: failed to recreate worktree at %s: %v, clearing workspace", agentWorkspace, err)
+					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",
+						"agent", agentName, "path", agentWorkspace, "branch", targetBranch, "error", err)
 					agentWorkspace = ""
 				} else {
 					util.Debugf("GetAgent: recreated missing worktree at %s (branch %s)", agentWorkspace, targetBranch)
@@ -4433,4 +4432,15 @@ func applyBuiltinResourceDefaults(cfg *api.ScionConfig) {
 func dirExists(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && fi.IsDir()
+}
+
+// worktreeInPlace reports whether path is a directory holding a .git entry,
+// the minimum for a registered worktree to be usable. A registration whose
+// directory or .git file was removed fails this.
+func worktreeInPlace(path string) bool {
+	if !dirExists(path) {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(path, ".git"))
+	return err == nil
 }
