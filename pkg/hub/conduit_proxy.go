@@ -95,7 +95,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_TCP,
 			Params: params,
 			Grant:  tok,
@@ -104,7 +104,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
-		target := conduitTargetOf(res, st)
+		target := conduitLeafTarget(res, st, bridge)
 		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindTCP,
 			Identity:  identity,
@@ -115,6 +115,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			StreamID:  target.StreamID,
 			Close:     sc.closeWithCode,
 			Renew:     conduitStreamRenewal(res, st.ID()),
+			Bridge:    bridge,
 		})
 		conn = sc
 		return nil
@@ -464,6 +465,10 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit routing is unavailable", nil)
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held); logged at Warn where it is found.
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
 	case errors.As(err, &ce) && ce.Code == conduit.CloseRelayTimeout:
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Nothing is listening on the agent port", nil)
 	default:

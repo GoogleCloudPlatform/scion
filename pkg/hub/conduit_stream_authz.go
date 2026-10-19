@@ -177,6 +177,12 @@ type conduitUserStream struct {
 	// held by this node, and no notice is sent). It must not block on the
 	// tracker.
 	Renew func() error
+	// Bridge is the stream's only internal stream to the owner relay of
+	// the target session, when it reaches the target through a separate
+	// relay (external relay mode; nil otherwise). It is the one stream
+	// renewals for the target will use, so none will need a second stream;
+	// nothing sends renewals on it yet (Renew is nil for such a stream).
+	Bridge relay.Bridge
 
 	// mu serializes checks of this stream; closed is set once a check
 	// closed it.

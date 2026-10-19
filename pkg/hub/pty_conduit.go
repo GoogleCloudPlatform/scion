@@ -490,7 +490,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := u.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_PTY,
 			Params: params,
 			Grant:  tok,
@@ -500,7 +500,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
-		target := conduitTargetOf(res, st)
+		target := conduitLeafTarget(res, st, bridge)
 		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
@@ -510,6 +510,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
 			Renew:     conduitStreamRenewal(res, st.ID()),
+			Bridge:    bridge,
 		})
 		return nil
 	})
@@ -582,6 +583,10 @@ func ptyAgentOpenError(err error) error {
 		return &StreamClosedError{Code: code, Reason: reason}
 	case errors.Is(err, errConduitForbidden):
 		return &StreamClosedError{Code: wsprotocol.ClosePTYForbidden, Reason: ptyCloseReasonForbidden}
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held): the internal error close.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYInternalError, Reason: wsprotocol.CloseReasonInternalError}
 	default:
 		return err
 	}
