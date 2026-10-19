@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -203,6 +204,31 @@ func TestStaticFile_DotPath404(t *testing.T) {
 			assert.Contains(t, rec.Header().Get("Content-Type"), "image/svg+xml")
 		})
 	}
+
+	// The first-segment dot rule of the SPA catch-all leaves /.well-known/
+	// alone: with the hub mounted, its own mux entry still routes it to
+	// the hub.
+	t.Run("well-known still routed to the hub", func(t *testing.T) {
+		const marker = "well-known-marker"
+		for mode, servers := range listingServers(t) {
+			for _, ws := range servers {
+				ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"marker": "` + marker + `", "path": "` + r.URL.Path + `"}`))
+				}), func(context.Context) error { return nil })
+				rec := getListing(t, ws.Handler(), "/.well-known/openid-configuration")
+				assert.Equal(t, http.StatusOK, rec.Code, mode)
+				assert.Contains(t, rec.Body.String(), marker, mode)
+				assert.Contains(t, rec.Body.String(), "/.well-known/openid-configuration", mode)
+				// Other first-segment dot paths are still a 404 (the
+				// catch-all needs a session, so only with dev auth).
+				if ws.config.DevAuthToken != "" {
+					rec = getListing(t, ws.Handler(), "/.vite/manifest.json")
+					assert.Equal(t, http.StatusNotFound, rec.Code, mode)
+				}
+			}
+		}
+	})
 }
 
 func TestFingerprintedAssets_StillLoadedFromManifest(t *testing.T) {

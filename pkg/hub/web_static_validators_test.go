@@ -276,9 +276,6 @@ func TestStaticAsset_ConditionalGet304(t *testing.T) {
 	})
 }
 
-// TestStaticAsset_DirectoryFallbackUnchanged pins that A1 keeps the
-// http.FileServer fallback for everything the index does not serve: the
-// directory listing still works (A4 changes it later).
 func TestRootStaticFile_ETag(t *testing.T) {
 	ws := newValidatorWebServer(t)
 	resp := doStatic(t, ws, http.MethodGet, "/favicon.svg", map[string]string{"Accept-Encoding": "br"})
