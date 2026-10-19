@@ -2928,7 +2928,7 @@ describe('chat page — startup after the page is removed', () => {
     await startups.settled();
 
     expect(dmListLoads()).toBe(0);
-    expect(el._fallbackPollInterval).toBeNull();
+    expect(el._stopFallbackPoll).toBeNull();
     expect(intervals.live()).toEqual([]);
     expect(el.v2SpaceRailLoaded).toBe(false);
   });
@@ -2953,8 +2953,8 @@ describe('chat page — startup after the page is removed', () => {
       expect(dmListLoads()).toBe(1);
       // Exactly one live interval, and it is the connected page's poll: the
       // first initV2 started nothing its disconnect could no longer clear.
-      expect(el._fallbackPollInterval).not.toBeNull();
-      expect(intervals.live()).toEqual([el._fallbackPollInterval]);
+      expect(el._stopFallbackPoll).not.toBeNull();
+      expect(intervals.live()).toHaveLength(1);
 
       el.remove();
       expect(intervals.live()).toEqual([]);
@@ -3163,7 +3163,7 @@ describe('chat page — startup after the page is removed', () => {
         expect(el.v2SpaceRailLoaded).toBe(false);
         expect(el.v2SpaceRailLoadFailed).toBe(true);
         expect(dmListLoads()).toBe(0);
-        expect(el._fallbackPollInterval).toBeNull();
+        expect(el._stopFallbackPoll).toBeNull();
         expect(intervals.live()).toEqual([]);
       } finally {
         el.remove();
