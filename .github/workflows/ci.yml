@@ -210,6 +210,20 @@ jobs:
           test ! -e public/assets || { echo "public/assets must not exist after the build (#3842)"; exit 1; }
           npm run check:orphans
 
+      # Bundle budget (ptone/scion#5306): main.js and entry-closure size
+      # limits, the lazy terminal-workspace chunk exists, and no terminal-*
+      # module is in the static closure of the entry (client/main.ts) or of
+      # the login and home routes. Limits live in web/bundle-budget.json.
+      # Not gated: it only reads the build above.
+      - name: Check web bundle budget
+        working-directory: ./web
+        run: node scripts/check-bundle-budget.mjs
+
+      - name: Test web bundle budget script
+        if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
+        working-directory: ./web
+        run: node --test scripts/check-bundle-budget.test.mjs
+
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
