@@ -164,8 +164,8 @@ func (a *conduitStreamAuthz) renewStream(ctx context.Context, st *conduitUserStr
 	now := a.cfg.Clock.Now()
 
 	var outcome, detail string
-	switch {
-	case err == nil:
+	switch err {
+	case nil:
 		send := st.Renew
 		if send == nil {
 			err = errConduitNoRenewalSender
