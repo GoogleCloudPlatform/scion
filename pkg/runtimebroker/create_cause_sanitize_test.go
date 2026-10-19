@@ -41,6 +41,7 @@ func TestSanitizeFailureCause(t *testing.T) {
 		{"unquoted value with spaces", "env KEY=a b c, next", "env KEY=[REDACTED], next"},
 		{"prose after a value is blanked", "run failed: FOO=bar BAZ=qux done", "run failed: FOO=[REDACTED] BAZ=[REDACTED]"},
 		{"spaced separator ends a value", "TOKEN=a SECRET =b", "TOKEN=[REDACTED] SECRET =[REDACTED]"},
+		{"separator on the next line ends a value", "TOKEN=a SECRET\n=b", "TOKEN=[REDACTED] SECRET\n=[REDACTED]"},
 		{"spaced colon ends a value", "TOKEN=a value : b", "TOKEN=[REDACTED] value : [REDACTED]"},
 		{"earlier marker inside a value", "FOO=x Bearer abcdefghijkl end", "FOO=[REDACTED]"},
 		{"quoted value blanked", `bad env X="a b c"`, "bad env X=[REDACTED]"},
