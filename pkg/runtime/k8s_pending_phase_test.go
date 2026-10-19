@@ -97,7 +97,8 @@ func TestList_PendingPodPhase(t *testing.T) {
 		},
 		{
 			// A stop in progress: a deletionTimestamp without a
-			// disruption signal is not a disruption.
+			// disruption signal is not a disruption; it reports starting
+			// until the pod is gone (accepted, short window).
 			name:                "pending pod being deleted without disruption",
 			podPhase:            corev1.PodPending,
 			deleting:            true,
