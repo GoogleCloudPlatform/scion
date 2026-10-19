@@ -213,6 +213,39 @@ describe('notification tray: event reactions', () => {
     expect(ids(tray)).toEqual(['old']);
   });
 
+  it('a stale list response landing after a newer one is ignored', async () => {
+    const tray = await mountTray([notif('old')]);
+
+    // Two held list requests: A, then (after X is upserted) B.
+    const releases: Array<(items: unknown[]) => void> = [];
+    apiFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          releases.push((items) => resolve(new Response(JSON.stringify(items), { status: 200 })));
+        })
+    );
+    const a = tray.fetchNotifications();
+    emitUserScoped(userEventPayload('x'));
+    const b = tray.fetchNotifications();
+    expect(releases).toHaveLength(2);
+
+    // B lists X and lands first; A, sent before X existed, lands last.
+    releases[1]([userEventPayload('x'), notif('old')]);
+    await b;
+    releases[0]([notif('old')]);
+    await a;
+    expect(ids(tray)).toEqual(['x', 'old']);
+
+    // X stays seen: the next fetch does not pop it again.
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify([userEventPayload('x'), notif('old')]), { status: 200 })
+      )
+    );
+    await tray.fetchNotifications();
+    expect(popups).toEqual(['x']);
+  });
+
   it('a user change drops the previous user queued fetch and the next event fetches at once', async () => {
     const tray = await mountTray([]);
 

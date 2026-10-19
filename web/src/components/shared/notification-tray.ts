@@ -128,12 +128,14 @@ export class ScionNotificationTray extends LitElement {
   /** The user id that the list, seenIds and initialFetchDone belong to. */
   private stateUserId: string | null = null;
 
-  /**
-   * Fetches for events that carry no usable notification: the first of a
-   * burst fetches at once, the rest collapse into one trailing fetch.
-   */
   /** Counts list requests sent; each request knows its own number. */
   private fetchSeq = 0;
+
+  /**
+   * The number of the newest list request whose response was applied. A
+   * response to an older request, landing after it, is stale and ignored.
+   */
+  private appliedSeq = 0;
 
   /**
    * Rows an event added, with the fetchSeq when it was added. A list request
@@ -142,6 +144,10 @@ export class ScionNotificationTray extends LitElement {
    */
   private upsertedAtSeq = new Map<string, number>();
 
+  /**
+   * Fetches for events that carry no usable notification: the first of a
+   * burst fetches at once, the rest collapse into one trailing fetch.
+   */
   private eventFetch: CoalescedRefresh = coalescedRefresh(() => this.fetchNotifications(), {
     waitMs: 500,
     maxWaitMs: 3000,
@@ -363,6 +369,9 @@ export class ScionNotificationTray extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
       if (!this.isForCurrentUser(requestUserId)) return;
+      // A newer request's answer is already shown: this one is older.
+      if (seq < this.appliedSeq) return;
+      this.appliedSeq = seq;
       // Older chat rows can still be unacknowledged; chat no longer belongs
       // in the bell, so they are neither listed, counted nor popped.
       const incoming = (data ?? []).filter((n) => !RETIRED_CHAT_STATUSES.has(n.status));
