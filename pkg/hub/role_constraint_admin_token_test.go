@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -437,6 +438,69 @@ func TestCustomRoleBindingToken_NeedsCreateSelectorAndProjectAccess(t *testing.T
 	rec = doRequestWithUAT(t, srv, holderKey, http.MethodPost, "/api/v1/admin/role-bindings", bind(t4.ID))
 	assert.Equal(t, http.StatusCreated, rec.Code, "token, project admin: %s", rec.Body.String())
 	assert.Equal(t, 1, rcaBindingCount(t, s, t4.ID, custom.ID))
+}
+
+// rcaRoleLookupFaultStore fails GetRoleDefinition while its switch is armed.
+type rcaRoleLookupFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (f *rcaRoleLookupFaultStore) GetRoleDefinition(ctx context.Context, id string) (*store.RoleDefinition, error) {
+	if f.fault.Active() {
+		return nil, errors.New("injected role definition lookup fault")
+	}
+	return f.Store.GetRoleDefinition(ctx, id)
+}
+
+// TestRoleBindingCreate_RoleLookupErrorAnswers500 pins that a project role
+// binding request whose role definition lookup fails with an error other
+// than not-found answers 500 before any admission decision, for a token and
+// for a session, and writes nothing.
+func TestRoleBindingCreate_RoleLookupErrorAnswers500(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *rcaRoleLookupFaultStore {
+		return &rcaRoleLookupFaultStore{Store: inner, fault: f}
+	})
+	sa := mtSuperAdmin(t, s, "sa")
+	project := igProject(t, s, "rca-rlf-project")
+	custom := rcaRole(t, s, "rlf-project", store.RoleScopeProject, "agent.read")
+	target := rcaUser(t, s, "rlf-target")
+	body := createRoleBindingRequest{RoleDefinitionID: custom.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: target.ID, ScopeType: store.RoleScopeProject, ScopeID: project}
+	key := mtMint(t, srv, sa.ID, hubBoundary(), "role_binding:create", "agent:read")
+
+	fault.Arm()
+	rec := doRequestWithUAT(t, srv, key, http.MethodPost, "/api/v1/admin/role-bindings", body)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "token: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, sa, http.MethodPost, "/api/v1/admin/role-bindings", body)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "session: %s", rec.Body.String())
+	assert.Zero(t, rcaBindingCount(t, s, target.ID, custom.ID), "nothing is written")
+}
+
+// TestBuiltInProjectRoleBindingToken_NeedsProjectManage pins that a
+// built-in project role binding by token is judged by project governance:
+// a super-admin's hub token carrying role_binding:create but not
+// project:manage is refused, and nothing is written; the holder's session
+// binds.
+func TestBuiltInProjectRoleBindingToken_NeedsProjectManage(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	sa := mtSuperAdmin(t, s, "sa")
+	project := igProject(t, s, "rca-bip-project")
+	member, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	bind := func(target string) createRoleBindingRequest {
+		return createRoleBindingRequest{RoleDefinitionID: member.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: target, ScopeType: store.RoleScopeProject, ScopeID: project}
+	}
+	key := mtMint(t, srv, sa.ID, hubBoundary(), "role_binding:create")
+
+	t1, t2 := rcaUser(t, s, "bip-t1"), rcaUser(t, s, "bip-t2")
+	rec := doRequestWithUAT(t, srv, key, http.MethodPost, "/api/v1/admin/role-bindings", bind(t1.ID))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "token: %s", rec.Body.String())
+	assert.Zero(t, rcaBindingCount(t, s, t1.ID, member.ID), "nothing is written")
+
+	rec = doRequestAsUser(t, srv, sa, http.MethodPost, "/api/v1/admin/role-bindings", bind(t2.ID))
+	assert.Equal(t, http.StatusCreated, rec.Code, "session: %s", rec.Body.String())
+	assert.Equal(t, 1, rcaBindingCount(t, s, t2.ID, member.ID))
 }
 
 // TestRoleBindingDeleteToken_SuperAdminBindingDenied pins that no token

@@ -345,12 +345,17 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 	requireHubAuth := peek.ScopeType != store.RoleScopeProject
 	if peek.ScopeType == store.RoleScopeProject && peek.RoleDefinitionID != "" {
 		// Check if this is a built-in project role.
+		// A missing role is refused by createRoleBinding; any other lookup
+		// error answers 500 before an admission decision.
 		roleDef, err := s.store.GetRoleDefinition(r.Context(), peek.RoleDefinitionID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "internal_error", "failed to load role definition", nil)
+			return
+		}
 		if err == nil && !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 			// Custom project role — require hub-level auth.
 			requireHubAuth = true
 		}
-		// If role lookup fails, createRoleBinding will handle the error.
 	}
 
 	if requireHubAuth {
