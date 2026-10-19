@@ -343,6 +343,20 @@ func TestRoleTunnel_RenewalDelivered(t *testing.T) {
 			if len(tracked) != 1 || string(tracked[0].LatestGrant) != renewal {
 				t.Fatalf("tracked %+v, want the renewal as the latest grant", tracked)
 			}
+
+			// The next re-check runs at the renewal's receipt plus 0.8 of the
+			// interval (8m), and not before.
+			if n := len(h.recheckBodies()); n != 1 {
+				t.Fatalf("%d re-checks after the first renewal, want 1", n)
+			}
+			f.clk.Advance(8*time.Minute - time.Second)
+			if n := len(h.recheckBodies()); n != 1 {
+				t.Fatalf("%d re-checks before receipt plus 8m, want 1", n)
+			}
+			f.clk.Advance(time.Second)
+			if n := len(h.recheckBodies()); n != 2 {
+				t.Fatalf("%d re-checks at receipt plus 8m, want 2", n)
+			}
 		})
 	}
 }
@@ -402,5 +416,43 @@ func TestRoleTunnel_UntrackedWhenSpliceEnds(t *testing.T) {
 	}
 	if tns := f.role.Tunnels(); len(tns) != 0 {
 		t.Fatalf("tunnels %+v after the tunnel ended, want none", tns)
+	}
+}
+
+// TestRoleTunnel_HintNeverArmsDeadlineClose: a usable hint only times
+// re-checks. When the hub cannot evaluate them (503), the relay does not
+// close the tunnel at the hinted authz_until or any time after: both legs
+// stay open, the stream stays tracked, and its AuthzUntil stays unset. The
+// target enforces the signed deadline.
+func TestRoleTunnel_HintNeverArmsDeadlineClose(t *testing.T) {
+	f := newRoleFixture(t)
+	target := newRenewalTarget()
+	rec := dialTarget(t, f.w, f.node, target.config)
+	now := f.clk.Now()
+	until := now.Add(10 * time.Minute).Unix()
+	h := &schedHub{tunnel: func() relay.HubRPCResponse { return hinted(t, rec, f.node.Internal.URL, until, 600) }}
+	ls, streams := schedUser(t, f, h)
+	_ = streamIDOf(t, requestTunnel(t, ls))
+	user := relaytest.Wait(t, streams, "the user stream")
+	relaytest.Wait(t, target.ids, "the target stream")
+
+	f.clk.Advance(time.Hour)
+	if n := len(h.recheckBodies()); n == 0 {
+		t.Fatal("no re-check ran at the hinted time")
+	}
+	tracked := trackedStreams(f.role.Streams)
+	if len(tracked) != 1 {
+		t.Fatalf("%d tracked streams an hour past the hinted deadline, want 1", len(tracked))
+	}
+	if !tracked[0].AuthzUntil.IsZero() {
+		t.Fatalf("tracked AuthzUntil %v, want unset (a hint never sets it)", tracked[0].AuthzUntil)
+	}
+	// Both legs are open: bytes cross the tunnel and come back from the
+	// target.
+	assertEcho(t, user)
+	select {
+	case <-target.ends:
+		t.Fatal("the target stream ended")
+	default:
 	}
 }
