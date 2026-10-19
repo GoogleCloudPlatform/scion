@@ -184,11 +184,12 @@ func hubIdentityRefusedIAMRead(err error) bool {
 // check failed because the hub's identity may not read IAM policy in the
 // service account's GCP project. Its only inputs are that project ID and
 // the hub's service account email; it returns "" when either is empty or
-// holds characters a GCP project ID or account email does not, so the
-// caller falls back to the generic text. It never names the target
+// is not shaped like a GCP project ID or account email (see
+// saAssignSafeProjectID and saAssignSafeEmail), so the caller falls back
+// to the generic text. It never names the target
 // account, so it reads the same whether or not that account exists.
 func saAssignIAMReadDeniedMessage(gcpProjectID, hubSAEmail string) string {
-	if !saAssignSafeIdent(gcpProjectID, false) || !saAssignSafeIdent(hubSAEmail, true) {
+	if !saAssignSafeProjectID(gcpProjectID) || !saAssignSafeEmail(hubSAEmail) {
 		return ""
 	}
 	return "Could not verify your permission to use this GCP service account: " +
@@ -199,22 +200,53 @@ func saAssignIAMReadDeniedMessage(gcpProjectID, hubSAEmail string) string {
 		` --member="serviceAccount:` + hubSAEmail + `" --role="` + saAssignIAMReadRole + `"`
 }
 
-// saAssignSafeIdent reports whether s is non-empty and uses only lowercase
-// letters, digits, '-', '.', ':' (domain-scoped project IDs) and, when
-// email is set, '@' and '_'. It keeps stored values that could not be a
-// real project ID or account email out of the suggested command.
-func saAssignSafeIdent(s string, email bool) bool {
+// saAssignSafeProjectID reports whether s can be shown as a GCP project
+// ID in the suggested command: non-empty, at most 254 bytes, and each
+// ':'-separated segment (domain-scoped IDs have two) non-empty, starting
+// with a lowercase letter and using only lowercase letters, digits, '-'
+// and '.'. A value starting with '-' would read as a gcloud flag.
+func saAssignSafeProjectID(s string) bool {
 	if s == "" || len(s) > 254 {
 		return false
 	}
+	for _, seg := range strings.Split(s, ":") {
+		if seg == "" || seg[0] < 'a' || seg[0] > 'z' || !saAssignIdentChars(seg, false) {
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignSafeEmail reports whether s can be shown as the hub's service
+// account email in the suggested command: at most 254 bytes, exactly one
+// '@', both parts non-empty and starting with a lowercase letter or digit,
+// and only lowercase letters, digits, '-', '.' and '_'.
+func saAssignSafeEmail(s string) bool {
+	if len(s) > 254 || strings.Count(s, "@") != 1 {
+		return false
+	}
+	local, domain, _ := strings.Cut(s, "@")
+	for _, part := range []string{local, domain} {
+		if part == "" || !saAssignAlnum(part[0]) || !saAssignIdentChars(part, true) {
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignIdentChars reports whether s uses only lowercase letters,
+// digits, '-' and '.', plus '_' when underscore is set.
+func saAssignIdentChars(s string, underscore bool) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.', c == ':':
-		case email && (c == '@' || c == '_'):
+		case saAssignAlnum(c), c == '-', c == '.':
+		case underscore && c == '_':
 		default:
 			return false
 		}
 	}
 	return true
 }
+
+func saAssignAlnum(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') }

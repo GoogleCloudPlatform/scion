@@ -279,6 +279,8 @@ func TestSACheckDiag_EndUserTextSameWhetherTargetExists(t *testing.T) {
 func TestSAAssignIAMReadDeniedMessage_RefusesUnusableInputs(t *testing.T) {
 	assert.Equal(t, saCheckIAMReadDeniedMsg("p-1"),
 		saAssignIAMReadDeniedMessage("p-1", "hub@test.iam.gserviceaccount.com"))
+	assert.Equal(t, saCheckIAMReadDeniedMsg("example.com:p-1"),
+		saAssignIAMReadDeniedMessage("example.com:p-1", "hub@test.iam.gserviceaccount.com"))
 	for _, in := range [][2]string{
 		{"", "hub@test.iam.gserviceaccount.com"},
 		{"p-1", ""},
@@ -288,6 +290,18 @@ func TestSAAssignIAMReadDeniedMessage_RefusesUnusableInputs(t *testing.T) {
 		{"p@1", "hub@test.iam.gserviceaccount.com"},
 		{"p-1", "hub@test.iam.gserviceaccount.com --role=x"},
 		{"p-1", "hub$(x)@test.iam.gserviceaccount.com"},
+		{"--quiet", "hub@test.iam.gserviceaccount.com"},
+		{"-x", "hub@test.iam.gserviceaccount.com"},
+		{"a:-b", "hub@test.iam.gserviceaccount.com"},
+		{"a:", "hub@test.iam.gserviceaccount.com"},
+		{":a", "hub@test.iam.gserviceaccount.com"},
+		{"1abc", "hub@test.iam.gserviceaccount.com"},
+		{"p-1", "a@b@c"},
+		{"p-1", "-hub@test.iam.gserviceaccount.com"},
+		{"p-1", "hub@-test.iam.gserviceaccount.com"},
+		{"p-1", "@test.iam.gserviceaccount.com"},
+		{"p-1", "hub@"},
+		{"p-1", "hub.test.iam.gserviceaccount.com"},
 	} {
 		assert.Empty(t, saAssignIAMReadDeniedMessage(in[0], in[1]), "inputs %q", in)
 	}
