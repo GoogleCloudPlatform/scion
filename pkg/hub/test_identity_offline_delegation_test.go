@@ -807,3 +807,65 @@ func TestOfflineDelegation_ReissueAndWebCode(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Len(t, x2WebCodeAudits(t, e.x2Env, id), 1, "no second web-login code was minted")
 }
+
+// X4b merge (phase DL): testAdminCredentialIssuer, the admission of an
+// admin-kind credential (token re-issue, web-login code) through a
+// workload delegation, refuses a non-human grantor kind first, before any
+// grantor read; a forged human-kind state carrying offline gate state is
+// refused too. The control (a clean human-kind state) passes this branch
+// and is refused later, by the live super-admin check, with its distinct
+// detail reason.
+func TestTestAdminCredentialIssuer_RefusesNonHumanGrantorKind(t *testing.T) {
+	e := newDLEnv(t)
+	spec := testAdminKindSpecs[testAdminRoleHubAdmin]
+	exp := time.Now().Add(time.Hour)
+	call := func(d *store.TestIdentityDelegation, passed bool) *httptest.ResponseRecorder {
+		ctx, identity := dlOfflineCtx(t, d, passed)
+		delegationID, grantor := d.ID, d.GrantorID
+		u := &store.User{
+			ID: generateID(), Kind: store.UserKindTestHubAdmin, Status: store.UserStatusActive,
+			ExpiresAt: &exp, Created: time.Now(), IssuedBy: &grantor, IssuerDelegationID: &delegationID,
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/test-identities/"+u.ID+"/token", nil).WithContext(ctx)
+		rr := httptest.NewRecorder()
+		ok := e.srv.testAdminCredentialIssuer(rr, req, identity, u, map[string]bool{spec.permission: true})
+		assert.False(t, ok)
+		return rr
+	}
+	offline := dlGateDelegation(time.Now())
+	offline.Scope = testIdentityDelegationAdminScope
+	for _, passed := range []bool{true, false} {
+		rr := call(offline, passed)
+		assert.Equal(t, http.StatusForbidden, rr.Code)
+		assert.NotContains(t, rr.Body.String(), testAdminReasonNotLiveAdmin, "refused at the grantor-kind branch, before the grantor read")
+	}
+	unknown := *offline
+	unknown.GrantorKind = "robot"
+	rr := call(&unknown, false)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.NotContains(t, rr.Body.String(), testAdminReasonNotLiveAdmin)
+
+	human := *offline
+	human.GrantorKind = store.DelegationGrantorHuman
+	rr = call(&human, true)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.NotContains(t, rr.Body.String(), testAdminReasonNotLiveAdmin)
+
+	// Control: a clean human-kind state reaches the live super-admin check
+	// (the reserved id names no user, so it is refused there).
+	rr = call(&human, false)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), testAdminReasonNotLiveAdmin)
+}
+
+// X4b merge (phase DL): the in-transaction grantor recheck of the admin
+// token re-issue and web-code paths passes the delegation's grantor kind,
+// so an offline kind is refused there as well (unit: the recheck itself).
+func TestRecheckTestAdminDelegationGrantor_OfflineKindRefused(t *testing.T) {
+	e := newDLEnv(t)
+	ctx := context.Background()
+	err := e.s.WithTx(ctx, func(tx store.Store) error {
+		return e.srv.recheckTestAdminDelegationGrantor(ctx, tx, store.DelegationGrantorTestInfraOffline, store.TestInfraOfflineGrantorID(x2HubID), permissionTestIdentityIssueAdmin)
+	})
+	require.ErrorIs(t, err, errTestAdminIssuerNotLive)
+}

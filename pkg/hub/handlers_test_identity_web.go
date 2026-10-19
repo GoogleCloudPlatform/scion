@@ -429,7 +429,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 			}
 		}
 		if adminThroughDelegation {
-			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.GrantorID, adminSpec.permission); err != nil {
+			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.EffectiveGrantorKind(), workload.delegation.GrantorID, adminSpec.permission); err != nil {
 				return err
 			}
 			if err := recheckTestAdminIdentityForDelegation(ctx, tx, workload, u.ID, now); err != nil {

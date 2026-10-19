@@ -481,7 +481,7 @@ func (s *Server) testIdentityCallerAdmitting(w http.ResponseWriter, r *http.Requ
 				return nil, nil, false
 			}
 		case store.DelegationGrantorTestInfraOffline:
-			if !st.offlineGatePassed || st.offline == nil {
+			if !st.offlineGatePassed || st.offline == nil || st.delegation.Scope != store.TestInfraOfflineDelegationScope {
 				logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "offline delegation without a passed offline gate")
 				writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 				return nil, nil, false
