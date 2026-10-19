@@ -756,8 +756,8 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
-	// TelemetryPolicy is the project's enforced telemetry on/off, set only
-	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// TelemetryPolicy is the project's enforced telemetry on/off, sent to
+	// every broker (wire key telemetryPolicy;
 	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
 	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
@@ -1487,8 +1487,8 @@ type RemoteAgentConfig struct {
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 
 	// TelemetryPolicy is the project's enforced telemetry on/off
-	// (projectSettingTelemetryEnabled), sent only to a broker that reports
-	// TemplateTiers. The broker applies it last, above the agent's config
+	// (projectSettingTelemetryEnabled), sent to every broker; one older than
+	// templateTiers ignores it. The broker applies it last, above the agent's config
 	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
 	// Nil = no policy.
 	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
@@ -1519,10 +1519,10 @@ type RemoteHubAgentDefaults struct {
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
 	// Telemetry is the hub's telemetry default (settings telemetry), sent
-	// only to a broker that reports TemplateTiers. The broker applies it per
+	// to every broker; one older than templateTiers ignores it. The broker applies it per
 	// start below the agent's own config telemetry and never persists it
-	// (ptone/scion#4218). A legacy broker gets it inline instead
-	// (dispatchTelemetry, ptone/scion#4222).
+	// (ptone/scion#4218). It is never sent inline (dispatchTelemetry,
+	// ptone/scion#4224).
 	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
@@ -1629,6 +1629,12 @@ type Server struct {
 	// logged a Warn, so a space that keeps failing (it is retried on every
 	// open) logs later failures at Debug. Cleared on success.
 	generalTopicWarned sync.Map
+
+	// brokerTemplateTiersWarned records broker IDs the heartbeat handler
+	// already warned about for lacking the templateTiers capability, so the
+	// WARN is logged once per broker per process
+	// (warnBrokerWithoutTemplateTiers).
+	brokerTemplateTiersWarned sync.Map
 
 	// hubSAMappingCache holds the hub-wide Kubernetes mapping view behind
 	// hubSAMappingWarnings for a short window (see gcp_sa_mapping_warnings.go).

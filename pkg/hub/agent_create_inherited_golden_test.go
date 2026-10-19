@@ -63,7 +63,6 @@ type inheritedGoldenCase struct {
 // inheritedSources is the part of a case's sources this test applies.
 type inheritedSources struct {
 	Template struct {
-		Config *store.TemplateConfig `json:"config"`
 		// AgentConfig is the template's own scion-agent.yaml snapshot,
 		// the hub's only source of a template's job keys
 		// (ptone/scion#4222).
@@ -167,7 +166,6 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 		ContentHash: "d00dfeed",
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
-		Config:      src.Template.Config,
 		AgentConfig: src.Template.AgentConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))

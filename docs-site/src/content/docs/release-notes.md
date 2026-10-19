@@ -35,14 +35,16 @@ A template now describes the agent's **job** (harness config, model, instruction
 - Concurrent pushes of the same template: one wins, the other gets `409 template_conflict`, and the CLI retries once.
 - Each template's storage moves to a content-addressed layout, once, on its next commit. Unreferenced blobs are garbage-collected after a grace period (24 hours by default, never less than 1 hour).
 - Cloning a template whose bundled harness-config has an unusable provisioner fails with `422`.
+- The template row's stored `config` and `image` columns are removed. Their values have been ignored since the previous release and listed by the validate report; they are now discarded. The validate report's `stored_config` kind is gone with them ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)).
 
 **Settings are no longer baked into agents** ([ptone/scion#4241](https://github.com/ptone/scion/issues/4241), [ptone/scion#4561](https://github.com/ptone/scion/issues/4561), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
 
 - Broker settings telemetry and the settings- and profile-derived image, image pull policy, resources and volumes are applied at each start, not persisted in `scion-agent.json`. A settings or profile change takes effect on the agent's next start. Hub `agent_defaults.resources` and the Hub default limits are also applied on every start ([ptone/scion#623](https://github.com/ptone/scion/issues/623)).
 - Agents created before this change keep their already-baked values until they are reprovisioned.
 - Agents created before ptone/scion#4222 keep a copy of the Hub default telemetry in their stored config until they are reprovisioned. Starting them no longer resends it.
+- Agents without recorded create inputs that are reincarnated keep any old template-derived env keys as explicit env, with a warning ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)).
 
-**Upgrade order:** upgrade the Hub before the Runtime Brokers. Until the Hub is upgraded, a newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create. It also gets no live template env: the older Hub sends no template identity on start, so the Runtime Broker uses the template version the agent was provisioned from if that version is still in its cache, and otherwise applies no template env, with a start warning.
+**Minimum Runtime Broker version and upgrade order** ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)): the Hub no longer sends telemetry in the old inline form. Runtime Brokers older than the release that introduced the `templateTiers` capability (TS-2a, [ptone/scion#4218](https://github.com/ptone/scion/issues/4218)) keep working but receive no Hub telemetry default and no project telemetry policy; the Hub logs a warning once per such Runtime Broker. **Upgrade all Runtime Brokers to at least that release before upgrading the Hub to this one.** This replaces the earlier advice to upgrade the Hub first. While the Hub is still older, an upgraded Runtime Broker receives Hub `agent_defaults.resources` only at create. It also gets no live template env: the older Hub sends no template identity on start, so the Runtime Broker uses the template version the agent was provisioned from if that version is still in its cache, and otherwise applies no template env, with a start warning.
 
 ## `scion project list` lists projects across hubs
 
