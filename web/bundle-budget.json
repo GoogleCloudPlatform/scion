@@ -1,0 +1,28 @@
+{
+  "$comment": "Bundle budget for the built web client, checked by scripts/check-bundle-budget.mjs after vite build (CI web job). Sizes are bytes; gzip is zlib level 6, as in the vite build report. Raise a limit only with a reason in the PR. See ptone/scion#5306.",
+  "files": {
+    "assets/main.js": { "raw": 240000, "gzip": 65000 }
+  },
+  "entryClosure": {
+    "entry": "src/client/main.ts",
+    "gzip": 140000
+  },
+  "requiredChunks": ["assets/terminal-workspace-"],
+  "forbiddenModules": [
+    {
+      "$comment": "The terminal workspace loads lazily (client/terminal-workspace-loader.ts). No terminal-* module may be in what the login and home routes load statically.",
+      "roots": ["src/components/pages/login.ts", "src/components/pages/home.ts"],
+      "pattern": "^terminal-",
+      "allow": [
+        {
+          "path": "src/client/terminal-workspace-loader.ts",
+          "reason": "The lazy loader itself (a single-flight import() of the workspace chunk, no workspace code); main.ts must reach it statically."
+        },
+        {
+          "path": "src/client/terminal-workspace-events.ts",
+          "reason": "Event-name and drag-MIME constants only (no workspace code); the header imports TERMINAL_SESSION_COUNT_EVENT on every route."
+        }
+      ]
+    }
+  ]
+}

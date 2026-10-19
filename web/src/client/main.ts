@@ -33,26 +33,20 @@ import { configureReadinessMarks, readinessNavigationStarted } from './readiness
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
-import { TerminalCoordinator } from './terminal-coordinator.js';
-import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
-import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
-import { openLayoutSlots } from './terminal-layout-open.js';
-import { parseLayoutUrl } from './terminal-layout.js';
+import type { TerminalCoordinator } from './terminal-coordinator.js';
+import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
+import type { TerminalWorkspacePersistence } from './terminal-persistence.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
+// The terminal workspace is a lazy chunk (ptone/scion#5306): only type
+// imports of its modules here; values come from loadTerminalWorkspace().
 import {
-  MOVE_TERMINALS_LABEL,
-  TERMINALS_OPEN_ELSEWHERE_HELP,
-  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
-  TERMINALS_OPEN_ELSEWHERE_STATUS,
-  nonOwnerOpenStatus,
-  offersMove,
-  openPalettePickedAgent,
-} from './terminal-palette-open.js';
-import { moveTerminalsWithStatus, terminalsOpenElsewhere } from './terminal-move.js';
+  loadTerminalWorkspace,
+  type TerminalWorkspaceModule,
+} from './terminal-workspace-loader.js';
 import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
@@ -164,6 +158,8 @@ let cachedAdminStatus: AdminStatus | null = null;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
 let terminalPersistence: TerminalWorkspacePersistence | null = null;
+/** The loaded terminal workspace chunk; set before the coordinator is created. */
+let terminalModule: TerminalWorkspaceModule | null = null;
 /** Set after account teardown to prevent stale callbacks from recreating sessions. */
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
@@ -194,17 +190,19 @@ function ensureRoots(): HTMLElement | null {
  * with its "?" help, and the move button under it.
  */
 function showTerminalsOpenElsewhere(): void {
-  terminalWorkspace?.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, {
-    label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
-    text: TERMINALS_OPEN_ELSEWHERE_HELP,
+  if (!terminalModule) return;
+  terminalWorkspace?.setStatus(terminalModule.TERMINALS_OPEN_ELSEWHERE_STATUS, {
+    label: terminalModule.TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+    text: terminalModule.TERMINALS_OPEN_ELSEWHERE_HELP,
   });
   offerTerminalMove();
 }
 
 /** Shows "Move terminals to this window" under the non-owner status message. */
 function offerTerminalMove(): void {
+  if (!terminalModule) return;
   terminalWorkspace?.setStatusAction({
-    label: MOVE_TERMINALS_LABEL,
+    label: terminalModule.MOVE_TERMINALS_LABEL,
     onClick: () => void runTerminalMove(),
   });
 }
@@ -218,10 +216,11 @@ async function runTerminalMove(): Promise<void> {
   const coordinator = terminalCoordinator;
   const persistence = terminalPersistence;
   const workspace = terminalWorkspace;
-  if (!coordinator || !persistence || !workspace || terminalMoveRunning) return;
+  const t = terminalModule;
+  if (!coordinator || !persistence || !workspace || !t || terminalMoveRunning) return;
   terminalMoveRunning = true;
   try {
-    const result = await moveTerminalsWithStatus({
+    const result = await t.moveTerminalsWithStatus({
       coordinator,
       persistence,
       workspace,
@@ -242,14 +241,27 @@ async function runTerminalMove(): Promise<void> {
   }
 }
 
-function ensureTerminalCoordinator(): TerminalCoordinator | null {
+/**
+ * Returns the terminal coordinator, creating it (and the workspace) on the
+ * first /terminals render. The first call loads the terminal workspace chunk;
+ * if navigation `thisNav` is superseded while it loads, nothing is created or
+ * mounted and null is returned. A chunk load failure rejects.
+ */
+async function ensureTerminalCoordinator(thisNav: number): Promise<TerminalCoordinator | null> {
+  if (!currentUser?.id || accountTornDown) return null;
+  if (terminalCoordinator) return terminalCoordinator;
+  const t = await loadTerminalWorkspace();
+  // Same guard as the rest of renderRoute: a newer navigation (or an account
+  // teardown) during the load wins, and this one must not mount anything.
+  if (thisNav !== navigationId) return null;
   if (!currentUser?.id || accountTornDown) return null;
   if (terminalCoordinator) return terminalCoordinator;
   const app = document.getElementById('app');
   if (!app) return null;
-  terminalWorkspace = new TerminalWorkspaceRoot(currentUser);
+  terminalModule = t;
+  terminalWorkspace = new t.TerminalWorkspaceRoot(currentUser);
   app.appendChild(terminalWorkspace.element);
-  terminalCoordinator = new TerminalCoordinator(
+  terminalCoordinator = new t.TerminalCoordinator(
     {
       hubUrl: new URL(import.meta.env.BASE_URL, window.location.origin).href,
       accountId: currentUser.id,
@@ -270,7 +282,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       },
     }
   );
-  terminalPersistence = new TerminalWorkspacePersistence({
+  terminalPersistence = new t.TerminalWorkspacePersistence({
     coordinator: terminalCoordinator,
     workspace: terminalWorkspace,
     onRestoredSelection: (agentId): void => {
@@ -290,7 +302,7 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
   terminalWorkspace.element.addEventListener(TERMINAL_PALETTE_NEW_AGENT_EVENT, (e) => {
     const { agentId } = (e as CustomEvent<TerminalPaletteNewAgentDetail>).detail;
     if (!terminalCoordinator || !terminalWorkspace) return;
-    void openPalettePickedAgent({
+    void t.openPalettePickedAgent({
       coordinator: terminalCoordinator,
       workspace: terminalWorkspace,
       agentId,
@@ -1099,8 +1111,22 @@ async function renderRoute(path: string): Promise<void> {
       navigateTo('/login');
       return;
     }
+    let coordinator: TerminalCoordinator | null;
+    try {
+      coordinator = await ensureTerminalCoordinator(thisNav);
+    } catch (err) {
+      // The chunk failed to load (for example after a deploy removed it).
+      // Like a failed page chunk, the previous page stays on screen; the
+      // loader does not cache the failure, so the next visit retries.
+      console.error('[Scion] Failed to load the terminal workspace:', err);
+      if (thisNav === navigationId) {
+        showToast('Could not load terminals. Reload the page to try again.', 'danger');
+      }
+      return;
+    }
+    if (thisNav !== navigationId) return;
+    const t = terminalModule;
     appContainer.hidden = true;
-    const coordinator = ensureTerminalCoordinator();
     terminalWorkspace?.setUser(currentUser);
     terminalWorkspace?.setCurrentPath(path);
     terminalWorkspace?.show(true);
@@ -1110,24 +1136,24 @@ async function renderRoute(path: string): Promise<void> {
     // Parse layout state from query params BEFORE default single-agent
     // selection to avoid a flash of single → multi layout transition.
     const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
-    const layoutUrl = parseLayoutUrl(queryString);
+    const layoutUrl = t ? t.parseLayoutUrl(queryString) : null;
 
     // ── Persisted terminal list restore (ptone/scion#2278) ──────────
     // Runs for every render into /terminals…, before the URL-driven code
     // below: an explicit URL decides what is visible and connected, and
     // the saved list decides rail membership only.
-    if (coordinator && terminalPersistence) {
-      await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
+    if (t && coordinator && terminalPersistence) {
+      await terminalPersistence.restore(t.restoreUrlIntent(pathname, queryString));
       if (thisNav !== navigationId) return;
     }
 
-    if (layoutUrl && coordinator && terminalWorkspace) {
+    if (t && layoutUrl && coordinator && terminalWorkspace) {
       // Suppress URL sync while restoring to avoid feedback loops
       terminalWorkspace.setSuppressUrlSync(true);
       try {
         // Restore the layout preset and open agents from URL slots.
         // Map agent IDs to session keys, opening new sessions as needed.
-        const sessionKeys = await openLayoutSlots({
+        const sessionKeys = await t.openLayoutSlots({
           coordinator,
           workspace: terminalWorkspace,
           slots: layoutUrl.slots,
@@ -1149,24 +1175,24 @@ async function renderRoute(path: string): Promise<void> {
     // Default behavior: single-agent from path
     const agentId = pathname.match(terminalAgentRoute)?.[1];
     terminalRouteAgentId = agentId?.toLowerCase() ?? null;
-    if (agentId && coordinator) {
+    if (t && agentId && coordinator) {
       const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
       if (requestId) terminalNavigations.set(requestId, thisNav);
       const result = await coordinator.open(agentId, requestId);
       if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
       if (thisNav === navigationId && !coordinator.isOwner) {
-        if (offersMove(result.status) && !terminalMoveRunning) {
+        if (t.offersMove(result.status) && !terminalMoveRunning) {
           showTerminalsOpenElsewhere();
         } else {
-          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+          terminalWorkspace?.setStatus(t.nonOwnerOpenStatus(result.status));
           if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
         }
       }
-    } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+    } else if (t && !agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
       // A bare /terminals in a window that does not own the terminals
       // (for example a new window): show the same "open in another
       // window" state as the other non-owner screens, not the empty one.
-      const elsewhere = await terminalsOpenElsewhere({
+      const elsewhere = await t.terminalsOpenElsewhere({
         coordinator,
         persistence: terminalPersistence,
       });
