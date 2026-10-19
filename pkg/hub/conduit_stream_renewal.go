@@ -176,8 +176,18 @@ func (a *conduitStreamAuthz) renewStream(ctx context.Context, st *conduitUserStr
 			st.deadline = r.AuthzUntil
 			a.armDeadlineLocked(st)
 		}
-		a.armRenewalLocked(st, a.renewalPoint(st.AuthzUntil, st.AuthzInterval))
+		next := a.renewalPoint(st.AuthzUntil, st.AuthzInterval)
+		if next.After(now) {
+			a.armRenewalLocked(st, next)
+		}
 		st.dmu.Unlock()
+		if !next.After(now) {
+			// The renewed authz_until leaves no renewal point ahead of
+			// now. Arming at it would renew again at once, and again,
+			// without end; the next attempt waits like a retry instead
+			// (at least conduitRenewalRetryFloor, never past authz_until).
+			a.retryRenewal(st, now)
+		}
 	default:
 		detail = err.Error()
 		switch ClassifyConduitRenewal(err) {
