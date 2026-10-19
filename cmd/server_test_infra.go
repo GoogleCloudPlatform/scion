@@ -38,6 +38,15 @@ import (
 // infrastructure allows.
 const testInfraMarkAcknowledgeFlag = "i-understand-this-hub-can-mint-super-admins"
 
+// Named refusals of "server test-infra mark". They are not the startup gate
+// errors (hub.ErrTestAdmin*, hub.ErrTestModeHubIDNotPinned), which carry G
+// codes; mark refuses earlier so a marker the hub would reject is never
+// written.
+var (
+	ErrTestInfraMarkHubIDNotPinned = errors.New("test-infra mark: the hub id is not pinned (server.hub.hub_id or SCION_SERVER_HUB_HUBID is unset); a derived hub id is refused")
+	ErrTestInfraMarkHubIDMismatch  = errors.New("test-infra mark: --hub-id differs from this hub's resolved hub id")
+)
+
 var (
 	testInfraMarkHubID       string
 	testInfraMarkAcknowledge bool
@@ -75,6 +84,10 @@ the test database of one hub. Every --test-mode level other than off refuses
 to start unless the marker is present and names the hub's own hub id.
 
 The command:
+  - refuses, writing nothing, unless the hub id is pinned in server.hub.hub_id
+    (or SCION_SERVER_HUB_HUBID) and --hub-id equals the hub id resolved from
+    that same configuration; pin the hub's CURRENT resolved id, never a new
+    value
   - opens the configured database directly (no running server is needed)
   - writes one marker row (hub id, class "test", time, host, attested JSON)
   - generates the hub-local test-identity web session key (64 random bytes)
@@ -179,21 +192,63 @@ func runTestInfraMark(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 	out := cmd.OutOrStdout()
 
-	cfg, client, err := openTestInfraDatabase(ctx, testInfraMarkConfigPath, testInfraMarkDBURL)
+	cfg, err := loadTestInfraConfig(testInfraMarkConfigPath, testInfraMarkDBURL)
 	if err != nil {
 		return err
+	}
+	// Refuse a mismatched or unpinned hub id before the database is opened
+	// and migrated; markTestInfra checks again before it writes.
+	if err := checkTestInfraMarkHubID(cfg, testInfraMarkHubID); err != nil {
+		return err
+	}
+	client, err := openTestInfraClient(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
 	return markTestInfra(ctx, client, cfg, out)
 }
 
+// checkTestInfraMarkHubID refuses a mark whose --hub-id the hub would not
+// accept at startup: the hub id must be pinned (server.hub.hub_id or
+// SCION_SERVER_HUB_HUBID, as hubIDPinned defines it for TM-h) and --hub-id
+// must equal the hub id resolved from that same configuration. It never
+// derives or persists a hub id.
+func checkTestInfraMarkHubID(cfg *config.GlobalConfig, hubID string) error {
+	if !hubIDPinned(cfg) {
+		current := "unknown: no ~/.scion/hub-id file yet; read hub_id from the running hub's GET /healthz"
+		if id, ok := config.ResolveHubIDFromEnvReadOnly(); ok {
+			current = fmt.Sprintf("%q", id)
+		}
+		return fmt.Errorf("%w: set server.hub.hub_id (or SCION_SERVER_HUB_HUBID) to this hub's CURRENT resolved hub id (%s), never a new value; nothing was written", ErrTestInfraMarkHubIDNotPinned, current)
+	}
+	if resolved := cfg.Hub.ResolveHubID(); resolved != hubID {
+		return fmt.Errorf("%w: --hub-id %q, but this configuration resolves hub id %q (server.hub.hub_id or SCION_SERVER_HUB_HUBID); nothing was written", ErrTestInfraMarkHubIDMismatch, hubID, resolved)
+	}
+	return nil
+}
+
 // openTestInfraDatabase loads the server configuration, applies a --db
 // override, and opens (and migrates) the configured database.
 func openTestInfraDatabase(ctx context.Context, configPath, dbURL string) (*config.GlobalConfig, *ent.Client, error) {
+	cfg, err := loadTestInfraConfig(configPath, dbURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := openTestInfraClient(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	return cfg, client, nil
+}
+
+// loadTestInfraConfig loads the server configuration and applies a --db
+// override, without opening the database.
+func loadTestInfraConfig(configPath, dbURL string) (*config.GlobalConfig, error) {
 	cfg, err := config.LoadGlobalConfig(configPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load configuration: %w", err)
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 	if dbURL != "" {
 		if strings.HasPrefix(dbURL, "postgres://") || strings.HasPrefix(dbURL, "postgresql://") || strings.Contains(dbURL, "host=") {
@@ -204,13 +259,9 @@ func openTestInfraDatabase(ctx context.Context, configPath, dbURL string) (*conf
 		cfg.Database.URL = dbURL
 	}
 	if cfg.Database.URL == "" {
-		return nil, nil, errors.New("no database URL configured; provide --db or a server configuration")
+		return nil, errors.New("no database URL configured; provide --db or a server configuration")
 	}
-	client, err := openTestInfraClient(ctx, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open database: %w", err)
-	}
-	return cfg, client, nil
+	return cfg, nil
 }
 
 // testInfraUnmarkArgs validates the unmark flags before anything is opened.
@@ -278,17 +329,8 @@ func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalCo
 	}
 	host, _ := os.Hostname()
 
-	// The hub resolves its id from server.hub.hub_id or the environment;
-	// warn when this host would resolve a different one (read-only: never
-	// creates ~/.scion/hub-id).
-	resolved := cfg.Hub.HubID
-	if resolved == "" {
-		if id, ok := config.ResolveHubIDFromEnvReadOnly(); ok {
-			resolved = id
-		}
-	}
-	if resolved != "" && resolved != testInfraMarkHubID {
-		_, _ = fmt.Fprintf(out, "WARNING: --hub-id %q differs from the hub id this host resolves (%q); the gate requires the hub's own id.\n", testInfraMarkHubID, resolved)
+	if err := checkTestInfraMarkHubID(cfg, testInfraMarkHubID); err != nil {
+		return err
 	}
 
 	m, err := testinfra.Mark(ctx, client, testinfra.MarkInput{
