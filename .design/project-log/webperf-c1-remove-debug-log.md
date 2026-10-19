@@ -16,6 +16,9 @@ yet). Part of the webperf epic (#5301). Client only; no hub change.
   experiment-gate.
 - Remaining `debug-log` mentions are in older project-log entries
   (`slow-list-lists-p1a/p4-2385.md`); they are history and stay unchanged.
+- `StateManager.getStateSnapshot()` (`state.ts`) now has no production caller;
+  only the new test spies on it. Kept here so C1 stays a pure removal; removing
+  it is a possible follow-up.
 
 ## Test
 
@@ -23,7 +26,12 @@ yet). Part of the webperf epic (#5301). Client only; no hub change.
 getStateSnapshot`: boots the real entry module (`__fixtures__/main-boot.ts`),
   spies on the shared `stateManager.getStateSnapshot`, then feeds 100 agent
   status updates through `handleUpdate`, flushing each, and asserts 100
-  `agents-updated` events and 0 snapshot calls.
+  `agents-updated` events and 0 snapshot calls. It then sends one project and
+  one broker update (the old listener snapshotted on those too) and asserts
+  still 0 calls. Neither the test nor `__fixtures__/main-boot.ts` is in a
+  typecheck project yet (nor are the `main-*.test.ts` siblings); the
+  tsconfig change belongs to ts1 (#5329), and adding them is tracked for
+  after ts1 and C1 land (#5335).
 - It boots `main.ts` on purpose. A test on a fresh `StateManager` would pass
   with or without the debug log, because the cost came from a listener
   `main.ts` attached. Run before the deletion, the test failed with 101 calls

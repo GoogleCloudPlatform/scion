@@ -78,5 +78,18 @@ describe('StateManager snapshot cost', () => {
     expect(updated).toHaveBeenCalledTimes(100);
     expect(snapshot).toHaveBeenCalledTimes(0);
     stateManager.removeEventListener('agents-updated', updated);
+
+    // The removed listener also snapshotted on project and broker updates.
+    const projects = vi.fn();
+    const brokers = vi.fn();
+    stateManager.addEventListener('projects-updated', projects);
+    stateManager.addEventListener('brokers-updated', brokers);
+    emit('project.p1.updated', { name: 'P1' });
+    emit('broker.b1.updated', { name: 'B1' });
+    expect(projects).toHaveBeenCalledTimes(1);
+    expect(brokers).toHaveBeenCalledTimes(1);
+    expect(snapshot).toHaveBeenCalledTimes(0);
+    stateManager.removeEventListener('projects-updated', projects);
+    stateManager.removeEventListener('brokers-updated', brokers);
   }, 15_000);
 });
