@@ -198,6 +198,15 @@ jobs:
       - name: Verify Web Build
         run: ls -la web/dist
 
+      # Every .js in dist/client/assets must be referenced by the Vite
+      # manifest: stale chunks from earlier builds would ship in the hub
+      # binary (#3842). Also runs the node:test suites of the build helpers.
+      - name: Check Web Build Orphans
+        working-directory: ./web
+        run: |
+          npm run test:build-scripts
+          npm run check:orphans
+
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web
