@@ -790,7 +790,7 @@ func conduitRenewalUnsupportedPrincipal(identity Identity) (kind string, unsuppo
 	}
 	inner, prefix := identity, ""
 	if s, ok := identity.(*ScopedUserIdentity); ok {
-		if s == nil || s.UserIdentity == nil {
+		if s == nil || isNilIdentity(s.UserIdentity) {
 			return "", false
 		}
 		inner, prefix = s.UserIdentity, "scoped_"

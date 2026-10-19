@@ -964,6 +964,10 @@ func TestConduitRenewalUnsupportedPrincipal(t *testing.T) {
 		"agent":                  newAgentIdentityFromStore(f.agent),
 		"opaque wrapper":         opaqueIdentity{f.owner},
 		"nil":                    nil,
+		// A scoped identity over a typed-nil user, and a typed-nil scoped
+		// identity, are not members either.
+		"scoped over typed-nil user": &ScopedUserIdentity{UserIdentity: (*AuthenticatedUser)(nil)},
+		"typed-nil scoped":           (*ScopedUserIdentity)(nil),
 	} {
 		_, unsupported := conduitRenewalUnsupportedPrincipal(ident)
 		assert.False(t, unsupported, name)
