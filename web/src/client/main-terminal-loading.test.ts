@@ -76,6 +76,10 @@ describe('main.ts terminal route', () => {
     vi.advanceTimersByTime(1);
     const el = loading();
     expect(el).not.toBeNull();
+    // The live region is inserted empty and filled in a later task, so
+    // screen readers announce the text.
+    expect(el!.textContent).toBe('');
+    vi.advanceTimersByTime(1);
     expect(el!.getAttribute('role')).toBe('status');
     expect(el!.getAttribute('aria-live')).toBe('polite');
     expect(el!.textContent).toContain('Loading terminals…');

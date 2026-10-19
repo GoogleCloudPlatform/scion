@@ -19,7 +19,11 @@ vertical slice; C4 and C8 build on it.
   newer navigation un-hides it. Because the outlet holds the whole app shell
   (sidebar, header, page), the first load shows "Loading terminals…" (a
   `role=status` placeholder with a spinner) after 150 ms, removed on mount,
-  failure, a newer navigation or account teardown. A failed load logs, shows a
+  failure, a non-terminal navigation or account teardown. A second
+  first-load terminal navigation during the load adopts the placeholder
+  (no blank flash, no restarted delay); a superseded load's settle never
+  removes it. Its text is set one task after the live region is inserted,
+  so screen readers announce it. A failed load logs, shows a
   toast, and shows the previous page again with focus restored (the same as a
   failed page chunk). The loader does not cache a rejection, so the next visit
   retries.

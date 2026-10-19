@@ -244,44 +244,69 @@ async function runTerminalMove(): Promise<void> {
 
 /** Delay before the first-load placeholder appears, so a cached chunk does not flash it. */
 const TERMINAL_LOADING_DELAY_MS = 150;
-/** Removes the current terminal loading placeholder (or cancels its timer). */
-let clearTerminalLoading: (() => void) | null = null;
+/**
+ * The first-load terminal placeholder: its timer, its element once shown,
+ * and the navigation that currently owns it.
+ */
+interface TerminalLoadingState {
+  owner: number;
+  timer: ReturnType<typeof setTimeout>;
+  el: HTMLElement | null;
+}
+let terminalLoading: TerminalLoadingState | null = null;
+
+/** Removes the terminal loading placeholder (or cancels its timer), whoever owns it. */
+function clearTerminalLoading(): void {
+  if (!terminalLoading) return;
+  clearTimeout(terminalLoading.timer);
+  terminalLoading.el?.remove();
+  terminalLoading = null;
+}
 
 /**
  * Shows "Loading terminals…" in #app after TERMINAL_LOADING_DELAY_MS, while
  * the terminal workspace chunk loads for the first time (the route outlet,
- * which holds the whole app shell, is hidden meanwhile). Returns this
- * placeholder's own cleanup: it clears only this one, so a superseded load
- * cannot remove a newer navigation's placeholder. Every navigation and an
- * account teardown also clear it through clearTerminalLoading.
+ * which holds the whole app shell, is hidden meanwhile). A newer first-load
+ * terminal navigation adopts a placeholder that is already pending or shown,
+ * so it neither flashes blank nor restarts the delay. Returns the cleanup for
+ * navigation `owner`: it removes the placeholder only while `owner` still
+ * owns it, so a superseded load cannot remove a newer navigation's. Non-
+ * terminal navigations and an account teardown use clearTerminalLoading.
  */
-function startTerminalLoading(app: HTMLElement): () => void {
-  clearTerminalLoading?.();
-  let el: HTMLElement | null = null;
-  const timer = setTimeout(() => {
-    el = document.createElement('div');
-    el.id = 'terminal-workspace-loading';
-    el.setAttribute('role', 'status');
-    el.setAttribute('aria-live', 'polite');
-    el.style.cssText =
-      'height:var(--scion-app-height, 100dvh);display:flex;flex-direction:column;' +
-      'align-items:center;justify-content:center;gap:var(--sl-spacing-small);' +
-      'background:var(--scion-surface);color:var(--scion-text-muted)';
-    const spinner = document.createElement('sl-spinner');
-    spinner.style.fontSize = '2rem';
-    const label = document.createElement('span');
-    label.textContent = 'Loading terminals…';
-    el.append(spinner, label);
-    app.appendChild(el);
-  }, TERMINAL_LOADING_DELAY_MS);
-  const clear = (): void => {
-    clearTimeout(timer);
-    el?.remove();
-    el = null;
-    if (clearTerminalLoading === clear) clearTerminalLoading = null;
+function startTerminalLoading(app: HTMLElement, owner: number): () => void {
+  if (terminalLoading) {
+    terminalLoading.owner = owner;
+  } else {
+    const state: TerminalLoadingState = {
+      owner,
+      el: null,
+      timer: setTimeout(() => {
+        const el = document.createElement('div');
+        el.id = 'terminal-workspace-loading';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.style.cssText =
+          'height:var(--scion-app-height, 100dvh);display:flex;flex-direction:column;' +
+          'align-items:center;justify-content:center;gap:var(--sl-spacing-small);' +
+          'background:var(--scion-surface);color:var(--scion-text-muted)';
+        const spinner = document.createElement('sl-spinner');
+        spinner.style.fontSize = '2rem';
+        const label = document.createElement('span');
+        el.append(spinner, label);
+        app.appendChild(el);
+        state.el = el;
+        // Fill the live region in a later task than its insertion: some
+        // screen readers do not announce text a status node is inserted with.
+        state.timer = setTimeout(() => {
+          label.textContent = 'Loading terminals…';
+        }, 0);
+      }, TERMINAL_LOADING_DELAY_MS),
+    };
+    terminalLoading = state;
+  }
+  return (): void => {
+    if (terminalLoading?.owner === owner) clearTerminalLoading();
   };
-  clearTerminalLoading = clear;
-  return clear;
 }
 
 /**
@@ -1045,7 +1070,7 @@ async function init(): Promise<void> {
       chatRecentFiles.clearForLogout();
     }
 
-    clearTerminalLoading?.();
+    clearTerminalLoading();
     if (accountTornDown) return;
     accountTornDown = true;
     try {
@@ -1136,8 +1161,6 @@ async function renderRoute(path: string): Promise<void> {
   if (!appContainer) return;
   const thisNav = ++navigationId;
   readinessNavigationStarted(thisNav);
-  // A loading placeholder belongs to the navigation that started it.
-  clearTerminalLoading?.();
 
   // The SSR payload belongs to this document and is offered to the first
   // render only, whichever route it is; it is cleared here whether or not it
@@ -1168,7 +1191,9 @@ async function renderRoute(path: string): Promise<void> {
     // First load only: the outlet (with the whole app shell) is hidden and
     // the workspace does not exist yet, so show a loading state meanwhile.
     const app = document.getElementById('app');
-    const stopLoading = !terminalCoordinator && app ? startTerminalLoading(app) : null;
+    let stopLoading: (() => void) | null = null;
+    if (!terminalCoordinator && app) stopLoading = startTerminalLoading(app, thisNav);
+    else clearTerminalLoading();
     let coordinator: TerminalCoordinator | null;
     try {
       coordinator = await ensureTerminalCoordinator(thisNav);
@@ -1280,6 +1305,8 @@ async function renderRoute(path: string): Promise<void> {
   // The terminal route handler hides the outlet without clearing it, so
   // the previous page and shell are still live in the DOM.
   const returningFromTerminal = appContainer.hidden;
+  // Leaving /terminals during a first load: its placeholder goes now.
+  clearTerminalLoading();
   appContainer.hidden = false;
   terminalWorkspace?.show(false);
   const route = resolveRoute(pathname);
