@@ -63,7 +63,11 @@ async function scion(bin: string, args: string[]): Promise<string> {
   } catch (err) {
     const e = err as { code?: unknown; stderr?: unknown };
     // The CLI never prints a token or code; still keep only the first line.
-    const first = String(e.stderr ?? '').split('\n')[0];
+    const stderr = typeof e.stderr === 'string' ? e.stderr : '';
+    const first = stderr.split('\n')[0];
+    // Only the first stderr line is kept: the caught error carries the whole
+    // CLI output and argv, so it is deliberately not attached as the cause.
+    // eslint-disable-next-line preserve-caught-error -- see above
     throw new Error(
       `scion ${args
         .filter((a) => !a.startsWith('--'))
