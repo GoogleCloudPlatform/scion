@@ -703,25 +703,38 @@ func TestSetMemberRoles_Ported_SystemScopedRoleRejected(t *testing.T) {
 // Credential gate
 // ---------------------------------------------------------------------------
 
-func TestSetMemberRoles_CredentialGate_RejectsUAT(t *testing.T) {
+// TestSetMemberRoles_TokenAdmittedUnderProjectManage pins the members PUT
+// for a user access token: a token without project:manage is refused, and
+// the direct owner's token carrying project:manage and the selectors of
+// the created role's permissions changes the principal's roles.
+func TestSetMemberRoles_TokenAdmittedUnderProjectManage(t *testing.T) {
 	f := setupMMRFixture(t)
-	uatKey := mintScopedUAT(t, f.srv, f.owner.ID, f.projectID, []string{"project:manage"})
+	narrow, err := f.store.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name: "mmr-narrow-" + tid(t.Name())[:8], ScopeType: store.RoleScopeProject, Permissions: []string{"project.read", "agent.read"},
+	})
+	require.NoError(t, err)
+	body := map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID, narrow.ID}}
 
-	body := map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}}
-	rec := doRequestWithUAT(t, f.srv, uatKey, http.MethodPut, mmrPrincipalPath(f.projectID, "user", f.member.ID), body)
+	noManage := mintScopedUAT(t, f.srv, f.owner.ID, f.projectID, []string{"project:read", "agent:read"})
+	rec := doRequestWithUAT(t, f.srv, noManage, http.MethodPut, mmrPrincipalPath(f.projectID, "user", f.member.ID), body)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient)
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 1)
+
+	uatKey := mintScopedUAT(t, f.srv, f.owner.ID, f.projectID, []string{"project:manage", "project:read", "agent:read"})
+	rec = doRequestWithUAT(t, f.srv, uatKey, http.MethodPut, mmrPrincipalPath(f.projectID, "user", f.member.ID), body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"changed":true`)
+	assert.Len(t, mmrBindingsFor(t, f.store, "user", f.member.ID, f.projectID), 2)
 }
 
 // TestSetMemberRoles_CredentialGate_RejectsAgentToken is L3 (review r1):
-// the acceptance criteria (ptone/scion#2529 acceptance 7) list "UAT or agent
-// token -> 403 credential_insufficient" for this endpoint, but only the UAT
-// half was tested. A real agent JWT authenticates to an AgentIdentity, which
-// is not a UserIdentity; the handler now checks that before calling
-// s.authorize (no permission in the registry maps project.manage to any
-// agent scope, so an agent could never pass that check anyway) and returns
-// the same credential_insufficient code a UAT gets, not a generic
-// authorization denial.
+// the acceptance criteria (ptone/scion#2529 acceptance 7) list "agent
+// token -> 403 credential_insufficient" for this endpoint. A real agent
+// JWT authenticates to an AgentIdentity, which is not a UserIdentity; the
+// handler checks that before calling s.authorize (no permission in the
+// registry maps project.manage to any agent scope, so an agent could never
+// pass that check anyway) and returns credential_insufficient, not a
+// generic authorization denial.
 func TestSetMemberRoles_CredentialGate_RejectsAgentToken(t *testing.T) {
 	f := setupMMRFixture(t)
 	ctx := context.Background()
@@ -742,7 +755,7 @@ func TestSetMemberRoles_CredentialGate_RejectsAgentToken(t *testing.T) {
 	f.srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token must be refused with the same code as a UAT")
+	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token is refused with credential_insufficient")
 }
 
 // TestSetMemberRoles_CredentialGate_DeleteRejectsAgentToken is R4-7 (review
@@ -769,7 +782,7 @@ func TestSetMemberRoles_CredentialGate_DeleteRejectsAgentToken(t *testing.T) {
 	f.srv.Handler().ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token must be refused with the same code as a UAT, on DELETE as on PUT")
+	assert.Contains(t, rec.Body.String(), ErrCodeMembershipCredentialInsufficient, "an agent token is refused with credential_insufficient, on DELETE as on PUT")
 }
 
 // ---------------------------------------------------------------------------
