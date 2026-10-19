@@ -156,7 +156,7 @@ func (d dirFileSystem) Open(name string) (http.File, error) {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
 			return nil, err
 		}
-		// Escapes from the root and malformed names are reported as missing.
+		// Names that resolve outside the root, and malformed names, are reported as missing.
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
 	return f, nil
