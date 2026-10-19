@@ -22,13 +22,15 @@
  * and provides a compose box for sending new messages with optional interrupt.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { FrameBatcher, SortedLogBuffer } from '../../client/sorted-log-buffer.js';
 import { getDenialMessage } from '../../shared/message-mode.js';
 import type { Message } from '../../shared/types.js';
 import './json-browser.js';
-import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { effectiveTimeZone, formatInstant, formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface MessageLogEntry {
@@ -66,6 +68,41 @@ interface ParsedMessage {
   recipientProjectId?: string | undefined;
   /** Whether this message crossed project boundaries. */
   crossProject?: boolean | undefined;
+}
+
+/**
+ * A parsed message plus what its row needs, computed once at ingest: the
+ * numeric timestamp (sort key) and the formatted strings. `zone` records the
+ * display zone the strings were formatted in; a zone change re-formats them
+ * once on the next render.
+ */
+interface MessageRow extends ParsedMessage {
+  ts: number;
+  zone: string;
+  date: string;
+  time: string;
+}
+
+function toMessageRow(msg: ParsedMessage, zone: string): MessageRow {
+  const row: MessageRow = {
+    ...msg,
+    ts: new Date(msg.timestamp).getTime(),
+    zone: '',
+    date: '',
+    time: '',
+  };
+  formatMessageRow(row, zone);
+  return row;
+}
+
+/** (Re-)formats a row's strings unless they are already in `zone`. */
+function formatMessageRow(row: MessageRow, zone: string): void {
+  if (row.zone === zone) return;
+  row.zone = zone;
+  // Date divider and row time in the effective display zone (24-hour);
+  // the divider names the zone.
+  row.date = formatInstantWithZone(row.timestamp, 'date');
+  row.time = formatInstant(row.timestamp, 'time-seconds');
 }
 
 const MAX_BUFFER = 500;
@@ -142,8 +179,13 @@ export class ScionAgentMessageViewer extends LitElement {
   @property()
   projectId = '';
 
-  @state() private messages: ParsedMessage[] = [];
-  @state() private entryMap = new Map<string, ParsedMessage>();
+  /** Messages in ascending timestamp order (rendered newest first). */
+  private readonly buffer = new SortedLogBuffer<MessageRow>({
+    cap: MAX_BUFFER,
+    keyOf: (row) => row.insertId,
+  });
+  /** Streamed messages render at most once per animation frame. */
+  private readonly renderBatch = new FrameBatcher(() => this.requestUpdate());
   @state() private loading = false;
   @state() private error: string | null = null;
   @state() private streaming = false;
@@ -495,8 +537,9 @@ export class ScionAgentMessageViewer extends LitElement {
       if (!baseUrl) return;
 
       const params = new URLSearchParams({ tail: '200' });
-      if (this.messages.length > 0) {
-        params.set('since', this.messages[0].timestamp);
+      const newest = this.buffer.newest;
+      if (newest) {
+        params.set('since', newest.timestamp);
       }
       const res = await apiFetch(`${baseUrl}?${params.toString()}`);
       if (!res.ok) {
@@ -549,26 +592,18 @@ export class ScionAgentMessageViewer extends LitElement {
     };
   }
 
+  /**
+   * Adds hub store messages to the sorted buffer (formatting each new one
+   * once) and schedules one render for the next animation frame.
+   */
   private mergeHubMessages(items: Message[]): void {
+    const zone = effectiveTimeZone();
+    let added = false;
     for (const item of items) {
-      const parsed = this.parseHubMessage(item);
-      if (!this.entryMap.has(parsed.insertId)) {
-        this.entryMap.set(parsed.insertId, parsed);
-      }
+      if (this.buffer.has(`hub:${item.id}`)) continue;
+      added = this.buffer.insert(toMessageRow(this.parseHubMessage(item), zone)) || added;
     }
-
-    const sorted = Array.from(this.entryMap.values()).sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
-
-    if (sorted.length > MAX_BUFFER) {
-      const evicted = sorted.splice(MAX_BUFFER);
-      for (const e of evicted) {
-        this.entryMap.delete(e.insertId);
-      }
-    }
-
-    this.messages = sorted;
+    if (added) this.renderBatch.schedule();
   }
 
   private parseEntry(entry: MessageLogEntry): ParsedMessage {
@@ -633,27 +668,20 @@ export class ScionAgentMessageViewer extends LitElement {
     };
   }
 
+  /**
+   * Adds Cloud Logging message records to the sorted buffer (formatting each
+   * new one once) and schedules one render for the next animation frame.
+   */
   private mergeEntries(newEntries: MessageLogEntry[]): void {
+    const zone = effectiveTimeZone();
+    let added = false;
     for (const entry of newEntries) {
-      if (!this.entryMap.has(entry.insertId)) {
-        const parsed = this.parseEntry(entry);
-        if (!isMessageRecord(entry, parsed)) continue;
-        this.entryMap.set(entry.insertId, parsed);
-      }
+      if (this.buffer.has(entry.insertId)) continue;
+      const parsed = this.parseEntry(entry);
+      if (!isMessageRecord(entry, parsed)) continue;
+      added = this.buffer.insert(toMessageRow(parsed, zone)) || added;
     }
-
-    const sorted = Array.from(this.entryMap.values()).sort(
-      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-    );
-
-    if (sorted.length > MAX_BUFFER) {
-      const evicted = sorted.splice(MAX_BUFFER);
-      for (const e of evicted) {
-        this.entryMap.delete(e.insertId);
-      }
-    }
-
-    this.messages = sorted;
+    if (added) this.renderBatch.schedule();
   }
 
   // ---------------------------------------------------------------------------
@@ -920,7 +948,7 @@ export class ScionAgentMessageViewer extends LitElement {
   }
 
   private renderContent() {
-    if (this.loading && this.messages.length === 0) {
+    if (this.loading && this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-spinner></sl-spinner>
@@ -929,7 +957,7 @@ export class ScionAgentMessageViewer extends LitElement {
       `;
     }
 
-    if (this.error && this.messages.length === 0) {
+    if (this.error && this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-icon name="exclamation-triangle"></sl-icon>
@@ -939,7 +967,7 @@ export class ScionAgentMessageViewer extends LitElement {
       `;
     }
 
-    if (this.messages.length === 0) {
+    if (this.buffer.size === 0) {
       return html`
         <div class="state-msg">
           <sl-icon name="chat-dots"></sl-icon>
@@ -952,30 +980,39 @@ export class ScionAgentMessageViewer extends LitElement {
   }
 
   private renderMessages() {
-    const rows: unknown[] = [];
-    let lastDate = '';
+    // Newest first. Formatting happened at ingest; formatMessageRow only
+    // redoes it after a display zone change.
+    const zone = effectiveTimeZone();
+    const items = this.buffer.items;
+    const rows: { msg: MessageRow; divider: boolean }[] = [];
+    let lastDate: string | null = null;
+    for (let i = items.length - 1; i >= 0; i--) {
+      const msg = items[i];
+      formatMessageRow(msg, zone);
+      rows.push({ msg, divider: msg.date !== lastDate });
+      lastDate = msg.date;
+    }
 
-    for (const msg of this.messages) {
-      // Date divider and row time in the effective display zone (24-hour);
-      // the divider names the zone.
-      const dateStr = formatInstantWithZone(msg.timestamp, 'date');
+    return repeat(
+      rows,
+      ({ msg }) => msg.insertId,
+      ({ msg, divider }) => this.renderMessage(msg, divider)
+    );
+  }
 
-      if (dateStr !== lastDate) {
-        lastDate = dateStr;
-        rows.push(html`<div class="date-divider">${dateStr}</div>`);
-      }
+  private renderMessage(msg: MessageRow, divider: boolean): TemplateResult {
+    const timeStr = msg.time;
+    const isExpanded = this.expandedIds.has(msg.insertId);
 
-      const timeStr = formatInstant(msg.timestamp, 'time-seconds');
-      const isExpanded = this.expandedIds.has(msg.insertId);
+    const dirIcon = msg.direction === 'sent' ? 'box-arrow-up-right' : 'box-arrow-in-down-left';
 
-      const dirIcon = msg.direction === 'sent' ? 'box-arrow-up-right' : 'box-arrow-in-down-left';
+    // Always show sender on the left and recipient on the right.
+    const fromLabel = msg.sender || 'unknown';
+    const toLabel = msg.recipient || 'unknown';
 
-      // Always show sender on the left and recipient on the right.
-      const fromLabel = msg.sender || 'unknown';
-      const toLabel = msg.recipient || 'unknown';
-
-      // prettier-ignore
-      rows.push(html`
+    // prettier-ignore
+    return html`
+        ${divider ? html`<div class="date-divider">${msg.date}</div>` : nothing}
         <div class="message-row" @click=${() => this.toggleExpand(msg.insertId)}>
           <div class="msg-direction ${msg.direction}">
             <sl-icon name=${dirIcon}></sl-icon>
@@ -1005,10 +1042,7 @@ export class ScionAgentMessageViewer extends LitElement {
             ${isExpanded ? this.renderDetail(msg) : nothing}
           </div>
         </div>
-      `);
-    }
-
-    return rows;
+      `;
   }
 
   private truncateBody(body: string): string {
