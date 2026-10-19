@@ -229,8 +229,11 @@ func (a *conduitStreamAuthz) renewStream(ctx context.Context, st *conduitUserStr
 		delete(a.streams, st)
 		a.mu.Unlock()
 	}
+	// authz_until is written under st.mu (a renewal), so it is read for the
+	// log before the lock is released.
+	until := st.AuthzUntil
 	st.mu.Unlock()
-	a.logRenewal(ctx, st, outcome, detail, start, now, enforced)
+	a.logRenewal(ctx, st, outcome, detail, start, now, until, enforced)
 }
 
 // retryRenewal schedules the next attempt after an unavailable or
@@ -297,8 +300,9 @@ func (a *conduitStreamAuthz) expireEnforced(ctx context.Context, st *conduitUser
 	)
 }
 
-// logRenewal records one renewal attempt in the log and metric.
-func (a *conduitStreamAuthz) logRenewal(ctx context.Context, st *conduitUserStream, outcome, detail string, start, end time.Time, enforced bool) {
+// logRenewal records one renewal attempt in the log and metric. until is
+// st's authz_until, read by the caller under st.mu.
+func (a *conduitStreamAuthz) logRenewal(ctx context.Context, st *conduitUserStream, outcome, detail string, start, end, until time.Time, enforced bool) {
 	if a.cfg.Metrics != nil {
 		a.cfg.Metrics.RecordConduitStreamAuthz(conduitAuthzTriggerRenewal, outcome, st.Kind)
 	}
@@ -319,7 +323,7 @@ func (a *conduitStreamAuthz) logRenewal(ctx context.Context, st *conduitUserStre
 		"agent_id", st.AgentID,
 		"project_id", st.ProjectID,
 		"principal_id", st.UserID,
-		"authz_until", st.AuthzUntil,
+		"authz_until", until,
 		"check_start", start,
 		"check_end", end,
 		"detail", detail,
