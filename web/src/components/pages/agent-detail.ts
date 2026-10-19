@@ -69,6 +69,7 @@ import {
 } from '../../shared/gcp-identity-display.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import '../shared/status-badge.js';
 import '../shared/detail-header.js';
@@ -820,9 +821,15 @@ export class ScionPageAgentDetail extends LitElement {
     }
   `;
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private stopRelativeTimeTick: (() => void) | null = null;
+  /**
+   * The stateManager project object last merged into `this.project` (or
+   * seeded from it). stateManager replaces a project's object on each of
+   * its events, so the same reference means nothing changed for it.
+   */
+  private mergedProjectSource: Project | null = null;
   /**
    * Pending SPA-redirect timer for the deleted state; cancellable on
    * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
@@ -842,7 +849,7 @@ export class ScionPageAgentDetail extends LitElement {
     }
     void this.loadData();
 
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
 
     this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
@@ -850,7 +857,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     this.stopRelativeTimeTick?.();
     this.stopRelativeTimeTick = null;
@@ -860,7 +867,22 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private onAgentsUpdated(): void {
+  /**
+   * React to a coalesced `agents-changed` flush only when it names this
+   * page's agent. Other agents in the project scope change often, and
+   * merging on their flushes gave `this.agent` a new identity each time,
+   * re-rendering the whole page for nothing.
+   */
+  private onAgentsChanged(event: Event): void {
+    const change = (event as CustomEvent<{ data?: AgentsChangedDetail }>).detail?.data;
+    const id = this.agentId;
+    if (
+      !change ||
+      !id ||
+      !(change.upserted.includes(id) || change.deleted.includes(id) || change.unknown.has(id))
+    ) {
+      return;
+    }
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
@@ -870,8 +892,8 @@ export class ScionPageAgentDetail extends LitElement {
     // mean it was deleted: setScope() clears the map before this page's
     // own reseed lands at the end of loadData (which awaits the project,
     // auth/me, notification and subscription fetches first), and
-    // removeAgent() prunes stale rows without a tombstone. Either way, an
-    // unrelated `agents-updated` flush during that window would otherwise
+    // removeAgent() prunes stale rows without a tombstone. Either way, a
+    // flush naming this agent during that window would otherwise
     // be read as "this agent was deleted". Key on the authoritative
     // tombstone instead of absence. (No `!this.deleted` guard here:
     // `showDeletedStateThenRedirect` already no-ops once `deleted` is true.)
@@ -940,7 +962,7 @@ export class ScionPageAgentDetail extends LitElement {
    * banner's Retry (no confirm) and Force. On 204 show the deleted state and
    * redirect. On 202 stay with "Deleting…" (the helper applied the
    * response's view); the SSE `deleted` event then runs
-   * `showDeletedStateThenRedirect` through `onAgentsUpdated`, as it does for
+   * `showDeletedStateThenRedirect` through `onAgentsChanged`, as it does for
    * a delete started elsewhere.
    */
   private async deleteAgent(opts: AgentDeleteRequest = {}): Promise<void> {
@@ -978,12 +1000,18 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private onProjectsUpdated(): void {
-    if (this.agent?.projectId) {
-      const updatedProject = stateManager.getProject(this.agent.projectId);
-      if (updatedProject && this.project) {
-        this.project = { ...this.project, ...updatedProject };
-      }
-    }
+    if (!this.agent?.projectId || !this.project) return;
+    const updatedProject = stateManager.getProject(this.agent.projectId);
+    if (!updatedProject) return;
+    // `projects-updated` carries no ID. Skip a flush that did not touch
+    // this page's project: same object as the one last merged (or the
+    // one loadData seeded, which is `this.project` itself) and the same
+    // updatedAt.
+    const sameObject =
+      updatedProject === this.project || updatedProject === this.mergedProjectSource;
+    if (sameObject && updatedProject.updatedAt === this.project.updatedAt) return;
+    this.mergedProjectSource = updatedProject;
+    this.project = { ...this.project, ...updatedProject };
   }
 
   override willUpdate(changed: Map<PropertyKey, unknown>): void {
