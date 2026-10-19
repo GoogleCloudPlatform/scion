@@ -30,6 +30,10 @@ type EntryPointExemption struct {
 
 	// Owner identifies the reviewer or team responsible for this exemption.
 	Owner string
+
+	// Response classifies what the route's response body can carry, for
+	// every method on Pattern (see ResponseSensitivity).
+	Response ResponseSensitivity
 }
 
 // MutationClassification maps a discovered security-relevant mutation call

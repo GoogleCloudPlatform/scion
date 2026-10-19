@@ -135,6 +135,11 @@ type EntryPoint struct {
 	// example "scope=user"). Empty when the pattern alone identifies the
 	// branch.
 	Variant string
+
+	// Response classifies what the entry point's response body can carry.
+	// Empty means nothing that needs special handling. HTTP-like entry
+	// points only.
+	Response ResponseSensitivity
 }
 
 // EntryPointKind classifies entry point types.
@@ -168,6 +173,35 @@ var httpLikeEntryPoints = map[EntryPointKind]bool{
 	EntryPointHTTPRoute: true,
 	EntryPointWebSocket: true,
 	EntryPointSSE:       true,
+}
+
+// ResponseSensitivity classifies a response body that must not share a
+// compression context with other content (pkg/hub isCompressBypassPath).
+// The hub keeps every entry point with a non-empty value out of response
+// compression; TestCompressBypass_SensitiveResponsesFromCatalog enforces it.
+type ResponseSensitivity string
+
+const (
+	// ResponseCredential marks a response that can carry a credential:
+	// an access, refresh or identity token, a secret or environment value,
+	// a join or invite code, or a capability URL.
+	ResponseCredential ResponseSensitivity = "credential"
+
+	// ResponseCallerSpecific marks a response that carries caller-specific
+	// configuration of a resource (for example the agent item).
+	ResponseCallerSpecific ResponseSensitivity = "caller_specific"
+)
+
+// validResponseSensitivities is the closed set of non-empty response
+// sensitivity values.
+var validResponseSensitivities = map[ResponseSensitivity]bool{
+	ResponseCredential:     true,
+	ResponseCallerSpecific: true,
+}
+
+// Valid reports whether r is empty or a recognized value.
+func (r ResponseSensitivity) Valid() bool {
+	return r == "" || validResponseSensitivities[r]
 }
 
 // PrincipalKind identifies a class of authenticated principal.

@@ -98,6 +98,9 @@ func TestEntryPointExemptionsAreValid(t *testing.T) {
 			t.Errorf("exemption [%d] (%s): duplicate pattern", i, ex.Pattern)
 		}
 		seen[ex.Pattern] = true
+		if !ex.Response.Valid() {
+			t.Errorf("exemption [%d] (%s): unknown response sensitivity %q", i, ex.Pattern, ex.Response)
+		}
 	}
 	t.Logf("entry point exemptions: %d validated", len(EntryPointExemptions))
 }
