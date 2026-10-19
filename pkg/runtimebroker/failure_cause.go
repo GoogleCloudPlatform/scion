@@ -73,9 +73,11 @@ var (
 // The result is then truncated to maxLoggedCauseBytes, with a marker giving
 // the sanitized length.
 //
-// The terminal create failure records (synchronous create and async
-// launch) pass their cause and error fields through this. The text never
-// reaches a client response.
+// The records of the create and start failures whose client response is
+// the fixed "Failed to <op>" text (synchronous create, async launch, create
+// preflight, start, restart, and start context preparation) pass their
+// cause and error fields through this. The text never reaches a client
+// response.
 func sanitizeFailureCause(text string) string {
 	s := causePEMRe.ReplaceAllString(text, redactedMarker)
 	s = causeURLUserInfoRe.ReplaceAllString(s, "${1}"+redactedMarker+"@")

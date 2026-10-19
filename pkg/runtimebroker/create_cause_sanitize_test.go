@@ -117,9 +117,11 @@ func credentialShapedStartError() error {
 }
 
 // sanitizedCauseLogSites lists the log records pinned to pass a failure's
-// cause and error text through sanitizeFailureCause: the terminal create
-// failure records (synchronous create and async launch). Each listed site
-// needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
+// cause and error text through sanitizeFailureCause: the records of the
+// create and start failures whose client response is the fixed
+// "Failed to <op>" text (synchronous create, async launch, create
+// preflight, start, restart, and start context preparation). Each listed
+// site needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
 var sanitizedCauseLogSites = []string{
 	"Agent create failed",
 	"runLaunch: agent start failed",

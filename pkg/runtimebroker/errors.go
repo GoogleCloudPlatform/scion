@@ -399,8 +399,9 @@ func (e *OpaqueError) Unwrap() error { return e.err }
 // and the stop handler's record-less-probe branch (handlers.go) call
 // runtimeOpError/RuntimeError directly instead, each with its own inline
 // log call (and, for create/start, its own span.SetStatus) rather than
-// going through writeRuntimeOpError — raw err still always reaches the
-// log on every path, just not through this one function.
+// going through writeRuntimeOpError — err's text still always reaches the
+// log on every path (through sanitizeFailureCause on the create and start
+// paths), just not through this one function.
 func runtimeOpError(op string, err error) *OpaqueError {
 	return NewOpaqueError(failedOpText(op), err)
 }
