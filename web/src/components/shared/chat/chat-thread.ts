@@ -685,7 +685,11 @@ export class ScionChatThread extends LitElement {
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
-  /** Raw inter-agent messages to render as inline markers in agent DMs. */
+  /**
+   * Raw inter-agent messages to render as inline markers in agent DMs.
+   * Invariant: kept in compareMessageOrder order. Every writer sorts (or
+   * clears) it, and renderMessages() relies on that and does not re-sort.
+   */
   @state() private interagentMessages: Message[] = [];
 
   /** Global expand/collapse state for all inter-agent markers. */
@@ -1945,6 +1949,8 @@ export class ScionChatThread extends LitElement {
   }
 
   private mergeMessages(newMessages: Message[]): void {
+    // The objects this merge stores, for deriving their row values below.
+    const ingested: Message[] = [];
     for (const msg of newMessages) {
       const existing = this.messageMap.get(msg.id);
       // Preserve agent recipient from existing message if incoming lacks it
@@ -1974,6 +1980,7 @@ export class ScionChatThread extends LitElement {
         );
       }
       this.messageMap.set(msg.id, toStore);
+      if (toStore.type !== 'mention') ingested.push(toStore);
     }
 
     // Match the server's (created, id) order so the displayed tail is also
@@ -1997,7 +2004,8 @@ export class ScionChatThread extends LitElement {
     // remain in messageMap so ID-based dedup prevents a later backfill from
     // re-inserting them as real messages.
     this.messages = sorted.filter((m) => m.type !== 'mention');
-    this.deriveRowValues(this.messages);
+    // Only this batch: earlier messages were derived when they arrived.
+    this.deriveRowValues(ingested);
 
     // Track last known timestamp for backfill
     if (sorted.length > 0) {
