@@ -290,8 +290,8 @@ type WebServer struct {
 
 	// fingerprintedAssets holds the request paths (/assets/x-<hash>.js) of
 	// the files Vite fingerprinted, read from its build manifest when assets
-	// are detected (see loadFingerprintedAssets). It is built before the
-	// server starts serving and only read afterwards, so it needs no lock.
+	// are detected (see fingerprintedAssetsFromManifest). It is built before
+	// the server starts serving and only read afterwards, so it needs no lock.
 	fingerprintedAssets map[string]bool
 
 	// staticIndex serves static assets with precompressed variants and
@@ -1453,17 +1453,6 @@ func (ws *WebServer) readViteManifest() (manifest map[string]viteManifestChunk, 
 	}
 	ws.logger().Debug("Vite build manifest loaded", "source", source, "chunks", len(manifest))
 	return manifest, true
-}
-
-// loadFingerprintedAssets reads the Vite build manifest (see
-// readViteManifest) and returns fingerprintedAssetsFromManifest of it, or
-// nil when there is no usable manifest.
-func (ws *WebServer) loadFingerprintedAssets() map[string]bool {
-	manifest, ok := ws.readViteManifest()
-	if !ok {
-		return nil
-	}
-	return fingerprintedAssetsFromManifest(manifest)
 }
 
 // fingerprintedAssetsFromManifest returns the request paths of every file

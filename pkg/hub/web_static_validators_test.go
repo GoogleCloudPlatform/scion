@@ -81,7 +81,7 @@ func newValidatorWebServer(t *testing.T) *WebServer {
 	ws.assets = validatorAssets(t)
 	ws.assetsDisk = ""
 	ws.hasAssets = ws.detectWebAssets()
-	ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+	ws.fingerprintedAssets = fingerprintedAssetsOf(ws)
 	require.True(t, ws.hasAssets)
 	return ws
 }
