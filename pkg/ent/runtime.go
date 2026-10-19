@@ -2499,6 +2499,10 @@ func init() {
 	testidentitydelegationDescLabel := testidentitydelegationFields[5].Descriptor()
 	// testidentitydelegation.DefaultLabel holds the default value on creation for the label field.
 	testidentitydelegation.DefaultLabel = testidentitydelegationDescLabel.Default.(string)
+	// testidentitydelegationDescHubID is the schema descriptor for hub_id field.
+	testidentitydelegationDescHubID := testidentitydelegationFields[9].Descriptor()
+	// testidentitydelegation.DefaultHubID holds the default value on creation for the hub_id field.
+	testidentitydelegation.DefaultHubID = testidentitydelegationDescHubID.Default.(string)
 	// testidentitydelegationDescID is the schema descriptor for id field.
 	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
 	// testidentitydelegation.DefaultID holds the default value on creation for the id field.

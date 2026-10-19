@@ -2885,6 +2885,9 @@ var (
 		{Name: "label", Type: field.TypeString, Default: ""},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "grantor_kind", Type: field.TypeEnum, Enums: []string{"human", "test_infra_offline"}, Default: "human"},
+		{Name: "hub_id", Type: field.TypeString, Default: ""},
+		{Name: "marker_created_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_at", Type: field.TypeTime, Nullable: true},
 		{Name: "revoked_by", Type: field.TypeString, Nullable: true},
 	}
