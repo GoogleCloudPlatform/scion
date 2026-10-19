@@ -2200,7 +2200,7 @@ export class ScionChatThread extends LitElement {
       !eventKey &&
       eventData.projectId &&
       this.projectId &&
-      !this.conversationKey.startsWith('dm:') &&
+      !this.conversationKey?.startsWith('dm:') &&
       eventData.projectId !== this.projectId
     ) {
       return;

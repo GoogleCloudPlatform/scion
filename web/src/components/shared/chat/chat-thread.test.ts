@@ -2482,6 +2482,26 @@ describe('scion-chat-thread SSE message filtering', () => {
     await vi.waitFor(() => expect(historyCalls()).toBe(1));
   });
 
+  it('a keyless event does not throw when the conversation key is unset', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    // A Lit property can be handed null at runtime despite its type.
+    el.conversationKey = null as unknown as string;
+    const handler = (el as unknown as { handleV2ChatMessage: (e: Event) => void })
+      .handleV2ChatMessage;
+    const event = new CustomEvent('chat-message-received', {
+      detail: { state: {}, data: { projectId: 'project-other', id: 'm1' } },
+    });
+
+    try {
+      expect(() => handler.call(el, event)).not.toThrow();
+    } finally {
+      // Teardown reads the key; give it back a string.
+      el.conversationKey = CONVERSATION_KEY;
+    }
+  });
+
   it('lightweight event burst issues at most 2 history requests', async () => {
     await mount();
     vi.useFakeTimers();
