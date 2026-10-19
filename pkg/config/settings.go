@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -519,6 +520,15 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		dir = GetProjectConfigDir(projectPath)
 	}
 
+	// One settings lock from the format check through any auto-migration
+	// to the update, so no other writer runs in between (see
+	// LockSettingsDir).
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
 	// Find existing settings file (YAML or JSON)
 	existingPath := GetSettingsPath(dir)
 
@@ -528,24 +538,24 @@ func UpdateSetting(projectPath string, key string, value string, global bool) er
 		if err == nil {
 			if version, _ := DetectSettingsFormat(data); version != "" {
 				// Delegate to versioned handler to preserve v1 format
-				return UpdateVersionedSetting(dir, key, value)
+				return updateVersionedSettingLocked(lock, dir, key, value)
 			}
 			// Legacy format detected — auto-migrate to v1 before updating
 			fmt.Fprintf(os.Stderr, "Warning: settings file %s uses legacy format. Auto-migrating to v1 schema.\n", existingPath)
 			fmt.Fprintf(os.Stderr, "  You can also run 'scion config migrate' to migrate manually.\n")
-			result, err := MigrateSettingsFile(dir, false)
+			result, err := migrateSettingsFileLocked(lock, dir, false)
 			if err != nil {
 				return fmt.Errorf("auto-migration of legacy settings failed: %w\n  Run 'scion config migrate' to migrate manually", err)
 			}
 			for _, w := range result.Warnings {
 				fmt.Fprintf(os.Stderr, "  Migration warning: %s\n", w)
 			}
-			return UpdateVersionedSetting(dir, key, value)
+			return updateVersionedSettingLocked(lock, dir, key, value)
 		}
 	}
 
 	// No existing file — create a new v1 settings file via the versioned handler
-	return UpdateVersionedSetting(dir, key, value)
+	return updateVersionedSettingLocked(lock, dir, key, value)
 }
 
 func GetSettingValue(s *Settings, key string) (string, error) {
@@ -804,8 +814,9 @@ func (s *Settings) IsHubExplicitlyDisabled() bool {
 // the whole content of a versioned file (ptone/scion#3497). A JSON file is
 // converted to settings.yaml, as before. A missing file is left missing.
 //
-// It does not take LockSettingsFile, as before; a caller that needs the
-// read-modify-write serialised holds the lock around the call.
+// It takes the settings lock for the settings directory (see
+// LockSettingsDir); a caller that already holds it, for a read-modify-write
+// of its own, uses DeleteHubConnectionLocked.
 func DeleteHubConnection(projectPath string, name string, global bool) error {
 	var dir string
 	if global {
@@ -824,5 +835,19 @@ func DeleteHubConnection(projectPath string, name string, global bool) error {
 		dir = GetProjectConfigDir(projectPath)
 	}
 
-	return deleteHubConnectionFromFile(dir, name)
+	lock, err := LockSettingsDir(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return deleteHubConnectionFromFile(lock, dir, name)
+}
+
+// DeleteHubConnectionLocked is DeleteHubConnection for the settings
+// directory whose settings lock the caller holds.
+func DeleteHubConnectionLocked(lock *SettingsLock, name string) error {
+	if err := lock.checkFor(filepath.Join(lock.dir, "settings.yaml")); err != nil {
+		return err
+	}
+	return deleteHubConnectionFromFile(lock, lock.dir, name)
 }

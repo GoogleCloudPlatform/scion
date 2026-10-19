@@ -491,8 +491,9 @@ var structParityBases = []structParityBase{
 //
 // There are thousands of cases, so the subtests run in parallel. That is
 // safe because each case works only in its own temporary directories.
-// UpdateVersionedSetting takes the package-wide settings-file lock
-// (LockSettingsFile), so that part of each case still runs one at a time.
+// UpdateVersionedSetting takes the settings lock (LockSettingsDir). Its
+// file lock is per directory, and the cases use separate directories, but
+// its process-wide mutex still runs that part of each case one at a time.
 // Callers must not use t.Setenv or change package variables
 // (such as createTempFile) while the subtests run.
 func runStructParity(t *testing.T, bases []structParityBase) {
@@ -510,7 +511,9 @@ func runStructParity(t *testing.T, bases []structParityBase) {
 						}
 					}
 					errNew := UpdateVersionedSetting(newDir, key, value)
-					errOld := updateVersionedSettingStruct(oldDir, key, value)
+					errOld := withSettingsLock(oldDir, func(lock *SettingsLock) error {
+						return updateVersionedSettingStruct(lock, oldDir, key, value)
+					})
 					require.Equal(t, errOld == nil, errNew == nil, "new err=%v old err=%v", errNew, errOld)
 					if errOld != nil {
 						return
