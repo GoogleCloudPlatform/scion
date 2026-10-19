@@ -48,6 +48,8 @@ func TestSanitizeFailureCause(t *testing.T) {
 		{"PEM block", "key -----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBg\n-----END PRIVATE KEY----- end", "key [REDACTED] end"},
 		{"unterminated PEM block", "key -----BEGIN CERTIFICATE-----\nMIIBVQIBADANBg", "key [REDACTED]"},
 		{"long hex run", "container 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef exited", "container [REDACTED] exited"},
+		{"single-quoted key", "spec {'password': 'hunter2-value'}", "spec {'password': [REDACTED]}"},
+		{"passphrase key", "key_passphrase: hunter2-value", "key_passphrase: [REDACTED]"},
 		{"lower-case colon key", "spec password: hunter2-value end", "spec password: [REDACTED] end"},
 		{"hyphenated header key", "header x-api-key: abc123 sent", "header x-api-key: [REDACTED] sent"},
 		{"capitalized key, no space", "Password:hunter2", "Password:[REDACTED]"},

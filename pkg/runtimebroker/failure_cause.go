@@ -29,7 +29,7 @@ const redactedMarker = "[REDACTED]"
 
 // causeCredentialWords matches the words that make a key credential-named
 // wherever they appear in it (case-insensitive patterns only).
-const causeCredentialWords = `(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)`
+const causeCredentialWords = `(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)`
 
 // causeValuePattern matches a value after a key and its separator: a
 // quoted string, or a run up to whitespace or a delimiter.
@@ -52,9 +52,9 @@ var (
 	// "auth" and "credential(s)" count only as a whole word of the key, so
 	// prose such as "unauthorized: authentication required" is kept.
 	causeBareCredentialKeyRe = regexp.MustCompile(`(?i)\b(SCION_[A-Z0-9_]*|[A-Z0-9_-]*` + causeCredentialWords + `[A-Z0-9_-]*|(?:[A-Z0-9]+[_-])*(?:AUTH|CREDENTIALS?)(?:[_-][A-Z0-9]+)*)(\s*[:=]\s*)` + causeValuePattern)
-	// A quoted credential-named key, as in JSON, followed by ':' and its
-	// value.
-	causeQuotedCredentialKeyRe = regexp.MustCompile(`(?i)("[A-Z0-9_.-]*(?:` + causeCredentialWords + `|AUTH|CREDENTIAL)[A-Z0-9_.-]*")(\s*:\s*)` + causeValuePattern)
+	// A quoted credential-named key, in double quotes as in JSON or single
+	// quotes as in YAML or Python output, followed by ':' and its value.
+	causeQuotedCredentialKeyRe = regexp.MustCompile(`(?i)("[A-Z0-9_.-]*(?:` + causeCredentialWords + `|AUTH|CREDENTIAL)[A-Z0-9_.-]*"|'[A-Z0-9_.-]*(?:` + causeCredentialWords + `|AUTH|CREDENTIAL)[A-Z0-9_.-]*')(\s*:\s*)` + causeValuePattern)
 	// A "value" key, as in a Kubernetes EnvVar in JSON
 	// ({"name":"X","value":"v"}) or printed with %+v ({Name:X Value:v}).
 	causeValueKeyRe = regexp.MustCompile(`(?i)("value"|\bvalue)(\s*:\s*)` + causeValuePattern)
