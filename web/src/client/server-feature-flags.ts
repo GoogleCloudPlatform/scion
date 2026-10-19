@@ -87,8 +87,11 @@ export function getPublicSettings(): Promise<Readonly<PublicSettings> | null> {
     try {
       const res = await fetch('/api/v1/settings/public', { credentials: 'include' });
       const body = await okJsonOrNull(res);
+      // Frozen: every caller shares this one object.
       const settings =
-        body && typeof body === 'object' && !Array.isArray(body) ? (body as PublicSettings) : null;
+        body && typeof body === 'object' && !Array.isArray(body)
+          ? Object.freeze(body as PublicSettings)
+          : null;
       if (settings && generation === publicSettingsGeneration) {
         publicSettings = settings;
       }

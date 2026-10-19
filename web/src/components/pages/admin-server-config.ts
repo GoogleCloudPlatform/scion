@@ -3369,6 +3369,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.error = `Reset failed: ${errText}`;
         return;
       }
+      // Like a save, a reset can change GET /api/v1/settings/public.
+      invalidatePublicSettings();
       this.resetConfirmSection = null;
       await this.loadConfig();
       this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;

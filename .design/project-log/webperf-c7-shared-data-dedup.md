@@ -13,22 +13,28 @@ is upstream yet). Part of the webperf epic (#5301). Client only; no hub change.
   terminal capture-scope dialog (`terminal-pane.ts`) then reuse. Before, each
   of those sent its own `GET /api/v1/settings/public` every time it opened.
   - Failures (network error, non-OK status, non-JSON or non-object body) are
-    not cached; the next caller retries.
-  - Invalidation: after a successful `PUT /api/v1/admin/server-config` in
-    `admin-server-config.ts` (the only page that edits the fields the endpoint
-    returns: chat toggle, telemetry and auto-expose defaults, hub agent
-    defaults, `agent_secrets.user_scope_only`), and in `terminal-pane.ts` after
-    a capture is rejected with `secret_scope_restricted`, so the "retry after a
-    rejection" flow still reads a since-changed policy. A generation counter
-    stops a request that was in flight at invalidation time from refilling the
-    cache with the old value.
+    not cached; the next caller retries. The cached object is frozen, since
+    every caller shares it.
+  - Invalidation: in `admin-server-config.ts` after a successful
+    `PUT /api/v1/admin/server-config` (Save & Reload) and after a successful
+    section reset (`DELETE /api/v1/admin/server-config/sections/{name}`). Those
+    are the two admin writes that can change the fields the endpoint returns
+    (chat toggle, telemetry and auto-expose defaults, hub agent defaults,
+    `agent_secrets.user_scope_only`); the federation page's PUT sends only
+    federation keys and needs none. A generation counter stops a request that
+    was in flight at invalidation time from refilling the cache with the old
+    value.
+  - The terminal capture-scope dialog keeps the fresh read of design
+    ptone/scion#2291 §7: it drops the cache before each open, so a policy an
+    admin changed in another tab (on or off) applies on the next open, and its
+    fresh result refreshes the copy the other pages read. The first review
+    round caught that a cached read here lost the "turned off elsewhere" case.
   - The response is hub-global (no per-user fields), and signing out or
     switching hubs is a full page load, so the cache cannot serve one user's or
     one hub's values to another.
-  - Trade-off: an admin edit made in another tab or browser now reaches an
-    open tab on its next page load instead of on the next dialog open. The
-    server still enforces the policy; the terminal case self-corrects through
-    the rejection invalidation.
+  - Trade-off: for the create, configure and project settings pages, an admin
+    edit made in another tab now reaches an open tab on its next page load (or
+    after the terminal dialog's fresh read), instead of on the next page open.
 - **`/auth/me` at boot.** Already a single request at the base when SSR
   provides the user (`loadPreferredTimeZone`; `fetchCurrentUser` only runs
   without an SSR user). The finding's "twice" no longer holds. Added the
@@ -57,9 +63,10 @@ is upstream yet). Part of the webperf epic (#5301). Client only; no hub change.
 - `projects page seeds capabilities (no projects?limit=1 on next nav)`
   (`components/pages/projects-capabilities.test.ts`).
 - Cache unit tests in `server-feature-flags.test.ts` (sharing, failures not
-  cached incl. a synchronously throwing fetch, invalidation during flight),
-  admin save invalidation in `admin-server-config.test.ts`, terminal reopen and
-  rejection refetch in `terminal-pane.test.ts`, and the GitHub App link cases
+  cached incl. a synchronously throwing fetch, invalidation during flight,
+  frozen result), admin save and section reset invalidation (success and
+  failure) in `admin-server-config.test.ts`, the terminal dialog's fresh read
+  past a warm cache in `terminal-pane.test.ts`, and the GitHub App link cases
   in `profile-nav.test.ts`.
 
 ## Learned
@@ -70,6 +77,6 @@ is upstream yet). Part of the webperf epic (#5301). Client only; no hub change.
 - In an `async` IIFE, a synchronous throw before the first `await` runs
   `catch`/`finally` synchronously, before the caller stores the promise. Clear
   the in-flight slot from a `.then` on the stored promise, not from `finally`.
-- The terminal pane's request-sequence guard still matters: overlapping
-  requests now only happen when the cache is invalidated between two opens,
-  and its two tests do that explicitly.
+- The terminal pane's request-sequence guard still matters: each open drops
+  the cache and starts its own request, and the generation counter keeps an
+  older open's response out of the cache.

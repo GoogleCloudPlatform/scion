@@ -275,12 +275,15 @@ describe('getPublicSettings: one request per page load (ptone/scion#5311)', () =
   });
 
   const failures: Array<[string, () => Promise<Response>]> = [
-    ['a non-OK status', () => Promise.resolve(jsonResponse({}, 500))],
-    ['a non-JSON body', () => Promise.resolve(new Response('<html>', { status: 200 }))],
-    ['a rejected fetch', () => Promise.reject(new Error('down'))],
+    ['a non-OK status', (): Promise<Response> => Promise.resolve(jsonResponse({}, 500))],
+    [
+      'a non-JSON body',
+      (): Promise<Response> => Promise.resolve(new Response('<html>', { status: 200 })),
+    ],
+    ['a rejected fetch', (): Promise<Response> => Promise.reject(new Error('down'))],
     [
       'a fetch that throws synchronously',
-      () => {
+      (): Promise<Response> => {
         throw new Error('down');
       },
     ],
@@ -315,5 +318,16 @@ describe('getPublicSettings: one request per page load (ptone/scion#5311)', () =
     );
     expect((await getPublicSettings())?.agentSecretsUserScopeOnly).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('getPublicSettings: shared object', () => {
+  it('the cached settings are frozen, so no caller can change what the others read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({ telemetryEnabled: true })))
+    );
+    const settings = await getPublicSettings();
+    expect(Object.isFrozen(settings)).toBe(true);
   });
 });

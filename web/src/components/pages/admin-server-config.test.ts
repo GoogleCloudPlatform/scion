@@ -529,6 +529,50 @@ describe('scion-page-admin-server-config', () => {
     it('a failed save keeps the cached public settings', async () => {
       expect(await saveWith(422)).toBe(0);
     });
+
+    /** Like saveWith, for a section reset (DELETE /admin/server-config/sections/{name}). */
+    async function resetWith(status: number): Promise<number> {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const handler = createFetchHandler(config);
+      element = await createComponent((url, init) => {
+        if (requestUrl(url).includes('/api/v1/settings/public')) {
+          return Promise.resolve(new Response('{}', { status: 200 }));
+        }
+        if (init?.method === 'DELETE') {
+          return Promise.resolve(new Response(status < 400 ? '{}' : 'bad', { status }));
+        }
+        return handler(url, init);
+      });
+      const fetchMock = vi.mocked(fetch);
+      const settingsCalls = (): number =>
+        fetchMock.mock.calls.filter(([u]) => requestUrl(u).includes('/api/v1/settings/public'))
+          .length;
+      invalidatePublicSettings();
+      await getPublicSettings();
+      const before = settingsCalls();
+
+      await (
+        element as unknown as { handleResetSection(name: string): Promise<void> }
+      ).handleResetSection('telemetry');
+      expect(
+        fetchMock.mock.calls.some(
+          ([u, init]) =>
+            init?.method === 'DELETE' &&
+            requestUrl(u).includes('/api/v1/admin/server-config/sections/telemetry')
+        )
+      ).toBe(true);
+
+      await getPublicSettings();
+      return settingsCalls() - before;
+    }
+
+    it('a successful section reset makes the next public settings read fetch again', async () => {
+      expect(await resetWith(200)).toBe(1);
+    });
+
+    it('a failed section reset keeps the cached public settings', async () => {
+      expect(await resetWith(500)).toBe(0);
+    });
   });
 
   // ── Criterion 4: DB mode, Layer-0 read-only ──
