@@ -57,14 +57,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"token create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"agent:read"}}, authzop.ReasonCredentialManagement},
 		{"token revoke", http.MethodPost, "/api/v1/auth/tokens/" + f.uatRevokePost + "/revoke", map[string]interface{}{}, authzop.ReasonCredentialManagement},
 		{"token delete", http.MethodDelete, "/api/v1/auth/tokens/" + f.uatRevokeDelete, nil, authzop.ReasonCredentialManagement},
-		{"project member add", http.MethodPost, "/api/v1/projects/" + f.project + "/members", map[string]interface{}{
-			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
-		}, authzop.ReasonGovernancePending},
-		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
-		{"scheduled event create", http.MethodPost, "/api/v1/projects/" + f.project + "/scheduled-events", map[string]interface{}{"eventType": "dispatch_agent", "fireIn": "1h", "agentName": "x"}, authzop.ReasonGovernancePending},
-		{"schedule create", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules", map[string]interface{}{"name": "x", "cronExpr": "0 * * * *", "eventType": "message", "agentName": "x", "message": "x"}, authzop.ReasonGovernancePending},
-		{"schedule update", http.MethodPatch, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule, map[string]interface{}{"name": "x"}, authzop.ReasonGovernancePending},
-		{"schedule resume", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule + "/resume", nil, authzop.ReasonGovernancePending},
 	}
 	for _, tc := range httpCases {
 		rec := doRequestWithUAT(t, m.srv, key, tc.method, tc.path, tc.body)
@@ -75,20 +67,7 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	// role_binding permissions carry no selector, are called directly with
 	// the same minted token, authenticated as the middleware does. Project
 	// delete is pinned at the service by TestRS3_ProjectDeleteScopedUATDenied.
-	// The scheduled authoring functions are also called directly, so the
-	// refusal is pinned at each function as well as at the routes above.
 	ctx := realTokenContext(t, m.srv, key)
-
-	rec := httptest.NewRecorder()
-	ok := m.srv.authorizeScheduledDispatchAgentAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil))
-	assert.False(t, ok)
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled dispatch authoring")
-
-	rec = httptest.NewRecorder()
-	payload := `{"agentId":"` + f.agent + `","message":"x"}`
-	ok = m.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil), f.project, payload, "", "")
-	assert.False(t, ok)
-	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled message authoring")
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)
 	require.NoError(t, err)
@@ -103,7 +82,7 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	require.NotNil(t, binding, "the fixture super-admin has a super-admin binding")
 	actor := GetUserIdentityFromContext(ctx)
 	require.NotNil(t, actor)
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	m.srv.deleteSystemSuperAdminBinding(rec, requestWithContext(ctx, http.MethodDelete, "/api/v1/admin/role-bindings/"+binding.ID, nil), binding, actor, superAdmin)
 	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "super-admin binding delete")
 	_, err = m.store.GetRoleBinding(context.Background(), binding.ID)

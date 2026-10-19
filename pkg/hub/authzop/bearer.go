@@ -153,6 +153,14 @@ const (
 	// BearerTargetThreadGroupRecord is a chat thread group's project, read
 	// from the thread group record (ptone/scion#4424).
 	BearerTargetThreadGroupRecord BearerTarget = "thread_group_record"
+	// BearerTargetListScope is the project set a list resolves for the
+	// caller (ResolveListScopes): the caller's live grants for the list
+	// permission, reduced by the token boundary. The token's ceiling must
+	// carry the list permission on either boundary kind.
+	BearerTargetListScope BearerTarget = "list_scope"
+	// BearerTargetRoleBindingRecord is a project-scoped role binding's
+	// project, read from the binding record.
+	BearerTargetRoleBindingRecord BearerTarget = "role_binding_record"
 	// BearerTargetGroupRecord is a group record: the group's project for a
 	// project-scoped group, or the hub for a group with no project
 	// (groupResource).
@@ -172,6 +180,8 @@ var validBearerTargets = map[BearerTarget]bool{
 	BearerTargetSelfRecord:         true,
 	BearerTargetConversationRecord: true,
 	BearerTargetThreadGroupRecord:  true,
+	BearerTargetListScope:          true,
+	BearerTargetRoleBindingRecord:  true,
 	BearerTargetGroupRecord:        true,
 }
 

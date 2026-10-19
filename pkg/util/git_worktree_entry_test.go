@@ -48,31 +48,8 @@ func hiddenSiblingRepo(t *testing.T) (repo, own, sibling string, restore func())
 	if err := CreateWorktree(own, "own"); err != nil {
 		t.Fatalf("CreateWorktree own: %v", err)
 	}
-	other := t.TempDir()
-	siblingParent := filepath.Join(other, "volume")
-	sibling = filepath.Join(siblingParent, "sibling")
-	if err := os.MkdirAll(siblingParent, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	// A worktree outside the repository, added the way a user would.
-	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "-b", "sibling", sibling).CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add sibling: %v\n%s", err, out)
-	}
-	hidden := filepath.Join(other, "volume-hidden")
-	if err := os.Rename(siblingParent, hidden); err != nil {
-		t.Fatal(err)
-	}
-	restored := false
-	restore = func() {
-		if restored {
-			return
-		}
-		restored = true
-		if err := os.Rename(hidden, siblingParent); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(restore)
+	sibling, restore = addHiddenSibling(t, repo)
 	return repo, own, sibling, restore
 }
 

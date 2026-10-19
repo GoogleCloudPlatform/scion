@@ -22,8 +22,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -897,4 +899,99 @@ func EnsureScionGitignore(repoRoot string) error {
 	}
 
 	return os.WriteFile(gitignorePath, []byte(newContent), 0644)
+}
+
+// EnsureScionGitExclude ensures that .scion/agents/ is ignored by git at the
+// given repo root without changing the repository's tracked files. If no
+// existing source (any .gitignore, info/exclude or global excludes) already
+// covers the path, it appends .scion/agents/ to the repository's own
+// info/exclude file, which git never tracks.
+//
+// It is for checkouts the hub creates and seeds with an explicit .scion
+// target (InitProject leaves the tracked .gitignore alone there), so that
+// they pass the provisioning check that agent state is git-ignored.
+//
+// A symbolic link or other non-regular file at info or info/exclude is
+// refused rather than followed. If the path is still not ignored once the
+// rule is in place (a tracked negation such as "!.scion/agents/" outranks
+// info/exclude), it returns an error.
+func EnsureScionGitExclude(repoRoot string) error {
+	if util.IsIgnored(repoRoot, ".scion/agents/") {
+		return nil
+	}
+
+	// Without --path-format=absolute, which would resolve symbolic links,
+	// so that the checks below see a link at info or info/exclude. The
+	// result is relative to repoRoot unless the git directory is elsewhere.
+	cmd := exec.Command("git", "rev-parse", "--git-path", "info/exclude")
+	cmd.Dir = repoRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("resolve git exclude file in %s: %w", repoRoot, err)
+	}
+	excludePath := strings.TrimSpace(string(out))
+	if excludePath == "" {
+		return fmt.Errorf("resolve git exclude file in %s: empty path", repoRoot)
+	}
+	if !filepath.IsAbs(excludePath) {
+		excludePath = filepath.Join(repoRoot, excludePath)
+	}
+
+	infoDir := filepath.Dir(excludePath)
+	if info, err := os.Lstat(infoDir); err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", infoDir)
+		}
+	} else if os.IsNotExist(err) {
+		if err := os.Mkdir(infoDir, 0755); err != nil {
+			return fmt.Errorf("create %s: %w", infoDir, err)
+		}
+	} else {
+		return err
+	}
+
+	var content []byte
+	if info, err := os.Lstat(excludePath); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file", excludePath)
+		}
+		if content, err = os.ReadFile(excludePath); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	present := false
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.TrimSpace(line) == ".scion/agents/" {
+			present = true
+			break
+		}
+	}
+
+	if !present {
+		entry := ".scion/agents/\n"
+		if len(content) > 0 && content[len(content)-1] != '\n' {
+			entry = "\n" + entry
+		}
+		f, err := os.OpenFile(excludePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+		if err != nil {
+			return err
+		}
+		if _, err := f.WriteString(entry); err != nil {
+			_ = f.Close()
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+
+	// info/exclude has the lowest precedence: a negation such as
+	// "!.scion/agents/" in a tracked .gitignore still wins over it.
+	if !util.IsIgnored(repoRoot, ".scion/agents/") {
+		return fmt.Errorf("the repository at %s un-ignores .scion/agents/; the rule in %s has no effect", repoRoot, excludePath)
+	}
+	return nil
 }

@@ -362,6 +362,20 @@ func (_c *MutationAuditCreate) SetNillableAgentDelegationCode(v *string) *Mutati
 	return _c
 }
 
+// SetProvenanceBasis sets the "provenance_basis" field.
+func (_c *MutationAuditCreate) SetProvenanceBasis(v string) *MutationAuditCreate {
+	_c.mutation.SetProvenanceBasis(v)
+	return _c
+}
+
+// SetNillableProvenanceBasis sets the "provenance_basis" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableProvenanceBasis(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetProvenanceBasis(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *MutationAuditCreate) SetID(v uuid.UUID) *MutationAuditCreate {
 	_c.mutation.SetID(v)
@@ -609,6 +623,10 @@ func (_c *MutationAuditCreate) createSpec() (*MutationAudit, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.AgentDelegationCode(); ok {
 		_spec.SetField(mutationaudit.FieldAgentDelegationCode, field.TypeString, value)
 		_node.AgentDelegationCode = value
+	}
+	if value, ok := _c.mutation.ProvenanceBasis(); ok {
+		_spec.SetField(mutationaudit.FieldProvenanceBasis, field.TypeString, value)
+		_node.ProvenanceBasis = value
 	}
 	return _node, _spec
 }
@@ -1119,6 +1137,9 @@ func (u *MutationAuditUpsertOne) UpdateNewValues() *MutationAuditUpsertOne {
 		}
 		if _, exists := u.create.mutation.Timestamp(); exists {
 			s.SetIgnore(mutationaudit.FieldTimestamp)
+		}
+		if _, exists := u.create.mutation.ProvenanceBasis(); exists {
+			s.SetIgnore(mutationaudit.FieldProvenanceBasis)
 		}
 	}))
 	return u
@@ -1847,6 +1868,9 @@ func (u *MutationAuditUpsertBulk) UpdateNewValues() *MutationAuditUpsertBulk {
 			}
 			if _, exists := b.mutation.Timestamp(); exists {
 				s.SetIgnore(mutationaudit.FieldTimestamp)
+			}
+			if _, exists := b.mutation.ProvenanceBasis(); exists {
+				s.SetIgnore(mutationaudit.FieldProvenanceBasis)
 			}
 		}
 	}))

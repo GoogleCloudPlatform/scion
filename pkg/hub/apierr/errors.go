@@ -141,6 +141,13 @@ const (
 	// it. Details carry agentId and phase (ptone/scion#4817).
 	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
 
+	// ErrCodeOutcomeUnknown is returned (502) by exec when the request was
+	// sent to the runtime broker and its result was not received: the
+	// broker may have executed it. It is never retried. Details carry
+	// operation, broker_id and request_id (contracts §2, "Ambiguous broker
+	// results").
+	ErrCodeOutcomeUnknown = "outcome_unknown"
+
 	// Conversation resolution error codes (Tranche G read-switch)
 
 	// ErrCodeConversationNotResolved is returned when the read-switch is ON

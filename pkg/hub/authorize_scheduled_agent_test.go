@@ -21,7 +21,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,9 +30,10 @@ import (
 // TestAuthorizeScheduledDispatchAgentAuthoring_Precondition checks the
 // scheduled authoring credential gate directly, through both authoring
 // functions' shared rule: it requires an identity, admits the allowlisted
-// (identity type, credential kind) pairs, and refuses every user access
-// token and every other credential kind, including an empty or unknown one,
-// with 403 and the GOV_PENDING session-only reason.
+// (identity type, credential kind) pairs, including a scoped user identity
+// with a user access token, and refuses every other credential kind,
+// including an empty or unknown one, with a plain 403 that carries no
+// session-only details.
 func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 	srv := &Server{}
 	user := NewAuthenticatedUser("gate-user", "gate-user@test.com", "Gate User", "member", "api")
@@ -40,6 +41,9 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "gate-agent"}, ProjectID: "project-1", Scopes: []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}}}
 	scopes := []string{"scheduled_event:create", "agent:create"}
 	noRecord := CredentialKind("")
+	hubCeiling, ok := permissions.BuildCeilingFromSelectors(scopes)
+	require.True(t, ok)
+	hubUAT := NewScopedUserIdentityWithBoundaryAndDecoration(user, TokenBoundary{Kind: BoundaryKindHub}, scopes, "", hubCeiling, nil)
 
 	cases := []struct {
 		name     string
@@ -54,10 +58,13 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 		{"federated user, federation credential", federated, CredentialKindFederation, http.StatusOK},
 		{"agent, agent JWT", agent, CredentialKindAgentJWT, http.StatusOK},
 		{"agent, no credential record", agent, noRecord, http.StatusOK},
-		{"project-scoped UAT", NewScopedUserIdentity(user, "project-1", scopes), noRecord, http.StatusForbidden},
-		{"hub-scoped UAT", NewScopedUserIdentity(user, "", scopes), noRecord, http.StatusForbidden},
+		{"project-scoped UAT, no credential record", NewScopedUserIdentity(user, "project-1", scopes), noRecord, http.StatusOK},
+		{"hub-scoped UAT, no credential record", hubUAT, noRecord, http.StatusOK},
+		{"project-scoped UAT, UAT credential", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindUAT, http.StatusOK},
+		{"hub-scoped UAT, UAT credential", hubUAT, CredentialKindUAT, http.StatusOK},
 		{"UAT credential on a plain user identity", user, CredentialKindUAT, http.StatusForbidden},
 		{"scoped identity with an interactive credential record", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindInteractive, http.StatusForbidden},
+		{"scoped identity with a hub delivery credential", NewScopedUserIdentity(user, "project-1", scopes), CredentialKindHubDelivery, http.StatusForbidden},
 		{"user, hub delivery credential", user, CredentialKindHubDelivery, http.StatusForbidden},
 		{"user, unknown credential kind", user, CredentialKind("bogus"), http.StatusForbidden},
 		{"user, agent JWT credential", user, CredentialKindAgentJWT, http.StatusForbidden},
@@ -85,8 +92,9 @@ func TestAuthorizeScheduledDispatchAgentAuthoring_Precondition(t *testing.T) {
 			if tc.want == http.StatusForbidden {
 				var resp ErrorResponse
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-				assert.Equal(t, string(authzop.ReasonGovernancePending), resp.Error.Details["reason"])
-				assert.Equal(t, sessionRequiredCredential, resp.Error.Details["credential"])
+				assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+				assert.Equal(t, scheduleAuthoringCredentialRefusedMessage, resp.Error.Message)
+				assert.Empty(t, resp.Error.Details, "a refused credential kind carries no session-only details")
 			}
 		})
 	}

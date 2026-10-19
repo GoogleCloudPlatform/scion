@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 func handle(uid string) api.ResourceHandle {
@@ -286,10 +287,70 @@ func TestOwnershipStore_ConflictingKeysRefused(t *testing.T) {
 	if recs, err := s.List(); err != nil || len(recs) != 2 {
 		t.Fatalf("List = %d records, %v", len(recs), err)
 	}
-	if !s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-1", "scion.name": "one"}) ||
-		!s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-9", "scion.name": "three"}) ||
-		s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}) {
+	if !s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-1", "scion.name": "one"}, sameKey) ||
+		!s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-9", "scion.name": "three"}, sameKey) ||
+		s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}, sameKey) {
 		t.Fatal("ConflictingLabels does not match the conflicting keys")
+	}
+}
+
+// sameKey is the label key mapping of a runtime that stores label keys as
+// given.
+func sameKey(k string) string { return k }
+
+// cloudRunKey is Cloud Run Instances' label key mapping: dots (and other
+// characters outside GCP's label key rules) become underscores.
+func cloudRunKey(k string) string { return runtime.LabelKey(&runtime.CloudRunRuntime{}, k) }
+
+// TestOwnershipStore_ConflictingLabelsReadRuntimeKeys: the project ID,
+// agent ID and slug are read under the keys the object's runtime stores
+// them under, so a Cloud Run instance (GCP-sanitized label keys) is
+// matched against the conflicting keys like any other object: contested
+// is conflicting, uncontested is not.
+func TestOwnershipStore_ConflictingLabelsReadRuntimeKeys(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "broker-a")
+	s.SetConflicting(map[string]bool{OwnershipAgentKey("proj", "agent-1"): true, OwnershipSlugKey("proj", "three"): true})
+
+	if s.ConflictingLabels(map[string]string{"scion_project_id": "proj", "agent_id": "agent-2", "scion_name": "two"}, cloudRunKey) {
+		t.Fatal("an uncontested Cloud Run instance is conflicting")
+	}
+	if !s.ConflictingLabels(map[string]string{"scion_project_id": "proj", "agent_id": "agent-1", "scion_name": "one"}, cloudRunKey) {
+		t.Error("a Cloud Run instance of a contested agent is not conflicting")
+	}
+	if !s.ConflictingLabels(map[string]string{"scion_project_id": "proj", "agent_id": "agent-9", "scion_name": "three"}, cloudRunKey) {
+		t.Error("a Cloud Run instance of a contested slug is not conflicting")
+	}
+}
+
+// TestOwnershipStore_ConflictingLabelsNeedTheirKeys: while any key is
+// conflicting, an object whose project ID, agent ID or slug label is
+// missing or empty (under its runtime's key) is treated as conflicting,
+// since it cannot be shown to name an uncontested agent. With no
+// conflicting key, nothing changes.
+func TestOwnershipStore_ConflictingLabelsNeedTheirKeys(t *testing.T) {
+	s := NewOwnershipStore(t.TempDir(), "broker-a")
+	if s.ConflictingLabels(map[string]string{"agent_id": "agent-2"}, sameKey) {
+		t.Fatal("with no conflicting key, an object with missing labels is conflicting")
+	}
+
+	s.SetConflicting(map[string]bool{OwnershipAgentKey("proj", "agent-1"): true})
+	if s.ConflictingLabels(map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}, sameKey) {
+		t.Fatal("an uncontested object with complete labels is conflicting")
+	}
+	for name, tc := range map[string]struct {
+		labels map[string]string
+		key    func(string) string
+	}{
+		"no project ID":          {map[string]string{"agent_id": "agent-2", "scion.name": "two"}, sameKey},
+		"empty project ID":       {map[string]string{"scion.project_id": "", "agent_id": "agent-2", "scion.name": "two"}, sameKey},
+		"no agent ID":            {map[string]string{"scion.project_id": "proj", "scion.name": "two"}, sameKey},
+		"empty slug":             {map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": ""}, sameKey},
+		"Cloud Run, no slug":     {map[string]string{"scion_project_id": "proj", "agent_id": "agent-2"}, cloudRunKey},
+		"Cloud Run, dotted keys": {map[string]string{"scion.project_id": "proj", "agent_id": "agent-2", "scion.name": "two"}, cloudRunKey},
+	} {
+		if !s.ConflictingLabels(tc.labels, tc.key) {
+			t.Errorf("%s: an object that cannot be matched against the conflicting keys is not conflicting", name)
+		}
 	}
 }
 

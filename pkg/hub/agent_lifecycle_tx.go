@@ -283,7 +283,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	// on (fixturePurgeBasisFor: only when the context carries the purge's
 	// basis and the agent's own stamp names the same root).
 	basis := fixturePurgeBasisFor(ctx, a.Fixture)
-	if basis != nil && actor.CorrelationID == "" {
+	if basis != nil {
 		actor.CorrelationID = basis.RunID
 	}
 	record, err := lifecycleAudit(mutationTypeAgentHardDelete, a.ID, actor, now, struct {
@@ -296,6 +296,14 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	}{opID, n, assignments, a.IsIncompleteCreate(), a.SoftDeleteOpID, basis})
 	if err != nil {
 		return err
+	}
+	if basis != nil {
+		// The provenance_basis column (Phase 3c); a failure aborts the
+		// hard delete.
+		if err := writeFixturePurgeAuditTx(ctx, tx, record, *basis); err != nil {
+			return fmt.Errorf("hard delete audit: %w", err)
+		}
+		return nil
 	}
 	if err := tx.CreateMutationAudit(ctx, record); err != nil {
 		return fmt.Errorf("hard delete audit: %w", err)

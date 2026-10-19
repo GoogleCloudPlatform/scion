@@ -926,7 +926,8 @@ func TestTestIdentityReaper_Registration(t *testing.T) {
 // remain and the cascade; it cannot reach purgeFixtureProject. The
 // purge-only selectors (purgeFixtureProject, the purge basis, the hard
 // delete flag, purgeTestIdentity) are reached only from the purge's own
-// files.
+// files (purgeTestIdentity also from the issuer cleanup, Phase 3c, which
+// runs the same purge per identity).
 func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 	var fields []string
 	rt := reflect.TypeOf(ProjectDeleteRequest{})
@@ -938,7 +939,7 @@ func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 	allowed := map[string][]string{
 		"purgeFixtureProject(":   {"fixture_purge.go", "project_fixture_purge.go"},
 		"withFixturePurgeBasis(": {"fixture_purge.go"},
-		"purgeTestIdentity(":     {"fixture_purge.go", "handlers_test_identities.go", "test_identity_reaper.go"},
+		"purgeTestIdentity(":     {"fixture_purge.go", "handlers_test_identities.go", "test_identity_reaper.go", "fixture_cleanup.go"},
 		"hard:":                  {"fixture_purge.go"},
 	}
 	for needle, files := range allowed {
