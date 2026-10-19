@@ -26,6 +26,8 @@
 
 import type { Locator, Page } from '@playwright/test';
 
+import { LAUNCH_STEP_LABELS, launchStepLabel } from '../../src/shared/agent-launch-labels.js';
+
 /** A data-testid selector. */
 function testId(id: string): string {
   return `[data-testid="${id}"]`;
@@ -34,7 +36,7 @@ function testId(id: string): string {
 export const SELECTORS = {
   // Agent page, launch in progress (launch.active).
   launchBanner: testId('agent-launch-banner'),
-  // "Step: <step>", with "_" shown as a space (see uiStepName).
+  // "Step: <step label>" (see uiStepLabel and uiStepName).
   launchStep: testId('launch-step'),
   launchMessage: testId('launch-message'),
 
@@ -171,20 +173,28 @@ export const KNOWN_LAUNCH_ERROR_CODES = [
  */
 export const A3F_EXPECTED_CODE = 'runtime_error';
 
-/** The launch-step text the page shows for a step: "Step: image pull". */
+/**
+ * The launch-step text the page shows for a step: "Step: " and the step's
+ * label (src/shared/agent-launch-labels.ts), e.g. "Step: pulling the image".
+ */
 export function uiStepLabel(step: string): string {
-  return `Step: ${step.replace(/_/g, ' ')}`;
+  return `Step: ${launchStepLabel(step)}`;
 }
 
 /**
- * The raw step name of a launch-step text: "Step: image pull" gives
- * "image_pull". Returns "" for an empty text.
+ * The raw step name of a launch-step text: "Step: pulling the image" gives
+ * "image_pull". A text that is no labelled step's label gives the text with
+ * spaces as "_", the label of a step without one. Returns "" for an empty
+ * text.
  */
 export function uiStepName(text: string): string {
-  return text
+  const label = text
     .replace(/^\s*Step:\s*/, '')
     .trim()
-    .replace(/\s+/g, '_');
+    .replace(/\s+/g, ' ');
+  if (!label) return '';
+  const step = Object.keys(LAUNCH_STEP_LABELS).find((s) => LAUNCH_STEP_LABELS[s] === label);
+  return step ?? label.replace(/ /g, '_');
 }
 
 /**

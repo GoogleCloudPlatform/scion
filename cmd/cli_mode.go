@@ -167,6 +167,10 @@ var agentAllowed = map[string]bool{
 	"hub.test-identity.delete":   true,
 	"hub.test-identity.teardown": true,
 	"hub.test-identity.web-code": true,
+	// Issuer cleanup and provenance (Phase 3c, DEC-7): the same gate, so
+	// an agent runner can verify a run by absence on a target hub.
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
 	// issue-admin (X4b, DEC-7) issues through the profile's admin
 	// delegation; it needs a profile in every mode.
 	"hub.test-identity.issue-admin": true,
