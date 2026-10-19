@@ -104,8 +104,8 @@ func TestFlatAgentDefaults_EveryAccessorReadsOnlyPolicy(t *testing.T) {
 	}
 	const base = "server.broker.instances[docker-1].agent_defaults"
 	for _, profile := range []string{"", "batch"} {
-		if got := view.ResolveImageRegistry(profile); got != "registry.example/instance" {
-			t.Errorf("ResolveImageRegistry(%q) = %q", profile, got)
+		if got := view.SettingsImageRegistry(profile); got != "registry.example/instance" {
+			t.Errorf("SettingsImageRegistry(%q) = %q", profile, got)
 		}
 		if got, src := view.ResolveCloneDepthWithSource(profile); got != "full" || src != base+".clone_depth" {
 			t.Errorf("ResolveCloneDepthWithSource(%q) = (%q, %q)", profile, got, src)
@@ -139,8 +139,8 @@ func TestFlatAgentDefaults_EveryAccessorReadsOnlyPolicy(t *testing.T) {
 	}
 
 	// Control: legacy resolution of the same settings is the profile's.
-	if got := vs.ResolveImageRegistry(""); got != "registry.example/profile" {
-		t.Errorf("legacy ResolveImageRegistry = %q", got)
+	if got := vs.SettingsImageRegistry(""); got != "registry.example/profile" {
+		t.Errorf("legacy SettingsImageRegistry = %q", got)
 	}
 	if got, src := vs.ResolveCloneDepthWithSource(""); got != "7" || src != "profiles.batch.clone_depth" {
 		t.Errorf("legacy ResolveCloneDepthWithSource = (%q, %q)", got, src)
@@ -172,8 +172,8 @@ func TestFlatAgentDefaults_UnsetFallsThroughToLowerRungs(t *testing.T) {
 	for name, d := range map[string]*V1InstanceAgentDefaults{"no block": nil, "empty block": {}} {
 		t.Run(name, func(t *testing.T) {
 			view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", d))
-			if got := view.ResolveImageRegistry(""); got != "registry.example/global" {
-				t.Errorf("ResolveImageRegistry = %q, want the top-level image_registry", got)
+			if got := view.SettingsImageRegistry(""); got != "registry.example/global" {
+				t.Errorf("SettingsImageRegistry = %q, want the top-level image_registry", got)
 			}
 			hc, err := view.ResolveHarnessConfig("", "claude")
 			if err != nil || !reflect.DeepEqual(hc, legacyAgentDefaultsSettings().HarnessConfigs["claude"]) {
@@ -260,11 +260,11 @@ func TestResolveHarnessConfigName_FlatCallSiteUsesInstanceDefault(t *testing.T) 
 // FC5 `image_registry`: the instance value beats the top-level one.
 func TestFlatAgentDefaults_ImageRegistryRung(t *testing.T) {
 	view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", &V1InstanceAgentDefaults{ImageRegistry: "registry.example/instance"}))
-	if got := view.ResolveImageRegistry(""); got != "registry.example/instance" {
+	if got := view.SettingsImageRegistry(""); got != "registry.example/instance" {
 		t.Fatalf("got %q, want the instance registry over the top-level one", got)
 	}
-	if !view.IsImageRegistryConfigured("") {
-		t.Fatal("an instance registry counts as configured")
+	if got := ResolveImageRegistryLayers(view.ImageRegistryLayers("", "")); got.Source != ImageRegistrySourceFileProfile {
+		t.Fatalf("source %q, want the instance (file profile/instance) layer", got.Source)
 	}
 }
 

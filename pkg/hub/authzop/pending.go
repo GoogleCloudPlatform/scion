@@ -144,12 +144,7 @@ var PendingBearerOperations = []OperationID{
 	"gcp.identity.mint",
 	"gcp.identity.read",
 	"gcp.identity.verify",
-	"group.create",
-	"group.delete",
-	"group.member.add",
-	"group.member.remove",
 	"group.read",
-	"group.update",
 	"hub.adminmode.read",
 	"hub.adminmode.update",
 	"hub.maintenance.execute",
@@ -160,9 +155,7 @@ var PendingBearerOperations = []OperationID{
 	"role.definition.update",
 	"secret.read",
 	"secret.write",
-	"user.admin.suspend",
 	"user.read",
-	"user.update",
 }
 
 var pendingBearerOperationSet = func() map[OperationID]bool {

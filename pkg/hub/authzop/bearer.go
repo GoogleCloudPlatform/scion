@@ -161,6 +161,10 @@ const (
 	// BearerTargetRoleBindingRecord is a project-scoped role binding's
 	// project, read from the binding record.
 	BearerTargetRoleBindingRecord BearerTarget = "role_binding_record"
+	// BearerTargetGroupRecord is a group record: the group's project for a
+	// project-scoped group, or the hub for a group with no project
+	// (groupResource).
+	BearerTargetGroupRecord BearerTarget = "group_record"
 )
 
 var validBearerTargets = map[BearerTarget]bool{
@@ -178,6 +182,7 @@ var validBearerTargets = map[BearerTarget]bool{
 	BearerTargetThreadGroupRecord:  true,
 	BearerTargetListScope:          true,
 	BearerTargetRoleBindingRecord:  true,
+	BearerTargetGroupRecord:        true,
 }
 
 // BearerSelfFilter is the result filter an admit_self operation applies.

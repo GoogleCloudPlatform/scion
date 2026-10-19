@@ -73,9 +73,16 @@ type ptyConduitFixture struct {
 // after the fixture's own (e.g. a lifetime cap).
 func newPTYConduitFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *ptyConduitFixture {
 	t.Helper()
+	return newPTYConduitFixtureServer(t, nil, mods...)
+}
+
+// newPTYConduitFixtureServer is newPTYConduitFixture with srvMod applied to
+// the server before it starts serving (newRelayFixtureServer).
+func newPTYConduitFixtureServer(t *testing.T, srvMod func(*Server), mods ...func(*ConduitRelayOptions)) *ptyConduitFixture {
+	t.Helper()
 	f := &ptyConduitFixture{peerSecret: make([]byte, 32), spawned: make(chan *fakePTY, 8)}
 	_, _ = rand.Read(f.peerSecret)
-	f.relayFixture = newRelayFixture(t, func(o *ConduitRelayOptions) {
+	f.relayFixture = newRelayFixtureServer(t, srvMod, func(o *ConduitRelayOptions) {
 		auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: f.peerSecret, SelfID: "hub-a"})
 		require.NoError(t, err)
 		o.PeerAuth = auth

@@ -733,8 +733,9 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthMe handles GET /api/v1/auth/me. Only the credentials the
 // user.self.profile catalog operation declares are admitted (an
-// interactive session, a dev credential, a user access token and an agent
-// JWT); any token reads its holder's own profile.
+// interactive session, a dev credential, a user access token, an agent
+// JWT and a visitor's federated user credential); any token reads its
+// holder's own profile, and a visitor reads its own federated account.
 func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)

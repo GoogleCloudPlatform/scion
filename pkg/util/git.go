@@ -15,6 +15,7 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -571,6 +572,28 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if repoRoot == "" || path == "" {
 		return nil
 	}
+	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...), nil
+	})
+}
+
+// RemoveWorktreeEntry is the contract of RemoveWorktreeEntryIn without its
+// agent-container guard, for callers that run git their own way (for
+// example with extra -c settings or environment for a shared checkout).
+// newCmd builds the git command for the given arguments, already pointed
+// at the repository; RemoveWorktreeEntry never adds -C itself. It appends
+// LC_ALL=C to the command's environment so git's messages can be matched.
+//
+// It acts only when path is absent (Lstat reports it does not exist), runs
+// "git worktree remove <path>" without --force, first with path as given
+// and, only if git does not know it, again with its existing ancestor's
+// symlinks resolved. "is not a working tree" after the last attempt means
+// git has no entry for path and is not an error. Any other failure is
+// returned; callers must not fall back to a repository-wide prune.
+func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error)) error {
+	if path == "" {
+		return nil
+	}
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("worktree entry %q: path must be absolute", path)
 	}
@@ -579,7 +602,7 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
-	known, err := removeWorktreeEntryAt(repoRoot, path)
+	known, err := removeWorktreeEntryAt(ctx, newCmd, path)
 	if err != nil || known {
 		return err
 	}
@@ -590,15 +613,22 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if !ok || resolved == path {
 		return nil
 	}
-	_, err = removeWorktreeEntryAt(repoRoot, resolved)
+	_, err = removeWorktreeEntryAt(ctx, newCmd, resolved)
 	return err
 }
 
-// removeWorktreeEntryAt runs "git worktree remove target" in repoRoot. It
-// reports known=false, with no error, when git has no worktree at target.
-func removeWorktreeEntryAt(repoRoot, target string) (known bool, err error) {
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", target)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+// removeWorktreeEntryAt runs "git worktree remove target" through newCmd.
+// It reports known=false, with no error, when git has no worktree at
+// target.
+func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error), target string) (known bool, err error) {
+	cmd, err := newCmd(ctx, "worktree", "remove", target)
+	if err != nil {
+		return true, fmt.Errorf("git worktree remove %s: %w", target, err)
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "is not a working tree") {

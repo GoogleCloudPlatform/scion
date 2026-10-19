@@ -329,7 +329,7 @@ server:
 
 	o := config.NewSettingsOverlay()
 	o.Update(map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
-		map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", SharedDirStorageBackend: "nfs"}}, nil, "")
+		map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", SharedDirStorageBackend: "nfs"}}, nil)
 	config.SetGlobalSettingsOverlay(o)
 
 	projectID := "pid-overlay-override"

@@ -558,3 +558,63 @@ func TestFederationPeerUserToken_VisitorRuleRefusedWithoutAcceptUserTokens(t *te
 	assert.Empty(t, f.peerRuleBindings(t, projectID, rule.ID), "no rule binding")
 	assert.Empty(t, f.peerVisitorLinkedAudits(t), "no visitor_linked audit")
 }
+
+// A user access credential minted by the peer, whose account a visitor
+// rule created on first contact, gets the same admission on
+// /api/v1/auth/me through the full handler as any other visitor: GET
+// answers 200 with the federated account's own profile, and HEAD the
+// handler's 405; POST on the route, and a route with no VisitorMethods,
+// answer the uniform refusal.
+func TestFederationPeerUserToken_RuleVisitorAuthMeAdmitsReadMethodsOnly(t *testing.T) {
+	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) { c.AllowVisitorGrants = true })
+	ctx := context.Background()
+	projectID, rule := f.addPeerVisitorRule(t, "example.com")
+	token, u := f.mintUserToken(t)
+	request := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set(FederationTokenHeader, token)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := request(http.MethodGet, "/api/v1/auth/me")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var me UserResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
+
+	acct, err := f.st.GetFederatedUserBySubject(ctx, testOIDCIssuerURL, u.ID)
+	require.NoError(t, err, "first contact linked the peer user to a federated account")
+	assert.Equal(t, store.UserKindFederated, acct.Kind)
+	assert.Equal(t, store.UserStatusActive, acct.Status)
+	require.NotNil(t, acct.FederatedEmail)
+	bindings := f.peerRuleBindings(t, projectID, rule.ID)
+	require.Len(t, bindings, 1, "the rule binds the account")
+	assert.Equal(t, acct.ID, bindings[0].PrincipalID)
+	identity, credential, mw := f.through(t, token)
+	require.Equal(t, http.StatusOK, mw.Code, mw.Body.String())
+	v, ok := identity.(*VisitorIdentity)
+	require.True(t, ok, "identity = %T, want *VisitorIdentity", identity)
+	assert.Equal(t, acct.ID, v.ID())
+	assert.Equal(t, CredentialKindFederation, credential.Kind)
+
+	assert.Equal(t, acct.ID, me.ID, "the visitor's own federated account, not the verified identity")
+	assert.Equal(t, *acct.FederatedEmail, me.Email)
+	assert.Equal(t, store.NormalizeFederatedEmail(u.Email), me.Email)
+	assert.Equal(t, "viewer", me.Role)
+
+	rec = request(http.MethodHead, "/api/v1/auth/me")
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/auth/me"},
+		{http.MethodGet, "/api/v1/users/me/groups"},
+	} {
+		rec := request(c.method, c.path)
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", c.method, c.path, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "%s %s", c.method, c.path)
+		assert.Equal(t, ErrCodeForbidden, resp.Error.Code, "%s %s", c.method, c.path)
+		assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "%s %s: the uniform refusal", c.method, c.path)
+	}
+}

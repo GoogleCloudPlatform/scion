@@ -81,9 +81,9 @@ This is not a from-scratch effort. For **local** (non-hub) git projects, Scion a
   registerMount(config.Workspace, containerWorkspace, false, true)
   ```
 
-- Tears worktrees + branches down on delete with pruning of stale records
-  (`util.RemoveWorktree`, `PruneWorktreesIn`, `DeleteBranchIn` —
-  `pkg/agent/provision.go:35-146`).
+- Tears worktrees + branches down on delete, removing only the agent's own stale
+  worktree record (`util.RemoveWorktree`, `RemoveWorktreeEntryIn`, `DeleteBranchIn` —
+  `pkg/agent/provision.go`).
 
 So worktree-per-agent **already runs in production** for the local-repo case. The work
 is to bring this model to **hub-managed** projects (which today take the
@@ -314,11 +314,13 @@ with a clear error (or falls back to clone-per-agent).
 ## 8. Lifecycle & cleanup
 
 Agent deletion already does the right thing for worktrees
-(`pkg/agent/provision.go:35-146`):
+(`pkg/agent/provision.go`):
 
 1. `util.RemoveWorktree(agentWorkspace, removeBranch)` — removes the worktree and
    optionally its branch.
-2. `util.PruneWorktreesIn(repoRoot)` — clears stale `.git/worktrees/<id>` records.
+2. `util.RemoveWorktreeEntryIn(repoRoot, path)` — removes the stale
+   `.git/worktrees/<id>` record of this agent's worktree only, never a
+   repository-wide `git worktree prune` (sibling agents' records are left alone).
 3. `util.DeleteBranchIn(repoRoot, branchName)` fallback by slugified name.
 4. External per-agent state dir removed (with podman-unshare fallback).
 
@@ -387,7 +389,7 @@ New work for the base repo:
 | Branch name from agent | `api.Slugify` / `sanitizeBranchName` | `workspace_backend_nfs.go:378-393` |
 | First-access guard | sentinel + `.scion-provision.lock` file lock (`acquireProvisionLock`) | `pkg/provision/provision.go` |
 | Dual mount (`.git` + worktree) | runtime mount registration | `common.go:181-189` |
-| Worktree teardown + prune | `RemoveWorktree`/`PruneWorktreesIn`/`DeleteBranchIn` | `provision.go:35-146` |
+| Worktree teardown (own entry only) | `RemoveWorktree`/`RemoveWorktreeEntryIn`/`DeleteBranchIn` | `pkg/agent/provision.go` |
 | In-container worktree guard | `SCION_HOST_UID` → `isGit=false` | `provision.go:303-309` |
 | Per-agent state isolation | external split storage | `.design/hub-shared-workspace-isolation.md` |
 | Backend abstraction | `WorkspaceBackend` Resolve/Provision/Realize | `workspace_backend.go:33-64` |

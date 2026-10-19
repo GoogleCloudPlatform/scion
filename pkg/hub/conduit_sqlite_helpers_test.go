@@ -379,7 +379,14 @@ type conduitProxyFixture struct {
 
 func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture {
 	t.Helper()
-	f := &conduitProxyFixture{relayFixture: newRelayFixture(t, nil), app: newProxyApp(t, app)}
+	return newConduitProxyFixtureServer(t, app, nil)
+}
+
+// newConduitProxyFixtureServer is newConduitProxyFixture with srvMod applied
+// to the server before it starts serving (newRelayFixtureServer).
+func newConduitProxyFixtureServer(t *testing.T, app http.Handler, srvMod func(*Server)) *conduitProxyFixture {
+	t.Helper()
+	f := &conduitProxyFixture{relayFixture: newRelayFixtureServer(t, srvMod, nil), app: newProxyApp(t, app)}
 	f.base = f.public.URL
 	setConduitExperiment(t, f.srv, true)
 	require.True(t, f.srv.conduitServing())
@@ -426,7 +433,18 @@ type relayFixture struct {
 
 func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture {
 	t.Helper()
+	return newRelayFixtureServer(t, nil, mod)
+}
+
+// newRelayFixtureServer is newRelayFixture with srvMod, when set, applied to
+// the server before the relay starts and before the public handler serves,
+// so a test can configure it without racing the serving goroutines.
+func newRelayFixtureServer(t *testing.T, srvMod func(*Server), mod func(*ConduitRelayOptions)) *relayFixture {
+	t.Helper()
 	f := &relayFixture{conduitFixture: newConduitFixture(t)}
+	if srvMod != nil {
+		srvMod(f.srv)
+	}
 	ctx := context.Background()
 
 	agent := &store.Agent{

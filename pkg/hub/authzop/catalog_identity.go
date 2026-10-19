@@ -152,17 +152,17 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.member.add",
 		Domain:      "group",
-		Description: "Add a member to a group",
+		Description: "Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver:      "group-from-url",
 		BasePermission:        "group.addMember",
 		Effects:               []SecurityEffect{EffectGrantAuthority},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions",
+		DelegationDescription: "Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions. A user access token is refused when the closure carries a system-scoped binding, and must hold, in each project the closure binds, every permission those bindings carry",
 		AuthorityEval:         AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "group_member_add",
@@ -171,7 +171,13 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority"},
+			{Package: "pkg/hub", Function: "TestGroupMemberAddToken_SystemBindingsOnClosureDenied"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.member.remove",
@@ -184,7 +190,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}/members/{memberType}/{memberId}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.removeMember",
 		Effects:          []SecurityEffect{EffectRevokeAuthority},
@@ -201,7 +207,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.delete",
@@ -211,7 +221,7 @@ var identityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "group-from-url",
 		BasePermission:   "group.delete",
 		Effects:          []SecurityEffect{EffectDeleteResource},
@@ -224,7 +234,11 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -468,12 +482,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.suspend",
 		Domain:      "user.admin",
-		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)",
+		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:status-field"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.suspend",
 		Effects:          []SecurityEffect{EffectChangePrincipalStatus},
@@ -487,7 +501,12 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_StatusRequiresSuspendSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfStatusGuardStillApplies"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubInstance, Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestUserPatchToken_StatusRequiresSuspendSelector"},
 	},
 
 	// =====================================================================
@@ -635,14 +654,13 @@ var identityOperations = []OperationSpec{
 	},
 
 	// =====================================================================
-	// Domain: group — group read, create, update
+	// Domain: group — group read, list, create, update
 	// =====================================================================
 	{
 		ID:          "group.read",
 		Domain:      "group",
-		Description: "Read group details or list groups",
+		Description: "Read group details",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
@@ -656,9 +674,30 @@ var identityOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
 	},
 	{
+		ID:          "group.list",
+		Domain:      "group",
+		Description: "List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "group-per-row",
+		BasePermission:   "group.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestExplicitGroupToken_ResolvesHubTarget"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
+	},
+	{
 		ID:          "group.create",
 		Domain:      "group",
-		Description: "Create a new group",
+		Description: "Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups", Method: "POST"},
 		},
@@ -670,12 +709,16 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupCreateToken_RequiresCreateSelectorOnHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.update",
 		Domain:      "group",
-		Description: "Update group metadata",
+		Description: "Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist",
 		EntryPoints: []EntryPoint{
 			// handleGroupRoutes (handlers_groups.go) dispatches on
 			// r.Method: PATCH, not PUT.
@@ -689,7 +732,12 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+			{Package: "pkg/hub", Function: "TestGroupOwnerChangeToken_RequiresDelegationForNewOwner"},
+		},
+		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 
 	// =====================================================================
@@ -733,19 +781,50 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.update",
 		Domain:      "user",
-		Description: "Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)",
+		Description: "Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "cross_user"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_CrossUserProfileRequiresUpdateSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_MixedFieldsAllOrNothing"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.self.update",
+		Domain:      "user",
+		Description: "Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfProfileSessionOnly"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path names the caller's own record, so no resource permission applies to the caller's own profile",
+			Scope:  "caller's own profile fields",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 
 	// =====================================================================
@@ -1158,12 +1237,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.self.profile",
 		Domain:      "user",
-		Description: "Read the caller's own profile and preferences. Any token reads its holder's own profile",
+		Description: "Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/me", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialFederatedUser},
 		ResourceResolver: "self-principal",
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
@@ -1171,6 +1250,9 @@ var identityOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestSelfIdentityReadsToken_AnyTokenReads"},
+			{Package: "pkg/hub", Function: "TestSelfReadCredential_VisitorIdentityOnly"},
+			{Package: "pkg/hub", Function: "TestVisitorRoute_AuthMeReturnsVisitorOwnProfile"},
+			{Package: "pkg/hub", Function: "TestVisitorRoute_UnlinkedFederatedUserUnchanged"},
 		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,

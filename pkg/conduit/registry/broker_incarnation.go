@@ -29,13 +29,59 @@ import (
 // session, or when its newest live session carries no incarnation: no
 // session is then resolvable for the broker.
 func (r *Registry) BrokerIncarnation(ctx context.Context, brokerID string, now time.Time) (inc string, ok bool, err error) {
+	ref, ok, err := r.BrokerReference(ctx, brokerID, now)
+	return ref.Incarnation, ok, err
+}
+
+// BrokerReference is the session that defines a broker's reference
+// incarnation: its incarnation and connection epoch.
+type BrokerReference struct {
+	Incarnation     string
+	ConnectionEpoch int64
+}
+
+// BrokerReference returns the reference session of broker brokerID, by
+// the rule BrokerIncarnation documents, with its connection epoch. ok is
+// false exactly when BrokerIncarnation's is.
+func (r *Registry) BrokerReference(ctx context.Context, brokerID string, now time.Time) (BrokerReference, bool, error) {
 	if brokerID == "" {
-		return "", false, fmt.Errorf("%w: empty broker id", ErrInvalidInput)
+		return BrokerReference{}, false, fmt.Errorf("%w: empty broker id", ErrInvalidInput)
 	}
 	ps, err := r.store.ListPrincipalSessions(ctx, PrincipalBroker, brokerID)
 	if err != nil {
-		return "", false, err
+		return BrokerReference{}, false, err
 	}
+	ref, ok := r.brokerReference(ps, now)
+	return ref, ok, nil
+}
+
+// BrokerSessionSuperseded reports whether session sessionID of broker
+// brokerID belongs to an older incarnation (design §3.4): the broker has a
+// reference session, and the session is listed with another incarnation
+// and a lower connection epoch. A session that is not listed, or a broker
+// without a reference, is not superseded.
+func (r *Registry) BrokerSessionSuperseded(ctx context.Context, brokerID, sessionID string, now time.Time) (bool, error) {
+	if brokerID == "" || sessionID == "" {
+		return false, fmt.Errorf("%w: empty broker or session id", ErrInvalidInput)
+	}
+	ps, err := r.store.ListPrincipalSessions(ctx, PrincipalBroker, brokerID)
+	if err != nil {
+		return false, err
+	}
+	ref, ok := r.brokerReference(ps, now)
+	if !ok {
+		return false, nil
+	}
+	for _, v := range ps.Sessions {
+		if s := v.Session; s.SessionID == sessionID {
+			return s.EndpointIncarnation != ref.Incarnation && s.ConnectionEpoch < ref.ConnectionEpoch, nil
+		}
+	}
+	return false, nil
+}
+
+// brokerReference picks the reference session from a broker's rows.
+func (r *Registry) brokerReference(ps PrincipalSessions, now time.Time) (BrokerReference, bool) {
 	now = now.UTC()
 	newest := -1 // index in ps.Sessions
 	for i := range ps.Sessions {
@@ -48,7 +94,8 @@ func (r *Registry) BrokerIncarnation(ctx context.Context, brokerID string, now t
 		}
 	}
 	if newest < 0 || ps.Sessions[newest].Session.EndpointIncarnation == "" {
-		return "", false, nil
+		return BrokerReference{}, false
 	}
-	return ps.Sessions[newest].Session.EndpointIncarnation, true, nil
+	s := ps.Sessions[newest].Session
+	return BrokerReference{Incarnation: s.EndpointIncarnation, ConnectionEpoch: s.ConnectionEpoch}, true
 }

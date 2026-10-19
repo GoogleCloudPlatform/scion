@@ -2196,6 +2196,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The node image registry is shown redacted (ptone/scion#3916).
+	if broker != nil {
+		shown := brokerForDisplay(*broker)
+		broker = &shown
+	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
 		Project:     project,
 		Broker:      broker,

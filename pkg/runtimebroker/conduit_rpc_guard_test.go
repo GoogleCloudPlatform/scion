@@ -236,6 +236,52 @@ func TestConduitRPCGuard_HelloDoesNotWidenAllowlist(t *testing.T) {
 	assert.Len(t, conduitRPCRoutes, len(conduit.BrokerRPCs()), "one route per broker RPC")
 }
 
+// TestConduitRPCRoutesMatchBrokerRPCs: the served routes are exactly the
+// broker RPCs, pairwise: every name in conduit.BrokerRPCs has one route,
+// every route serves one listed name, and each name is on the method and
+// path pinned here. An added, removed or changed route, a duplicate, or a
+// name on another RPC's route fails.
+func TestConduitRPCRoutesMatchBrokerRPCs(t *testing.T) {
+	type route struct{ method, path string }
+	pinned := map[string]route{
+		conduit.RPCAgentLogs:      {http.MethodGet, "/api/v1/agents/*/logs"},
+		conduit.RPCAgentExec:      {http.MethodPost, "/api/v1/agents/*/exec"},
+		conduit.RPCImageStatus:    {http.MethodGet, "/api/v1/images/status"},
+		conduit.RPCImagePull:      {http.MethodPost, "/api/v1/images/pull"},
+		conduit.RPCImageDelete:    {http.MethodDelete, "/api/v1/images/local"},
+		conduit.RPCProjectCleanup: {http.MethodDelete, "/api/v1/projects/*"},
+	}
+
+	names := conduit.BrokerRPCs()
+	listed := map[string]bool{}
+	for _, n := range names {
+		assert.False(t, listed[n], "broker RPC %q listed twice", n)
+		listed[n] = true
+		_, ok := pinned[n]
+		assert.True(t, ok, "broker RPC %q has no pinned route", n)
+	}
+	for n := range pinned {
+		assert.True(t, listed[n], "pinned route %q is not a broker RPC", n)
+	}
+
+	served := map[string]route{}
+	byRoute := map[route]string{}
+	for _, r := range conduitRPCRoutes {
+		got := route{r.method, "/" + strings.Join(r.segments, "/")}
+		if prev, dup := served[r.name]; dup {
+			t.Errorf("name %q served twice: %v and %v", r.name, prev, got)
+		}
+		if prev, dup := byRoute[got]; dup {
+			t.Errorf("route %v served twice: %q and %q", got, prev, r.name)
+		}
+		served[r.name], byRoute[got] = got, r.name
+		assert.True(t, listed[r.name], "route %v serves %q, which is not a broker RPC", got, r.name)
+	}
+	assert.Equal(t, pinned, served, "served routes by name")
+	assert.Len(t, conduitRPCRoutes, len(names), "one route per broker RPC")
+	assert.Len(t, conduitRPCRoutes, 6)
+}
+
 // TestConduitRPCGuard_SignatureRequired: whatever the broker auth
 // middleware allows, a request on the conduit session must carry a valid
 // hub signature over the receiving session's id.

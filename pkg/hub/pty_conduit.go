@@ -243,9 +243,17 @@ func (s *Server) agentPTYPath(ctx context.Context, identity Identity, agent *sto
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"The agent's runtime does not support attach, and stream authorization checks are not running", ptyReasonStreamAuthzDown)
 	}
-	_, err := rtr.Resolve(ctx, agentPTYRequest(agent), nil)
+	res, err := rtr.Resolve(ctx, agentPTYRequest(agent), nil)
 	switch {
 	case err == nil:
+		// Renewal path (contracts, Renewal path unavailable): decided on
+		// the resolved row, for the preflight and the WebSocket open alike,
+		// before any upgrade. A temporary failure, never
+		// runtime_attach_unsupported.
+		if s.conduitRenewalPathUnavailable(ctx, identity, conduitTargetRenews(res), conduitRouteCanRenew(res), conduitRoutePTY, agent.ID) {
+			return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
+				conduitStreamRenewalUnavailableMessage, conduitReasonStreamRenewalUnavailable)
+		}
 		return ptyPathDecision{Path: ptyPathAgent}
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		return ptyRefusal(http.StatusServiceUnavailable, ErrCodeUnavailable,
@@ -486,11 +494,14 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 				SessionID:           res.Record.SessionID,
 				ConnectionEpoch:     res.Record.ConnectionEpoch,
 			},
+			Via:          grant.ViaPTY,
+			TargetRenews: conduitTargetRenews(res),
+			CanRenew:     conduitRouteCanRenew(res),
 		})
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := u.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_PTY,
 			Params: params,
 			Grant:  tok,
@@ -500,7 +511,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 		}
 		u.st = st
 		u.sessionID = res.Record.SessionID
-		target := conduitTargetOf(res, st)
+		target := conduitLeafTarget(res, st, bridge)
 		u.untrack = u.s.trackConduitUserStream(&conduitUserStream{
 			Kind:      grant.StreamKindPTY,
 			Identity:  u.identity,
@@ -510,6 +521,7 @@ func (u *agentPTYUpstream) Open(ctx context.Context, cols, rows int) error {
 			StreamID:  target.StreamID,
 			Close:     u.closeWithCode,
 			Renew:     conduitStreamRenewal(res, st.ID()),
+			Bridge:    bridge,
 		})
 		return nil
 	})
@@ -582,6 +594,16 @@ func ptyAgentOpenError(err error) error {
 		return &StreamClosedError{Code: code, Reason: reason}
 	case errors.Is(err, errConduitForbidden):
 		return &StreamClosedError{Code: wsprotocol.ClosePTYForbidden, Reason: ptyCloseReasonForbidden}
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		// The mint's backstop for a re-resolution after the pre-upgrade
+		// check: a temporary failure (design v2.21.36 §3.3.1, 4504), so the client
+		// retries with backoff and may land on a route that can renew.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYUpstreamTimeout, Reason: conduitReasonStreamRenewalUnavailable}
+	case errors.Is(err, errConduitLeafNotRelayHeld), errors.Is(err, errConduitGrantInternal):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held), or the open grant was not
+		// minted for an internal reason: the internal error close.
+		return &StreamClosedError{Code: wsprotocol.ClosePTYInternalError, Reason: wsprotocol.CloseReasonInternalError}
 	default:
 		return err
 	}

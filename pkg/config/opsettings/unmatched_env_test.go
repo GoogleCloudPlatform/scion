@@ -262,3 +262,19 @@ func TestFindUnmatchedSettingsEnv_LogLevelAlias(t *testing.T) {
 		t.Errorf("GlobalConfig LogLevel = %q, want debug", gc.LogLevel)
 	}
 }
+
+// TestFindUnmatchedSettingsEnv_OverriddenAliasNotUnmatched: an alias that the
+// canonical name overrides still names a setting, so it is not reported as
+// matching nothing (WarnDeprecatedServerEnvAliases reports it as ignored).
+func TestFindUnmatchedSettingsEnv_OverriddenAliasNotUnmatched(t *testing.T) {
+	t.Setenv("SCION_SERVER_HUB_ADMINEMAILS", "canon@example.com")
+	t.Setenv("SCION_SERVER_HUB_ADMIN_EMAILS", "legacy@example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "canon@example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMIN_EMAILS", "legacy@example.com")
+	got := unmatchedByName(os.Environ())
+	for _, n := range []string{"SCION_SERVER_HUB_ADMIN_EMAILS", "SCION_SEED_SERVER_HUB_ADMIN_EMAILS"} {
+		if u, ok := got[n]; ok {
+			t.Errorf("%s reported as matching no setting (suggestion %q)", n, u.Suggestion)
+		}
+	}
+}
