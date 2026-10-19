@@ -2058,8 +2058,9 @@ export class ScionPageChat extends LitElement {
     this._stopFallbackPoll = visibleInterval(() => {
       // After 60 s or more hidden, the resume rail refresh also loads the DM
       // list on return, so this catch-up sends a second /chat/dms request.
-      // Accepted: the rail catch-up is trailing (it waits for an SSE
-      // reconnect), so the two cannot reliably share one request.
+      // Accepted: which of the two starts first is up to the rail catch-up's
+      // timing, which is not this poll's to rely on, so sharing one request
+      // could not be made reliable.
       void this.loadUnreadDMPeers();
       // A DM has no membership of its own, so re-syncing here would silently
       // swap the member list the user was just looking at. Leave the sidebar on

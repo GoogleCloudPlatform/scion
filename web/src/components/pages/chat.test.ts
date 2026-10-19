@@ -2953,6 +2953,7 @@ describe('chat page — startup after the page is removed', () => {
     expect(dmListLoads()).toBe(0);
     expect(el._stopFallbackPoll).toBeNull();
     expect(livePolls.size).toBe(0);
+    // No raw setInterval left running either (livePolls covers the poll).
     expect(intervals.live()).toEqual([]);
     expect(el.v2SpaceRailLoaded).toBe(false);
   });
@@ -2985,6 +2986,7 @@ describe('chat page — startup after the page is removed', () => {
       expect(livePolls.size).toBe(0);
 
       el.remove();
+      // No raw setInterval left running either (livePolls covers the poll).
       expect(intervals.live()).toEqual([]);
     } finally {
       el.remove();
@@ -3194,6 +3196,7 @@ describe('chat page — startup after the page is removed', () => {
         expect(dmListLoads()).toBe(0);
         expect(el._stopFallbackPoll).toBeNull();
         expect(livePolls.size).toBe(0);
+        // No raw setInterval left running either (livePolls covers the poll).
         expect(intervals.live()).toEqual([]);
       } finally {
         el.remove();
