@@ -609,8 +609,46 @@ func TestClientConnection_CM1(t *testing.T) {
 		if got := connectionModeFor("", clientcmdapi.Config{}, errors.New("raw config unreadable")); got != ConnUnknown {
 			t.Errorf("unreadable raw config: %v, want %v", got, ConnUnknown)
 		}
-		if got := connectionModeFor("ctx", clientcmdapi.Config{}, errors.New("raw config unreadable")); got != ConnKubeconfig {
-			t.Errorf("requested context with unreadable raw config: %v, want %v", got, ConnKubeconfig)
+		// The selected cluster cannot be checked, so not Kubeconfig.
+		if got := connectionModeFor("ctx", clientcmdapi.Config{}, errors.New("raw config unreadable")); got != ConnUnknown {
+			t.Errorf("requested context with unreadable raw config: %v, want %v", got, ConnUnknown)
+		}
+	})
+
+	t.Run("Kubeconfig only when the raw config fully describes the selected cluster", func(t *testing.T) {
+		full := clientcmdapi.Config{
+			CurrentContext: "ctx-a",
+			Clusters: map[string]*clientcmdapi.Cluster{
+				"c-a":       {Server: "https://127.0.0.1:6443"},
+				"c-noserve": {},
+			},
+			Contexts: map[string]*clientcmdapi.Context{
+				"ctx-a":         {Cluster: "c-a"},
+				"ctx-nocluster": {Cluster: "c-missing"},
+				"ctx-noserver":  {Cluster: "c-noserve"},
+			},
+		}
+		rows := []struct {
+			name      string
+			requested string
+			current   string
+			want      ConnectionMode
+		}{
+			{name: "current context fully described", current: "ctx-a", want: ConnKubeconfig},
+			{name: "requested context fully described", requested: "ctx-a", current: "ctx-noserver", want: ConnKubeconfig},
+			{name: "current context's cluster entry missing", current: "ctx-nocluster", want: ConnUnknown},
+			{name: "current context's cluster has an empty server", current: "ctx-noserver", want: ConnUnknown},
+			{name: "requested context's cluster entry missing", requested: "ctx-nocluster", current: "ctx-a", want: ConnUnknown},
+			{name: "requested context's cluster has an empty server", requested: "ctx-noserver", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context not defined", requested: "ctx-undefined", current: "ctx-a", want: ConnUnknown},
+			{name: "current context not defined", current: "ctx-undefined", want: ConnUnknown},
+		}
+		for _, r := range rows {
+			raw := full
+			raw.CurrentContext = r.current
+			if got := connectionModeFor(r.requested, raw, nil); got != r.want {
+				t.Errorf("%s: %v, want %v", r.name, got, r.want)
+			}
 		}
 	})
 

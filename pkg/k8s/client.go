@@ -286,25 +286,38 @@ type loadedSource struct {
 }
 
 // connectionModeFor classifies a deferred-loader client that loaded
-// successfully. A requested context, or a raw configuration with a current
-// context, is a kubeconfig connection. A raw configuration with no
+// successfully. It only reports Kubeconfig when the raw config fully
+// describes the selected cluster: the selected context (the requested one,
+// else the raw current-context) exists, its cluster exists, and that
+// cluster has a server. A raw configuration with no current context, no
 // contexts and no clusters means the deferred loader's sources were empty,
 // so its ClientConfig fell back to in-cluster credentials. Anything else
-// (the raw configuration could not be read, or it has contexts or clusters
-// but no current context) is unknown.
+// (the raw configuration could not be read, or it names a context or
+// cluster it does not fully describe, in which case the loader may also
+// have fallen back to in-cluster credentials) is unknown.
 func connectionModeFor(contextName string, raw clientcmdapi.Config, rawErr error) ConnectionMode {
-	switch {
-	case contextName != "":
-		return ConnKubeconfig
-	case rawErr != nil:
-		return ConnUnknown
-	case raw.CurrentContext != "":
-		return ConnKubeconfig
-	case len(raw.Contexts) == 0 && len(raw.Clusters) == 0:
-		return ConnInCluster
-	default:
+	if rawErr != nil {
 		return ConnUnknown
 	}
+	selected := contextName
+	if selected == "" {
+		selected = raw.CurrentContext
+	}
+	if selected == "" {
+		if len(raw.Contexts) == 0 && len(raw.Clusters) == 0 {
+			return ConnInCluster
+		}
+		return ConnUnknown
+	}
+	ctx, ok := raw.Contexts[selected]
+	if !ok || ctx == nil {
+		return ConnUnknown
+	}
+	cluster, ok := raw.Clusters[ctx.Cluster]
+	if !ok || cluster == nil || cluster.Server == "" {
+		return ConnUnknown
+	}
+	return ConnKubeconfig
 }
 
 func loadClientConfig(kubeconfigPath, contextName string) (*rest.Config, loadedSource, error) {
