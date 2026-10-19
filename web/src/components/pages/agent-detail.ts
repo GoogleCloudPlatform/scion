@@ -823,6 +823,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
+  private boundOnAgentsResync = this.onAgentsResync.bind(this);
   private stopRelativeTimeTick: (() => void) | null = null;
   /**
    * The stateManager project object last merged into `this.project` (or
@@ -851,6 +852,7 @@ export class ScionPageAgentDetail extends LitElement {
 
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
 
     this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
@@ -859,6 +861,7 @@ export class ScionPageAgentDetail extends LitElement {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     this.stopRelativeTimeTick?.();
     this.stopRelativeTimeTick = null;
     if (this.deleteRedirectTimer) {
@@ -900,6 +903,16 @@ export class ScionPageAgentDetail extends LitElement {
     if (!updatedAgent && this.agent && stateManager.getDeletedAgentIds().has(this.agentId)) {
       this.showDeletedStateThenRedirect();
     }
+  }
+
+  /**
+   * After an SSE reconnect, changes to this agent during the outage were
+   * missed and arrive in no `agents-changed` flush. Refetch it, so a quiet
+   * agent does not keep a stale phase until its next change.
+   */
+  private onAgentsResync(): void {
+    if (!this.agent || this.deleted) return;
+    this.backgroundRefresh();
   }
 
   /**

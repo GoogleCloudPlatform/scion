@@ -531,9 +531,10 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     const el = await mount(makeAgent());
     fakeStateManager.setAgent({ id: AGENT_ID });
 
-    // A stale-row prune (chat.ts's use of removeAgent) with no deletion.
+    // A stale-row prune (chat.ts's use of removeAgent) with no deletion,
+    // then a flush naming this agent.
     fakeStateManager.removeAgent(AGENT_ID);
-    fakeStateManager.notifyAgentsUpdated();
+    fakeStateManager.notifyAgentsChanged({ unknown: new Map([[AGENT_ID, {}]]) });
     await el.updateComplete;
 
     expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
@@ -817,6 +818,24 @@ describe('scion-page-agent-detail reacts only to its own agent (webperf C2)', ()
     fakeStateManager.setProject(fakeStateManager.getProject(PROJECT.id)!);
     await el.updateComplete;
     expect(renders.calls).toBe(1);
+  });
+
+  it('agent-detail refetches its agent on agents-resync', async () => {
+    const el = await mount(makeAgent());
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url === `/api/v1/agents/${AGENT_ID}`
+          ? okJson(makeAgent({ phase: 'stopped' }))
+          : ({ ok: false, status: 404, json: () => Promise.resolve({}) } as unknown as Response)
+      )
+    );
+
+    fakeStateManager.dispatchEvent(new CustomEvent('agents-resync'));
+
+    await vi.waitFor(() => {
+      expect((el as unknown as { agent: Agent }).agent.phase).toBe('stopped');
+    });
+    expect(apiFetch).toHaveBeenCalledWith(`/api/v1/agents/${AGENT_ID}`);
   });
 });
 
