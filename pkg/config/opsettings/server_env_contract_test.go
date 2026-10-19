@@ -305,6 +305,7 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"server.broker.hub_endpoint":                     envNameRuntimeBroker,
 	"server.broker.port":                             envNameRuntimeBroker,
 	"server.broker.read_timeout":                     envNameRuntimeBroker,
+	"server.broker.state_dir":                        envNameRuntimeBroker,
 	"server.broker.write_timeout":                    envNameRuntimeBroker,
 	"server.hub.public_url":                          "named after the GlobalConfig field hub.endpoint (ptone/scion#3905)",
 }

@@ -133,10 +133,14 @@ func (svc *ProjectMembershipService) AssignableRoles(ctx context.Context, actor 
 
 // assignableActorAuthority evaluates the actor-side checks of
 // SetMemberRoles Phase P once, for a plan that creates a binding: the
-// credential gate, then memberActorAuthorityPreTx (asking custom-role
-// create authority only when a custom role is listed).
+// actor admission check (checkMembershipActor), then
+// memberActorAuthorityPreTx (asking custom-role create authority only when
+// a custom role is listed). For a user access token the grantable flag
+// then reflects the token's delegation limits: CanDelegate intersects the
+// holder's permissions with the token's selectors, and a token never uses
+// the hub role-binding authority of a holder with no project role.
 func (svc *ProjectMembershipService) assignableActorAuthority(ctx context.Context, actor UserIdentity, projectID string, roles []*store.RoleDefinition) (*memberActorAuthority, error) {
-	if denial := svc.checkMembershipCredential(ctx, actor.ID()); denial != nil {
+	if denial := svc.checkMembershipActor(ctx, actor.ID(), projectID); denial != nil {
 		return &memberActorAuthority{credentialDenial: denial}, nil
 	}
 

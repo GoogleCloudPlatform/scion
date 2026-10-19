@@ -663,9 +663,9 @@ func TestPutServerConfigDB_UnchangedSeededRowIsAdopted(t *testing.T) {
 }
 
 // An access save on a hub with no access row starts from the effective
-// snapshot values, and endpoints from the effective public_url and
-// image_registry, as their builders did before the move to the shared
-// helper.
+// snapshot values. An endpoints save with no row carries neither the
+// bootstrap public_url nor the bootstrap image_registry (ptone/scion#3905,
+// ptone/scion#3916).
 func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	fake := newFakeHubSettingStore()
@@ -681,7 +681,7 @@ func TestPutServerConfigDB_AccessNoRowBaseFromSnapshot(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.Equal(t, decodeJSONValue(t, []byte(`{"default_user_role":"viewer","user_access_mode":"invite"}`)),
 		decodeJSONValue(t, storedRow(fake, "access").Value))
-	assert.Equal(t, decodeJSONValue(t, []byte(`{"image_registry":"file.example.com","public_url":"https://hub.example.com"}`)),
+	assert.Equal(t, decodeJSONValue(t, []byte(`{"public_url":"https://hub.example.com"}`)),
 		decodeJSONValue(t, storedRow(fake, "endpoints").Value))
 }
 

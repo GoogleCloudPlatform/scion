@@ -249,6 +249,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_governance.go:ReplaceRoleBinding:GetRoleBinding":                              "mutation: the binding being replaced",
 	"handlers_auth.go:deleteSuperAdminRoleBinding:ListRoleBindingsForPrincipal":                      "mutation: bindings being deleted",
 	"handlers_roles.go:deleteRoleBinding:GetRoleBinding":                                             "mutation: the binding being deleted",
+	"handlers_roles.go:authorizeRoleBindingDelete:GetRoleBinding":                                    "routing: the binding's scope selects the project check; the authorization service decides",
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",

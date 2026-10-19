@@ -163,11 +163,14 @@ func TestBrokerSkippedForRegistry(t *testing.T) {
 	}{
 		{"broker disabled", false, onboardingStatusResult{}, nil, missing, false},
 		{"hub: no broker, registry check fails", true, onboardingStatusResult{}, nil, missing, true},
-		// e.g. the registry comes from SCION_MAINTENANCE_IMAGE_REGISTRY or
-		// project settings, which the hub's status does not report, and the
+		// e.g. the registry comes from project settings, which the hub's
+		// status does not report, and the
 		// broker had not registered by the readiness deadline.
 		{"hub: no broker yet, registry check passes", true, onboardingStatusResult{}, nil, present, false},
 		{"hub: broker running", true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil, missing, false},
+		// A registry saved in the hub database, which the local check
+		// cannot read (ptone/scion#3916).
+		{"hub: registry resolved by the hub, local check fails", true, onboardingStatusResult{ImageRegistry: "db.example/r"}, nil, missing, false},
 		{"no hub answer: local check fails", true, onboardingStatusResult{}, statusErr, missing, true},
 		{"no hub answer: local check passes", true, onboardingStatusResult{}, statusErr, present, false},
 	}
@@ -317,8 +320,8 @@ func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
 	})
 
 	t.Run("no broker yet but a registry is configured: no notice", func(t *testing.T) {
-		t.Setenv("SCION_IMAGE_REGISTRY", "")
-		t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "ghcr.io/maint")
+		t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
+		t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/node")
 		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
 		out := captureStdout(t, func() {
 			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)

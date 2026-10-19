@@ -102,11 +102,11 @@ func TestCompleteJoinAndPersist_BrokerIDPathElement(t *testing.T) {
 func TestBrokerLocalStatePaths_BrokerIDPathElement(t *testing.T) {
 	for name, id := range brokerIDsNotPathElement {
 		t.Run(name, func(t *testing.T) {
-			got := brokerLocalStatePaths("/g", "/h/.scion", id)
+			got := brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", id)
 			assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, got, "state path listed for broker ID %q", id)
 		})
 	}
-	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "b-1"))
+	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", "b-1"))
 }
 
 // isolatedGlobalDir points HOME at a fresh temporary directory and returns

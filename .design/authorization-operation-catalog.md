@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 338
+**Operations:** 342
 
 ## Table of Contents
 
@@ -43,6 +43,10 @@
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
 - [project.membership.list](#projectmembershiplist) — List project members and their roles
 - [project.membership.transfer](#projectmembershiptransfer) — Atomically transfer project ownership from the actor to another user
+- [project.membership.principal.set](#projectmembershipprincipalset) — Replace a principal's whole set of project roles
+- [project.membership.principal.remove](#projectmembershipprincipalremove) — Remove every project role a principal holds
+- [project.membership.rolebinding.create](#projectmembershiprolebindingcreate) — Create a project-scoped binding of a built-in project role through the role-binding API
+- [project.membership.rolebinding.delete](#projectmembershiprolebindingdelete) — Delete a project-scoped role binding through the role-binding API
 - [project.visitors.list](#projectvisitorslist) — List a project's visitor grants (federated accounts holding the project-visitor role)
 - [project.visitors.add](#projectvisitorsadd) — Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
 - [project.visitors.update](#projectvisitorsupdate) — Replace the window (not before, expires at) of a project visitor grant
@@ -222,7 +226,7 @@
 - [hub.audit.effectiveaccess](#hubauditeffectiveaccess) — Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile
+- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
 - [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
@@ -1515,9 +1519,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMembershipToken_CannotGrantRoleAboveCaller`)
 
 **Base Permission:** `project.manage`
 
@@ -1571,9 +1575,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMembershipToken_GovernanceMatrixApplies`)
 
 **Base Permission:** `project.manage`
 
@@ -1630,9 +1634,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMembershipToken_GovernanceMatrixApplies`)
 
 **Base Permission:** `project.manage`
 
@@ -1714,9 +1718,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestTransferOwnershipToken_RequiresDirectOwner`)
 
 **Base Permission:** `project.manage`
 
@@ -1757,6 +1761,226 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.membership.principal.set
+
+**Domain:** project.membership
+
+**Description:** Replace a principal's whole set of project roles
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/members/principals/{type}/{principalId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMembershipToken_CannotGrantRoleAboveCaller`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `grant-authority`, `change-authority`, `revoke-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- CanDelegate checked for every created binding; a built-in role change is checked only when the new role is higher
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Built-in roles follow the governance matrix (owners manage all roles, admins manage members only, direct owners for admin and owner targets); custom roles need custom-role authority (direct owner). Enforced by ProjectMembershipService.SetMemberRoles.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| direct-user-only-owner | security | project-owner role is direct-user-only | Yes |
+| single-binding-per-principal | business | CT1 D4: one built-in binding per principal per project | No |
+| last-owner-guard | security | Cannot remove or demote the last active direct owner | Yes |
+
+### Audit
+
+- **Event Type:** `project_member_role_change`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** target_principal_id, old_role
+- **After Fields:** new_role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `role_assignment_forbidden`, `target_role_protected`, `principal_ineligible`, `last_owner`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestMembershipToken_SelectorAndBoundaryPerRoute`
+
+---
+
+## project.membership.principal.remove
+
+**Domain:** project.membership
+
+**Description:** Remove every project role a principal holds
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{id}/members/principals/{type}/{principalId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`; pinned by `TestMembershipToken_LastOwnerProtected`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `revoke-authority`
+
+**Authority Evaluation:** `proposed_post_state`
+
+### Governance
+
+- **Kind:** peer_superior
+- Built-in roles follow the governance matrix; custom roles need custom-role authority (direct owner). Enforced by ProjectMembershipService.SetMemberRoles.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| last-owner-guard | security | Cannot remove the last active direct owner | Yes |
+
+### Audit
+
+- **Event Type:** `project_member_remove`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** target_principal_id, target_role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `role_assignment_forbidden`, `target_role_protected`, `last_owner`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestMembershipToken_SelectorAndBoundaryPerRoute`
+
+---
+
+## project.membership.rolebinding.create
+
+**Domain:** project.membership
+
+**Description:** Create a project-scoped binding of a built-in project role through the role-binding API
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/role-bindings` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`; pinned by `TestMembershipToken_CannotGrantRoleAboveCaller`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Actor must hold all permissions in the target role (CanDelegate non-amplification)
+
+### Governance
+
+- **Kind:** peer_superior
+- Routed to ProjectMembershipService.AddMember (create-only): the governance matrix, direct-owner rule and one-binding invariant apply. The project-scope branch runs before any hub-level check.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| direct-user-only-owner | security | project-owner role is direct-user-only | Yes |
+| single-binding-per-principal | business | CT1 D4: one direct binding per principal per project | No |
+
+### Audit
+
+- **Event Type:** `project_member_add`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** target_principal_id, target_role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `role_assignment_forbidden`, `target_role_protected`, `principal_ineligible`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestMembershipToken_SelectorAndBoundaryPerRoute`
+
+---
+
+## project.membership.rolebinding.delete
+
+**Domain:** project.membership
+
+**Description:** Delete a project-scoped role binding through the role-binding API
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/admin/role-bindings/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `role_binding_record`; boundaries `project`, `hub`; pinned by `TestMembershipToken_GovernanceMatrixApplies`)
+
+**Base Permission:** `project.manage`
+
+**Resource Resolver:** project-from-binding
+
+**Effects:** `revoke-authority`
+
+**Authority Evaluation:** `proposed_post_state`
+
+### Governance
+
+- **Kind:** peer_superior
+- Project-scoped bindings are removed under project governance: a caller with project.manage on the binding's project goes to ProjectMembershipService.RemoveMember (governance matrix, direct-owner rule, last-owner guard) before any hub-level check; any other caller needs role_binding.delete at hub scope.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| last-owner-guard | security | Cannot remove the last active direct owner | Yes |
+
+### Audit
+
+- **Event Type:** `project_member_remove`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** target_principal_id, target_role
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `role_assignment_forbidden`, `target_role_protected`, `last_owner`
+
+### Tests
+
+- `pkg/hub:TestRoleBindingDelete_ProjectBindingUnderProjectGovernance`
 
 ---
 
@@ -8307,7 +8531,7 @@
 
 **Domain:** user
 
-**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile
+**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
 
 ### Entry Points
 
@@ -8317,7 +8541,7 @@
 
 **Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `federated_user`
 
 **Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
 
@@ -8330,6 +8554,9 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestSelfReadCredential_VisitorIdentityOnly`
+- `pkg/hub:TestVisitorRoute_AuthMeReturnsVisitorOwnProfile`
+- `pkg/hub:TestVisitorRoute_UnlinkedFederatedUserUnchanged`
 
 ### Exemptions
 

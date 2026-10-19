@@ -376,9 +376,10 @@ agents:
   # broker without a registry (requireImageRegistryForBroker,
   # cmd/server_foreground.go), so an empty value fails the render. The hub
   # also accepts image_registry for the active profile through config.extra,
-  # or SCION_IMAGE_REGISTRY / SCION_MAINTENANCE_IMAGE_REGISTRY through
-  # hub.extraEnv; either satisfies the check instead. Not checked under
-  # config.existingSecret, where your file must carry it.
+  # or SCION_IMAGE_REGISTRY through hub.extraEnv; either satisfies the check
+  # instead (SCION_MAINTENANCE_IMAGE_REGISTRY applies to maintenance builds
+  # only and does not). Not checked under config.existingSecret, where your
+  # file must carry it.
   #
   #   imageRegistry: us-docker.pkg.dev/my-project/scion
   #

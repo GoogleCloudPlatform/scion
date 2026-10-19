@@ -47,6 +47,38 @@ type bearerMatrixExclusion struct {
 // TestBearerMatrixExclusions_NotStaleAndPinned keeps every key live and
 // every Pin declared.
 var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
+	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.update", Method: "PATCH", Pattern: "/api/v1/projects/{id}/members/{memberId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.remove", Method: "DELETE", Pattern: "/api/v1/projects/{id}/members/{memberId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.transfer", Method: "POST", Pattern: "/api/v1/projects/{id}/transfer-ownership"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.principal.set", Method: "PUT", Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.principal.remove", Method: "DELETE", Pattern: "/api/v1/projects/{id}/members/principals/{type}/{principalId}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.rolebinding.create", Method: "POST", Pattern: "/api/v1/admin/role-bindings"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
+	{OperationID: "project.membership.rolebinding.delete", Method: "DELETE", Pattern: "/api/v1/admin/role-bindings/{id}"}: {
+		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project. The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
+		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",
+	},
 	{OperationID: "project.lifecycle.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}"}: {
 		Reason: "project.delete has no token selector, so a token is refused by the deletion service's base permission check (403 project_delete_forbidden) before its session-only credential step is reached; the session-only step and its IRREVERSIBLE_CASCADE reason are pinned at the service",
 		Pin:    "TestRS3_ProjectDeleteScopedUATDenied",

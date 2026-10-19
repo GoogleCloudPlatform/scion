@@ -77,7 +77,10 @@ field is updated to reference the built image.`,
 
 		imageRegistry := ""
 		if settings != nil {
-			imageRegistry = settings.ResolveImageRegistry(profile)
+			// SCION_IMAGE_REGISTRY beats every settings layer
+			// (ptone/scion#3916).
+			imageRegistry = config.ResolveImageRegistryLayers(
+				settings.ImageRegistryLayers(profile, config.ImageRegistryFromEnv())).Value
 		}
 
 		baseImage := buildBaseImage

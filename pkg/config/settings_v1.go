@@ -600,12 +600,12 @@ func ValidateSharedDirSize(size string) error {
 //
 // A profile-level entry for gsaEmail takes precedence over a runtime-level
 // entry for the same gsaEmail — the same profile-overrides precedence
-// ResolveImageRegistry already applies, here evaluated per map key instead of
+// SettingsImageRegistry already applies, here evaluated per map key instead of
 // as a whole-value override, since this setting is a map rather than a
 // scalar. A profile with no entry for gsaEmail (including an empty-string
 // value, treated as unset) falls through to the runtime-level entry, rather
 // than that GSA having no mapping at all. profileName "" resolves to
-// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// vs.ActiveProfile, matching ResolveRuntime and SettingsImageRegistry. If
 // ResolveRuntime cannot resolve profileName's runtime (unknown profile or
 // runtime), this returns false, the same as no mapping being found — callers
 // that need to distinguish "no mapping" from "settings error" should call
@@ -1195,33 +1195,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsImageRegistryConfigured returns true if image_registry is set at any level
-// (top-level or in any profile).
-func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
-	return vs.ResolveImageRegistry(profileName) != ""
-}
-
-// ResolveImageRegistry returns the effective image_registry for the given profile.
-// Profile-level image_registry takes precedence over the top-level setting.
-// On a flat instance view (ForFlatInstance) the instance's
-// agent_defaults.image_registry takes the profile's place, over the same
-// top-level setting.
-func (vs *VersionedSettings) ResolveImageRegistry(profileName string) string {
-	if vs != nil && vs.flat != nil {
-		if r := vs.flat.Defaults.ImageRegistry; r != "" {
-			return r
-		}
-		return vs.ImageRegistry
-	}
-	if profileName == "" {
-		profileName = vs.ActiveProfile
-	}
-	if profile, ok := vs.Profiles[profileName]; ok && profile.ImageRegistry != "" {
-		return profile.ImageRegistry
-	}
-	return vs.ImageRegistry
-}
-
 // The Tier* accessors read the Runtime Broker Profile tier for the callers
 // that used to index Profiles directly. In legacy resolution each runs the
 // former call site's profile lookup, including its guard (an empty name,
@@ -1483,6 +1456,11 @@ type VersionedSettings struct {
 	// non-empty stored runtimes lack them (ptone/scion#5113); nil when none
 	// were. It is not serialized.
 	retainedRuntimeNames []string
+	// imageRegistryHub is the co-located hub's image_registry layers
+	// (managed database values, file tier, profile catalog), set by the
+	// settings overlay; nil elsewhere. It is not serialized; see
+	// ImageRegistryLayers.
+	imageRegistryHub *ImageRegistryHubInputs
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -2059,6 +2037,12 @@ type V1BrokerConfig struct {
 	// dispatch agents whose harness-config declares container-script
 	// provisioning. Defaults to true; set false to block container-script dispatches.
 	AllowContainerScriptHarnesses *bool `json:"allow_container_script_harnesses,omitempty" yaml:"allow_container_script_harnesses,omitempty" koanf:"allow_container_script_harnesses"`
+	// StateDir is the base directory of this broker's runtime state (launch
+	// journal, dispatch attempts, pending env-gather); the broker uses
+	// <state_dir>/<broker-id>. Empty means ~/.scion/runtime-broker-state.
+	// Must be absolute or start with ~/. Flat Runtime Broker instances do
+	// not use it. Read at startup.
+	StateDir string `json:"state_dir,omitempty" yaml:"state_dir,omitempty" koanf:"state_dir"`
 	// Instances declares the flat (single-target) Runtime Broker instances
 	// this process hosts (.design/flat-runtime-brokers-contract.md section 2).
 	// Empty or absent means legacy hosting. P1 accepts exactly one entry and
@@ -3956,12 +3940,18 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
 // directly; left mapped they would land on hub.profile and hub.run, which
 // are not settings.
+//
+// SCION_IMAGE_REGISTRY is the node env layer of image_registry, which beats
+// every settings value (ptone/scion#3916). Folded into the top-level
+// image_registry it would rank below a profile value and could be written
+// back into a settings file, so it is read only by ImageRegistryFromEnv.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
 	"SCION_HUB_PROFILE",
 	"SCION_HUB_RUN",
+	EnvImageRegistry,
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
@@ -3974,11 +3964,41 @@ func isSettingsExcludedEnv(name string) bool {
 	return false
 }
 
+// agentContainerEnvVars lists SCION_* variables the runtime sets inside an
+// agent container for sciontool and the harness: SCION_RUNTIME (for example
+// substrate) and SCION_WORKSPACE_PATH (the workspace mount). Left mapped,
+// they would land on the runtime and workspace_path settings of a CLI or
+// broker started in that container. Inside a hub-managed agent
+// (IsHubManagedAgent) versionedEnvKeyMapper drops them; outside one they
+// map as before.
+var agentContainerEnvVars = []string{
+	"SCION_RUNTIME",
+	"SCION_WORKSPACE_PATH",
+}
+
+// isAgentContainerEnv reports whether name is in agentContainerEnvVars and
+// this process runs inside a hub-managed agent container.
+func isAgentContainerEnv(name string) bool {
+	for _, e := range agentContainerEnvVars {
+		if e == name {
+			return IsHubManagedAgent()
+		}
+	}
+	return false
+}
+
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isAgentContainerEnv(s) {
+		// See agentContainerEnvVars: set by the runtime inside an agent
+		// container, never a settings override there. Only this mapper
+		// drops them; the process env and their direct readers are
+		// unchanged.
+		return ""
 	}
 	if isSettingsExcludedEnv(s) {
 		// See settingsExcludedEnvVars for every excluded name and the reason.
@@ -4360,6 +4380,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if v1.Broker.ContainerHubEndpoint != "" {
 			gc.RuntimeBroker.ContainerHubEndpoint = v1.Broker.ContainerHubEndpoint
+		}
+		if v1.Broker.StateDir != "" {
+			gc.RuntimeBroker.StateDir = v1.Broker.StateDir
 		}
 		if v1.Broker.BrokerID != "" {
 			gc.RuntimeBroker.BrokerID = v1.Broker.BrokerID
@@ -4750,6 +4773,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		WriteTimeout:                  gc.RuntimeBroker.WriteTimeout.String(),
 		HubEndpoint:                   gc.RuntimeBroker.HubEndpoint,
 		ContainerHubEndpoint:          gc.RuntimeBroker.ContainerHubEndpoint,
+		StateDir:                      gc.RuntimeBroker.StateDir,
 		BrokerID:                      gc.RuntimeBroker.BrokerID,
 		BrokerName:                    gc.RuntimeBroker.BrokerName,
 		AllowContainerScriptHarnesses: &gc.RuntimeBroker.AllowContainerScriptHarnesses,

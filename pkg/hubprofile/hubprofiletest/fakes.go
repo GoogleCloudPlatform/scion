@@ -182,6 +182,9 @@ type Target struct {
 	idLife    time.Duration
 	tokenHits int
 	webCodes  []WebCode
+	health    []Request
+	hubID     string
+	healthFn  http.HandlerFunc
 	// AudienceOverride, when set, replaces the issuer audience the
 	// target publishes (set before use).
 	AudienceOverride *string
@@ -223,7 +226,54 @@ func bearerOf(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
+// SetHubID makes the target's GET /healthz report hub id id ("" for no
+// hub id, the default).
+func (f *Target) SetHubID(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hubID = id
+}
+
+// SetHealthHandler makes h answer the target's GET /healthz instead of the
+// default JSON (after the IAP check); nil restores the default.
+func (f *Target) SetHealthHandler(h http.HandlerFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.healthFn = h
+}
+
+// HealthProbes returns the GET /healthz requests the target received
+// (kept apart from Recorded, which lists the other requests).
+func (f *Target) HealthProbes() []Request {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Request(nil), f.health...)
+}
+
 func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/healthz" {
+		f.mu.Lock()
+		f.health = append(f.health, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
+		id, fn := f.hubID, f.healthFn
+		f.mu.Unlock()
+		if f.iap {
+			c, err := transportauth.DecodeIDTokenClaims(strings.TrimPrefix(r.Header.Get("Proxy-Authorization"), "Bearer "))
+			if err != nil || c.Email != UATSA || !c.HasAudience(IAPAudience) {
+				http.Error(w, "IAP: forbidden", http.StatusUnauthorized)
+				return
+			}
+		}
+		if fn != nil {
+			fn(w, r)
+			return
+		}
+		body := map[string]any{"status": "healthy"}
+		if id != "" {
+			body["hub_id"] = id
+		}
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
 	f.mu.Lock()
 	f.requests = append(f.requests, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
 	reqIndex := len(f.requests) - 1
@@ -502,4 +552,51 @@ func (f *Target) IdentityKind(id string) (kind, delegation string) {
 		return u.Kind, u.Delegation
 	}
 	return "", ""
+}
+
+// HealthHub is a hub that serves only GET /healthz, as the agent's own hub
+// in the own-hub check tests. It records every request it receives.
+type HealthHub struct {
+	Srv    *httptest.Server
+	mu     sync.Mutex
+	body   map[string]any
+	status int
+	reqs   []Request
+}
+
+// SetResponse replaces the health response status and JSON body.
+func (h *HealthHub) SetResponse(status int, body map[string]any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.status, h.body = status, body
+}
+
+// NewHealthHub starts a HealthHub whose health response reports hub id id
+// at the top level ("" for none).
+func NewHealthHub(t testing.TB, id string) *HealthHub {
+	t.Helper()
+	h := &HealthHub{body: map[string]any{"status": "healthy"}, status: http.StatusOK}
+	if id != "" {
+		h.body["hub_id"] = id
+	}
+	h.Srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		h.reqs = append(h.reqs, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
+		status, body := h.status, h.body
+		h.mu.Unlock()
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, status, body)
+	}))
+	t.Cleanup(h.Srv.Close)
+	return h
+}
+
+// Recorded returns the requests the hub received.
+func (h *HealthHub) Recorded() []Request {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]Request(nil), h.reqs...)
 }

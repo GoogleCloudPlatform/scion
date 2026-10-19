@@ -1177,6 +1177,12 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
+	// layer the hub resolves this broker's dispatches with
+	// (ptone/scion#3916). It is a node configuration value, not a feature
+	// flag. Sent at registration and in every heartbeat with capabilities;
+	// empty (an old broker, or none set) means no node env.
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
