@@ -298,11 +298,18 @@ export class ScionAgentLogViewer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Lit does not re-render on reconnect; show lines whose frame was
+    // cancelled by disconnectedCallback.
+    if (this.buffer.size > 0) this.requestUpdate();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    // A frame left pending would keep this detached element (and its buffer)
+    // alive until a hidden tab becomes visible; connectedCallback renders
+    // anything it skipped.
+    this.renderBatch.cancel();
   }
 
   /** Called by the parent when the logs tab is first shown. */

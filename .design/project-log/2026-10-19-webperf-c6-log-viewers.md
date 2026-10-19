@@ -36,10 +36,14 @@ Changes:
 - `components/shared/log-viewer-batching.test.ts`, per viewer, driven through a fake `EventSource` so the real listeners run:
   - "500 streamed lines inside one frame produce exactly 1 render": a `render` spy shows 0 renders while the lines arrive and 1 after the frame;
   - the `Intl.DateTimeFormat` format count (counted through the prototype's `format` getter) equals new entries, not entries × renders;
-  - out-of-order ordering, and keyed rows that keep their DOM nodes.
+  - keyed rows: each line keeps its own DOM node when lines are inserted before and after it (checked per key; fails if `repeat` is replaced by `map`);
+  - one re-format per row after a display-zone change;
+  - disconnect cancels the pending frame (no render or scroll on the detached element), and reconnect renders the skipped lines.
 - The existing `log-viewer-timezone` and `agent-message-viewer` tests now ingest through `mergeEntries`/`mergeHubMessages` and run rAF synchronously. They used to assign arrays to the removed `entries`/`messages` fields.
 
 ## Learnings
 
+- A pending animation frame retains its element. In a hidden tab rAF never fires, so a removed viewer stays alive until the tab is visible again. Cancel the frame in `disconnectedCallback`. Lit does not re-render on reconnect, so `connectedCallback` must request an update for anything the cancelled frame skipped.
+- A keyed-rows test must check node identity per key, with an insertion in the middle. Lit's unkeyed rendering also reuses nodes by index, so a simple "old nodes are still there" check passes without `repeat`.
 - `Intl.DateTimeFormat.prototype.format` is an accessor (a getter that returns a bound function), so `vi.spyOn(proto, 'format')` does not work. Redefine the getter and count its accesses instead.
 - Lit already batches synchronous updates into one microtask. A "1 render per burst" test therefore has to let a microtask pass between lines (`await el.updateComplete`), or it passes even without batching. The new tests fail on the old code: 7 of 14.

@@ -108,9 +108,12 @@ beforeEach(() => {
   FakeEventSource.instances = [];
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => frames.push(cb));
-  vi.stubGlobal('cancelAnimationFrame', (h: number) => {
-    frames[h - 1] = (): void => {};
-  });
+  vi.stubGlobal(
+    'cancelAnimationFrame',
+    vi.fn((h: number) => {
+      frames[h - 1] = (): void => {};
+    })
+  );
   setPreferredTimeZone('Asia/Tokyo');
 });
 
@@ -157,8 +160,23 @@ interface ViewerCase {
   /** Emits stream line `i` on the viewer's (fake) EventSource. */
   emit: (source: FakeEventSource, i: number) => void;
   rowSelector: string;
+  /** Selector, inside a row, of the cell holding `line <i>` (the row's key text). */
+  keyCell: string;
+  /** Selector of the row time cell, and line 0's time in UTC. */
+  timeSelector: string;
+  utcTime0: string;
   /** Row text order for lines emitted with these indices (display order). */
   rowKeys: (el: AnyEl) => string[];
+}
+
+/** Row node per key text (`line <i>`), to check node identity across renders. */
+function rowsByKey(el: AnyEl, c: ViewerCase): Map<string, Element> {
+  const map = new Map<string, Element>();
+  for (const row of el.shadowRoot.querySelectorAll(c.rowSelector) as NodeListOf<Element>) {
+    const text = (row.querySelector(c.keyCell)?.textContent ?? '').trim();
+    map.set(text.replace('hello ', 'line '), row);
+  }
+  return map;
 }
 
 async function settle(el: AnyEl): Promise<void> {
@@ -180,6 +198,9 @@ const cases: ViewerCase[] = [
     },
     emit: (source, i) => source.emit('log', logLine(i)),
     rowSelector: 'tr.log-row',
+    keyCell: 'td.msg',
+    timeSelector: 'td.ts',
+    utcTime0: '15:00:00.000',
     rowKeys: (el) =>
       Array.from(el.shadowRoot.querySelectorAll('td.msg') as NodeListOf<HTMLElement>).map((n) =>
         (n.textContent ?? '').trim()
@@ -197,6 +218,9 @@ const cases: ViewerCase[] = [
     },
     emit: (source, i) => source.emit('log', logLine(i, { source: 'hub' })),
     rowSelector: '.log-row',
+    keyCell: '.msg',
+    timeSelector: '.log-row .ts',
+    utcTime0: '15:00:00.000',
     rowKeys: (el) =>
       Array.from(el.shadowRoot.querySelectorAll('.log-row .msg') as NodeListOf<HTMLElement>).map(
         (n) => (n.textContent ?? '').trim()
@@ -215,6 +239,9 @@ const cases: ViewerCase[] = [
     },
     emit: (source, i) => source.emit('message', hubMessage(i)),
     rowSelector: '.message-row',
+    keyCell: '.msg-body',
+    timeSelector: '.msg-time',
+    utcTime0: '15:00:00',
     rowKeys: (el) =>
       Array.from(el.shadowRoot.querySelectorAll('.msg-body') as NodeListOf<HTMLElement>).map((n) =>
         (n.textContent ?? '').trim().replace('hello ', 'line ')
@@ -291,20 +318,74 @@ describe.each(cases.map((c) => [c.name, c] as const))('%s streaming', (_name, c)
     expect(c.rowKeys(el)).toEqual(expectedOrder(c.name, order));
   });
 
-  it('keys rows: a new line keeps the existing row nodes', async () => {
+  it('keys rows: each line keeps its own row node when lines are inserted around it', async () => {
+    const el = await c.mount();
+    const source = FakeEventSource.instances[0];
+    for (const i of [0, 2, 4]) c.emit(source, i);
+    await settle(el);
+    const before = rowsByKey(el, c);
+    expect([...before.keys()].sort()).toEqual(['line 0', 'line 2', 'line 4']);
+
+    // One line in the middle (out of order) and one at the newest end. With
+    // index-based (unkeyed) reuse, rows after the insertion point would show
+    // other lines' text in the old nodes.
+    c.emit(source, 1);
+    c.emit(source, 5);
+    await settle(el);
+    const after = rowsByKey(el, c);
+    expect(after.size).toBe(5);
+    for (const [key, node] of before) {
+      expect(after.get(key), key).toBe(node);
+    }
+    expect(c.rowKeys(el)).toEqual(expectedOrder(c.name, [0, 1, 2, 4, 5]));
+  });
+
+  it('re-formats each row once after a display zone change', async () => {
     const el = await c.mount();
     const source = FakeEventSource.instances[0];
     for (let i = 0; i < 3; i++) c.emit(source, i);
     await settle(el);
-    const before = new Set(el.shadowRoot.querySelectorAll(c.rowSelector));
-    expect(before.size).toBe(3);
+    const formats = countFormats();
+    try {
+      setPreferredTimeZone('UTC');
+      await el.updateComplete;
+      expect(formats.count).toBe(3 * FORMATS_PER_ENTRY);
+      el.requestUpdate();
+      await el.updateComplete;
+      expect(formats.count).toBe(3 * FORMATS_PER_ENTRY);
+    } finally {
+      formats.restore();
+    }
+    const times = Array.from(
+      el.shadowRoot.querySelectorAll(c.timeSelector) as NodeListOf<HTMLElement>
+    ).map((n) => (n.textContent ?? '').trim());
+    expect(times).toContain(c.utcTime0);
+  });
 
-    c.emit(source, 3);
-    await settle(el);
-    const after = Array.from(el.shadowRoot.querySelectorAll(c.rowSelector));
-    expect(after).toHaveLength(4);
-    expect(after.filter((n) => before.has(n))).toHaveLength(3);
-    expect(c.rowKeys(el)).toEqual(expectedOrder(c.name, [0, 1, 2, 3]));
+  it('cancels a pending frame on disconnect and renders skipped lines on reconnect', async () => {
+    const el = await c.mount();
+    const source = FakeEventSource.instances[0];
+    const cancel = vi.mocked(cancelAnimationFrame);
+    c.emit(source, 0);
+    expect(frames).toHaveLength(1);
+
+    el.remove();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    // stopStream's own state change (streaming=false) may still render once;
+    // let it finish before watching for the frame's render.
+    await el.updateComplete;
+    const render = vi.spyOn(el, 'render');
+    // Only the unified viewer auto-scrolls after a frame.
+    const scroll = typeof el.scrollToBottom === 'function' ? vi.spyOn(el, 'scrollToBottom') : null;
+    flushFrames();
+    await el.updateComplete;
+    await Promise.resolve();
+    expect(render).not.toHaveBeenCalled();
+    if (scroll) expect(scroll).not.toHaveBeenCalled();
+
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(c.rowKeys(el)).toEqual(['line 0']);
   });
 });
 
@@ -321,25 +402,5 @@ describe('date dividers with sorted ingest', () => {
       el.shadowRoot.querySelectorAll('td.date-divider') as NodeListOf<HTMLElement>
     ).map((n) => (n.textContent ?? '').trim());
     expect(dividers).toEqual(['Sep 24, 2026 (Asia/Tokyo)', 'Sep 23, 2026 (Asia/Tokyo)']);
-  });
-
-  it('message viewer re-formats once after a display zone change', async () => {
-    const el = await cases[2].mount();
-    const source = FakeEventSource.instances[0];
-    source.emit('message', hubMessage(0));
-    await settle(el);
-    const formats = countFormats();
-    try {
-      setPreferredTimeZone('UTC');
-      await el.updateComplete;
-      expect(formats.count).toBe(FORMATS_PER_ENTRY);
-      el.requestUpdate();
-      await el.updateComplete;
-      expect(formats.count).toBe(FORMATS_PER_ENTRY);
-    } finally {
-      formats.restore();
-    }
-    const time = el.shadowRoot.querySelector('.msg-time') as HTMLElement;
-    expect((time.textContent ?? '').trim()).toBe('15:00:00');
   });
 });

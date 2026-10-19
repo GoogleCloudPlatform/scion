@@ -155,7 +155,9 @@ export class ScionUnifiedLogViewer extends LitElement {
   /**
    * Count for the "new entries below" banner. Not a reactive property: the
    * stream bumps it per line, so it renders with the next frame's batch
-   * instead of once per line.
+   * instead of once per line. The setter schedules that batch, which lets the
+   * stream listener (unchanged, still assigning `newEntriesBelowCount`)
+   * drive it; keep it a setter rather than turning it back into `@state`.
    */
   private newEntriesBelow = 0;
   private get newEntriesBelowCount(): number {
@@ -460,6 +462,9 @@ export class ScionUnifiedLogViewer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    // Lit does not re-render on reconnect; show lines whose frame was
+    // cancelled by disconnectedCallback.
+    if (this.buffer.size > 0) this.requestUpdate();
     this.severity = this.initialSeverity || 'INFO';
     void this.loadInitialData();
   }
@@ -467,6 +472,10 @@ export class ScionUnifiedLogViewer extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopStream();
+    // A frame left pending would keep this detached element (and its buffer)
+    // alive until a hidden tab becomes visible; connectedCallback renders
+    // anything it skipped.
+    this.renderBatch.cancel();
     if (this.searchDebounceTimer) {
       clearTimeout(this.searchDebounceTimer);
     }
