@@ -30,10 +30,6 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// testHookTunnelEnded, when set (tests only), runs after a tunnel's splice
-// has ended and the tunnel is untracked and forgotten.
-var testHookTunnelEnded func()
-
 // MaxTunnelReResolves bounds how many times one tunnel request goes back to
 // the hub after the target session it named turned out stale (the same
 // budget the router gives one resolution).
@@ -242,6 +238,9 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 	} else {
 		renewer = HopRenewer(bridge)
 	}
+	// AuthzUntil is left unset: an unsigned hint only times re-checks and
+	// never arms the relay's own deadline close. The target enforces the
+	// signed deadline; a renewal result from the hub sets the relay's.
 	untrack := ro.Streams.Track(TrackedStream{
 		UserSessionID:  userSessionID,
 		Target:         ids,
@@ -267,7 +266,7 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		defer func() {
 			untrack()
 			remove()
-			if h := testHookTunnelEnded; h != nil {
+			if h := ro.testHookTunnelEnded; h != nil {
 				h()
 			}
 		}()

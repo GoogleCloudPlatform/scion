@@ -384,9 +384,8 @@ func TestRoleTunnel_DenyClosesBothLegs(t *testing.T) {
 // longer tracked or recorded.
 func TestRoleTunnel_UntrackedWhenSpliceEnds(t *testing.T) {
 	ended := make(chan struct{}, 4)
-	testHookTunnelEnded = func() { ended <- struct{}{} }
-	t.Cleanup(func() { testHookTunnelEnded = nil })
 	f := newRoleFixture(t)
+	f.role.testHookTunnelEnded = func() { ended <- struct{}{} }
 	target := newRenewalTarget()
 	rec := dialTarget(t, f.w, f.node, target.config)
 	h := &schedHub{tunnel: func() relay.HubRPCResponse { return tunnelInstruction(t, rec, f.node.Internal.URL) }}

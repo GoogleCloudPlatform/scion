@@ -47,6 +47,9 @@ const hintSkew = 30 * time.Second
 // stream is left to the sweep. The hints are usable when both are present,
 // the interval is within the stream_authz_max bounds and authz_until is
 // after receipt and no later than receipt plus the interval plus the skew.
+// Receipt is the relay's clock and authz_until the hub's: a relay clock more
+// than the skew behind the hub classes every hint invalid, which shows as a
+// rising invalid count.
 func hintSchedule(receipt time.Time, untilUnix, intervalS int64) (firstRecheck time.Time, interval time.Duration, fallback string) {
 	switch {
 	case untilUnix == 0 && intervalS == 0:

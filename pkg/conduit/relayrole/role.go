@@ -100,6 +100,10 @@ type Role struct {
 
 	// tunnels are the tunnels this relay opened for its user sessions.
 	tunnels tunnelTable
+	// testHookTunnelEnded, when set (tests only, before any tunnel opens),
+	// runs after a tunnel's splice has ended and the tunnel is untracked
+	// and forgotten.
+	testHookTunnelEnded func()
 }
 
 // heldSession is one relay-held session's hub admission.
