@@ -168,7 +168,11 @@ export default defineConfig({
                 },
             },
         },
-        sourcemap: true,
+        // 'hidden' writes the .map files but no sourceMappingURL comment.
+        // npm run build then moves them to dist/sourcemaps (outside the
+        // embedded dist/client) with scripts/move-sourcemaps.mjs, so they are
+        // neither served nor embedded; CI keeps them as a workflow artifact.
+        sourcemap: 'hidden',
         // Write .vite/manifest.json: the hub reads it to give the files Vite
         // fingerprinted (chunks, their CSS and assets) the long cache
         // lifetime, while the unhashed entry (assets/main.js) stays no-cache.
