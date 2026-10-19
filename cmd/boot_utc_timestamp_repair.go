@@ -37,8 +37,16 @@ import (
 var utcTimestampRepairBudget = 30 * time.Minute
 
 // utcTimestampSnapshotLabel names the snapshot file written before the
-// boot-time repair: <db file>.<label>-<UTC time>.bak.
-const utcTimestampSnapshotLabel = "pre-" + entadapter.UTCTimestampNormalizeKey
+// boot-time repair: <db file>.<label>-<UTC time>.bak. The hub's run of
+// utc-timestamp-normalize at start uses the same label, so both share one
+// snapshot.
+const utcTimestampSnapshotLabel = entadapter.UTCTimestampSnapshotLabel
+
+// utcTimestampStaleTmpAge is the age at which a leftover snapshot temporary
+// file of this label belongs to a killed process: more than every writer's
+// budget (this repair's utcTimestampRepairBudget and the hub's run at start,
+// both 30 minutes).
+const utcTimestampStaleTmpAge = 35 * time.Minute
 
 // snapshotSQLite takes, or reuses, the pre-repair snapshot. A variable so
 // tests can make it fail.
@@ -125,6 +133,11 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	slog.Warn(label+": tables hold timestamps that cannot be read; repairing them before the store is used",
 		"tables_unreadable", tables)
 
+	if removed, _, err := entadapter.RemoveStaleSnapshotTemp(ctx, db, utcTimestampSnapshotLabel, utcTimestampStaleTmpAge, time.Now()); err != nil {
+		slog.Warn(label+": could not inspect a leftover snapshot temporary file", "error", err)
+	} else if removed {
+		slog.Warn(label+": removed the temporary file of an interrupted snapshot", "older_than", utcTimestampStaleTmpAge)
+	}
 	snap, err := snapshotSQLite(ctx, db, utcTimestampSnapshotLabel, time.Now())
 	switch {
 	case errors.Is(err, entadapter.ErrSnapshotInProgress):
