@@ -19,7 +19,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync, execFileSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+  symlinkSync,
+  chmodSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -52,10 +60,14 @@ function seedAssets(webRoot) {
 }
 
 function git(cwd, ...args) {
-  execFileSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], {
-    cwd,
-    stdio: 'pipe',
-  });
+  execFileSync(
+    'git',
+    ['-c', 'user.email=t@example.com', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', ...args],
+    {
+      cwd,
+      stdio: 'pipe',
+    }
+  );
 }
 
 test('no public/assets: no-op', (t) => {
@@ -129,4 +141,61 @@ test('CLI: exits 1 and lists the tracked file on refusal, 0 after removal', (t) 
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /removed public\/assets\//);
   assert.equal(existsSync(join(root, 'public/assets')), false);
+});
+
+test('public/ is a symlink to a tracked dir: refuses and deletes nothing', (t) => {
+  const repo = tempRoot(t);
+  withCeiling(t, repo);
+  git(repo, 'init', '-q');
+  mkdirSync(join(repo, 'real/assets'), { recursive: true });
+  writeFileSync(join(repo, 'real/assets/a.js'), '// tracked');
+  git(repo, 'add', 'real/assets/a.js');
+  git(repo, 'commit', '-q', '-m', 'track');
+  const root = join(repo, 'web');
+  mkdirSync(root);
+  symlinkSync('../real', join(root, 'public'));
+  assert.throws(() => cleanPublicGenerated(root), /public\/ resolves through a symlink/);
+  assert.equal(existsSync(join(repo, 'real/assets/a.js')), true);
+});
+
+test('public/assets itself is a symlink: removes the link, not its target', (t) => {
+  const root = tempRoot(t);
+  withCeiling(t, root);
+  git(root, 'init', '-q');
+  mkdirSync(join(root, 'public'));
+  mkdirSync(join(root, 'elsewhere'));
+  writeFileSync(join(root, 'elsewhere/keep.js'), '// keep');
+  symlinkSync('../elsewhere', join(root, 'public/assets'));
+  assert.deepEqual(cleanPublicGenerated(root), { removed: true, tracked: [] });
+  assert.equal(existsSync(join(root, 'public/assets')), false);
+  assert.equal(existsSync(join(root, 'elsewhere/keep.js')), true);
+});
+
+test('CLI: git not installed (empty PATH): proceeds and removes public/assets', (t) => {
+  const root = tempRoot(t);
+  seedAssets(root);
+  const emptyBin = join(root, 'empty-bin');
+  mkdirSync(emptyBin);
+  const res = spawnSync(process.execPath, [SCRIPT, root], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: emptyBin },
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.equal(existsSync(join(root, 'public/assets')), false);
+});
+
+test('CLI: unexpected git failure fails closed and deletes nothing', (t) => {
+  const root = tempRoot(t);
+  seedAssets(root);
+  const bin = join(root, 'stub-bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'git'), '#!/bin/sh\necho "fatal: boom" >&2\nexit 128\n');
+  chmodSync(join(bin, 'git'), 0o755);
+  const res = spawnSync(process.execPath, [SCRIPT, root], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: bin },
+  });
+  assert.equal(res.status, 1);
+  assert.match(res.stderr, /git ls-files failed \(exit 128\): fatal: boom/);
+  assert.equal(existsSync(join(root, 'public/assets/main-old.js')), true);
 });

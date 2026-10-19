@@ -22,15 +22,17 @@
  * build's chunks piled up in later builds (#3842). The copy is gone; this
  * script runs as the prebuild hook to clean trees that still hold the debris.
  *
- * It refuses to delete anything if git tracks a file under public/assets/.
- * When git is not installed or the tree is not a git checkout (for example
- * the Docker frontend stage), no file can be tracked, so it proceeds.
+ * It refuses to delete anything if git tracks a file under public/assets/, or
+ * if public/assets resolves through a symlinked parent (git would not see the
+ * tracked files behind the link). When git is not installed or the tree is not
+ * a git checkout (for example the Docker frontend stage), no file can be
+ * tracked, so it proceeds. Any other git failure fails closed.
  *
  * Usage: node scripts/clean-public-generated.mjs [webRoot]
  */
 
 import { spawnSync } from 'child_process';
-import { existsSync, rmSync } from 'fs';
+import { existsSync, realpathSync, rmSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -42,9 +44,11 @@ const TARGET = 'public/assets';
  * Throws on any other git failure so the caller does not delete blindly.
  */
 export function trackedFiles(webRoot, dir) {
+  // LC_ALL=C keeps git's error text untranslated for the check below.
   const res = spawnSync('git', ['ls-files', '-z', '--', dir], {
     cwd: webRoot,
     encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C', LANGUAGE: '' },
   });
   if (res.error) {
     if (res.error.code === 'ENOENT') return [];
@@ -59,11 +63,21 @@ export function trackedFiles(webRoot, dir) {
 
 /**
  * Removes webRoot/public/assets unless git tracks a file in it.
- * Returns { removed: boolean, tracked: string[] }.
+ * Returns { removed: boolean, tracked: string[] }. Throws if the directory
+ * resolves through a symlinked parent, or on an unexpected git failure.
  */
 export function cleanPublicGenerated(webRoot) {
   const target = resolve(webRoot, TARGET);
   if (!existsSync(target)) return { removed: false, tracked: [] };
+  // A symlink at public/assets itself is fine: git lists it if tracked, and
+  // rmSync unlinks it without following it. A symlinked parent (public/ ->
+  // elsewhere) hides tracked files from git ls-files, so refuse that.
+  const parent = realpathSync(dirname(target));
+  if (parent !== resolve(realpathSync(webRoot), dirname(TARGET))) {
+    throw new Error(
+      `refusing to delete ${TARGET}/: public/ resolves through a symlink to ${parent}`
+    );
+  }
   const tracked = trackedFiles(webRoot, TARGET);
   if (tracked.length > 0) return { removed: false, tracked };
   rmSync(target, { recursive: true, force: true });

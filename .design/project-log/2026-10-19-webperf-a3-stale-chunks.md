@@ -38,5 +38,10 @@ comments and a README row).
   manifest files (one entry). This held across consecutive builds.
 - `vite build` under `ulimit -v 8000000` aborted once with `std::bad_alloc`
   while computing gzip sizes (one in four runs). The address-space cap, not real
-  memory use, is the limit, so a LIGHT gate window that runs the build should
-  expect this.
+  memory use, is the limit. `NODE_OPTIONS=--max-old-space-size=3072` makes it
+  reliable under the cap, so LIGHT gate windows set it for build steps.
+- Review follow-ups: the clean refuses when `public/` resolves through a
+  symlink (git ls-files cannot see tracked files behind a symlinked parent),
+  runs git with `LC_ALL=C` so the "not a git repository" match is stable, and
+  CI fails if `public/assets` exists after the build, because a single fresh
+  build with `emptyOutDir` would not show a re-added copy step as orphans.
