@@ -526,7 +526,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.list",
 		Domain:      "project",
-		Description: "List projects within the caller's authorized scope",
+		Description: "List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects", Method: "GET"},
 		},
@@ -563,7 +563,9 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestRS2_TransferredOwnership"},
 			{Package: "pkg/hub", Function: "TestRS2_TransitiveGroupAccess"},
 			{Package: "pkg/hub", Function: "TestRS2_FilterCompositionMatrix"},
+			{Package: "pkg/hub", Function: "TestProjectListToken_RequiresProjectListSelector"},
 		},
+		Bearer: AdmitOn(BearerTargetListScope, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "project.update",
@@ -1464,9 +1466,10 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.messagelogs.read",
 		Domain:      "project",
-		Description: "Read a project's message log",
+		Description: "Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/message-logs", Method: "GET"},
+			{Kind: EntryPointSSE, Pattern: "/api/v1/projects/{id}/message-logs/stream", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},

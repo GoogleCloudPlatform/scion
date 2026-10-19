@@ -306,6 +306,8 @@ var routeAuthzManifest = map[string]string{
 	"POST /api/v1/test-identities/{id}/token":          "authenticated", // Re-issue a test identity token
 	"POST /api/v1/test-identities/{id}/web-login-code": "authenticated", // Mint a test identity web-login code
 	"DELETE /api/v1/test-identities/{id}":              "authenticated", // Delete a test identity
+	"POST /api/v1/test-identities/cleanup":             "authenticated", // Issuer-scoped cleanup of expired test identities
+	"GET /api/v1/test-identities/provenance":           "authenticated", // Provenance of one resource
 	"POST /api/v1/test-identities/admin":               "authenticated", // Issue an admin-kind test identity
 	"POST /api/v1/test-identities/admin/revoke-all":    "authenticated", // Revoke every admin-kind test identity
 	"GET /api/v1/test-identities/admin/{id}/residue":   "authenticated", // Residue report of an admin-kind test identity

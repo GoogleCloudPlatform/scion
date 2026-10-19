@@ -51,12 +51,11 @@ type resourceActionKey struct {
 // no registry entry. Each maps to the permission ID role definitions and
 // relationship rows use for it. Adding an entry requires naming its call
 // sites; a newly registered permission should be used instead.
-var unregisteredResourcePermissions = map[resourceActionKey]string{
-	// handlers_env_secrets.go and handlers_runtime_brokers.go: runtime
-	// broker scoped env/secret and broker record checks.
-	{ResourceType: "runtime_broker", Action: ActionRead}:   "runtime_broker.read",
-	{ResourceType: "runtime_broker", Action: ActionUpdate}: "runtime_broker.update",
-}
+//
+// The set is empty: runtime broker records, their env/secret material and
+// the heartbeat user path are all checked on the registry's broker type
+// (brokerResource), so one permission family covers a broker.
+var unregisteredResourcePermissions = map[resourceActionKey]string{}
 
 type resourcePermissionEntry struct {
 	id        string

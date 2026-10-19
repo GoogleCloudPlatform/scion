@@ -2238,6 +2238,34 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 	})
 }
 
+// canRunBrokerImageOps reports whether the caller may pull or remove an
+// image on broker (the harness-config image operations with broker_id). It
+// writes no HTTP response.
+//
+// Dispatch authority is checked first: a user or dev caller holding
+// broker.dispatch on the broker passes. A user or dev caller whose
+// credential is not an interactive session or dev credential
+// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
+// setting never admits a user access token or any other non-session
+// credential. Every other caller is decided by canDispatchToBroker, the
+// shared-broker rule agent creation uses. Agent creation itself keeps
+// canUseBrokerForProject.
+func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || broker == nil {
+		return false
+	}
+	if user, ok := identity.(UserIdentity); ok && (identity.Type() == "user" || identity.Type() == "dev") {
+		if s.userHoldsBrokerDispatch(ctx, user, broker) {
+			return true
+		}
+		if !sessionCredentialAllowed(ctx) {
+			return false
+		}
+	}
+	return s.canDispatchToBroker(ctx, broker)
+}
+
 // canUseBrokerForProject reports whether the caller, already authorized to
 // create an agent in project, may have it dispatched to broker. It writes no
 // HTTP response. Auto-provide brokers are open to every authenticated caller.
