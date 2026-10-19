@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -125,6 +126,12 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		if !e.IsDir() || e.Type()&os.ModeSymlink != 0 || skipCopyEntry(e) {
 			continue
 		}
+		// An Agent Plugins bundle (claude installs them in its skills dir)
+		// is not a skill: the new harness installs it natively from the
+		// control-plane record instead.
+		if isAgentPluginDir(root, filepath.Join(oldRel, e.Name())) {
+			continue
+		}
 		if err := root.MkdirAll(newRel, 0755); err != nil {
 			return nil, undo(carryOverStage("create", fmt.Errorf("create skills dir %s: %w", newRel, err)), "")
 		}
@@ -134,6 +141,14 @@ func carryOverSkillsDir(agentHome, oldSkillsDir, newSkillsDir string) ([]string,
 		copied = append(copied, e.Name())
 	}
 	return copied, nil
+}
+
+// isAgentPluginDir reports whether the directory rel under root holds a
+// regular-file plugin.json at its top level, the mark of an Agent Plugins
+// bundle. A symlinked plugin.json does not count (Lstat, never followed).
+func isAgentPluginDir(root *os.Root, rel string) bool {
+	fi, err := root.Lstat(filepath.Join(rel, agentplugin.ManifestFile))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // carryOverStageError is a carry-over failure together with the fixed name

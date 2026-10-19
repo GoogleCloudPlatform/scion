@@ -36,6 +36,8 @@ const (
 	FieldCreated = "created"
 	// FieldMembershipKind holds the string denoting the membership_kind field in the database.
 	FieldMembershipKind = "membership_kind"
+	// FieldSourceRuleID holds the string denoting the source_rule_id field in the database.
+	FieldSourceRuleID = "source_rule_id"
 	// FieldIssuanceID holds the string denoting the issuance_id field in the database.
 	FieldIssuanceID = "issuance_id"
 	// EdgeRoleDefinition holds the string denoting the role_definition edge name in mutations.
@@ -64,6 +66,7 @@ var Columns = []string{
 	FieldCreatedBy,
 	FieldCreated,
 	FieldMembershipKind,
+	FieldSourceRuleID,
 	FieldIssuanceID,
 }
 
@@ -191,6 +194,11 @@ func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 // ByMembershipKind orders the results by the membership_kind field.
 func ByMembershipKind(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMembershipKind, opts...).ToFunc()
+}
+
+// BySourceRuleID orders the results by the source_rule_id field.
+func BySourceRuleID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceRuleID, opts...).ToFunc()
 }
 
 // ByIssuanceID orders the results by the issuance_id field.

@@ -95,7 +95,7 @@ func TestReconcileOwnersGoneAndBack(t *testing.T) {
 		c.live["user:user-live"] = true
 
 		now := time.Now()
-		res, err := ReconcileOwners(ctx, st, c, now)
+		res, err := ReconcileOwners(ctx, st, c, now, nil)
 		if err != nil || res != (ReconcileResult{Owners: 3, Orphaned: 2}) {
 			t.Fatalf("first pass = %+v, %v", res, err)
 		}
@@ -114,7 +114,7 @@ func TestReconcileOwnersGoneAndBack(t *testing.T) {
 		}
 
 		// Idempotent: a second pass changes nothing and keeps the first mark.
-		res, err = ReconcileOwners(ctx, st, c, now.Add(time.Hour))
+		res, err = ReconcileOwners(ctx, st, c, now.Add(time.Hour), nil)
 		if err != nil || res != (ReconcileResult{Owners: 3}) {
 			t.Fatalf("second pass = %+v, %v", res, err)
 		}
@@ -125,7 +125,7 @@ func TestReconcileOwnersGoneAndBack(t *testing.T) {
 		// The owner is back: the mark is cleared.
 		delete(c.gone, "agent:agent-gone")
 		c.live["agent:agent-gone"] = true
-		res, err = ReconcileOwners(ctx, st, c, now.Add(2*time.Hour))
+		res, err = ReconcileOwners(ctx, st, c, now.Add(2*time.Hour), nil)
 		if err != nil || res != (ReconcileResult{Owners: 3, Unorphaned: 2}) {
 			t.Fatalf("restore pass = %+v, %v", res, err)
 		}
@@ -140,16 +140,16 @@ func TestReconcileOwnersGoneAndBack(t *testing.T) {
 		// cleared too.
 		c.gone["agent:agent-gone"] = true
 		delete(c.live, "agent:agent-gone")
-		if _, err := ReconcileOwners(ctx, st, c, now); err != nil {
+		if _, err := ReconcileOwners(ctx, st, c, now, nil); err != nil {
 			t.Fatal(err)
 		}
 		delete(c.gone, "agent:agent-gone")
-		if res, err := ReconcileOwners(ctx, st, c, now); err != nil || res.Unorphaned != 2 {
+		if res, err := ReconcileOwners(ctx, st, c, now, nil); err != nil || res.Unorphaned != 2 {
 			t.Errorf("unanswered pass = %+v, %v; want the mark cleared", res, err)
 		}
 
 		// No checker: nothing happens.
-		if res, err := ReconcileOwners(ctx, st, nil, now); err != nil || res != (ReconcileResult{}) {
+		if res, err := ReconcileOwners(ctx, st, nil, now, nil); err != nil || res != (ReconcileResult{}) {
 			t.Errorf("nil checker = %+v, %v", res, err)
 		}
 	})
@@ -172,7 +172,7 @@ func TestReconcileOwnersCheckerError(t *testing.T) {
 
 		// Failing on the first page: nothing changes at all.
 		c.failOn = 0
-		res, err := ReconcileOwners(ctx, st, c, time.Now())
+		res, err := ReconcileOwners(ctx, st, c, time.Now(), nil)
 		var cerr *CheckerError
 		if !errors.As(err, &cerr) || !errors.Is(err, errChecker) || cerr.Unprocessed != ownerPageSize+5 {
 			t.Fatalf("error on the first page = %v (%+v); want a CheckerError with %d unprocessed", err, cerr, ownerPageSize+5)
@@ -192,7 +192,7 @@ func TestReconcileOwnersCheckerError(t *testing.T) {
 		// Failing on the second page: the first page is applied, the stop
 		// point is the second page, and its 5 owners stay unmarked.
 		c.calls, c.failOn = nil, 1
-		res, err = ReconcileOwners(ctx, st, c, time.Now())
+		res, err = ReconcileOwners(ctx, st, c, time.Now(), nil)
 		if !errors.As(err, &cerr) || cerr.Unprocessed != 5 {
 			t.Fatalf("error on the second page = %v (%+v); want 5 unprocessed", err, cerr)
 		}
@@ -207,7 +207,7 @@ func TestReconcileOwnersCheckerError(t *testing.T) {
 
 		// The next pass, with a working checker, finishes the job.
 		c.calls, c.failOn = nil, -1
-		res, err = ReconcileOwners(ctx, st, c, time.Now())
+		res, err = ReconcileOwners(ctx, st, c, time.Now(), nil)
 		if err != nil || res.Orphaned != 5 || res.Owners != ownerPageSize+5 || len(c.calls) != 2 {
 			t.Errorf("recovery pass = %+v, %v, %d calls", res, err, len(c.calls))
 		}

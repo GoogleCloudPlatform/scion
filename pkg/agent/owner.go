@@ -19,6 +19,7 @@ import (
 	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Instance ownership (ptone/scion#3274). A manager serving a flat Runtime
@@ -45,8 +46,10 @@ type OwnerScope struct {
 	// EntryUnresolved, when set, reports a runtime object carrying the
 	// owner label whose ownership is nevertheless unresolved (its agent or
 	// slug is claimed by another configured instance too). Such an object
-	// is not owned.
-	EntryUnresolved func(labels map[string]string) bool
+	// is not owned. labelKey maps a label key to the key the manager's
+	// runtime stores it under (runtime.LabelKey); labels are read through
+	// it.
+	EntryUnresolved func(labels map[string]string, labelKey func(string) string) bool
 	// EntryPathTrusted reports whether the project path an owned runtime
 	// object's labels name may be written (List's terminal-state
 	// convergence of agent-info.json). Nil means no label-derived path is
@@ -100,16 +103,25 @@ func (m *AgentManager) OwnerRuntimeBrokerID() string {
 }
 
 // ownsEntry reports whether a runtime entry belongs to this manager: always
-// for a legacy manager; for an owned manager only when the reserved label
-// names its instance and its ownership is not unresolved.
+// for a legacy manager; for an owned manager only when the reserved label,
+// read under the runtime's own key for it (labelKey), is
+// present and names its instance, and its ownership is not unresolved.
 func (m *AgentManager) ownsEntry(a api.AgentInfo) bool {
 	if m.owner == nil {
 		return true
 	}
-	if a.Labels[api.LabelRuntimeBrokerID] != m.owner.RuntimeBrokerID {
+	owner := a.Labels[m.labelKey(api.LabelRuntimeBrokerID)]
+	if owner == "" || owner != m.owner.RuntimeBrokerID {
 		return false
 	}
-	return m.owner.EntryUnresolved == nil || !m.owner.EntryUnresolved(a.Labels)
+	return m.owner.EntryUnresolved == nil || !m.owner.EntryUnresolved(a.Labels, m.labelKey)
+}
+
+// labelKey returns the key under which the manager's runtime stores the
+// label named key (runtime.LabelKey), so runtime entry labels are read
+// under the same keys they were written under.
+func (m *AgentManager) labelKey(key string) string {
+	return runtime.LabelKey(m.Runtime, key)
 }
 
 // ownsFileAgent reports whether a file-only agent belongs to this manager.
@@ -122,12 +134,18 @@ func (m *AgentManager) ownsFileAgent(projectID, slug string) bool {
 
 // mayWriteEntryPath reports whether List may write agent files under the
 // project path a runtime entry's labels name: always for a legacy manager;
-// for an owned manager only when its EntryPathTrusted accepts the path.
+// for an owned manager only when the entry's project ID label (read under
+// the runtime's key for it) is present and its EntryPathTrusted accepts the
+// path for that project ID.
 func (m *AgentManager) mayWriteEntryPath(a api.AgentInfo) bool {
 	if m.owner == nil {
 		return true
 	}
-	return m.owner.EntryPathTrusted != nil && m.owner.EntryPathTrusted(a.ProjectPath, a.Labels["scion.project_id"])
+	projectID := a.Labels[m.labelKey("scion.project_id")]
+	if projectID == "" {
+		return false
+	}
+	return m.owner.EntryPathTrusted != nil && m.owner.EntryPathTrusted(a.ProjectPath, projectID)
 }
 
 // ownsLaunchHandle reports whether CleanupLaunch may delete the object a
@@ -157,10 +175,11 @@ func (m *AgentManager) listRuntime(ctx context.Context, filter map[string]string
 }
 
 // ownerLabels returns the reserved owner label to add to a new runtime
-// object, or nil for a legacy manager.
+// object, or nil for a legacy manager. Its key is the runtime's own key for
+// the label (labelKey), the same key ownsEntry reads.
 func (m *AgentManager) ownerLabels() map[string]string {
 	if m.owner == nil {
 		return nil
 	}
-	return map[string]string{api.LabelRuntimeBrokerID: m.owner.RuntimeBrokerID}
+	return map[string]string{m.labelKey(api.LabelRuntimeBrokerID): m.owner.RuntimeBrokerID}
 }

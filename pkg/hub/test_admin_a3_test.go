@@ -375,7 +375,7 @@ func TestTestAdminA3_CanDelegateRequiresShaping(t *testing.T) {
 	assert.True(t, d.Allowed, "human control: %s", d.Reason)
 
 	// The middleware puts the shaping on every request of the identity.
-	ctx := contextWithTestAdminActor(contextWithIdentityAndUser(admin), row)
+	ctx := contextWithTestAdminActor(contextWithIdentityAndUser(admin), row, testAdminCredentialBearer)
 	ctx = contextWithGrantShaping(ctx)
 	g, ok := store.GrantShapingFromContext(ctx)
 	require.True(t, ok)

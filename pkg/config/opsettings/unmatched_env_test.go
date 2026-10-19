@@ -37,26 +37,12 @@ func unmatchedByName(environ []string) map[string]config.UnmatchedEnvName {
 
 func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 	cases := map[string]string{
-		// Underscored multi-word names bind only to a VersionedSettings
-		// field the hub ignores (ptone/scion#1081, ptone/scion#1284).
-		"SCION_SERVER_HUB_ADMIN_EMAILS":           "SCION_SERVER_HUB_ADMINEMAILS",
-		"SCION_SEED_SERVER_HUB_ADMIN_EMAILS":      "SCION_SEED_SERVER_HUB_ADMINEMAILS",
-		"SCION_SERVER_HUB_READ_TIMEOUT":           "SCION_SERVER_HUB_READTIMEOUT",
-		"SCION_SEED_SERVER_HUB_STALLED_THRESHOLD": "SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD",
-		"SCION_SEED_IMAGE_REGISTRY":               "SCION_SEED_IMAGEREGISTRY",
-		// Former schema names.
-		"SCION_SERVER_BROKER_PORT":           "SCION_SERVER_RUNTIMEBROKER_PORT",
-		"SCION_SERVER_BROKER_BROKERID":       "SCION_SERVER_BROKER_BROKER_ID",
-		"SCION_SERVER_HUB_ADMINEMAIL":        "SCION_SERVER_HUB_ADMINEMAILS",
-		"SCION_SERVER_HUB_ID":                "SCION_SERVER_HUB_HUBID",
-		"SCION_SERVER_AUTH_USER_ACCESS_MODE": "SCION_SERVER_AUTH_USERACCESSMODE",
-		// VersionedSettings spellings of CORS keys the hub reads from the
-		// flattened GlobalConfig fields.
-		"SCION_SERVER_HUB_CORS_ENABLED":         "SCION_SERVER_HUB_CORSENABLED",
-		"SCION_SERVER_HUB_CORS_MAX_AGE":         "SCION_SERVER_HUB_CORSMAXAGE",
-		"SCION_SERVER_HUB_CORS_ALLOWED_ORIGINS": "SCION_SERVER_HUB_CORSALLOWEDORIGINS",
-		"SCION_SERVER_BROKER_CORS_ENABLED":      "SCION_SERVER_RUNTIMEBROKER_CORSENABLED",
-		"SCION_SERVER_BROKER_CORS_MAX_AGE":      "SCION_SERVER_RUNTIMEBROKER_CORSMAXAGE",
+		// Former schema names and misspellings.
+		"SCION_SERVER_HUB_ADMINEMAIL": "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SERVER_HUB_ID":         "SCION_SERVER_HUB_HUBID",
+		// The derived spellings of server.hub.public_url are inert
+		// (ptone/scion#3905).
+		"SCION_SERVER_HUB_PUBLICURL": "SCION_SERVER_HUB_ENDPOINT",
 	}
 	var environ []string
 	for name := range cases {
@@ -85,15 +71,14 @@ func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 
 func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 	names := []string{
-		"SCION_SERVER_DATABASE_MAX_OPEN_CONNS",
 		"SCION_SERVER_NO_SUCH_SETTING",
+		// A half-collapsed spelling is neither the canonical name nor an
+		// alias (ptone/scion#3911).
+		"SCION_SERVER_HUB_PORT_PROXY_RESPONSEHEADERTIMEOUT",
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
 		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
 		"SCION_SERVER_LOG_FORMAT",
-		"SCION_SERVER_LOGFORMAT", // server.log_format is accepted but not read
-		// Underscored spelling splits into auto.expose.ports.enabled; the
-		// accepted spelling is SCION_SEED_AUTOEXPOSEPORTS_ENABLED.
-		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",
+		"SCION_SERVER_LOGFORMAT",              // server.log_format is accepted but not read
 		"SCION_SEED_SERVER_HUB_IMAGEREGISTRY", // image_registry is top-level
 		// trusted_issuers is a list of objects, so no single env string can
 		// set it (ptone/scion#3836).
@@ -141,6 +126,27 @@ func TestFindUnmatchedSettingsEnv_AcceptsValidNames(t *testing.T) {
 		"SCION_SEED_PROJECTDEFAULTS_DEFAULTSCRATCHPAD=x",
 		"SCION_SERVER_HARNESSCONFIGS=x",
 		"SCION_SEED_HARNESSCONFIGS=x",
+		// Legacy aliases from the env mapping table (ptone/scion#3911):
+		// they set the same setting as the canonical name.
+		"SCION_SERVER_HUB_ADMIN_EMAILS=x",
+		"SCION_SEED_SERVER_HUB_ADMIN_EMAILS=x",
+		"SCION_SERVER_HUB_READ_TIMEOUT=x",
+		"SCION_SEED_SERVER_HUB_STALLED_THRESHOLD=x",
+		"SCION_SEED_IMAGE_REGISTRY=x",
+		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED=x",
+		"SCION_SERVER_BROKER_PORT=x",
+		"SCION_SERVER_BROKER_BROKERID=x",
+		"SCION_SERVER_BROKER_BROKER_ID=x",
+		"SCION_SERVER_AUTH_USER_ACCESS_MODE=x",
+		"SCION_SERVER_DATABASE_MAX_OPEN_CONNS=x",
+		"SCION_SERVER_LOG_LEVEL=x",
+		"SCION_SERVER_HUB_CORS_ENABLED=x",
+		"SCION_SERVER_HUB_CORSENABLED=x",
+		"SCION_SERVER_HUB_CORS_MAX_AGE=x",
+		"SCION_SERVER_HUB_CORS_ALLOWED_ORIGINS=x",
+		"SCION_SERVER_BROKER_CORS_ENABLED=x",
+		"SCION_SERVER_BROKER_CORS_MAX_AGE=x",
+		"SCION_SERVER_RUNTIMEBROKER_CORSENABLED=x",
 		// Unrelated prefixes are ignored entirely.
 		"SCION_PROJECT=x",
 		"HOME=/tmp",
@@ -154,14 +160,14 @@ func TestWarnUnmatchedSettingsEnv_LogsNamesNotValues(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 	config.WarnUnmatchedSettingsEnv(logger, []string{
-		"SCION_SERVER_HUB_ADMIN_EMAILS=topsecret@example.com",
+		"SCION_SERVER_HUB_ADMINEMAIL=topsecret@example.com",
 		"SCION_SERVER_HUB_ADMINEMAILS=alsosecret@example.com",
 	}, IsLayer1Key)
 	out := buf.String()
 	if strings.Count(out, "level=WARN") != 1 {
 		t.Errorf("want exactly one warning, got:\n%s", out)
 	}
-	if !strings.Contains(out, "SCION_SERVER_HUB_ADMIN_EMAILS") || !strings.Contains(out, "did_you_mean=SCION_SERVER_HUB_ADMINEMAILS") {
+	if !strings.Contains(out, "SCION_SERVER_HUB_ADMINEMAIL ") || !strings.Contains(out, "did_you_mean=SCION_SERVER_HUB_ADMINEMAILS") {
 		t.Errorf("warning lacks name or hint:\n%s", out)
 	}
 	if strings.Contains(out, "secret") {
@@ -235,25 +241,24 @@ func TestSeedImageRegistry_ReachesBootstrap(t *testing.T) {
 	}
 }
 
-// TestFindUnmatchedSettingsEnv_LogLevelNote checks the LOG_LEVEL warning
-// names the setting spelling and says that SCION_LOG_LEVEL and --debug take
-// precedence over it.
-func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
-	u, ok := unmatchedByName([]string{"SCION_SERVER_LOG_LEVEL=debug"})["SCION_SERVER_LOG_LEVEL"]
-	if !ok {
-		t.Fatal("SCION_SERVER_LOG_LEVEL not flagged")
+// TestFindUnmatchedSettingsEnv_LogLevelAlias: SCION_SERVER_LOG_LEVEL is an
+// alias of server.log_level (canonical SCION_SERVER_LOGLEVEL) in the env
+// mapping table, so it sets the hub's log level and is not flagged.
+func TestFindUnmatchedSettingsEnv_LogLevelAlias(t *testing.T) {
+	if _, ok := unmatchedByName([]string{"SCION_SERVER_LOG_LEVEL=debug"})["SCION_SERVER_LOG_LEVEL"]; ok {
+		t.Error("SCION_SERVER_LOG_LEVEL flagged; it is an alias of server.log_level")
 	}
-	if u.Suggestion != "SCION_SERVER_LOGLEVEL" {
-		t.Errorf("suggestion = %q, want SCION_SERVER_LOGLEVEL", u.Suggestion)
+	path, alias, ok := config.KeyForServerEnv("SCION_SERVER_LOG_LEVEL")
+	if !ok || !alias || path != "server.log_level" {
+		t.Errorf("KeyForServerEnv(SCION_SERVER_LOG_LEVEL) = %q, %v, %v; want server.log_level, alias", path, alias, ok)
 	}
-	for _, want := range []string{"server.log_level", "startup", "file-mode reload", "SCION_LOG_LEVEL", "--debug"} {
-		if !strings.Contains(u.Note, want) {
-			t.Errorf("note %q lacks %q", u.Note, want)
-		}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_SERVER_LOG_LEVEL", "debug")
+	gc, err := config.LoadGlobalConfig(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	var buf bytes.Buffer
-	config.WarnUnmatchedSettingsEnv(slog.New(slog.NewTextHandler(&buf, nil)), []string{"SCION_SERVER_LOG_LEVEL=debug"}, IsLayer1Key)
-	if !strings.Contains(buf.String(), "note=") {
-		t.Errorf("warning lacks the note:\n%s", buf.String())
+	if gc.LogLevel != "debug" {
+		t.Errorf("GlobalConfig LogLevel = %q, want debug", gc.LogLevel)
 	}
 }
