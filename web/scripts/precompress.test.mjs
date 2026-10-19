@@ -23,7 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, utimesSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,8 +39,11 @@ const MAIN_BR_MAX = 85_000;
 const SHOELACE_BR_MAX = 50_000;
 const ENTRY_CLOSURE_BR_MAX = 160_000;
 
-function fixture() {
+// fixture writes a small client build into a new temp dir, removed when the
+// test ends.
+function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'precompress-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const text = 'export const x = "scion";\n'.repeat(200); // compresses well
   const files = {
     'assets/main.js': text,
@@ -73,8 +76,8 @@ test('isCandidateName', () => {
   }
 });
 
-test('writes br and gz siblings that decode to the source bytes', () => {
-  const dir = fixture();
+test('writes br and gz siblings that decode to the source bytes', (t) => {
+  const dir = fixture(t);
   const summary = precompressDir(dir);
   for (const name of ['assets/main.js', 'assets/style.css', 'assets/exact.js', 'shoelace/assets/icons/a.svg', 'manifest.webmanifest', '.vite/manifest.json']) {
     const raw = readFileSync(join(dir, name));
@@ -88,8 +91,8 @@ test('writes br and gz siblings that decode to the source bytes', () => {
   assert.equal(summary.files, 7, 'six compressible files plus random.js');
 });
 
-test('skips source maps, small files, other types and incompressible files', () => {
-  const dir = fixture();
+test('skips source maps, small files, other types and incompressible files', (t) => {
+  const dir = fixture(t);
   precompressDir(dir);
   for (const name of ['assets/main.js.map', 'assets/tiny.js', 'assets/font.woff2', 'assets/random.js']) {
     assert.ok(!existsSync(join(dir, `${name}.br`)), `${name}.br`);
@@ -97,8 +100,8 @@ test('skips source maps, small files, other types and incompressible files', () 
   }
 });
 
-test('is deterministic and idempotent, and removes stale siblings', () => {
-  const dir = fixture();
+test('is deterministic and idempotent, and removes stale siblings', (t) => {
+  const dir = fixture(t);
   precompressDir(dir);
   const first = readFileSync(join(dir, 'assets/main.js.gz'));
   const firstBr = readFileSync(join(dir, 'assets/main.js.br'));
@@ -114,19 +117,19 @@ test('is deterministic and idempotent, and removes stale siblings', () => {
   assert.ok(!existsSync(join(dir, 'assets/main.js.gz.br')));
 });
 
-test('siblings are not older than their source (DiskIndex mtime rule)', () => {
-  const dir = fixture();
+test('siblings are not older than their source (DiskIndex mtime rule)', (t) => {
+  const dir = fixture(t);
   const past = new Date(Date.now() - 3_600_000);
   utimesSync(join(dir, 'assets/main.js'), past, past);
   precompressDir(dir);
   assert.ok(statSync(join(dir, 'assets/main.js.br')).mtimeMs >= statSync(join(dir, 'assets/main.js')).mtimeMs);
 });
 
-test('CLI: usage error without a dir, summary line with one', () => {
+test('CLI: usage error without a dir, summary line with one', (t) => {
   const bad = spawnSync(process.execPath, [script], { encoding: 'utf8' });
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /usage/);
-  const dir = fixture();
+  const dir = fixture(t);
   const ok = spawnSync(process.execPath, [script, dir], { encoding: 'utf8' });
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /^precompress: .*7 files/);

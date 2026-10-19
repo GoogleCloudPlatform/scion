@@ -330,6 +330,13 @@ func TestNewIndex_NonCleanPathRejected(t *testing.T) {
 	}
 }
 
+func TestNewIndex_NilFS(t *testing.T) {
+	ix, err := NewIndex(nil)
+	if err == nil || ix != nil {
+		t.Fatalf("NewIndex(nil) = %v, %v; want nil index and an error", ix, err)
+	}
+}
+
 // TestNewIndex_HashingTime10MB bounds the startup cost of hashing (design
 // risk 3): indexing 10 MB of assets must take under 200 ms.
 func TestNewIndex_HashingTime10MB(t *testing.T) {

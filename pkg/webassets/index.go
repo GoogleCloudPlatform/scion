@@ -65,6 +65,9 @@ type entry struct {
 // under assets/ and shoelace/. Files named *.br or *.gz are never servable
 // by their own name.
 func NewIndex(fsys fs.FS) (*Index, error) {
+	if fsys == nil {
+		return nil, fmt.Errorf("webassets: NewIndex: nil file system")
+	}
 	ix := &Index{fsys: fsys, entries: map[string]*entry{}}
 	err := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
