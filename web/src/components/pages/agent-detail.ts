@@ -877,12 +877,13 @@ export class ScionPageAgentDetail extends LitElement {
    * re-rendering the whole page for nothing.
    */
   private onAgentsChanged(event: Event): void {
-    const change = (event as CustomEvent<{ data?: AgentsChangedDetail }>).detail?.data;
+    // Typed as partial: a malformed or partial payload must not throw here.
+    const change = (event as CustomEvent<{ data?: Partial<AgentsChangedDetail> }>).detail?.data;
     const id = this.agentId;
     if (
       !change ||
       !id ||
-      !(change.upserted.includes(id) || change.deleted.includes(id) || change.unknown.has(id))
+      !(change.upserted?.includes(id) || change.deleted?.includes(id) || change.unknown?.has(id))
     ) {
       return;
     }
@@ -1017,12 +1018,13 @@ export class ScionPageAgentDetail extends LitElement {
     const updatedProject = stateManager.getProject(this.agent.projectId);
     if (!updatedProject) return;
     // `projects-updated` carries no ID. Skip a flush that did not touch
-    // this page's project: same object as the one last merged (or the
-    // one loadData seeded, which is `this.project` itself) and the same
-    // updatedAt.
+    // this page's project: the same object as the one last merged (or the
+    // one loadData seeded, which is `this.project` itself). stateManager
+    // never mutates a stored project in place, so the same reference means
+    // nothing changed.
     const sameObject =
       updatedProject === this.project || updatedProject === this.mergedProjectSource;
-    if (sameObject && updatedProject.updatedAt === this.project.updatedAt) return;
+    if (sameObject) return;
     this.mergedProjectSource = updatedProject;
     this.project = { ...this.project, ...updatedProject };
   }

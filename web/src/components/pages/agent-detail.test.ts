@@ -783,6 +783,29 @@ describe('scion-page-agent-detail reacts only to its own agent (webperf C2)', ()
     expect(renders.calls).toBe(0);
   });
 
+  it('agent-detail tolerates a partial agents-changed payload', async () => {
+    const el = await mount(makeAgent());
+    const renders = spyRender(el);
+    fakeStateManager.setAgent({ ...makeAgent(), phase: 'stopped' } as { id: string });
+
+    // Payloads missing some or all of upserted/deleted/unknown.
+    for (const data of [{}, { deleted: ['agent-B'] }, { unknown: new Map() }, undefined]) {
+      expect(() =>
+        fakeStateManager.dispatchEvent(new CustomEvent('agents-changed', { detail: { data } }))
+      ).not.toThrow();
+    }
+    await el.updateComplete;
+    expect(renders.calls).toBe(0);
+
+    // A partial payload that names this agent is still applied.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('agents-changed', { detail: { data: { upserted: [AGENT_ID] } } })
+    );
+    await el.updateComplete;
+    expect(renders.calls).toBe(1);
+    expect((el as unknown as { agent: Agent }).agent.phase).toBe('stopped');
+  });
+
   it('agent-detail re-renders for its own agent', async () => {
     const el = await mount(makeAgent());
     const renders = spyRender(el);

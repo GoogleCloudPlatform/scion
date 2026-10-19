@@ -22,9 +22,13 @@ sibling agent's status tick. `projects-updated` did the same with
   logic are unchanged.
 - `projects-updated` carries no ID, so the page remembers the stateManager
   project object it last merged (or seeded: `loadData` seeds `this.project`
-  itself). It skips the flush when the object is that same reference and
-  `updatedAt` is the same. stateManager replaces a project's object on each
-  of its events, so reference equality is a reliable "nothing changed" signal.
+  itself). It skips the flush when the object is that same reference.
+  stateManager replaces a project's object on each of its events and never
+  mutates one in place, so reference equality is a reliable "nothing
+  changed" signal; an extra `updatedAt` comparison would be redundant.
+- Event payloads are read defensively (optional chaining on `upserted`,
+  `deleted` and `unknown`), so a partial `agents-changed` payload is
+  ignored instead of throwing.
 - On `agents-resync` (an SSE reconnect) the page refetches its agent
   through `backgroundRefresh()`. Changes during the outage arrive in no
   `agents-changed` flush, and the old "pick it up at any flush" behaviour no
@@ -55,6 +59,9 @@ New tests use a render-count spy (an instance override of `render()`):
 - `agent-detail re-renders for its own agent`: 1 render.
 - `agent-detail project update with same reference ignored`: 0 renders, then
   1 render for a new object with a new `updatedAt`.
+- `agent-detail tolerates a partial agents-changed payload`: no throw and no
+  render for payloads missing fields; a partial payload naming this agent
+  still applies.
 - `agent-detail refetches its agent on agents-resync`: GETs the agent and shows
   the new phase.
 
