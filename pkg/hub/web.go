@@ -1249,7 +1249,8 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		// symlink) and no *.br/*.gz sibling is opened.
 		fileServer = http.FileServer(webassets.DirFileSystem(ws.assetsDisk))
 	} else {
-		fileServer = http.FileServer(http.FS(ws.assets))
+		// Like http.FS, but no *.br/*.gz sibling is opened.
+		fileServer = http.FileServer(webassets.FSFileSystem(ws.assets))
 	}
 
 	// Go's built-in MIME table has no entry for these, and the system
@@ -1259,7 +1260,20 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
+	// Set here for the file server fallback (and the 404s below); Serve sets
+	// the same value through the same policy.
 	w.Header().Set("Cache-Control", ws.staticCacheControl(r.URL.Path))
+
+	// The mux cleans only the escaped path, so a decoded path can still
+	// hold dot segments or empty segments (from %2e or %2f). Such a path is
+	// refused rather than cleaned, and a precompressed sibling is never
+	// served by its own name, so the name the file server would open is
+	// always the name checked here.
+	clean := cleanStaticPath(r.URL.Path)
+	if clean != r.URL.Path || webassets.IsVariantName(clean) {
+		http.NotFound(w, r)
+		return
+	}
 
 	// Indexed files are served with their precompressed variant (br, gzip)
 	// and an ETag; anything else (directories, unindexed paths) falls back
@@ -1267,12 +1281,24 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 	if srv := ws.staticAssets(); srv != nil && srv.Serve(w, r, ws.staticCacheControl) {
 		return
 	}
-	// The fallback never serves a precompressed sibling by its own name.
-	if webassets.IsVariantName(r.URL.Path) {
-		http.NotFound(w, r)
-		return
-	}
 	fileServer.ServeHTTP(w, r)
+}
+
+// cleanStaticPath cleans a URL path the way http.ServeMux does: rooted,
+// path.Clean, and a trailing slash kept (so directory paths stay as they
+// are).
+func cleanStaticPath(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if p[0] != '/' {
+		p = "/" + p
+	}
+	np := path.Clean(p)
+	if p[len(p)-1] == '/' && np != "/" {
+		np += "/"
+	}
+	return np
 }
 
 // staticCacheControl is the Cache-Control of a static asset. Files Vite
@@ -1620,9 +1646,10 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	if name == "" {
 		return false
 	}
-	// A precompressed sibling (*.br, *.gz) is never a file of its own:
-	// treat it as missing.
-	if webassets.IsVariantName(name) {
+	// A non-clean decoded path (dot or empty segments left by %2e or %2f)
+	// and a precompressed sibling (*.br, *.gz, checked on the clean name)
+	// are never files of their own: treat them as missing.
+	if clean := cleanStaticPath(r.URL.Path); clean != r.URL.Path || webassets.IsVariantName(clean) {
 		return false
 	}
 

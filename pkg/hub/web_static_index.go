@@ -65,7 +65,10 @@ type assetServer interface {
 // ws.assets or ws.assetsDisk after construction (see staticHandler), so each
 // request compares the source it sees with the one the index was built from
 // (a pointer or value comparison, never a hash) and rebuilds under the mutex
-// only when they differ. A stale index is therefore never served.
+// only when they differ. A stale index is therefore never served, with one
+// limit: the identity of the source is compared, not its contents, so a
+// test that changes the same MapFS in place after the first request would
+// still get the index of the earlier contents.
 type staticAssetIndex struct {
 	current atomic.Pointer[staticAssetSnapshot]
 	mu      sync.Mutex // serializes rebuilds

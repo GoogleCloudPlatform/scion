@@ -207,3 +207,34 @@ func TestServe_MethodsOtherThanGetHead(t *testing.T) {
 		}
 	}
 }
+
+func TestFSFileSystem_RefusesVariantNames(t *testing.T) {
+	fsys := FSFileSystem(testFS(t))
+	for _, name := range []string{"/assets/main.js.br", "/assets/main.js.gz", "/assets/MAIN.JS.BR", "/favicon.svg.br"} {
+		if f, err := fsys.Open(name); err == nil {
+			_ = f.Close()
+			t.Errorf("opened %s", name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: err %v, want fs.ErrNotExist", name, err)
+		}
+	}
+	for _, name := range []string{"/assets/main.js", "/assets", "/favicon.svg"} {
+		f, err := fsys.Open(name)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		_ = f.Close()
+	}
+	srv := http.FileServer(fsys)
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/main.js.br", nil))
+	if rec.Code != http.StatusNotFound || bytes.Equal(rec.Body.Bytes(), fakeBrotli) {
+		t.Errorf("file server served the sibling: code %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/sub/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "deep.js") {
+		t.Errorf("listing: code %d body %q", rec.Code, rec.Body.String())
+	}
+}

@@ -353,7 +353,9 @@ func TestNewIndex_HashingTime10MB(t *testing.T) {
 		t.Fatalf("indexed %d files, want %d", ix.Len(), files)
 	}
 	t.Logf("indexed %d bytes in %v", files*size, elapsed)
-	if elapsed >= 200*time.Millisecond {
+	// The race detector slows hashing several times over; the bound holds
+	// for normal builds only (the nightly race job runs this package).
+	if !raceEnabled && elapsed >= 200*time.Millisecond {
 		t.Errorf("indexing 10 MB took %v, want < 200ms", elapsed)
 	}
 }

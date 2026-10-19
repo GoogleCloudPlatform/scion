@@ -161,3 +161,21 @@ func (d dirFileSystem) Open(name string) (http.File, error) {
 	}
 	return f, nil
 }
+
+// FSFileSystem returns an http.FileSystem over fsys for a fallback
+// http.FileServer. It is http.FS(fsys), except that a precompressed sibling
+// (*.br, *.gz) is never opened by its own name.
+func FSFileSystem(fsys fs.FS) http.FileSystem {
+	return variantRefusingFS{http.FS(fsys)}
+}
+
+type variantRefusingFS struct {
+	http.FileSystem
+}
+
+func (v variantRefusingFS) Open(name string) (http.File, error) {
+	if IsVariantName(name) {
+		return nil, fs.ErrNotExist
+	}
+	return v.FileSystem.Open(name)
+}

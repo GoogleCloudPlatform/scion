@@ -64,6 +64,8 @@ func TestIsVariantName(t *testing.T) {
 		"assets/main.js.br": true,
 		"assets/main.js.gz": true,
 		"/favicon.svg.GZ":   true,
+		"/assets/x.br/":     true,
+		"/assets/x.gz//":    true,
 		"assets/main.js":    false,
 		"assets/brand.js":   false,
 		"assets/x.gzip":     false,

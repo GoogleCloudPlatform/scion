@@ -67,6 +67,7 @@ func validatorAssets(t *testing.T) fstest.MapFS {
 		},
 		"favicon.svg":         {Data: validatorFavicon},
 		"favicon.svg.br":      {Data: validatorFavBr},
+		"favicon.svg.gz":      {Data: gzipBytes(t, validatorFavicon)},
 		".vite/manifest.json": {Data: []byte(`{"outside-marker": {"file": "assets/main.js", "isEntry": true}}`)},
 	}
 }
@@ -177,7 +178,32 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 			req.RequestURI = target
 			rec := httptest.NewRecorder()
 			ws.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code, target)
 			assert.NotContains(t, rec.Body.String(), "outside-marker", target)
+			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+		}
+	})
+
+	t.Run("non-clean decoded paths are refused, not cleaned", func(t *testing.T) {
+		// The mux cleans only the escaped path: an encoded slash or dot
+		// leaves dot segments in the decoded path. Cleaning them would
+		// reach the stored sibling (main.js.br) or another file, so the
+		// request is a 404.
+		for _, target := range []string{
+			"/assets/main.js.br%2f.",
+			"/assets/main.js.br%2F%2e",
+			"/assets/main.js.gz%2f.",
+			"/assets/x%2f..%2fmain.js.br",
+			"/assets/main.js%2f.",
+			"/assets/%2e/main.js",
+		} {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept-Encoding", "br, gzip")
+			rec := httptest.NewRecorder()
+			ws.Handler().ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code, target)
+			assert.NotEqual(t, validatorMainBr, rec.Body.Bytes(), target)
+			assert.NotContains(t, rec.Body.String(), "console.log", target)
 			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		}
 	})
@@ -354,6 +380,76 @@ func TestStaticAsset_IndexFollowsAssetSource(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(ws.assetsDisk, "assets", "main.js"), []byte("// disk"), 0o644))
 	resp = doStatic(t, ws, http.MethodGet, "/assets/main.js", nil)
 	assert.Equal(t, "// disk", string(readBody(t, resp)))
+}
+
+// TestStaticAsset_SiblingNameForms covers every spelling of a sibling
+// name, through the /assets/ handler (serveStaticAsset) and the root-file
+// path (tryServeStaticFile), in embedded mode: none returns the stored
+// variant or any Content-Encoding. The /assets/ forms get a 404 (or the
+// mux's redirect for a literal dot segment); the root forms get the SPA
+// shell, as any missing root file does (or the mux's redirect).
+func TestStaticAsset_SiblingNameForms(t *testing.T) {
+	ws := newValidatorWebServer(t)
+	// The root forms run with dev auth so that every one of them reaches
+	// the SPA catch-all (and so tryServeStaticFile), not the login gate.
+	wsAuth := newDevAuthWebServer(t)
+	wsAuth.assets = validatorAssets(t)
+	wsAuth.assetsDisk = ""
+	wsAuth.hasAssets = wsAuth.detectWebAssets()
+	require.True(t, wsAuth.hasAssets)
+	gzMain := gzipBytes(t, validatorMainJS)
+	gzFav := gzipBytes(t, validatorFavicon)
+	cases := []struct {
+		base   string // the sibling, e.g. /assets/main.js.br
+		stored []byte
+		root   bool // served through tryServeStaticFile
+	}{
+		{"/assets/main.js.br", validatorMainBr, false},
+		{"/assets/main.js.gz", gzMain, false},
+		{"/favicon.svg.br", validatorFavBr, true},
+		{"/favicon.svg.gz", gzFav, true},
+	}
+	for _, tc := range cases {
+		for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
+			target := tc.base + suffix
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept-Encoding", "br, gzip")
+			rec := httptest.NewRecorder()
+			if tc.root {
+				wsAuth.Handler().ServeHTTP(rec, req)
+			} else {
+				ws.Handler().ServeHTTP(rec, req)
+			}
+			body := rec.Body.Bytes()
+			assert.NotEqual(t, tc.stored, body, target)
+			assert.False(t, bytes.Contains(body, tc.stored), "%s: body holds the stored variant", target)
+			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+			switch {
+			case rec.Code == http.StatusMovedPermanently:
+			case !tc.root && rec.Code == http.StatusNotFound:
+			case tc.root && rec.Code == http.StatusOK:
+				assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be the SPA shell", target)
+			default:
+				t.Errorf("%s: unexpected status %d", target, rec.Code)
+			}
+		}
+	}
+}
+
+func TestCleanStaticPath(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                       "/",
+		"/":                      "/",
+		"/assets/":               "/assets/",
+		"/assets/main.js":        "/assets/main.js",
+		"/assets/main.js.br/.":   "/assets/main.js.br",
+		"/assets/../favicon.svg": "/favicon.svg",
+		"/assets//main.js":       "/assets/main.js",
+		"/assets/./":             "/assets/",
+		"assets/main.js":         "/assets/main.js",
+	} {
+		assert.Equal(t, want, cleanStaticPath(in), in)
+	}
 }
 
 func TestSameFS(t *testing.T) {

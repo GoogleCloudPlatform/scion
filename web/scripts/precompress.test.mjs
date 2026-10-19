@@ -18,7 +18,7 @@
 //
 // The unit tests use a temp dir. The "real build" tests check the output of
 // `npm run build` in dist/client (decoding and byte budgets); they skip when
-// no build is present, so run them after a build.
+// no build is present (fail with REQUIRE_BUILD=1), so run them after a build.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -135,8 +135,15 @@ test('CLI: usage error without a dir, summary line with one', () => {
 
 // ---- Real build output (after `npm run build`) ----
 
+// REQUIRE_BUILD=1 (set by the gate) turns a missing build into failures
+// instead of skips.
 const haveBuild = existsSync(join(distClient, 'assets', 'main.js'));
-const skipReason = haveBuild ? false : 'no build in dist/client; run npm run build first';
+const requireBuild = process.env.REQUIRE_BUILD === '1';
+const skipReason = haveBuild || requireBuild ? false : 'no build in dist/client; run npm run build first';
+
+function assertBuild() {
+  assert.ok(haveBuild, `no build in ${distClient} (REQUIRE_BUILD=1)`);
+}
 
 function* walk(dir) {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -152,12 +159,14 @@ function brSize(rel) {
 }
 
 test('real build: main.js.br and main.js.gz exist and decode to identical bytes', { skip: skipReason }, () => {
+  assertBuild();
   const raw = readFileSync(join(distClient, 'assets/main.js'));
   assert.deepEqual(brotliDecompressSync(readFileSync(join(distClient, 'assets/main.js.br'))), raw);
   assert.deepEqual(gunzipSync(readFileSync(join(distClient, 'assets/main.js.gz'))), raw);
 });
 
 test('real build: every .br/.gz decodes to its source', { skip: skipReason }, () => {
+  assertBuild();
   let n = 0;
   for (const p of walk(distClient)) {
     if (!p.endsWith('.br') && !p.endsWith('.gz')) continue;
@@ -171,6 +180,7 @@ test('real build: every .br/.gz decodes to its source', { skip: skipReason }, ()
 });
 
 test('real build: byte budgets', { skip: skipReason }, () => {
+  assertBuild();
   const mainBr = statSync(join(distClient, 'assets/main.js.br')).size;
   console.log(`main.js.br = ${mainBr} B (budget ${MAIN_BR_MAX})`);
   assert.ok(mainBr <= MAIN_BR_MAX, `main.js.br ${mainBr} > ${MAIN_BR_MAX}`);

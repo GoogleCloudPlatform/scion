@@ -45,9 +45,10 @@ var etagSuffix = map[Encoding]string{
 // IsVariantName reports whether name (a URL path or file name) is a
 // precompressed sibling (*.br or *.gz). Such names are never servable by
 // their own name: they are only sent as an encoded representation of the
-// file without the suffix.
+// file without the suffix. Trailing slashes are ignored ("x.br/" is a
+// variant name too).
 func IsVariantName(name string) bool {
-	lower := strings.ToLower(name)
+	lower := strings.ToLower(strings.TrimRight(name, "/"))
 	return strings.HasSuffix(lower, ".br") || strings.HasSuffix(lower, ".gz")
 }
 
