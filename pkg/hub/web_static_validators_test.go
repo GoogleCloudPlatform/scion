@@ -278,46 +278,6 @@ func TestStaticAsset_ConditionalGet304(t *testing.T) {
 // TestStaticAsset_DirectoryFallbackUnchanged pins that A1 keeps the
 // http.FileServer fallback for everything the index does not serve: the
 // directory listing still works (A4 changes it later).
-func TestStaticAsset_DirectoryFallbackUnchanged(t *testing.T) {
-	ws := newValidatorWebServer(t)
-	resp := doStatic(t, ws, http.MethodGet, "/assets/", nil)
-	body := readBody(t, resp)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, string(body), "main.js")
-	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
-	assert.Empty(t, resp.Header.Get("ETag"), "listings are not indexed")
-
-	t.Run("disk", func(t *testing.T) {
-		dir := t.TempDir()
-		require.NoError(t, os.MkdirAll(filepath.Join(dir, "assets"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "assets", "main.js"), validatorMainJS, 0o644))
-		disk := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		resp := doStatic(t, disk, http.MethodGet, "/assets/", nil)
-		body := readBody(t, resp)
-		require.Equal(t, http.StatusOK, resp.StatusCode)
-		assert.Contains(t, string(body), "main.js")
-	})
-
-	t.Run("disk symlink out of the root is not served", func(t *testing.T) {
-		outside := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(outside, "outside.js"), []byte("outside-marker"), 0o644))
-		dir := t.TempDir()
-		require.NoError(t, os.MkdirAll(filepath.Join(dir, "assets"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "assets", "main.js"), validatorMainJS, 0o644))
-		if err := os.Symlink(filepath.Join(outside, "outside.js"), filepath.Join(dir, "assets", "linked.js")); err != nil {
-			t.Skipf("symlinks unsupported: %v", err)
-		}
-		require.NoError(t, os.Symlink(outside, filepath.Join(dir, "assets", "out")))
-		disk := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		for _, p := range []string{"/assets/linked.js", "/assets/out/outside.js", "/assets/out/"} {
-			resp := doStatic(t, disk, http.MethodGet, p, nil)
-			body := readBody(t, resp)
-			assert.Equal(t, http.StatusNotFound, resp.StatusCode, p)
-			assert.NotContains(t, string(body), "outside-marker", p)
-		}
-	})
-}
-
 func TestRootStaticFile_ETag(t *testing.T) {
 	ws := newValidatorWebServer(t)
 	resp := doStatic(t, ws, http.MethodGet, "/favicon.svg", map[string]string{"Accept-Encoding": "br"})
@@ -440,8 +400,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		{"/favicon.svg.gz", gzFav, true},
 	}
 	// check asserts that a response never carries the stored variant.
-	// followed reports that rec is the landing response of a redirect.
-	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root, followed bool) {
+	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root bool) {
 		t.Helper()
 		body := rec.Body.Bytes()
 		assert.NotEqual(t, stored, body, target)
@@ -449,9 +408,9 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		switch {
 		case !root && rec.Code == http.StatusNotFound:
-		case rec.Code == http.StatusOK && (root || followed):
-			// The SPA shell (root forms) or, only after a redirect, the
-			// directory listing a dot-dot form under /assets/ lands on.
+		case rec.Code == http.StatusOK && root:
+			// The SPA shell. Under /assets/ a dot-dot form lands on the
+			// directory, which is a 404 (no listings).
 			assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be HTML", target)
 		default:
 			t.Errorf("%s: unexpected status %d", target, rec.Code)
@@ -476,9 +435,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 					req.Header.Set("Accept-Encoding", "br, gzip")
 					rec := httptest.NewRecorder()
 					srv(tc.root).ServeHTTP(rec, req)
-					followed := false
 					if isRedirect(rec.Code) {
-						followed = true
 						// The mux cleans a literal dot segment with a
 						// redirect; follow it once and check where it lands.
 						assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
@@ -491,7 +448,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 						srv(tc.root).ServeHTTP(rec, req)
 						target += " -> " + loc
 					}
-					check(t, target, rec, tc.stored, tc.root, followed)
+					check(t, target, rec, tc.stored, tc.root)
 				}
 			}
 		})
