@@ -193,6 +193,7 @@ export class ScionPageProjects extends LitElement {
     const hydratedCaps = stateManager.getScopeCapabilities('project');
     if (hydratedProjects.length > 0 && hydratedCaps && this.projectScope === 'all') {
       this.projects = hydratedProjects;
+      this.mergedFrom.clear();
       this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedProjects(this.projects);

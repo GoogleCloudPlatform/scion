@@ -76,13 +76,11 @@ function withInheritedCapabilities(agent: Agent, scopeCapabilities?: Capabilitie
 }
 
 /** Own enumerable keys and their values are identical (`Object.is`) in both objects. */
-function shallowEqual(a: Agent, b: Agent): boolean {
-  const aKeys = Object.keys(a);
+function shallowEqual<T extends object>(a: T, b: T): boolean {
+  const aKeys = Object.keys(a) as Array<keyof T>;
   if (aKeys.length !== Object.keys(b).length) return false;
-  const aRec = a as unknown as Record<string, unknown>;
-  const bRec = b as unknown as Record<string, unknown>;
   for (const key of aKeys) {
-    if (!Object.prototype.hasOwnProperty.call(b, key) || !Object.is(aRec[key], bRec[key])) {
+    if (!Object.prototype.hasOwnProperty.call(b, key) || !Object.is(a[key], b[key])) {
       return false;
     }
   }
