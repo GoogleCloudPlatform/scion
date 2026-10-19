@@ -254,7 +254,7 @@ func (s *Server) WarnMaintenanceImageRegistryDrift() {
 	}
 	if resolved := s.resolveImageRegistry(); resolved != override {
 		slog.Warn(config.EnvMaintenanceImageRegistry+" now applies only to maintenance image builds; agent images use the resolved image_registry. Set "+config.EnvImageRegistry+" or the hub image_registry setting for agent images.",
-			"maintenance_image_registry", override, "agent_image_registry", resolved)
+			"maintenance_image_registry", config.RedactImageRegistry(override), "agent_image_registry", config.RedactImageRegistry(resolved))
 	}
 }
 
@@ -290,5 +290,5 @@ func (s *Server) WarnShadowedImageRegistries(instanceRegistries map[string]strin
 	sort.Strings(profiles)
 	sort.Strings(instances)
 	slog.Warn("image_registry: the hub's saved top-level value now beats these settings-file values; clear the hub value, or move each value into the hub profile",
-		"hub_image_registry", top, "profiles", profiles, "flat_instances", instances)
+		"hub_image_registry", config.RedactImageRegistry(top), "profiles", profiles, "flat_instances", instances)
 }
