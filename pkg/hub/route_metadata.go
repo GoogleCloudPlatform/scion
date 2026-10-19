@@ -450,8 +450,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
-	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
-	// tokens with agent:port:forward only; the handler reads the agent row.
+	// Conduit sessions (WebSocket), behind hub.conduit. Agent principals
+	// authenticate with an agent token carrying agent:port:forward (the
+	// handler reads the agent row); runtime broker principals authenticate
+	// with broker HMAC through the shared /runtime-brokers/connect verifier,
+	// and their sessions carry the hub's transient broker RPCs.
 	"/api/v1/conduit": {
 		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
 		Classification: RouteAgentToken,
@@ -510,11 +513,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
@@ -753,21 +758,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
@@ -811,6 +820,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
 		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Conduit grant key revocation, behind hub.conduit. Removes a key at
+	// once; returns the kid only.
+	"/api/v1/admin/conduit/grant-keys/revoke": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/revoke", RouteID: "admin.conduit.grantKeys.revoke",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
@@ -939,17 +956,22 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Role management (PR-C1)
+	// Hub admin: Role management (PR-C1). The read routes admit a
+	// hub-boundary token carrying role:read; every write method on them is
+	// checked again inline with its own permission, which no token selector
+	// admits.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/roles": {
 		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/export": {
 		Pattern: "/api/v1/admin/roles/export", RouteID: "admin.roles.export",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/import": {
 		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
@@ -960,6 +982,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/role-bindings": {
 		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
@@ -984,25 +1007,31 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Access Constraints (AC1)
+	// Hub admin: Access Constraints (AC1). The read routes admit a
+	// hub-boundary token carrying access_constraint:read; every write method
+	// on them is checked again inline with access_constraint.admin, which no
+	// token selector admits.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/access-constraints": {
 		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraints/": {
 		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"GET /api/v1/admin/access-constraints/{id}/audit": {
 		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
 		Classification: RoutePolicy,
-		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "manage",
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "read",
 	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
@@ -1018,7 +1047,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/effective-access": {
 		Pattern: "/api/v1/admin/effective-access", RouteID: "admin.effectiveAccess",
 		Classification: RouteAuthenticated,
-		Permission:     "hub.audit.read", Resource: "hub", Action: "manage",
+		Permission:     "hub.audit.read", Resource: "hub", Action: "read",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1124,6 +1153,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// and user.delete (canDeleteTestIdentity).
 	"DELETE /api/v1/test-identities/{id}": {
 		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Issuer-scoped orphan cleanup (Phase 3c). The handler selects the
+	// targets from the provenance stamps of expired or deleted test
+	// identities of the caller's issuer scope (its own identities, its own
+	// workload delegation's, or every issuer's for an unscoped platform
+	// admin session); the request names none.
+	"POST /api/v1/test-identities/cleanup": {
+		Pattern: "POST /api/v1/test-identities/cleanup", RouteID: "testIdentities.cleanup",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Provenance explain (Phase 3c): proven or unproven for one resource;
+	// no owner or creator data for an unproven one.
+	"GET /api/v1/test-identities/provenance": {
+		Pattern: "GET /api/v1/test-identities/provenance", RouteID: "testIdentities.provenance",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",

@@ -59,28 +59,7 @@ func deleteWithHiddenSibling(t *testing.T, agentName string, prepare func(projec
 		t.Fatalf("CreateWorktree: %v", err)
 	}
 
-	volume := filepath.Join(tmpDir, "volume")
-	sibling := filepath.Join(volume, "sibling")
-	if err := os.MkdirAll(volume, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command("git", "-C", projectDir, "worktree", "add", "-b", "sibling", sibling).CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add sibling: %v\n%s", err, out)
-	}
-	hidden := filepath.Join(tmpDir, "volume-hidden")
-	if err := os.Rename(volume, hidden); err != nil {
-		t.Fatal(err)
-	}
-	restored := false
-	restore := func() {
-		if !restored {
-			restored = true
-			if err := os.Rename(hidden, volume); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	t.Cleanup(restore)
+	sibling, restore := addHiddenSiblingWorktree(t, projectDir)
 
 	if prepare != nil {
 		prepare(projectDir, agentWorkspace)

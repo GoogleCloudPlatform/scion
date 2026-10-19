@@ -190,6 +190,11 @@ func AgentDelegationCode(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldAgentDelegationCode, v))
 }
 
+// ProvenanceBasis applies equality check predicate on the "provenance_basis" field. It's identical to ProvenanceBasisEQ.
+func ProvenanceBasis(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldProvenanceBasis, v))
+}
+
 // TimestampEQ applies the EQ predicate on the "timestamp" field.
 func TimestampEQ(v time.Time) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldEQ(FieldTimestamp, v))
@@ -2128,6 +2133,81 @@ func AgentDelegationCodeEqualFold(v string) predicate.MutationAudit {
 // AgentDelegationCodeContainsFold applies the ContainsFold predicate on the "agent_delegation_code" field.
 func AgentDelegationCodeContainsFold(v string) predicate.MutationAudit {
 	return predicate.MutationAudit(sql.FieldContainsFold(FieldAgentDelegationCode, v))
+}
+
+// ProvenanceBasisEQ applies the EQ predicate on the "provenance_basis" field.
+func ProvenanceBasisEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEQ(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisNEQ applies the NEQ predicate on the "provenance_basis" field.
+func ProvenanceBasisNEQ(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNEQ(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisIn applies the In predicate on the "provenance_basis" field.
+func ProvenanceBasisIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIn(FieldProvenanceBasis, vs...))
+}
+
+// ProvenanceBasisNotIn applies the NotIn predicate on the "provenance_basis" field.
+func ProvenanceBasisNotIn(vs ...string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotIn(FieldProvenanceBasis, vs...))
+}
+
+// ProvenanceBasisGT applies the GT predicate on the "provenance_basis" field.
+func ProvenanceBasisGT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGT(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisGTE applies the GTE predicate on the "provenance_basis" field.
+func ProvenanceBasisGTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldGTE(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisLT applies the LT predicate on the "provenance_basis" field.
+func ProvenanceBasisLT(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLT(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisLTE applies the LTE predicate on the "provenance_basis" field.
+func ProvenanceBasisLTE(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldLTE(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisContains applies the Contains predicate on the "provenance_basis" field.
+func ProvenanceBasisContains(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContains(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisHasPrefix applies the HasPrefix predicate on the "provenance_basis" field.
+func ProvenanceBasisHasPrefix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasPrefix(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisHasSuffix applies the HasSuffix predicate on the "provenance_basis" field.
+func ProvenanceBasisHasSuffix(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldHasSuffix(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisIsNil applies the IsNil predicate on the "provenance_basis" field.
+func ProvenanceBasisIsNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldIsNull(FieldProvenanceBasis))
+}
+
+// ProvenanceBasisNotNil applies the NotNil predicate on the "provenance_basis" field.
+func ProvenanceBasisNotNil() predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldNotNull(FieldProvenanceBasis))
+}
+
+// ProvenanceBasisEqualFold applies the EqualFold predicate on the "provenance_basis" field.
+func ProvenanceBasisEqualFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldEqualFold(FieldProvenanceBasis, v))
+}
+
+// ProvenanceBasisContainsFold applies the ContainsFold predicate on the "provenance_basis" field.
+func ProvenanceBasisContainsFold(v string) predicate.MutationAudit {
+	return predicate.MutationAudit(sql.FieldContainsFold(FieldProvenanceBasis, v))
 }
 
 // And groups predicates with the AND operator between them.

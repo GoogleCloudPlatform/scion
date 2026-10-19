@@ -171,7 +171,10 @@ const AgentDelegation = "hub.agent_delegation"
 // before; while it is on, a token whose (issuer, subject) is linked to an
 // active federated account yields that account's visitor identity. It also
 // gates POST /api/v1/auth/federation-token (404 while off), where this
-// hub's own users obtain user access credentials for peer hubs.
+// hub's own users obtain user access credentials for peer hubs, and the
+// acceptance of user access credentials from peer hub issuers with
+// accept_user_tokens (refused while off; agent tokens from those issuers are
+// unaffected).
 const FederationProjectVisitors = "federation.project_visitors"
 
 // ChatThreadGroups gates project-scoped chat thread groups
@@ -213,7 +216,7 @@ var compiled = []Experiment{
 	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences. While off, federated user tokens behave exactly as before, no user access credentials are issued, and stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

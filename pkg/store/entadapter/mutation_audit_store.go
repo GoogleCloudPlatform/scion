@@ -68,6 +68,8 @@ func entMutationAuditToStore(ma *ent.MutationAudit) *store.MutationAuditRecord {
 		ExchangeAgentCredentialID: ma.ExchangeAgentCredentialID,
 		ActorKind:                 ma.ActorKind,
 		AgentDelegationCode:       ma.AgentDelegationCode,
+
+		ProvenanceBasis: ma.ProvenanceBasis,
 	}
 }
 
@@ -152,6 +154,9 @@ func (s *MutationAuditStore) CreateMutationAudit(ctx context.Context, record *st
 	}
 	if record.AgentDelegationCode != "" {
 		builder.SetAgentDelegationCode(record.AgentDelegationCode)
+	}
+	if record.ProvenanceBasis != "" {
+		builder.SetProvenanceBasis(record.ProvenanceBasis)
 	}
 
 	created, err := builder.Save(ctx)

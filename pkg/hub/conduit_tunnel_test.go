@@ -763,6 +763,14 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 	stopped := tf.newAgent(t, "tunnel-stopped")
 	stopped.Phase = string(state.PhaseStopped)
 	require.NoError(t, tf.store.UpdateAgent(ctx, stopped))
+	// A stop clears the agent's exposed ports.
+	stoppedNoPort := tf.newAgent(t, "tunnel-stopped-no-port")
+	stoppedNoPort.Phase = string(state.PhaseStopped)
+	require.NoError(t, tf.store.UpdateAgent(ctx, stoppedNoPort))
+	stoppedNoPort = tf.exposePort(t, stoppedNoPort)
+	require.Empty(t, stoppedNoPort.ExposedPorts)
+	runningNoPort := tf.exposePort(t, tf.newAgent(t, "tunnel-running-no-port"))
+	require.Empty(t, runningNoPort.ExposedPorts)
 
 	offlineBroker := uuid.NewString()
 	require.NoError(t, tf.store.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -803,6 +811,12 @@ func TestConduitTunnel_TypedErrors(t *testing.T) {
 		{"403 kind action before 409", portOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
 		{"403 ActionTunnel before 409", attachOnlyC, stopped.ID, grant.StreamKindPTY, nil, http.StatusForbidden, ErrCodeForbidden},
 		{"409 for the owner with both", owner, stopped.ID, grant.StreamKindPTY, nil, http.StatusConflict, ErrCodeAgentNotRunning},
+		// The tcp target port is checked after the agent's state: a
+		// stopped agent whose ports were cleared is not running (409) for
+		// a caller with access, and still 403 for one without.
+		{"409 before the port check", owner, stoppedNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusConflict, ErrCodeAgentNotRunning},
+		{"403 before 409 without the port", strangerC, stoppedNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusForbidden, ErrCodeForbidden},
+		{"403 port not exposed on a running agent", owner, runningNoPort.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusForbidden, ErrCodeForbidden},
 		{"503 broker unavailable", owner, brokerless.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail},
 		{"503 agent session unavailable", owner, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"), http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable},
 	} {
@@ -870,6 +884,57 @@ func TestConduitTunnel_CredentialExpiry(t *testing.T) {
 	assert.Equal(t, ErrCodeUnauthorized, r.err.Code)
 	roundTrip(t, st, "after expiry")
 	assert.Nil(t, c.ls.Err(), "the session stays up")
+}
+
+// TestConduitTunnel_TCPTargetCheckedOnOpen: the port check that runs after
+// the agent's state still decides the open of a running agent: an
+// unexposed port is refused 403 and opens nothing, and once the port is
+// exposed the same request opens a working tunnel.
+func TestConduitTunnel_TCPTargetCheckedOnOpen(t *testing.T) {
+	tf := newTunnelFixture(t)
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+
+	require.Empty(t, tf.exposePort(t, tf.launched).ExposedPorts)
+	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	assert.Equal(t, http.StatusForbidden, r.status, r.body)
+	assert.Equal(t, ErrCodeForbidden, r.err.Code, r.body)
+	select {
+	case <-tf.dials:
+		t.Fatal("a refused tunnel reached the agent")
+	default:
+	}
+
+	tf.exposePort(t, tf.launched, 3000)
+	st := c.open(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	<-tf.dials
+	roundTrip(t, st, "port exposed")
+	assert.Nil(t, c.ls.Err(), "the session stays up")
+}
+
+// TestConduitTunnel_RecheckPortDecisionUnchanged: a re-check of a tracked
+// tcp stream still includes the port check (only the tunnel open defers
+// it): a stopped agent with no exposed port is denied on the port, and
+// the same agent with the port exposed is allowed.
+func TestConduitTunnel_RecheckPortDecisionUnchanged(t *testing.T) {
+	tf := newTunnelFixture(t)
+	ctx := context.Background()
+	a := tf.newAgent(t, "recheck-stopped-no-port")
+	a.Phase = string(state.PhaseStopped)
+	require.NoError(t, tf.store.UpdateAgent(ctx, a))
+	require.Empty(t, tf.exposePort(t, a).ExposedPorts)
+	st := &conduitUserStream{
+		Kind: grant.StreamKindTCP, Identity: tf.owner, UserID: tf.owner.ID(),
+		AgentID: a.ID, ProjectID: a.ProjectID, Port: 3000, ViaTunnel: true,
+	}
+
+	verdict, reason := tf.srv.checkConduitUserStream(ctx, st)
+	assert.Equal(t, conduitAuthzDenied, verdict)
+	assert.Equal(t, "port no longer an authorized target", reason)
+
+	tf.exposePort(t, a, 3000)
+	verdict, reason = tf.srv.checkConduitUserStream(ctx, st)
+	assert.Equal(t, conduitAuthzAllowed, verdict, reason)
 }
 
 // TestConduitTunnel_ErrorTable: the refusal mapping is the closed set of

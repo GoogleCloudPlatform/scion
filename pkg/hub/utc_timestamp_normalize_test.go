@@ -486,63 +486,6 @@ func (c *cancelOnWrite) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// TestUTCTimestampNormalize_StartupCheck covers the hub-start probe: it is
-// silent on a canonical store, reports a named-zone row and a numeric-zone
-// row by table, and is silent again after the operation runs.
-func TestUTCTimestampNormalize_StartupCheck(t *testing.T) {
-	cases := []struct {
-		name       string
-		text       string
-		unreadable bool
-	}{
-		{"named-zone", "2026-10-01 13:00:00 +0900 JST", false},
-		{"named-zone-monotonic", "2026-10-01 05:00:00 -0700 PDT m=+0.5", false},
-		{"utc-monotonic", "2026-10-01 04:00:00 +0000 UTC m=+0.5", false},
-		{"numeric-zone", "2026-10-01 09:45:00 +0545 +0545", true},
-		{"nameless-fixed-zone", "2026-10-01 06:00:00 +0200 +0200 m=+1.5", true},
-		{"rfc3339", "2026-10-01T13:00:00+09:00", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			_, s, db := newEntWebChatStore(t)
-			ctx := context.Background()
-			srv := &Server{store: s}
-			proj := normProject(t, s, "norm-startup")
-			id := tid("norm-startup-msg")
-			require.NoError(t, s.CreateMessage(ctx, &store.Message{
-				ID: id, ProjectID: proj.ID, Sender: "user:alice", Recipient: "agent:bot",
-				Msg: "x", Channel: "web", CreatedAt: normBase.Add(123456 * time.Microsecond),
-			}))
-
-			logs := captureSlog(t)
-			srv.checkStoredTimestamps(ctx)
-			assert.NotContains(t, logs.String(), entadapter.UTCTimestampNormalizeKey, "canonical store must not warn")
-
-			execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", c.text, id)
-			logs.Reset()
-			srv.checkStoredTimestamps(ctx)
-			out := logs.String()
-			assert.Contains(t, out, "level=ERROR")
-			assert.Contains(t, out, entadapter.UTCTimestampNormalizeKey)
-			assert.Contains(t, out, "messages")
-			assert.Equal(t, 1, strings.Count(out, "level=ERROR"), "exactly one error line")
-			assert.Contains(t, out, "repaired automatically at hub start")
-			if c.unreadable {
-				assert.Contains(t, out, "tables_unreadable=[messages]")
-			} else {
-				assert.Contains(t, out, "tables_unreadable=[]")
-			}
-			assert.NotContains(t, out, "level=WARN")
-			assert.NotContains(t, out, c.text, "a stored value reached the log")
-
-			runNormalize(t, db, entadapter.TimestampNormalizeOptions{})
-			logs.Reset()
-			srv.checkStoredTimestamps(ctx)
-			assert.Empty(t, logs.String(), "the check must be silent after the run")
-		})
-	}
-}
-
 // TestUTCTimestampNormalize_ExecutorWiring checks the seed, the executor
 // registration, a dry run and a real run through the migrations endpoint.
 func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {
@@ -607,23 +550,19 @@ func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {
 		Msg: "y", Channel: "web", CreatedAt: normBase,
 	}))
 	execOne(t, db, "UPDATE messages SET created = ? WHERE id = ?", "2026-10-01 13:00:01 +0900 JST m=+0.5", id2)
-	logs := captureSlog(t)
-	srv.checkStoredTimestamps(ctx)
-	assert.Contains(t, logs.String(), "level=ERROR")
 
 	got = run(`{}`)
 	assert.Equal(t, store.MaintenanceStatusCompleted, got.Status, got.Result)
 	assert.Contains(t, got.Result, "rewrote 1 values")
 	assert.Equal(t, "2026-10-01 04:00:01 +0000 UTC", rawText(t, db, "SELECT CAST(created AS TEXT) FROM messages WHERE id = ?", id2))
-	logs.Reset()
+	logs := captureSlog(t)
 	srv.checkStoredTimestamps(ctx)
 	assert.Empty(t, logs.String())
 }
 
 // TestUTCTimestampNormalize_StartupCheckUnparseableOnly checks that when the
 // only non-canonical values left are unparseable, the check points at the
-// run log instead of asking for another run, and that a parseable leftover
-// still asks for a run.
+// run log and starts no run.
 func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
 	_, s, db := newEntWebChatStore(t)
 	ctx := context.Background()
@@ -669,15 +608,6 @@ func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
 	assert.Contains(t, out, "run log")
 	assert.Contains(t, out, "tables_unreadable=[messages]")
 	assert.NotContains(t, out, "2026-02-30")
-
-	// A parseable leftover in the same table means the operation has work.
-	mk("jst", "2026-10-01 13:00:00 +0900 JST")
-	logs.Reset()
-	srv.checkStoredTimestamps(ctx)
-	out = logs.String()
-	assert.Equal(t, 1, strings.Count(out, "level=ERROR"))
-	assert.NotContains(t, out, "level=WARN")
-	assert.Contains(t, out, "tables_unreadable=[messages]")
 }
 
 // TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads checks that the
@@ -743,11 +673,10 @@ func TestUTCTimestampNormalize_StartupCheckRecoversFromPanic(t *testing.T) {
 }
 
 // TestUTCTimestampNormalize_StartupCheckRunsInBackground checks that the
-// start hook returns at once and the check still logs.
+// start hook returns at once and the check and its run still happen.
 func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
-	_, s, db := newEntWebChatStore(t)
+	srv, s, db, _ := newFileNormServer(t)
 	ctx := context.Background()
-	srv := &Server{store: s}
 	proj := normProject(t, s, "norm-startup-bg")
 	id := tid("norm-startup-bg-msg")
 	require.NoError(t, s.CreateMessage(ctx, &store.Message{
@@ -768,8 +697,7 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	storedTimestampCheck = func(s *Server, ctx context.Context) {
 		close(started)
 		<-release
-		_, hasDeadline := ctx.Deadline()
-		assert.True(t, hasDeadline, "the background check must have a bounded context")
+		assert.NotNil(t, ctx.Done(), "shutdown must be able to cancel the background check")
 		orig(s, ctx)
 	}
 	t.Cleanup(func() { storedTimestampCheck = orig })
@@ -789,9 +717,11 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the check never started")
 	}
-	assert.NotContains(t, logs.String(), "tables_unreadable", "the check ran before it was released")
+	assert.NotContains(t, logs.String(), "timestamp normalize", "the check ran before it was released")
 	close(release)
 	require.Eventually(t, func() bool {
-		return strings.Contains(logs.String(), "tables_unreadable=[messages]")
+		return strings.Contains(logs.String(), "stored timestamps normalized at hub start")
 	}, 10*time.Second, 10*time.Millisecond)
+	srv.stopStoredTimestampCheck()
+	assert.NotContains(t, logs.String(), "level=ERROR")
 }

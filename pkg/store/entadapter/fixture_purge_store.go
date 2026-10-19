@@ -17,6 +17,9 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
+
+	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -138,4 +141,129 @@ func (s *UserStore) ListExpiredTestFixtureUsers(ctx context.Context, q store.Exp
 		out = append(out, *entUserToStore(r))
 	}
 	return out, nil
+}
+
+// ListFixtureRoots returns the distinct provenance stamps on agents,
+// schedules, groups and projects, optionally for one issuer and after a
+// root cursor (ptone/scion#4240, Phase 3c); see store.Store.ListFixtureRoots.
+// Each table is read in root order from the cursor, at most limit+1
+// distinct stamps, so the merged first limit roots are exact.
+func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID, afterRootID string, limit int) ([]store.FixtureProvenance, bool, error) {
+	var issuer, after *uuid.UUID
+	if issuerID != "" {
+		u, err := parseUUID(issuerID)
+		if err != nil {
+			return nil, false, err
+		}
+		issuer = &u
+	}
+	if afterRootID != "" {
+		u, err := parseUUID(afterRootID)
+		if err != nil {
+			return nil, false, err
+		}
+		after = &u
+	}
+	fetch := 0
+	if limit > 0 {
+		fetch = limit + 1
+	}
+	seen := map[store.FixtureProvenance]bool{}
+	add := func(root, iss *uuid.UUID) {
+		if root == nil || iss == nil {
+			return
+		}
+		seen[store.FixtureProvenance{RootID: root.String(), IssuerID: iss.String()}] = true
+	}
+
+	aq := c.client.Agent.Query().Where(agent.FixtureRootIDNotNil(), agent.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		aq = aq.Where(agent.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		aq = aq.Where(agent.FixtureRootIDGT(*after))
+	}
+	aq = aq.Unique(true).Order(agent.ByFixtureRootID())
+	if fetch > 0 {
+		aq = aq.Limit(fetch)
+	}
+	agents, err := aq.Select(agent.FieldFixtureRootID, agent.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, a := range agents {
+		add(a.FixtureRootID, a.FixtureIssuerID)
+	}
+
+	sq := c.client.Schedule.Query().Where(schedule.FixtureRootIDNotNil(), schedule.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		sq = sq.Where(schedule.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		sq = sq.Where(schedule.FixtureRootIDGT(*after))
+	}
+	sq = sq.Unique(true).Order(schedule.ByFixtureRootID())
+	if fetch > 0 {
+		sq = sq.Limit(fetch)
+	}
+	schedules, err := sq.Select(schedule.FieldFixtureRootID, schedule.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, sc := range schedules {
+		add(sc.FixtureRootID, sc.FixtureIssuerID)
+	}
+
+	gq := c.client.Group.Query().Where(group.FixtureRootIDNotNil(), group.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		gq = gq.Where(group.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		gq = gq.Where(group.FixtureRootIDGT(*after))
+	}
+	gq = gq.Unique(true).Order(group.ByFixtureRootID())
+	if fetch > 0 {
+		gq = gq.Limit(fetch)
+	}
+	groups, err := gq.Select(group.FieldFixtureRootID, group.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, g := range groups {
+		add(g.FixtureRootID, g.FixtureIssuerID)
+	}
+
+	pq := c.client.Project.Query().Where(project.FixtureRootIDNotNil(), project.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		pq = pq.Where(project.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		pq = pq.Where(project.FixtureRootIDGT(*after))
+	}
+	pq = pq.Unique(true).Order(project.ByFixtureRootID())
+	if fetch > 0 {
+		pq = pq.Limit(fetch)
+	}
+	projects, err := pq.Select(project.FieldFixtureRootID, project.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, p := range projects {
+		add(p.FixtureRootID, p.FixtureIssuerID)
+	}
+
+	out := make([]store.FixtureProvenance, 0, len(seen))
+	for st := range seen {
+		out = append(out, st)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].RootID != out[j].RootID {
+			return out[i].RootID < out[j].RootID
+		}
+		return out[i].IssuerID < out[j].IssuerID
+	})
+	if limit > 0 && len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }

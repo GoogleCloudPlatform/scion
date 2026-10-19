@@ -262,6 +262,12 @@ func handleChatLinkVerification(w http.ResponseWriter, r *http.Request, opts cha
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	// Linking binds an external account to the caller's identity:
+	// session-only (IDENTITY_BINDING), so a token is refused before the
+	// rate limit and the body.
+	if !requireIdentityBindingCredential(w, r) {
+		return
+	}
 
 	if opts.allowVerify != nil && !opts.allowVerify(opts.clientIP) {
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many verify attempts, try again later", nil)

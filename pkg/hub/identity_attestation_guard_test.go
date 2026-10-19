@@ -132,6 +132,7 @@ return ok
 		"bypassAgentsDevIdentity": "not attested",
 		"devTypedUserIdentity":    "not attested",
 		"federatedTestIdentity":   "not attested",
+		"wrappedScoped":           "not attested",
 	},
 }
 
