@@ -17,6 +17,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -38,6 +39,20 @@ func renderSPAShell(t *testing.T) string {
 	var buf bytes.Buffer
 	require.NoError(t, ws.shellTmpl.Execute(&buf, spaShellData{}))
 	return buf.String()
+}
+
+// shellInitialData returns the raw fields of the shell's initial data.
+func shellInitialData(t *testing.T, html string) map[string]json.RawMessage {
+	t.Helper()
+	const open = `<script id="__SCION_DATA__" type="application/json">`
+	start := strings.Index(html, open)
+	require.GreaterOrEqual(t, start, 0, "no initial data in the shell")
+	start += len(open)
+	end := strings.Index(html[start:], "</script>")
+	require.Greater(t, end, 0)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(html[start:start+end]), &fields))
+	return fields
 }
 
 // extractBetween returns the substring from the first occurrence of start up

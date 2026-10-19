@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,21 +114,25 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 	ws.SetUserTokenService(tokenSvc)
 
 	entered := make(chan struct{})
+	var enteredOnce sync.Once
 	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHub := func() { releaseOnce.Do(func() { close(release) }) }
 	agentID := tid("flush-agent")
 	ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(entered)
-		select {
-		case <-release:
-		case <-r.Context().Done():
-			return
-		}
+		enteredOnce.Do(func() { close(entered) })
+		// Block on the test only, not on the prefetch deadline, so the
+		// head can only have arrived through the flush.
+		<-release
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": agentID, "name": "flush-agent"})
 	}), func(ctx context.Context) error { return nil })
 
 	srv := httptest.NewServer(ws.Handler())
 	defer srv.Close()
+	// Runs before srv.Close (defers run last-in first-out), so a failing
+	// test never leaves the handler blocked and Close waiting on it.
+	defer releaseHub()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -176,7 +181,7 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 	assert.NotContains(t, head, "__SCION_DATA__")
 	assert.NotContains(t, head, "flush-agent")
 
-	close(release)
+	releaseHub()
 	rest, err := io.ReadAll(br)
 	require.NoError(t, err)
 	assert.Contains(t, string(rest), `"flush-agent"`, "the prefetched data follows the head")
@@ -269,9 +274,9 @@ func TestSPAShell_SpecialCharactersStayInsideInitialData(t *testing.T) {
 			require.NoError(t, json.Unmarshal(fields["path"], &gotPath))
 			assert.Equal(t, req.URL.Path, gotPath)
 			if path == "/projects/p-1" {
-				var data map[string]string
-				require.NoError(t, json.Unmarshal(fields["data"], &data))
-				assert.Equal(t, special, data["name"])
+				var apiData map[string]string
+				require.NoError(t, json.Unmarshal(fields["data"], &apiData))
+				assert.Equal(t, special, apiData["name"])
 			}
 		})
 	}
