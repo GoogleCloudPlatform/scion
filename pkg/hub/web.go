@@ -904,10 +904,19 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// longest-prefix matching, so /api/v1/ takes priority over /
 	// (the SPA catch-all).
 	// JSON responses are gzipped for clients that accept it; streams,
-	// upgrades and the paths in isCompressBypassPath are never wrapped.
-	ws.mux.Handle("/api/v1/", httpcompress.Wrap(ws.sessionToBearerMiddleware(hubHandler), httpcompress.Options{
+	// upgrades, the paths in isCompressBypassPath and non-GET requests to
+	// the agent collections (isAgentCollectionPath) are never wrapped.
+	apiHandler := ws.sessionToBearerMiddleware(hubHandler)
+	compressed := httpcompress.Wrap(apiHandler, httpcompress.Options{
 		BypassPath: isCompressBypassPath,
 		MinSize:    httpcompress.DefaultMinSize,
+	})
+	ws.mux.Handle("/api/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && isAgentCollectionPath(r.URL.Path) {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		compressed.ServeHTTP(w, r)
 	}))
 	// Forward OIDC discovery endpoints so they are reachable in combo mode
 	// (hub + web on the same port). Without this, the SPA catch-all "/"
@@ -2524,6 +2533,25 @@ func isCompressBypassPath(path string) bool {
 				}
 			}
 		}
+	}
+	return false
+}
+
+// isAgentCollectionPath reports the agent collection paths
+// (/api/v1/agents and /api/v1/projects/{projectId}/agents, with or without a
+// trailing slash). MountHubAPI keeps non-GET responses on them (agent
+// create) uncompressed; the GET list is compressed.
+func isAgentCollectionPath(path string) bool {
+	const api = "/api/v1/"
+	if !strings.HasPrefix(path, api) {
+		return false
+	}
+	segs := strings.Split(strings.TrimSuffix(strings.TrimPrefix(path, api), "/"), "/")
+	switch len(segs) {
+	case 1:
+		return segs[0] == "agents"
+	case 3:
+		return segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 	}
 	return false
 }

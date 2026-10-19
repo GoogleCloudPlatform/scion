@@ -36,7 +36,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -101,6 +102,11 @@ type compressHubEnv struct {
 func newCompressHubEnv(t *testing.T, logs *compressFeedLogQuerier) *compressHubEnv {
 	t.Helper()
 	srv, st := testServer(t)
+	return newCompressHubEnvOn(t, srv, st, logs)
+}
+
+func newCompressHubEnvOn(t *testing.T, srv *Server, st store.Store, logs *compressFeedLogQuerier) *compressHubEnv {
+	t.Helper()
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	srv.events = events
@@ -255,6 +261,83 @@ func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
 		require.GreaterOrEqual(t, len(body), 1024)
 		assert.Contains(t, string(body), strings.Repeat("b", 1500))
 	})
+}
+
+func TestWebAPI_AgentCreateNotCompressed(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, st, project := setupCreateAgentServer(t, disp)
+	env := newCompressHubEnvOn(t, srv, st, nil)
+	ctx := context.Background()
+
+	post := func(t *testing.T, path string, body CreateAgentRequest) {
+		t.Helper()
+		payload, err := json.Marshal(body)
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, env.ts.URL+path, strings.NewReader(string(payload)))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept-Encoding", "gzip")
+		req.Header.Set("Authorization", env.auth["Authorization"])
+		resp, err := compressClient().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		got, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, "%.300s", got)
+		requireNoEncoding(t, resp)
+		require.GreaterOrEqual(t, len(got), 1024, "the create body must be large enough to be compressed if it were wrapped")
+		assert.True(t, json.Valid(got), "identity JSON expected")
+	}
+	task := strings.Repeat("t", 1500)
+	for _, tc := range []struct{ name, path string }{
+		{"global", "/api/v1/agents"},
+		{"project", "/api/v1/projects/" + project.ID + "/agents"},
+	} {
+		t.Run("POST "+tc.name, func(t *testing.T) {
+			post(t, tc.path, CreateAgentRequest{
+				Name:      "gz-create-" + strings.ReplaceAll(tc.name, " ", "-"),
+				ProjectID: project.ID,
+				Task:      task,
+			})
+		})
+	}
+
+	// Control: the GET list on the same paths is still compressed. Extra
+	// agents keep the list above the compression threshold.
+	for i := 0; i < 20; i++ {
+		require.NoError(t, st.CreateAgent(ctx, &store.Agent{
+			ID: api.NewUUID(), Name: fmt.Sprintf("gz-list-agent-%02d", i), Slug: fmt.Sprintf("gz-list-agent-%02d", i), ProjectID: project.ID,
+		}))
+	}
+	for _, p := range []string{"/api/v1/agents", "/api/v1/projects/" + project.ID + "/agents"} {
+		t.Run("GET "+p, func(t *testing.T) {
+			resp := compressGet(t, ctx, env.ts.URL+p, env.auth)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
+			zr, err := gzip.NewReader(resp.Body)
+			require.NoError(t, err)
+			body, err := io.ReadAll(zr)
+			require.NoError(t, err)
+			assert.Contains(t, string(body), "gz-create-global")
+		})
+	}
+}
+
+func TestIsAgentCollectionPath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/api/v1/agents":                true,
+		"/api/v1/agents/":               true,
+		"/api/v1/projects/p1/agents":    true,
+		"/api/v1/projects/p1/agents/":   true,
+		"/api/v1/agents/a1":             false,
+		"/api/v1/projects/p1/agents/a1": false,
+		"/api/v1/projects//agents":      false,
+		"/api/v1/projects":              false,
+		"/api/v1/agent":                 false,
+		"/agents":                       false,
+	} {
+		assert.Equal(t, want, isAgentCollectionPath(p), p)
+	}
 }
 
 func TestWebAPI_SmallPublicJSONNotCompressed(t *testing.T) {
