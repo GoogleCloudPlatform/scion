@@ -25,6 +25,10 @@ sibling agent's status tick. `projects-updated` did the same with
   itself). It skips the flush when the object is that same reference and
   `updatedAt` is the same. stateManager replaces a project's object on each
   of its events, so reference equality is a reliable "nothing changed" signal.
+- On `agents-resync` (an SSE reconnect) the page refetches its agent
+  through `backgroundRefresh()`. Changes during the outage arrive in no
+  `agents-changed` flush, and the old "pick it up at any flush" behaviour no
+  longer covers them (review finding M1). This adds a reaction listener only.
 - No change to subscriptions, SSE or the 15 s relative-time tick (C5a).
 
 ## Emitter audit
@@ -51,11 +55,14 @@ New tests use a render-count spy (an instance override of `render()`):
 - `agent-detail re-renders for its own agent`: 1 render.
 - `agent-detail project update with same reference ignored`: 0 renders, then
   1 render for a new object with a new `updatedAt`.
+- `agent-detail refetches its agent on agents-resync`: GETs the agent and shows
+  the new phase.
 
 Run against the old source, the sibling and project tests fail. The
 page-load tombstone-guard test now sends its flush as an `unknown` entry for
 this agent, because an unrelated flush is ignored outright and would no
-longer exercise the guard.
+longer exercise the guard. The removeAgent-prune test likewise sends an
+explicit `unknown` entry instead of relying on an earlier dirty ID.
 
 ## Learnings
 
