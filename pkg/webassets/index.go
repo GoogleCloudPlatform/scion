@@ -119,10 +119,10 @@ func newEntry(fsys fs.FS, name string) (*entry, error) {
 
 // Serve writes the file for r.URL.Path, or returns false without writing
 // anything when the path is not an indexed file (a directory, a missing or
-// unindexed file, a *.br/*.gz name, or a malformed path), so the caller can
-// fall back to its own handler.
+// unindexed file, a *.br/*.gz name, a malformed path, or a method other than
+// GET and HEAD), so the caller can fall back to its own handler.
 func (ix *Index) Serve(w http.ResponseWriter, r *http.Request, p CachePolicy) bool {
-	if ix == nil {
+	if ix == nil || !servableMethod(r.Method) {
 		return false
 	}
 	name, ok := lookupName(r.URL.Path)
@@ -189,6 +189,13 @@ func writeHeaders(w http.ResponseWriter, r *http.Request, p CachePolicy, content
 	}
 }
 
+// servableMethod reports whether the method is one Serve answers (GET and
+// HEAD). Other methods are left to the caller's fallback, which never
+// serves a variant.
+func servableMethod(method string) bool {
+	return method == http.MethodGet || method == http.MethodHead
+}
+
 // inScope reports whether a slash path relative to the asset root is one
 // the index serves: a root-level file or a file under assets/ or shoelace/.
 func inScope(name string) bool {
@@ -200,8 +207,8 @@ func inScope(name string) bool {
 
 // lookupName maps a URL path to a clean slash path relative to the asset
 // root. It rejects anything that is not already clean and inside the root:
-// "..", ".", empty or doubled segments, backslashes, NUL bytes and variant
-// names.
+// "..", ".", empty or doubled segments, backslashes, NUL bytes, variant
+// names and index.html.
 func lookupName(urlPath string) (string, bool) {
 	if !strings.HasPrefix(urlPath, "/") {
 		return "", false
@@ -211,6 +218,11 @@ func lookupName(urlPath string) (string, bool) {
 		return "", false
 	}
 	if IsVariantName(name) || !inScope(name) {
+		return "", false
+	}
+	// http.FileServer redirects .../index.html to the directory; leave such
+	// names to the caller's fallback so that behaviour is kept.
+	if path.Base(name) == "index.html" {
 		return "", false
 	}
 	return name, true

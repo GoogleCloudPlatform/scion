@@ -16,7 +16,11 @@ package webassets
 
 import (
 	"bytes"
+	"errors"
+	"io/fs"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,5 +105,105 @@ func TestDiskIndex_StaleSiblingIgnored(t *testing.T) {
 	rec, _ = serve(t, d, http.MethodGet, "/assets/main.js", map[string]string{"Accept-Encoding": "br, gzip"})
 	if got := rec.Header().Get("Content-Encoding"); got != "br" {
 		t.Errorf("after regenerating: Content-Encoding = %q, want br", got)
+	}
+}
+
+func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(outside, "secret.js"), []byte("secret"), time.Now())
+	writeFile(t, filepath.Join(outside, "secret.js.br"), []byte("secret-br"), time.Now())
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "assets", "main.js"), mainJS, time.Now())
+	// A symlinked file and a symlinked directory pointing outside the root.
+	if err := os.Symlink(filepath.Join(outside, "secret.js"), filepath.Join(dir, "assets", "leak.js")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "assets", "out")); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink that stays inside the root keeps working.
+	if err := os.Symlink("main.js", filepath.Join(dir, "assets", "alias.js")); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDiskIndex(dir)
+	for _, p := range []string{"/assets/leak.js", "/assets/out/secret.js"} {
+		rec, found := serve(t, d, http.MethodGet, p, map[string]string{"Accept-Encoding": "br"})
+		if found || strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("%s: served outside the root (found=%v body=%q)", p, found, rec.Body.String())
+		}
+	}
+	if rec, found := serve(t, d, http.MethodGet, "/assets/alias.js", nil); !found || !bytes.Equal(rec.Body.Bytes(), mainJS) {
+		t.Errorf("in-root symlink: found=%v", found)
+	}
+
+	// The fallback file system refuses the same paths, and siblings.
+	fsys := DirFileSystem(dir)
+	for _, name := range []string{"/assets/leak.js", "/assets/out/secret.js", "/assets/out", "/../" + filepath.Base(outside) + "/secret.js", "/assets/main.js.br", "/assets/main.js.gz"} {
+		if f, err := fsys.Open(name); err == nil {
+			_ = f.Close()
+			t.Errorf("DirFileSystem opened %s", name)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("DirFileSystem %s: err %v, want fs.ErrNotExist", name, err)
+		}
+	}
+	for _, name := range []string{"/", "/assets", "/assets/", "/assets/main.js", "/assets/alias.js"} {
+		f, err := fsys.Open(name)
+		if err != nil {
+			t.Errorf("DirFileSystem %s: %v", name, err)
+			continue
+		}
+		_ = f.Close()
+	}
+	// Through a real file server: 404, not the secret, and listings still work.
+	srv := http.FileServer(fsys)
+	for _, p := range []string{"/assets/leak.js", "/assets/out/secret.js", "/assets/main.js.br"} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("file server %s: code %d", p, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/assets/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "main.js") {
+		t.Errorf("listing: code %d body %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDiskIndex_EncodedTraversalRejected(t *testing.T) {
+	parent := t.TempDir()
+	writeFile(t, filepath.Join(parent, "secret.js"), []byte("secret"), time.Now())
+	dir := filepath.Join(parent, "client")
+	writeFile(t, filepath.Join(dir, "assets", "main.js"), mainJS, time.Now())
+	d := NewDiskIndex(dir)
+	for _, target := range []string{"/assets/%2e%2e/%2e%2e/secret.js", "/assets/..%2f..%2fsecret.js", "/%2e%2e/secret.js", "/assets/..%5c..%5csecret.js"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.URL = u
+		rec := httptest.NewRecorder()
+		if d.Serve(rec, req, noCache) || strings.Contains(rec.Body.String(), "secret") {
+			t.Errorf("%s (decoded %q) served", target, u.Path)
+		}
+	}
+}
+
+func TestServe_MethodsOtherThanGetHead(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "assets", "main.js"), mainJS, time.Now())
+	writeFile(t, filepath.Join(dir, "assets", "main.js.br"), fakeBrotli, time.Now())
+	for name, s := range map[string]interface {
+		Serve(http.ResponseWriter, *http.Request, CachePolicy) bool
+	}{"index": newTestIndex(t), "disk": NewDiskIndex(dir)} {
+		for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions, http.MethodPatch} {
+			if rec, found := serve(t, s, m, "/assets/main.js", map[string]string{"Accept-Encoding": "br"}); found || len(rec.Header()) != 0 {
+				t.Errorf("%s %s: served (found=%v)", name, m, found)
+			}
+		}
+		if _, found := serve(t, s, http.MethodHead, "/assets/main.js", nil); !found {
+			t.Errorf("%s HEAD: not served", name)
+		}
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -69,6 +70,7 @@ func testFS(t *testing.T) fstest.MapFS {
 		"other/file.js":                {Data: []byte("out of scope")},
 		"assets/orphan.js.gz":          {Data: gz(t, []byte("orphan"))},
 		"assets/dir.js/placeholder.js": {Data: []byte("x")},
+		"assets/index.html":            {Data: []byte("<html></html>")},
 	}
 }
 
@@ -266,7 +268,7 @@ func TestServe_SiblingNamesNotServable(t *testing.T) {
 
 func TestServe_NotIndexedFallsBack(t *testing.T) {
 	ix := newTestIndex(t)
-	for _, p := range []string{"/assets/", "/assets", "/shoelace/assets/icons/", "/", "/.vite/manifest.json", "/other/file.js", "/assets/missing.js", "/assets/dir.js"} {
+	for _, p := range []string{"/assets/", "/assets", "/shoelace/assets/icons/", "/", "/.vite/manifest.json", "/other/file.js", "/assets/missing.js", "/assets/dir.js", "/assets/index.html"} {
 		if _, found := serve(t, ix, http.MethodGet, p, nil); found {
 			t.Errorf("%s: found, want fallback", p)
 		}
@@ -303,6 +305,19 @@ func TestNewIndex_PathTraversalRejected(t *testing.T) {
 		rec := httptest.NewRecorder()
 		if ix.Serve(rec, req, noCache) {
 			t.Errorf("%q served (code %d)", p, rec.Code)
+		}
+	}
+	// Percent-encoded traversal decodes to a non-clean path and is refused.
+	for _, target := range []string{"/assets/%2e%2e/.vite/manifest.json", "/assets/%2E%2E%2F.vite%2Fmanifest.json", "/%2e%2e/assets/main.js", "/assets/main.js%00", "/assets/main.js%2ebr"} {
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.URL = u
+		rec := httptest.NewRecorder()
+		if ix.Serve(rec, req, noCache) {
+			t.Errorf("%s (decoded %q) served", target, u.Path)
 		}
 	}
 	if _, ok := ix.entries[".vite/manifest.json"]; ok {

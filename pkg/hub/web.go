@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/GoogleCloudPlatform/scion/pkg/webassets"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
@@ -292,6 +293,10 @@ type WebServer struct {
 	// are detected (see loadFingerprintedAssets). It is built before the
 	// server starts serving and only read afterwards, so it needs no lock.
 	fingerprintedAssets map[string]bool
+
+	// staticIndex serves static assets with precompressed variants and
+	// ETags (pkg/webassets); see staticAssets in web_static_index.go.
+	staticIndex staticAssetIndex
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -692,7 +697,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 		ws.assetsDisk = cfg.AssetsDir
 		ws.logger().Info("Web server using filesystem assets", "dir", cfg.AssetsDir)
 	} else if web.AssetsEmbedded {
-		sub, err := fs.Sub(web.ClientAssets, "dist/client")
+		sub, err := embeddedClientFS()
 		if err != nil {
 			ws.logger().Error("Failed to create sub-filesystem from embedded assets. Run 'make web && make build' to rebuild with web assets included, or use --web-assets-dir.", "error", err)
 		} else if _, err := fs.Stat(sub, "assets/main.js"); err != nil {
@@ -717,6 +722,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	ws.hasAssets = ws.detectWebAssets()
 	if ws.hasAssets {
 		ws.fingerprintedAssets = ws.loadFingerprintedAssets()
+		// Build the precompressed-asset index once, at startup (it hashes
+		// every servable file of the embedded build).
+		ws.staticAssets()
 	}
 
 	ws.registerRoutes()
@@ -1237,7 +1245,9 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 
 	var fileServer http.Handler
 	if ws.assetsDisk != "" {
-		fileServer = http.FileServer(http.Dir(ws.assetsDisk))
+		// Like http.Dir, but nothing outside the directory (by ".." or a
+		// symlink) and no *.br/*.gz sibling is opened.
+		fileServer = http.FileServer(webassets.DirFileSystem(ws.assetsDisk))
 	} else {
 		fileServer = http.FileServer(http.FS(ws.assets))
 	}
@@ -1249,15 +1259,31 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 
-	// Files Vite fingerprinted (listed in its build manifest) and other
-	// hex-hashed names get long-lived caching; the unhashed entry
-	// (assets/main.js) and every other file get revalidation.
-	if ws.fingerprintedAssets[r.URL.Path] || isHashedAsset(r.URL.Path) {
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-	} else {
-		w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", ws.staticCacheControl(r.URL.Path))
+
+	// Indexed files are served with their precompressed variant (br, gzip)
+	// and an ETag; anything else (directories, unindexed paths) falls back
+	// to the file server below, unchanged.
+	if srv := ws.staticAssets(); srv != nil && srv.Serve(w, r, ws.staticCacheControl) {
+		return
+	}
+	// The fallback never serves a precompressed sibling by its own name.
+	if webassets.IsVariantName(r.URL.Path) {
+		http.NotFound(w, r)
+		return
 	}
 	fileServer.ServeHTTP(w, r)
+}
+
+// staticCacheControl is the Cache-Control of a static asset. Files Vite
+// fingerprinted (listed in its build manifest) and other hex-hashed names
+// get long-lived caching; the unhashed entry (assets/main.js) and every
+// other file get revalidation.
+func (ws *WebServer) staticCacheControl(requestPath string) string {
+	if ws.fingerprintedAssets[requestPath] || isHashedAsset(requestPath) {
+		return "public, max-age=86400"
+	}
+	return "no-cache"
 }
 
 // staticContentTypes maps file extensions missing from Go's built-in MIME
@@ -1592,6 +1618,11 @@ func (ws *WebServer) tryServeStaticFile(w http.ResponseWriter, r *http.Request) 
 	// Clean the path and strip the leading slash for fs.Open.
 	name := strings.TrimPrefix(filepath.ToSlash(r.URL.Path), "/")
 	if name == "" {
+		return false
+	}
+	// A precompressed sibling (*.br, *.gz) is never a file of its own:
+	// treat it as missing.
+	if webassets.IsVariantName(name) {
 		return false
 	}
 
