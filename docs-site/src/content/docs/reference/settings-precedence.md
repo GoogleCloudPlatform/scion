@@ -184,6 +184,11 @@ Key names are mapped by `versionedEnvKeyMapper`: the `SCION_` prefix is stripped
 lowercased, and `_` becomes a settings path separator — so `SCION_HUB_PROJECT_ID` sets
 `hub.project_id`.
 
+`SCION_HUB_PROJECT_ID` also outranks the project's `.scion/project-id` file, in both settings
+loaders, and a warning names both sources when they disagree. `SCION_PROJECT_ID` ranks lower: it
+sets the top-level `project_id`, and a `hub.project_id` from the settings files or the
+`project-id` file wins over it. When both variables are set, `SCION_HUB_PROJECT_ID` wins.
+
 :::caution[Same prefix, unrelated mechanism]
 Bucket 1 and [Bucket 2](#bucket-2--scion_-variables-that-scion-injects-into-agents) both use the
 `SCION_` prefix and are otherwise unrelated. Bucket 1 is *the broker reading its own
@@ -388,7 +393,8 @@ then used only to fill keys the config left unset.
 runtime_broker  <  hub  <  project  <  user  <  request / --config env
 ```
 
-So request env **outranks all four storage scopes, `user` included.**
+So request env **outranks all four storage scopes, `user` included.** It also outranks a harness
+config's `env:` block, including on a local start that is not dispatched by a Hub.
 
 #### The top rung is not a plain inequality, and a ranked list cannot express it
 
