@@ -24,19 +24,23 @@ User-visible: in a background tab, polled data and the notification badge
 update when the user returns, not while the tab is hidden. SSE-driven
 updates are unaffected.
 
-## Chat: the resume refresh and the poll catch-up share one DM request
+## Chat: one duplicate DM request on return (accepted)
 
-- Chat's `ResumeRefresh` (a rail refresh after 30 s or more in the
-  background) is separate from the fallback poll and is unchanged. After at
-  least 60 s hidden, both fire on return, and both load the DM list
-  (`loadUnreadDMPeers()`; the rail refresh through its `rail-refresh`
-  event). To avoid a second `GET /api/v1/chat/dms`, the poll now asks with
-  `maxAgeMs: FALLBACK_POLL_DM_REUSE_MS` (5 s), so it joins the request the
-  rail refresh has just started. The rail refresh still loads fresh. This
-  depends on order: the `ResumeRefresh` listener is registered before the
-  poll's, and the rail refresh dispatches `rail-refresh` synchronously
-  (C11's leading-edge coalescer keeps that true). A regular tick finds no
-  request that recent and fetches fresh, as before.
+Chat's `ResumeRefresh` (a rail refresh after 30 s or more in the
+background) is separate from the fallback poll and is unchanged. After at
+least 60 s hidden, both run on return, and both load the DM list fresh
+(`loadUnreadDMPeers()`; the rail refresh through its `rail-refresh` event),
+so the page sends two `GET /api/v1/chat/dms` requests. That duplicate is
+accepted. It is still fewer requests than before, when the poll also ran
+while hidden.
+
+Sharing one request was tried in review and dropped. The poll asked with
+`maxAgeMs` to join the rail refresh's request, which worked only while the
+rail refresh started first. C11 (#5317) makes the resume catch-up trailing
+(a 250 ms coalescer with `leading: false`, so it starts after an SSE
+reconnect), so the poll then fetches first and the rail refresh fetches
+again. Joining in the other direction (`startedAfter` in the rail refresh)
+would undo the reason C11 made the catch-up trailing.
 
 ## Not changed (deliberately)
 
@@ -56,20 +60,19 @@ of fake time gives 0 polls; becoming visible gives exactly 1; started
 hidden; normal cadence while visible; no polls after disconnect, even across
 a later visibility change. Existing tests that read the old timer fields
 (`_fallbackPollInterval`, `pollTimer`) now read the stop functions. The
-chat file also keeps the real DM loader in two tests: a regular tick fetches
-fresh, and a return after more than 60 s hidden sends one `/chat/dms`
-request although both the resume refresh and the catch-up ask for it.
+chat file also keeps the real DM loader in one test: a regular tick fetches
+the DM list fresh.
 
 ## Learnings
 
 - The chat page startup awaits dynamic imports and requests, so faking all
-  timers stalls it. Faking only `setInterval`, `clearInterval`, `Date` and `performance`
+  timers stalls it. Faking only `setInterval`, `clearInterval` and `Date`
   (`vi.useFakeTimers({ toFake: [...] })`) lets startup settle and still
   drives the poll and the wall-clock catch-up check.
 - The chat poll fans out to several loaders, some through shared caches
   with reuse windows, so counting raw requests is fragile. The test stubs
   the loaders after startup and counts `loadUnreadDMPeers` calls (one per
   poll).
-- `SharedJsonLoad` measures `maxAgeMs` on `performance.now()`, so the test
-  also fakes `performance`; otherwise two fake 60 s ticks are microseconds
-  apart on that clock and the second reuses the first.
+- Check a cross-branch timing assumption against the branch that changes
+  it. C11's coalescer defaults to `leading: true`, but the resume catch-up
+  sets `leading: false`, and the DM sharing above relied on the default.

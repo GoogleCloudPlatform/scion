@@ -19,7 +19,7 @@
  * pauses while the tab is hidden and catches up with one poll when the tab
  * is shown again (C5b). The poll's loaders are stubbed so each poll counts
  * as one call of loadUnreadDMPeers, which every poll makes first; the last
- * tests keep the DM loader real and count /chat/dms requests instead.
+ * test keeps the DM loader real and counts /chat/dms requests instead.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -114,14 +114,11 @@ describe('chat page — fallback poll in a hidden tab', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     chatDMsLoad.invalidate();
     chatSpacesLoad.invalidate();
-    // Only the interval and the clocks: startup awaits imports and requests.
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date', 'performance'] });
+    // Only the interval and the clock: startup awaits imports and requests.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
     hidden = false;
     pages = [];
     vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
-    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() =>
-      hidden ? 'hidden' : 'visible'
-    );
   });
 
   afterEach(() => {
@@ -180,34 +177,5 @@ describe('chat page — fallback poll in a hidden tab', () => {
     vi.advanceTimersByTime(POLL_MS);
     expect(dmListRequests()).toBe(2);
     el.remove();
-  });
-
-  it('a return after more than 60 s hidden sends one /chat/dms request', async () => {
-    const el = await startedPage({ realDMLoader: true });
-    // The rail is not rendered here: stand in for it. Its refresh dispatches
-    // rail-refresh (synchronously), which the page answers with a fresh DM load.
-    const railRefreshes = vi.fn();
-    el.addEventListener('rail-refresh', railRefreshes);
-    el.refreshRail = vi.fn(() =>
-      el.dispatchEvent(
-        new CustomEvent('rail-refresh', {
-          detail: { waitUntil: (): void => {} },
-          bubbles: true,
-          composed: true,
-        })
-      )
-    );
-    const dmLoads = vi.spyOn(el, 'loadUnreadDMPeers');
-
-    setHidden(true);
-    vi.advanceTimersByTime(POLL_MS + 1_000);
-    expect(dmListRequests()).toBe(0);
-    setHidden(false);
-
-    // Both the resume rail refresh and the poll catch-up asked for the list...
-    expect(railRefreshes).toHaveBeenCalledTimes(1);
-    expect(dmLoads).toHaveBeenCalledTimes(2);
-    // ...and shared one request.
-    expect(dmListRequests()).toBe(1);
   });
 });
