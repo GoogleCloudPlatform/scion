@@ -64,6 +64,7 @@ import { chatRecentFiles } from './chat-recent-files.js';
 import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
+import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
@@ -1115,8 +1116,9 @@ async function renderRoute(path: string): Promise<void> {
     // chunk was lazy: the URL already says /terminals, so the old page must
     // not stay interactive under it while the load runs. A newer navigation
     // un-hides it (and reuses the page, see returningFromTerminal below).
-    // Hiding blurs the focused element; a failed load gives focus back.
-    const focusBeforeLoad = document.activeElement;
+    // Hiding blurs the focused element; a failed load gives focus back. Look
+    // through shadow roots: document.activeElement is only the outer host.
+    const focusBeforeLoad = deepActiveElement();
     appContainer.hidden = true;
     let coordinator: TerminalCoordinator | null;
     try {
@@ -1128,7 +1130,13 @@ async function renderRoute(path: string): Promise<void> {
       console.error('[Scion] Failed to load the terminal workspace:', err);
       if (thisNav === navigationId) {
         appContainer.hidden = false;
-        if (focusBeforeLoad instanceof HTMLElement && focusBeforeLoad.isConnected) {
+        // Only if nothing else took focus during the load.
+        const now = deepActiveElement();
+        if (
+          (now === null || now === document.body) &&
+          focusBeforeLoad instanceof HTMLElement &&
+          focusBeforeLoad.isConnected
+        ) {
           focusBeforeLoad.focus({ preventScroll: true });
         }
         showToast('Could not load terminals. Reload the page to try again.', 'danger');

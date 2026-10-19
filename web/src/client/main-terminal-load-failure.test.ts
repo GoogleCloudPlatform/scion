@@ -30,6 +30,7 @@ import {
   fakeTerminalWorkspaceModule,
 } from './__fixtures__/terminal-workspace-fake.js';
 import type { TerminalWorkspaceModule } from './terminal-workspace-loader.js';
+import { deepActiveElement } from '../components/shared/deep-active-element.js';
 
 vi.mock('../components/pages/admin-users.js', () => {
   if (!customElements.get('scion-page-admin-users')) {
@@ -73,11 +74,16 @@ describe('main.ts terminal route', () => {
       BOOT_WAIT
     );
     const outlet = document.getElementById('route-outlet')!;
-    // Something on the page has focus when the user opens /terminals.
+    // Something on the page has focus when the user opens /terminals. Pages
+    // are Lit elements, so it sits inside a shadow root, where
+    // document.activeElement only sees the host.
+    const host = document.createElement('div');
+    document.querySelector('scion-page-admin-users')!.appendChild(host);
     const focused = document.createElement('button');
-    document.querySelector('scion-page-admin-users')!.appendChild(focused);
+    host.attachShadow({ mode: 'open' }).appendChild(focused);
     focused.focus();
-    expect(document.activeElement).toBe(focused);
+    expect(document.activeElement).toBe(host);
+    expect(deepActiveElement()).toBe(focused);
 
     main.navigateTo('/terminals');
     await vi.waitFor(() => expect(loadTerminalWorkspace).toHaveBeenCalledTimes(1), BOOT_WAIT);
@@ -103,7 +109,7 @@ describe('main.ts terminal route', () => {
     expect(outlet.hidden).toBe(false);
     expect(document.querySelector('scion-page-admin-users')).not.toBeNull();
     // Focus goes back to where it was before the outlet was hidden.
-    expect(document.activeElement).toBe(focused);
+    expect(deepActiveElement()).toBe(focused);
 
     // The failure was not cached: the next visit loads again and mounts.
     main.navigateTo('/terminals');
