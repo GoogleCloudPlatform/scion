@@ -188,7 +188,7 @@ func newConduitSessionPairConfig(t *testing.T, brokerCfg conduit.Config) *broker
 
 func newConduitHarness(t *testing.T, handler http.Handler, slots int) tunnelHarness {
 	h := &conduitHarness{
-		handler:   newConduitRPCHandler(handler, "", slots, slog.Default()),
+		handler:   newGuardedConduitRPCHandler(handler, "", slots, slog.Default(), passAllChecker{}),
 		queued:    make(chan string, 64),
 		calls:     map[string]*conduitCall{},
 		responses: map[string]int{},

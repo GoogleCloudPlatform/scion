@@ -26,8 +26,10 @@ package hub
 //
 // Every level other than off requires, all together: a hub with a user
 // store, the hub id binding (the value after the colon equals the resolved
-// hub id), server.hub.class: test, a test infrastructure marker for this
-// hub id in the database, and no explicit --production. admin and
+// hub id), a pinned hub id (server.hub.hub_id or SCION_SERVER_HUB_HUBID set
+// explicitly, never derived from the hostname or K_SERVICE),
+// server.hub.class: test, a test infrastructure marker for this hub id in
+// the database, and no explicit --production. admin and
 // super-admin add the rest of the test admin gate (test_admin_gate.go). A
 // level whose preconditions are not all met refuses to start; it is never
 // lowered to a smaller level.
@@ -115,6 +117,7 @@ const (
 	TestModePreconditionUserStore           = "user_store"
 	TestModePreconditionNotProduction       = "not_production"
 	TestModePreconditionHubIDBinding        = "hub_id_binding"
+	TestModePreconditionHubIDPinned         = "hub_id_pinned"
 	TestModePreconditionHubClassTest        = "hub_class_test"
 	TestModePreconditionMarker              = "test_infra_marker"
 	TestModePreconditionNotWorkstation      = "not_workstation"
@@ -136,6 +139,7 @@ func TestModeMemberPreconditions() []string {
 		TestModePreconditionUserStore,
 		TestModePreconditionNotProduction,
 		TestModePreconditionHubIDBinding,
+		TestModePreconditionHubIDPinned,
 		TestModePreconditionHubClassTest,
 		TestModePreconditionMarker,
 	}
@@ -217,10 +221,10 @@ var ErrTestModeRemovedFlag = testAdminGateErr("test_mode", "removed_flag",
 // is one of the four allowlisted strings, the switches the hub runs with
 // (EnableTestIdentities, TestAdminGate) are exactly what the level grants,
 // and, for every level but off, the member preconditions the resolution
-// carries hold (hub id binding equals cfg.HubID, hub class test, marker for
-// this hub id with class test, no explicit --production). The user store is
-// checked by New itself. It does not repeat the admin gate checks
-// (validateTestAdminGateConfig) or read the database.
+// carries hold (hub id binding equals cfg.HubID, cfg.HubIDPinned, hub class
+// test, marker for this hub id with class test, no explicit --production).
+// The user store is checked by New itself. It does not repeat the admin
+// gate checks (validateTestAdminGateConfig) or read the database.
 func ValidateTestModeConfig(cfg ServerConfig) error {
 	level := cfg.TestMode.level()
 	known := false
@@ -250,6 +254,8 @@ func ValidateTestModeConfig(cfg ServerConfig) error {
 		return ErrTestAdminProductionFlag
 	case t.HubID == "" || t.HubID != cfg.HubID:
 		return ErrTestAdminHubIDMismatch
+	case !cfg.HubIDPinned:
+		return ErrTestModeHubIDNotPinned
 	case !config.IsTestHubClass(t.HubClass):
 		return ErrTestAdminHubClassNotTest
 	case t.MarkerHubID == "":

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -150,6 +151,10 @@ type launchWaitOptions struct {
 	// LaunchID is the accepted launch's ID, when the client holds one; it
 	// only names the launch in the not-readable message.
 	LaunchID string
+	// PriorLaunchID is the ID of a launch that had already ended when the
+	// wait began (the create answer showed it ended). Its error belongs to
+	// an earlier attempt, so it does not end the wait; "" when none.
+	PriorLaunchID string
 	// Get fetches the agent.
 	Get func(ctx context.Context) (*hubclient.Agent, error)
 	// Timeout is an explicit wait (--wait-timeout); 0 derives it.
@@ -246,7 +251,7 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		}
 		last = a
 		progress.report(o.Progress, o.AgentName, a)
-		return launchOutcome(o.AgentName, a)
+		return launchOutcome(o.AgentName, a, o.PriorLaunchID)
 	}
 
 	start := func(budgetAgent *hubclient.Agent) {
@@ -292,9 +297,41 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 	}
 }
 
-// launchOutcome maps an agent to the end of the wait: running is success;
+// launchOutcome maps an agent to the end of the wait: the phase rule of
+// launchPhaseOutcome, and also a launch that has ended with an error code
+// or a failed end reason, whatever the phase (design wave 3 D-g): a failed start can leave the agent
+// in any phase its start path restores. priorLaunchID names a launch that
+// had already ended before this wait (the create answer showed it ended);
+// its error is an earlier attempt's, so it does not end the wait.
+func launchOutcome(name string, a *hubclient.Agent, priorLaunchID string) (bool, error) {
+	if done, err := launchPhaseOutcome(name, a); done {
+		return done, err
+	}
+	if l := a.Launch; l != nil && !l.Active && l.ID != priorLaunchID && (l.Error != "" || failedLaunchEndReason(l.EndReason)) {
+		return true, newLaunchFailedError(name, a)
+	}
+	return false, nil
+}
+
+// failedLaunchEndReason reports whether an ended launch's end reason means
+// it did not bring the agent up, even without an error code. It follows
+// pkg/hubclient's rule except for not_launched: the Hub also ends a launch
+// not_launched when a broker without async launch answered the start
+// synchronously (pkg/hub/launch_dispatch.go, endLaunchNotLaunched after a
+// synchronous answer), and that start goes on, so it must not end the wait.
+// pkg/hubclient's rule has the same exposure (ptone/scion#5283).
+func failedLaunchEndReason(reason string) bool {
+	switch reason {
+	case "failed", "timed_out", "lost":
+		return true
+	}
+	return false
+}
+
+// launchPhaseOutcome is the phase-only end of the wait, which is all that
+// CLIs released before the ended-launch rule check: running is success;
 // error, stopped and halted are failures; every other phase keeps waiting.
-func launchOutcome(name string, a *hubclient.Agent) (bool, error) {
+func launchPhaseOutcome(name string, a *hubclient.Agent) (bool, error) {
 	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
 	switch phase {
 	case string(state.PhaseRunning):
@@ -334,7 +371,7 @@ func (p *launchProgress) report(w io.Writer, name string, a *hubclient.Agent) {
 	}
 	p.printed, p.lastPhase, p.lastStep = true, phase, step
 	if step != "" {
-		_, _ = fmt.Fprintf(w, "  %s: %s (%s)\n", name, phase, step)
+		_, _ = fmt.Fprintf(w, "  %s: %s (%s)\n", name, phase, launchStepLabel(step))
 	} else {
 		_, _ = fmt.Fprintf(w, "  %s: %s\n", name, phase)
 	}
@@ -373,7 +410,14 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 	e := &launchFailedError{Agent: name, Phase: phase}
 	if a.Launch != nil && a.Launch.Error != "" {
 		e.Incomplete = a.Launch.Kind == "" || a.Launch.Kind == "create"
+		// The raw code stays first and its label follows, unless the
+		// message already carries the label: the broker's fixed failure
+		// text for a typed failure is the label (the Hub prefixes the
+		// step), and it is not printed twice.
 		code := a.Launch.Error
+		if label := launchCodeLabel(a.Launch.Error); !strings.Contains(a.Message, label) {
+			code += ": " + label
+		}
 		if a.Launch.Cause != "" {
 			// The fixed runtime cause code (ptone/scion#4666), such as
 			// runtime_forbidden: the runtime refused the start.
@@ -382,6 +426,17 @@ func newLaunchFailedError(name string, a *hubclient.Agent) *launchFailedError {
 		reason := fmt.Sprintf("agent '%s' did not start (%s)", name, code)
 		if e.Incomplete {
 			reason = fmt.Sprintf("agent '%s' create did not complete (%s)", name, code)
+		}
+		switch {
+		case a.Launch.Error == api.LaunchCodeLaunchStopped && e.Incomplete:
+			// A launch someone stopped did not fail: the text says so
+			// without the failure framing (the exit status stays 1, the
+			// start did not happen).
+			reason = fmt.Sprintf("agent '%s' create did not complete: the create was stopped (%s)", name, a.Launch.Error)
+		case a.Launch.Error == api.LaunchCodeLaunchStopped:
+			reason = fmt.Sprintf("agent '%s' did not start: the start was stopped (%s)", name, a.Launch.Error)
+		case a.Launch.Step != "":
+			reason += " while " + launchStepLabel(a.Launch.Step)
 		}
 		if a.Message != "" {
 			reason += ": " + a.Message

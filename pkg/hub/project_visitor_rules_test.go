@@ -1178,11 +1178,48 @@ func TestProjectVisitorRules_ConduitAuthzChangedAfterCommit(t *testing.T) {
 	})
 }
 
-// A visitor rule does not link or create an account for a transport
-// identity: the platform service account and a proxy driver principal
-// (also given in mixed case), each in a domain that has a rule, are not
-// served as visitors, and get no federated account, no rule binding and no
-// visitor_linked audit. Another email in each of those domains is still
+// setTransportIdentities configures the hub's platform service account and
+// proxy driver principals the way New does from ServerConfig.PlatformAuthSA
+// and ServerConfig.ProxyDriverPrincipals: on the Server, which the visitor
+// paths read (Server.isTransportIdentity), and on authConfig, which the
+// auth middleware reads (AuthConfig.isTransportIdentity).
+func setTransportIdentities(srv *Server, platform string, drivers ...string) {
+	srv.platformAuthSA = platform
+	srv.proxyDrivers = newDriverPrincipalSet(drivers)
+	srv.authConfig.PlatformAuthSA = srv.platformAuthSA
+	srv.authConfig.DriverPrincipals = srv.proxyDrivers
+}
+
+// requireRefusedThrough runs an issuer token through the auth middleware
+// and requires the federation verification refusal: 401 "invalid
+// federation token", with no handler run.
+func (f *visitorGrantFixture) requireRefusedThrough(t *testing.T, token string) {
+	t.Helper()
+	identity, _, code := f.identityThroughMiddleware(t, token)
+	require.Equal(t, http.StatusUnauthorized, code)
+	assert.Nil(t, identity, "the handler never runs")
+	rec := f.middlewareResponse(t, token)
+	require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Equal(t, "invalid federation token", federationTokenErrorMessage(t, rec))
+}
+
+// transportIdentityCases are the transport identity emails of the
+// transport identity visitor tests: a proxy driver principal and the
+// platform service account, each also in mixed case.
+func transportIdentityCases(driver, platform, driverMixed, platformMixed string) map[string]struct{ subject, email string } {
+	return map[string]struct{ subject, email string }{
+		"driver principal":                {"sub-driver", driver},
+		"driver principal, mixed case":    {"sub-driver-mixed", driverMixed},
+		"platform service account":        {"sub-platform", platform},
+		"platform service account, mixed": {"sub-platform-mixed", platformMixed},
+	}
+}
+
+// On a hub configured with a platform service account and a proxy driver
+// principal, an issuer token naming either of them (also in mixed case),
+// each in a domain that has a visitor rule, is refused by the auth
+// middleware with 401, and gets no federated account, no rule binding and
+// no visitor_linked audit. Another email in each of those domains is still
 // linked and bound by the rule.
 func TestFederatedVisitor_RuleSkipsTransportIdentities(t *testing.T) {
 	const (
@@ -1190,23 +1227,18 @@ func TestFederatedVisitor_RuleSkipsTransportIdentities(t *testing.T) {
 		platform = "platform-sa@visitor-proj.iam.gserviceaccount.com"
 	)
 	f := newVisitorGrantFixture(t, func(srv *Server) {
-		srv.proxyDrivers = newDriverPrincipalSet([]string{driver})
-		srv.platformAuthSA = platform
+		setTransportIdentities(srv, platform, driver)
 	})
 	ctx := context.Background()
 	issuer := store.NormalizeFederatedIssuer(grantTestOtherIssuer)
 	driverRule := f.addRuleOK(t, grantTestOtherIssuer, "partner.example")
 	platformRule := f.addRuleOK(t, grantTestOtherIssuer, "visitor-proj.iam.gserviceaccount.com")
 
-	for name, tc := range map[string]struct{ subject, email string }{
-		"driver principal":                {"sub-driver", driver},
-		"driver principal, mixed case":    {"sub-driver-mixed", "Web-Driver@Partner.EXAMPLE"},
-		"platform service account":        {"sub-platform", platform},
-		"platform service account, mixed": {"sub-platform-mixed", "Platform-SA@visitor-proj.IAM.gserviceaccount.com"},
-	} {
+	for name, tc := range transportIdentityCases(driver, platform,
+		"Web-Driver@Partner.EXAMPLE", "Platform-SA@visitor-proj.IAM.gserviceaccount.com") {
 		t.Run(name, func(t *testing.T) {
 			tok := f.token(t, grantTestOtherIssuer, tc.subject, tc.email, boolPtr(true))
-			assert.Nil(t, f.visitorThrough(t, tok), "not served as a visitor")
+			f.requireRefusedThrough(t, tok)
 			_, err := f.st.GetFederatedUserByEmail(ctx, issuer, store.NormalizeFederatedEmail(tc.email))
 			assert.ErrorIs(t, err, store.ErrNotFound, "no federated account for %s", tc.email)
 			_, err = f.st.GetFederatedUserBySubject(ctx, grantTestOtherIssuer, tc.subject)
@@ -1233,10 +1265,12 @@ func TestFederatedVisitor_RuleSkipsTransportIdentities(t *testing.T) {
 	}
 }
 
-// A rule does not bind an account linked before its email became a
-// transport identity: after the email is configured as a proxy driver
-// principal or as the platform service account, a matching rule added
-// later writes no binding and no visitor_linked audit on the next request.
+// An account linked before its email became a transport identity: once
+// the hub is configured with the email as a proxy driver principal or as
+// the platform service account, the auth middleware refuses its next
+// issuer token with 401, and a matching rule added later writes no binding
+// and no visitor_linked audit. Another account in the domain is bound by
+// the rule.
 func TestFederatedVisitor_RuleDoesNotBindLaterTransportIdentity(t *testing.T) {
 	const (
 		driver   = "later-driver@any.example"
@@ -1252,22 +1286,123 @@ func TestFederatedVisitor_RuleDoesNotBindLaterTransportIdentity(t *testing.T) {
 	}
 	linkedBefore := len(f.audits(t, mutationTypeVisitorLinked))
 
-	f.srv.proxyDrivers = newDriverPrincipalSet([]string{driver})
-	f.srv.platformAuthSA = platform
+	setTransportIdentities(f.srv, platform, driver)
 	otherProject := tid(t.Name() + "-other")
 	createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
 	rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
 	require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
 
-	for _, tok := range tokens {
-		_, _, code := f.identityThroughMiddleware(t, tok)
-		require.Equal(t, http.StatusOK, code)
+	for sub, tok := range tokens {
+		t.Run(sub, func(t *testing.T) {
+			f.requireRefusedThrough(t, tok)
+		})
 	}
 	assert.Empty(t, f.ruleBindings(t, otherProject, rule.ID), "the rule binds neither account")
 	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), linkedBefore, "no new visitor_linked audit")
 
 	// Control: another account in the domain is bound by the rule.
 	v := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-cal", "cal@any.example", boolPtr(true)))
+	require.NotNil(t, v)
+	bindings := f.ruleBindings(t, otherProject, rule.ID)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, v.ID(), bindings[0].PrincipalID)
+}
+
+// First contact (resolveFederatedVisitor, then linkPendingVisitor) called
+// directly, as any caller that does not go through the auth middleware
+// would: a verified federated user naming a transport identity (also in
+// mixed case), in a domain that has a visitor rule, is not served as a
+// visitor, and gets no federated account, no rule binding and no
+// visitor_linked audit. Another email in each of those domains is linked
+// and bound.
+func TestFederatedVisitor_ResolveSkipsTransportIdentityOnFirstContact(t *testing.T) {
+	const (
+		driver   = "direct-driver@partner.example"
+		platform = "direct-sa@visitor-proj.iam.gserviceaccount.com"
+	)
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		setTransportIdentities(srv, platform, driver)
+	})
+	ctx := context.Background()
+	issuer := store.NormalizeFederatedIssuer(grantTestOtherIssuer)
+	driverRule := f.addRuleOK(t, grantTestOtherIssuer, "partner.example")
+	platformRule := f.addRuleOK(t, grantTestOtherIssuer, "visitor-proj.iam.gserviceaccount.com")
+
+	for name, tc := range transportIdentityCases(driver, platform,
+		"Direct-Driver@Partner.EXAMPLE", "Direct-SA@visitor-proj.IAM.gserviceaccount.com") {
+		t.Run(name, func(t *testing.T) {
+			v, err := f.srv.resolveFederatedVisitor(ctx,
+				NewFederatedUserIdentity(grantTestOtherIssuer, tc.subject, tc.email, "Visitor "+tc.subject, "viewer", nil))
+			require.NoError(t, err)
+			assert.Nil(t, v, "not served as a visitor")
+			_, err = f.st.GetFederatedUserByEmail(ctx, issuer, store.NormalizeFederatedEmail(tc.email))
+			assert.ErrorIs(t, err, store.ErrNotFound, "no federated account for %s", tc.email)
+			_, err = f.st.GetFederatedUserBySubject(ctx, grantTestOtherIssuer, tc.subject)
+			assert.ErrorIs(t, err, store.ErrNotFound, "no account linked to %s", tc.subject)
+		})
+	}
+	assert.Empty(t, f.ruleBindings(t, f.projectID, driverRule.ID), "no binding in the driver's domain")
+	assert.Empty(t, f.ruleBindings(t, f.projectID, platformRule.ID), "no binding in the platform account's domain")
+	assert.Empty(t, f.audits(t, mutationTypeVisitorLinked), "no visitor_linked audit")
+
+	// Control: other emails in the same domains are linked and bound.
+	for _, tc := range []struct {
+		subject, email string
+		rule           ProjectVisitorRuleView
+	}{
+		{"sub-ann", "ann@partner.example", driverRule},
+		{"sub-bo", "bo@visitor-proj.iam.gserviceaccount.com", platformRule},
+	} {
+		v, err := f.srv.resolveFederatedVisitor(ctx,
+			NewFederatedUserIdentity(grantTestOtherIssuer, tc.subject, tc.email, "Visitor "+tc.subject, "viewer", nil))
+		require.NoError(t, err)
+		require.NotNil(t, v, "%s is a visitor through the rule", tc.email)
+		bindings := f.ruleBindings(t, f.projectID, tc.rule.ID)
+		require.Len(t, bindings, 1, "%s is bound", tc.email)
+		assert.Equal(t, v.ID(), bindings[0].PrincipalID)
+	}
+}
+
+// A later request of a linked account (resolveFederatedVisitor, then
+// applyVisitorRules) called directly: after the account's email is
+// configured as a proxy driver principal or as the platform service
+// account, a matching rule added later writes no binding and no
+// visitor_linked audit. Another linked account in the domain is bound by
+// the rule on its next request.
+func TestFederatedVisitor_ResolveDoesNotBindLaterTransportIdentity(t *testing.T) {
+	const (
+		driver   = "direct-later-driver@any.example"
+		platform = "direct-later-platform@any.example"
+		control  = "direct-later-cal@any.example"
+	)
+	f := newVisitorGrantFixture(t)
+	ctx := context.Background()
+	users := map[string]*FederatedUserIdentity{}
+	for sub, email := range map[string]string{"sub-later-driver": driver, "sub-later-platform": platform, "sub-later-cal": control} {
+		f.grantOK(t, grantTestOtherIssuer, email)
+		users[sub] = NewFederatedUserIdentity(grantTestOtherIssuer, sub, email, "Visitor "+sub, "viewer", nil)
+		v, err := f.srv.resolveFederatedVisitor(ctx, users[sub])
+		require.NoError(t, err)
+		require.NotNil(t, v, "%s links through its grant", email)
+	}
+	linkedBefore := len(f.audits(t, mutationTypeVisitorLinked))
+
+	setTransportIdentities(f.srv, platform, driver)
+	otherProject := tid(t.Name() + "-other")
+	createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
+	rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
+	require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
+
+	for _, sub := range []string{"sub-later-driver", "sub-later-platform"} {
+		_, err := f.srv.resolveFederatedVisitor(ctx, users[sub])
+		require.NoError(t, err)
+	}
+	assert.Empty(t, f.ruleBindings(t, otherProject, rule.ID), "the rule binds neither account")
+	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), linkedBefore, "no new visitor_linked audit")
+
+	// Control: the other linked account in the domain is bound by the rule.
+	v, err := f.srv.resolveFederatedVisitor(ctx, users["sub-later-cal"])
+	require.NoError(t, err)
 	require.NotNil(t, v)
 	bindings := f.ruleBindings(t, otherProject, rule.ID)
 	require.Len(t, bindings, 1)
