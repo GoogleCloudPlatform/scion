@@ -440,7 +440,8 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		{"/favicon.svg.gz", gzFav, true},
 	}
 	// check asserts that a response never carries the stored variant.
-	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root bool) {
+	// followed reports that rec is the landing response of a redirect.
+	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root, followed bool) {
 		t.Helper()
 		body := rec.Body.Bytes()
 		assert.NotEqual(t, stored, body, target)
@@ -448,9 +449,9 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		switch {
 		case !root && rec.Code == http.StatusNotFound:
-		case rec.Code == http.StatusOK:
-			// The SPA shell (root forms) or a directory listing (a dot-dot
-			// form under /assets/ redirected to /assets/).
+		case rec.Code == http.StatusOK && (root || followed):
+			// The SPA shell (root forms) or, only after a redirect, the
+			// directory listing a dot-dot form under /assets/ lands on.
 			assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be HTML", target)
 		default:
 			t.Errorf("%s: unexpected status %d", target, rec.Code)
@@ -475,7 +476,9 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 					req.Header.Set("Accept-Encoding", "br, gzip")
 					rec := httptest.NewRecorder()
 					srv(tc.root).ServeHTTP(rec, req)
+					followed := false
 					if isRedirect(rec.Code) {
+						followed = true
 						// The mux cleans a literal dot segment with a
 						// redirect; follow it once and check where it lands.
 						assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
@@ -488,7 +491,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 						srv(tc.root).ServeHTTP(rec, req)
 						target += " -> " + loc
 					}
-					check(t, target, rec, tc.stored, tc.root)
+					check(t, target, rec, tc.stored, tc.root, followed)
 				}
 			}
 		})
