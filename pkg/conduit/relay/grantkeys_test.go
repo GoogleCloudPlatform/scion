@@ -43,18 +43,33 @@ func TestRelayNotifyGrantKeysChanged(t *testing.T) {
 	w.SetPrincipal("v2", agentPrincipal("L1", 1))
 	v2Hello := relaytest.AgentHello(agentID, "L1", "", "pty")
 	v2Hello.Capabilities.Features = []string{conduit.FeatureStreamRenewal}
-	a.MustDial("v2", v2Hello, counting(&v2Hints))
+	_, v2Welcome := a.MustDial("v2", v2Hello, counting(&v2Hints))
 
 	w.SetPrincipal("plain", relay.Principal{Kind: registry.PrincipalAgent, ID: "agent-plain", ProjectID: project,
 		Agent: relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 1}})
 	plainHello := relaytest.AgentHello("agent-plain", "L2", "", "pty")
 	plainHello.Capabilities.Features = []string{"stream_renewal"} // the earlier name is not .v2
-	plain, _ := a.MustDial("plain", plainHello, counting(&plainHints))
+	plain, plainWelcome := a.MustDial("plain", plainHello, counting(&plainHints))
 
 	w.SetPrincipal("user", relay.Principal{Kind: registry.PrincipalUser, ID: "user-1"})
 	userHello := relaytest.UserHello("user-1")
 	userHello.Capabilities.Features = []string{conduit.FeatureStreamRenewal}
-	user, _ := a.MustDial("user", userHello, counting(&userHints))
+	user, userWelcome := a.MustDial("user", userHello, counting(&userHints))
+
+	// MustDial returns once the Welcome arrives, which the relay sends
+	// while the session is still pending; NotifyGrantKeysChanged only sees
+	// registered sessions. Wait for every dialled session to register so
+	// the count, and the absence of hints on the others, are both
+	// meaningful (ptone/scion#5338). The relay clock is fake, so ctx is
+	// the only bound.
+	for name, wel := range map[string]*conduitv1.Welcome{"v2": v2Welcome, "plain": plainWelcome, "user": userWelcome} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _, ok := a.Relay.Local(ctx, wel.GetSessionId())
+		cancel()
+		if !ok {
+			t.Fatalf("%s: the session did not register on the relay", name)
+		}
+	}
 
 	if n := a.Relay.NotifyGrantKeysChanged(); n != 1 {
 		t.Fatalf("sent on %d sessions, want 1", n)
