@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 310
+**Operations:** 323
 
 ## Table of Contents
 
@@ -21,12 +21,12 @@
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
-- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries
-- [agent.messages.read](#agentmessagesread) — Read an agent's message history and message logs
+- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read
+- [agent.messages.read](#agentmessagesread) — Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
 - [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
 - [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
 - [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action
-- [agent.attach](#agentattach) — Attach to an agent session via WebSocket
+- [agent.attach](#agentattach) — Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
 - [agent.port.list](#agentportlist) — List an agent's exposed ports
 - [agent.port.register](#agentportregister) — Register, delete or clear an agent's exposed ports
@@ -90,7 +90,7 @@
 - [project.injectedskills.read](#projectinjectedskillsread) — List the skills injected into a project's agents
 - [project.injectedskills.write](#projectinjectedskillswrite) — Add, replace or remove skills injected into a project's agents
 - [project.gcpsa.create](#projectgcpsacreate) — Register a project-scoped GCP service account. Project-route service account writes use project.manage
-- [project.messagelogs.read](#projectmessagelogsread) — Read a project's message log
+- [project.messagelogs.read](#projectmessagelogsread) — Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read
 - [project.broadcast](#projectbroadcast) — Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
 - [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
 - [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
@@ -134,6 +134,8 @@
 - [inbox.notification.template.create](#inboxnotificationtemplatecreate) — Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
 - [inbox.notification.template.read](#inboxnotificationtemplateread) — List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
 - [inbox.notification.template.delete](#inboxnotificationtemplatedelete) — Delete a subscription template the caller created. A token needs inbox:write for the template's project
+- [project.conversation.gcsobject.read](#projectconversationgcsobjectread) — Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary
+- [web.events.stream](#webeventsstream) — Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream
 - [chat.prefs.read](#chatprefsread) — Read the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:read for the agent's project
 - [chat.prefs.update](#chatprefsupdate) — Write the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:write for the agent's project
 - [chat.space.list](#chatspacelist) — List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
@@ -201,11 +203,13 @@
 - [group.read](#groupread) — Read group details or list groups
 - [group.create](#groupcreate) — Create a new group
 - [group.update](#groupupdate) — Update group metadata
-- [user.read](#userread) — Read user profile or list users
+- [user.read](#userread) — Read a user profile
+- [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
 - [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
-- [role.read](#roleread) — Read role definitions and permission registry
+- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 - [role.binding.read](#rolebindingread) — Read role binding assignments
-- [access.constraint.read](#accessconstraintread) — Read access constraint definitions
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
+- [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
@@ -215,6 +219,15 @@
 - [template.user.create](#templateusercreate) — Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
 - [template.user.update](#templateuserupdate) — Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
 - [template.user.delete](#templateuserdelete) — Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
+- [hub.audit.effectiveaccess](#hubauditeffectiveaccess) — Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
+- [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
+- [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
+- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile
+- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+- [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
+- [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
+- [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
+- [user.chatlink.verify](#userchatlinkverify) — Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -874,7 +887,7 @@
 
 **Domain:** agent
 
-**Description:** Read an agent's runtime logs and Cloud Logging entries
+**Description:** Read an agent's runtime logs and Cloud Logging entries, and stream its Cloud Logging entries. A stream opened by a token ends once the token stops validating or loses agent.read
 
 ### Entry Points
 
@@ -884,6 +897,8 @@
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/logs` |
 | http_route | GET | `/api/v1/agents/{id}/cloud-logs` |
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs` |
+| sse | GET | `/api/v1/agents/{id}/cloud-logs/stream` |
+| sse | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -909,7 +924,7 @@
 
 **Domain:** agent
 
-**Description:** Read an agent's message history and message logs
+**Description:** Read and stream an agent's message history and message logs. agent.attach gives the full history; agent.read alone gives the messages the caller sent or received. A stream opened by a token ends once the token stops validating or loses the permission that admitted it
 
 ### Entry Points
 
@@ -918,6 +933,9 @@
 | http_route | GET | `/api/v1/agents/{id}/messages` |
 | http_route | GET | `/api/v1/agents/{id}/message-logs` |
 | http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs` |
+| sse | GET | `/api/v1/agents/{id}/messages/stream` |
+| sse | GET | `/api/v1/agents/{id}/message-logs/stream` |
+| sse | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -1057,7 +1075,7 @@
 
 **Domain:** agent
 
-**Description:** Attach to an agent session via WebSocket
+**Description:** Attach to an agent session via WebSocket. A session opened by a token closes with 4401 once the token stops validating or loses agent.attach
 
 ### Entry Points
 
@@ -3612,13 +3630,14 @@
 
 **Domain:** project
 
-**Description:** Read a project's message log
+**Description:** Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}/message-logs` |
+| sse | GET | `/api/v1/projects/{id}/message-logs/stream` |
 
 **Principals:** `user`, `agent`
 
@@ -5139,6 +5158,72 @@
 ### Tests
 
 - `pkg/hub:TestNotificationTemplates_ListedOnlyForReadableProjects`
+
+---
+
+## project.conversation.gcsobject.read
+
+**Domain:** project
+
+**Description:** Fetch a gs:// object named in a message of a project group conversation, through the sending agent's assigned service account. Needs project:read on the conversation's project; a token needs it inside its boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/gcs/object` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** message-conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestGCSObjectToken_ProjectGroupNeedsProjectRead`
+
+---
+
+## web.events.stream
+
+**Domain:** web
+
+**Description:** Stream hub events to the web client. The web server admits only a signed-in web session; a token never opens the stream
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| sse | GET | `/events` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** event-subjects
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestWebEventStream_RefusesUserAccessToken`
+
+### Exemptions
+
+- **authentication_only:** Each requested subject is authorized for the session user when the stream opens; no single resource permission applies (scope: web event stream) — waives: `base_permission`
 
 ---
 
@@ -7545,13 +7630,12 @@
 
 **Domain:** user
 
-**Description:** Read user profile or list users
+**Description:** Read a user profile
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/users` |
 | http_route | GET | `/api/v1/users/{id}` |
 
 **Principals:** `user`
@@ -7569,6 +7653,38 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## user.list
+
+**Domain:** user
+
+**Description:** List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `user.list`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserListToken_RequiresUserListAndHubBoundary`
 
 ---
 
@@ -7606,7 +7722,7 @@
 
 **Domain:** role
 
-**Description:** Read role definitions and permission registry
+**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -7615,12 +7731,16 @@
 | http_route | GET | `/api/v1/admin/roles` |
 | http_route | GET | `/api/v1/admin/roles/{id}` |
 | http_route | GET | `/api/v1/admin/roles/export` |
+| http_route | HEAD | `/api/v1/admin/roles/export` |
 | http_route | GET | `/api/v1/admin/roles/{id}/export` |
+| http_route | HEAD | `/api/v1/admin/roles/{id}/export` |
 | http_route | GET | `/api/v1/admin/permissions` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `role.read`
 
@@ -7633,6 +7753,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
+- `pkg/hub:TestRoleRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -7651,7 +7773,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `role_binding.read`
 
@@ -7664,6 +7788,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
 
 ---
 
@@ -7671,7 +7796,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Read access constraint definitions
+**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -7679,10 +7804,13 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/access-constraints` |
 | http_route | GET | `/api/v1/admin/access-constraints/{id}` |
+| http_route | GET | `/api/v1/admin/access-constraints/{id}/affected-principals` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `access_constraint.read`
 
@@ -7695,6 +7823,40 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestConstraintReadToken_DoesNotAdmitConstraintAdmin`
+- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsStillDenied`
+
+---
+
+## hub.audit.constraint
+
+**Domain:** hub
+
+**Description:** Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/access-constraints/{id}/audit` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.audit.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary`
 
 ---
 
@@ -8024,6 +8186,311 @@
 
 - `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
 - `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## hub.audit.effectiveaccess
+
+**Domain:** hub
+
+**Description:** Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/effective-access` |
+| http_route | HEAD | `/api/v1/admin/effective-access` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.audit.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
+
+---
+
+## hub.audit.explain
+
+**Domain:** hub
+
+**Description:** Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/authz/explain` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.audit.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
+
+---
+
+## user.self.explain
+
+**Domain:** user
+
+**Description:** Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/authz/explain` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`
+
+### Exemptions
+
+- **authentication_only:** Explains the caller's own authorization; every explained decision runs with the caller's own credential (scope: caller's own authorization only) — waives: `base_permission`
+
+---
+
+## user.self.profile
+
+**Domain:** user
+
+**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/auth/me` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Reads the caller's own profile; carries no authority (scope: caller's own profile only) — waives: `base_permission`
+
+---
+
+## user.self.scopes
+
+**Domain:** user
+
+**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/auth/scopes` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+
+### Exemptions
+
+- **authentication_only:** Lists the selector catalog and the caller's own mint eligibility; carries no authority (scope: selector catalog and caller's own eligibility only) — waives: `base_permission`
+
+---
+
+## user.self.adminstatus
+
+**Domain:** user
+
+**Description:** Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/auth/admin-status` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestAdminStatusToken_ReportsCeilingIntersection`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminStatusToken_ReportsCeilingIntersection`
+
+### Exemptions
+
+- **authentication_only:** Reads the caller's own admin status; a token's permission list is limited to its ceiling and boundary (scope: caller's own admin status only) — waives: `base_permission`
+
+---
+
+## user.self.groups
+
+**Domain:** user
+
+**Description:** List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/groups` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`
+
+### Exemptions
+
+- **authentication_only:** Lists the caller's own group memberships; a project token sees only its boundary project's groups and groups with no project (scope: caller's own groups only) — waives: `base_permission`
+
+---
+
+## user.invite.redeem
+
+**Domain:** user
+
+**Description:** Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/auth/invite/redeem` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestInviteRedeem_SessionOnly`
+
+### Exemptions
+
+- **authentication_only:** Redeems an invitation for the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
+
+---
+
+## user.chatlink.verify
+
+**Domain:** user
+
+**Description:** Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/telegram/link/verify` |
+| http_route | POST | `/api/v1/discord/link/verify` |
+| http_route | POST | `/api/v1/teams/link/verify` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestChatLinkVerify_SessionOnly`
+
+### Exemptions
+
+- **authentication_only:** Links an external chat account to the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
 
 ---
 

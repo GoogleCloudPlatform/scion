@@ -303,6 +303,14 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		{"inbox.notification.template.create", "/api/v1/notifications/templates"}: {
 			"name": f.inbox.createConversations + "-template", "triggerActivities": []string{"COMPLETED"}, "projectId": f.project,
 		},
+		// Explain names a fixture project target; the cross-principal
+		// variant explains for the fixture user.
+		{"user.self.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read",
+		},
+		{"hub.audit.explain", "/api/v1/authz/explain"}: {
+			"resource": map[string]interface{}{"type": "project", "id": f.project}, "action": "read", "principalId": f.user,
+		},
 		// Chat writes with bodies the handlers accept.
 		{"chat.prefs.update", "/api/v1/chat/prefs"}:                                    {"visibility_mode": "conversation"},
 		{"chat.thread.create", "/api/v1/chat/spaces/{id}/threads"}:                     {"name": "bdm thread"},
@@ -339,6 +347,13 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
 	return map[string]map[string]string{
 		"/api/v1/agents/{id}/pty": {"id": f.agent},
+		// Streams of the fixture agent and project.
+		"/api/v1/agents/{id}/cloud-logs/stream":                        {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs/stream":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages/stream":                          {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs/stream":                      {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs/stream": {"projectId": f.project, "id": f.agent},
+		"/api/v1/projects/{id}/message-logs/stream":                    {"id": f.project},
 	}
 }
 

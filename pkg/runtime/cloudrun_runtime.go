@@ -269,6 +269,9 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := rejectNonNFSOnCloudRun(cfg); err != nil {
 		return "", err
 	}
+	if err := r.checkOwnerLabel(cfg); err != nil {
+		return "", err
+	}
 	// Deliver resolved secrets through the instance env: env-type secrets as
 	// plain variables, file/variable secrets as the staged blob that
 	// sciontool init writes out. Done before any provisioning so an

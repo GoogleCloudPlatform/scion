@@ -16,9 +16,10 @@ package hub
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"time"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Long-lived streams re-check the credential that opened them.
@@ -28,7 +29,10 @@ import (
 // re-checks the request's credential on a fixed interval and ends when the
 // check fails, so a token that is revoked, expires, belongs to a suspended
 // user or loses the permission stops receiving data within one
-// interval.
+// interval. The diagnostics log stream re-checks every credential
+// (streamCredentialStillAuthorized); the agent and project streams and
+// PTY sessions re-check only a user access token
+// (streamTokenStillAuthorized), so a session keeps its stream.
 
 // streamCredentialRecheckInterval is how often a long-lived stream
 // re-checks its credential. Tests shorten it.
@@ -45,10 +49,8 @@ const streamCredentialEndedEvent = "event: error\ndata: {\"message\":\"stream en
 // (AuthzRequestFromContext), with the identity's credential only when none
 // is recorded. The authorization decision for permission on resource must
 // be allowed again and, when the request's credential is a user access
-// token, the stored token must not be revoked or expired, must still have
-// a valid boundary and must belong to the same active user. A missing
-// identity, a non-user identity, a token credential without a token ID or
-// any lookup error fails the check.
+// token, the token must still validate (bearerStillValid). A missing
+// identity, a non-user identity or a failed token check fails the check.
 func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource Resource, action Action, permission string) bool {
 	if s.authzService == nil || s.store == nil {
 		return false
@@ -57,26 +59,44 @@ func (s *Server) streamCredentialStillAuthorized(ctx context.Context, resource R
 	if !ok || isNilIdentity(user) {
 		return false
 	}
+	if !s.bearerStillValid(ctx) {
+		return false
+	}
 	req := AuthzRequestFromContext(ctx, resource, action)
 	req.Permission = permission
-	if req.Credential.Kind == CredentialKindUAT {
-		if req.Credential.ID == "" {
-			return false
-		}
-		token, err := s.store.GetUserAccessToken(ctx, req.Credential.ID)
-		if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
-			return false
-		}
-		if token.ExpiresAt != nil && time.Until(*token.ExpiresAt) <= 0 {
-			return false
-		}
-		if token.ValidateBoundary() != nil {
-			return false
-		}
-		owner, err := s.store.GetUser(ctx, token.UserID)
-		if err != nil || owner == nil || owner.Status == store.UserStatusSuspended {
-			return false
-		}
-	}
 	return s.authzService.Decide(ctx, req).Allowed
+}
+
+// streamTokenStillAuthorized is the re-check of a stream that ends only
+// for a user access token: a request whose credential is a user access
+// token must pass streamCredentialStillAuthorized; any other credential
+// passes, so sessions, dev and agent credentials keep their stream.
+func (s *Server) streamTokenStillAuthorized(ctx context.Context, resource Resource, action Action, permission string) bool {
+	if !requestCredentialIsUAT(ctx) {
+		return true
+	}
+	return s.streamCredentialStillAuthorized(ctx, resource, action, permission)
+}
+
+// streamTokenRecheck returns the channel a stream selects on to re-check a
+// user access token credential every streamCredentialRecheckInterval, and
+// the function that stops it. For any other credential the channel is nil
+// and never fires.
+func streamTokenRecheck(ctx context.Context) (<-chan time.Time, func()) {
+	if !requestCredentialIsUAT(ctx) {
+		return nil, func() {}
+	}
+	t := time.NewTicker(streamCredentialRecheckInterval)
+	return t.C, t.Stop
+}
+
+// endStreamForCredential writes streamCredentialEndedEvent unless the
+// request is already cancelled. A re-check on a cancelled request can fail;
+// such a stream ends without the event.
+func endStreamForCredential(ctx context.Context, w io.Writer, flusher http.Flusher) {
+	if ctx.Err() != nil {
+		return
+	}
+	_, _ = fmt.Fprint(w, streamCredentialEndedEvent)
+	flusher.Flush()
 }
