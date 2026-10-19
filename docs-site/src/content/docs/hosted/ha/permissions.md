@@ -158,11 +158,11 @@ When check mode is `enforce`, the Hub's service account needs `roles/iam.securit
 
 ```bash
 gcloud projects add-iam-policy-binding <service-account-project> \
-  --member=serviceAccount:<hub-service-account> \
-  --role=roles/iam.securityReviewer
+  --member="serviceAccount:<hub-service-account>" \
+  --role="roles/iam.securityReviewer"
 ```
 
-If the role is missing there, assignment is refused with `403` and a message that names the service account's GCP project, the Hub's service account and the role, and gives this command with both values filled in. Retrying does not help until the role is granted. Other check failures, such as the Policy Troubleshooter API being disabled or a transient error, keep the message "Could not verify your permission to use this GCP service account because the check did not complete; try again".
+If the role is missing there, assignment is refused with `403` and a message that names the service account's GCP project, the Hub's service account and the IAM Security Reviewer role, and gives this command with both values filled in. Retrying does not help until the role is granted. Other check failures, such as the Policy Troubleshooter API being disabled or a transient error, keep the message "Could not verify your permission to use this GCP service account because the check did not complete; try again".
 
 If the check cannot run because of the Hub's identity, that Hub instance reports the check `sa_assign_check` as `degraded` in its health row, and the admin health summary (`GET /api/v1/admin/health/summary`) reports it in a `service_account_check` section that lists the instances reporting it. Every Hub replica returns the same section.
 

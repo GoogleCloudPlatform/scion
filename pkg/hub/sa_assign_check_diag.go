@@ -192,11 +192,11 @@ func saAssignIAMReadDeniedMessage(gcpProjectID, hubSAEmail string) string {
 		return ""
 	}
 	return "Could not verify your permission to use this GCP service account: " +
-		"the Hub's service account (" + hubSAEmail + ") cannot read IAM policy in " +
-		"the account's GCP project " + gcpProjectID + ". It needs the " +
-		saAssignIAMReadRole + " role on that project. A GCP project admin can " +
+		"the Hub could not read IAM policy in GCP project " + gcpProjectID + ". " +
+		"The Hub's service account " + hubSAEmail + " needs the IAM Security Reviewer " +
+		"role (" + saAssignIAMReadRole + ") on that project. A GCP project admin can " +
 		"grant it with: gcloud projects add-iam-policy-binding " + gcpProjectID +
-		" --member=serviceAccount:" + hubSAEmail + " --role=" + saAssignIAMReadRole
+		` --member="serviceAccount:` + hubSAEmail + `" --role="` + saAssignIAMReadRole + `"`
 }
 
 // saAssignSafeIdent reports whether s is non-empty and uses only lowercase

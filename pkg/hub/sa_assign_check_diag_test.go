@@ -163,11 +163,11 @@ func TestSACheckDiag_HubIdentityRefused_ShownToAdminAndAssignmentDenied(t *testi
 func saCheckIAMReadDeniedMsg(gcpProject string) string {
 	const hub = "hub@test.iam.gserviceaccount.com"
 	return "Could not verify your permission to use this GCP service account: " +
-		"the Hub's service account (" + hub + ") cannot read IAM policy in " +
-		"the account's GCP project " + gcpProject + ". It needs the " +
-		"roles/iam.securityReviewer role on that project. A GCP project admin can " +
+		"the Hub could not read IAM policy in GCP project " + gcpProject + ". " +
+		"The Hub's service account " + hub + " needs the IAM Security Reviewer " +
+		"role (roles/iam.securityReviewer) on that project. A GCP project admin can " +
 		"grant it with: gcloud projects add-iam-policy-binding " + gcpProject +
-		" --member=serviceAccount:" + hub + " --role=roles/iam.securityReviewer"
+		` --member="serviceAccount:` + hub + `" --role="roles/iam.securityReviewer"`
 }
 
 func saCheckStatusErr(t *testing.T, code codes.Code, msg string, details ...protoadapt.MessageV1) error {
