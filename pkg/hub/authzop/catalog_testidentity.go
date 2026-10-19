@@ -21,7 +21,9 @@ package authzop
 // and a workload-bound issuer delegation (phase X2), which acts for its
 // human grantor within its single scope and manages only the identities
 // issued through it. Admin-kind issuance also admits a workload delegation
-// of the kind's admin scope (phase X4; issue-only). The delegation
+// of the kind's admin scope (phase X4), which also re-issues tokens for and
+// mints web-login codes for the admin-kind identities it issued (phase
+// X4b); list, delete and member issuance refuse it. The delegation
 // operations themselves (create, list, revoke) admit an interactive
 // session only.
 var testIdentityOperations = []OperationSpec{
@@ -79,7 +81,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.token.issue",
 		Domain:      "testidentity",
-		Description: "Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session",
+		Description: "Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session; an admin-kind identity's token is re-issued only through the admin-scope workload delegation that issued it (phase X4b)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/token", Method: "POST"},
 		},
@@ -91,7 +93,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only the identity's issuer (or an unscoped platform admin session) re-issues; the token never outlives the identity",
+			Description: "Only the identity's issuer (or an unscoped platform admin session) re-issues a member-tier token, with test_identity.issue; the token never outlives the identity. An admin-kind identity's token (no re-issue for any other caller: 409) is re-issued only through the admin-scope workload delegation that issued it, of the identity's kind, with that kind's issuer checks (its capability, a live super-admin grantor through current bindings), at most the kind's token lifetime and never past the identity's expiry or its creation plus the kind's maximum lifetime; the delegation, the grantor and the identity are re-checked inside the mint transaction, and a test admin audit sink line carries the delegation id. Admin token re-issue is bounded only by the per-delegation test identity rate limiter, not by an admin-specific limit; each re-issue adds a live token (earlier ones stay valid until they expire), and every token ends no later than the identity's kind lifetime",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
@@ -104,13 +106,15 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentity_TokenReissue"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminCredentials_TokenReissueOwnIdentity"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminCredentials_TokenReissueRefusals"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
 		ID:          "testidentity.webcode.issue",
 		Domain:      "testidentity",
-		Description: "Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)",
+		Description: "Mint a single-use, five-minute web-login code for a live test identity, for its issuer, a workload issuer delegation on the identities it issued (member scope: member-tier identities; admin scope, phase X4b: admin-kind identities of its kind), or an unscoped platform admin session; only on hubs where test identity web sessions are available. Kind test_fixture needs test_identity.issue; an admin kind (test_hub_admin, test_super_admin) only while server.hub.test_identities.admin_web_sessions is on at an admin --test-mode level, and only with the issuer checks of that kind's issuance (its capability, a live super-admin through current bindings, an access token with exactly the kind's scope)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/{id}/web-login-code", Method: "POST"},
 		},
@@ -122,7 +126,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks; at most one unredeemed code per identity, redeemable once, never past the identity's expiry",
+			Description: "Only the identity's issuer (or a workload delegation, for the identities of its tier issued through it, or an unscoped platform admin session) mints a code; for an admin-kind identity the caller also passes that kind's issuer checks, and through an admin-scope delegation the delegation, the grantor and the identity are re-checked inside the mint transaction and a test admin audit sink line carries the delegation id; at most one unredeemed code per identity, redeemable once, never past the identity's expiry (for an admin kind, nor its creation plus the kind's maximum lifetime)",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
@@ -140,6 +144,8 @@ var testIdentityOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeForOwnIdentity"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_RevokedAfterAuthMintsNothing"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminCredentials_WebCodeOwnIdentity"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminCredentials_WebCodeRefusals"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
@@ -253,7 +259,7 @@ var testIdentityOperations = []OperationSpec{
 		DelegationDescription: "The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. A workload issuer delegation (phase X4) acts for its human grantor within its one admin scope (test_identity:issue_admin or test_identity:issue_super_admin), which must be the requested kind's; inside the issuance transaction the delegation is re-read and the grantor is re-checked as a live human super-admin holding the capability (recheckTestAdminDelegationGrantor). The binding expires with the identity",
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level, and is issue-only. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)",
+			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level; besides issuance it re-issues tokens for and mints web-login codes for the identities it issued (phase X4b), and nothing else. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
