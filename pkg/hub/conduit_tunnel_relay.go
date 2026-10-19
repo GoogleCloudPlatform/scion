@@ -168,6 +168,12 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 	}
 	if claims != nil {
 		open.OpenJTI = claims.JTI
+		// Scheduling hints for the relay, copied from the claims just
+		// minted (never from the request): both or neither.
+		if !claims.AuthzUntil.IsZero() && claims.AuthzInterval > 0 {
+			open.AuthzUntil = claims.AuthzUntil.Unix()
+			open.AuthzIntervalS = int64(claims.AuthzInterval / time.Second)
+		}
 	}
 	log.Info("Conduit tunnel authorized for a relay-held session", "target_session_id", res.Record.SessionID, "owner_relay", res.Record.RelayInstanceID)
 	return &conduitTunnelResponse{
