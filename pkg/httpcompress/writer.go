@@ -104,13 +104,16 @@ func (cw *compressWriter) Write(p []byte) (int, error) {
 	}
 	switch cw.state {
 	case stateHolding:
-		cw.held = append(cw.held, p...)
-		if len(cw.held) >= cw.minSize {
-			if err := cw.startCompressing(); err != nil {
-				return 0, err
-			}
+		if len(cw.held)+len(p) < cw.minSize {
+			cw.held = append(cw.held, p...)
+			return len(p), nil
 		}
-		return len(p), nil
+		// Over the threshold: send what is held, then compress p directly
+		// rather than copying it into the hold buffer.
+		if err := cw.startCompressing(); err != nil {
+			return 0, err
+		}
+		return cw.gz.Write(p)
 	case stateCompressing:
 		return cw.gz.Write(p)
 	default:

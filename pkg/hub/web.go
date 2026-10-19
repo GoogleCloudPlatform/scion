@@ -2460,14 +2460,16 @@ func isProxyRoute(path string) bool {
 // gzipped by the MountHubAPI compression wrapper (pkg/httpcompress). The
 // wrapper already passes through upgrade and event-stream requests and every
 // non-JSON response; this list adds:
-//   - streaming and connection routes: agent PTY, attach, and every port
+//   - streaming and connection routes: agent PTY and every port
 //     route (proxy, tunnel, list; see isProxyRoute), and any path ending in
 //     /stream or /events;
 //   - endpoints that return credentials or secret values: /api/v1/auth/,
 //     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
-//     identities, and every env or secrets route.
+//     identities, and every env or secrets route;
+//   - agent item responses (/api/v1/agents/{id} and
+//     /api/v1/projects/{projectId}/agents/{id}).
 //
 // Keep this list in step with new streaming or credential-returning routes;
 // TestCompressBypass_StreamRoutesFromCatalog fails for an uncovered stream
@@ -2510,9 +2512,14 @@ func isCompressBypassPath(path string) bool {
 		case "env", "secrets":
 			return true
 		case "agents":
+			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
+			// project-scoped form) stay uncompressed.
+			if i+2 == len(segs) {
+				return true
+			}
 			if i+2 < len(segs) {
 				switch segs[i+2] {
-				case "pty", "attach", "ports":
+				case "pty", "ports":
 					return true
 				}
 			}

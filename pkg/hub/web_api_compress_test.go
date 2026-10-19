@@ -215,6 +215,48 @@ func TestWebAPI_AgentListGzip(t *testing.T) {
 	assert.JSONEq(t, string(body), string(identity))
 }
 
+func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
+	env := newCompressHubEnv(t, nil)
+	ctx := context.Background()
+	agent := createTestAgent(t, env.store)
+	agent.Labels = map[string]string{"note": strings.Repeat("a", 1500)}
+	require.NoError(t, env.store.UpdateAgent(ctx, agent))
+
+	for _, p := range []string{
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/projects/" + agent.ProjectID + "/agents/" + agent.ID,
+	} {
+		t.Run("GET "+p, func(t *testing.T) {
+			resp := compressGet(t, ctx, env.ts.URL+p, env.auth)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			requireNoEncoding(t, resp)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, len(body), 1024, "the item body must be large enough to be compressed if it were wrapped")
+			assert.Contains(t, string(body), agent.ID)
+		})
+	}
+
+	t.Run("PATCH", func(t *testing.T) {
+		patch, err := json.Marshal(map[string]any{"labels": map[string]string{"note": strings.Repeat("b", 1500)}})
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPatch, env.ts.URL+"/api/v1/agents/"+agent.ID, strings.NewReader(string(patch)))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept-Encoding", "gzip")
+		req.Header.Set("Authorization", env.auth["Authorization"])
+		resp, err := compressClient().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%.300s", body)
+		requireNoEncoding(t, resp)
+		require.GreaterOrEqual(t, len(body), 1024)
+		assert.Contains(t, string(body), strings.Repeat("b", 1500))
+	})
+}
+
 func TestWebAPI_SmallPublicJSONNotCompressed(t *testing.T) {
 	env := newCompressHubEnv(t, nil)
 	resp := compressGet(t, context.Background(), env.ts.URL+"/api/v1/settings/public", nil)
@@ -314,7 +356,7 @@ func TestWebAPI_PTYRouteNotWrapped(t *testing.T) {
 		_, _ = w.Write(largeJSON())
 	}))
 
-	for _, p := range []string{"/api/v1/agents/a1/pty", "/api/v1/agents/a1/attach", "/api/v1/agents/a1/ports/tunnel"} {
+	for _, p := range []string{"/api/v1/agents/a1/pty", "/api/v1/agents/a1/ports/tunnel"} {
 		t.Run(p, func(t *testing.T) {
 			// An upgrade request reaches the hub with a hijackable writer.
 			conn, err := net.Dial("tcp", strings.TrimPrefix(ts.URL, "http://"))
@@ -492,7 +534,6 @@ func TestCompressBypass_StreamRoutesFromCatalog(t *testing.T) {
 	// Guard against the iteration silently finding nothing.
 	for _, want := range []string{
 		"/api/v1/agents/x1/pty",
-		"/api/v1/agents/x1/attach",
 		"/api/v1/agents/x1/ports/tunnel",
 		"/api/v1/agents/x1/messages/stream",
 		"/api/v1/agents/x1/message-logs/stream",
@@ -507,7 +548,6 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 	bypassed := []string{
 		// Streams, upgrades and ports.
 		"/api/v1/agents/a1/pty",
-		"/api/v1/agents/a1/attach",
 		"/api/v1/agents/a1/ports/",
 		"/api/v1/agents/a1/ports/tunnel",
 		"/api/v1/agents/a1/ports/3000",
@@ -545,6 +585,10 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		"/api/v1/test-identities/admin",
 		"/api/v1/env",
 		"/api/v1/env/KEY",
+		// Agent item responses.
+		"/api/v1/agents/a1",
+		"/api/v1/agents/a1/",
+		"/api/v1/projects/p1/agents/a1",
 		"/api/v1/projects/p1/env/KEY",
 		"/api/v1/secrets",
 		"/api/v1/secrets/KEY",
@@ -554,13 +598,14 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 	}
 	compressed := []string{
 		"/api/v1/agents",
-		"/api/v1/agents/a1",
+		"/api/v1/agents/",
 		"/api/v1/agents/a1/messages",
 		"/api/v1/agents/a1/message-logs",
 		"/api/v1/agents/a1/logs",
 		"/api/v1/projects",
 		"/api/v1/projects/p1",
 		"/api/v1/projects/p1/agents",
+		"/api/v1/projects/p1/agents/",
 		"/api/v1/chat/conversations/c1/messages",
 		"/api/v1/settings/public",
 		"/api/v1/runtime-brokers",
