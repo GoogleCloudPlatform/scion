@@ -2373,49 +2373,6 @@ func MarshalV1ServerConfig(v1 *V1ServerConfig) ([]byte, error) {
 	return yamlv3.Marshal(v1)
 }
 
-// MergeServerIntoSettings merges a V1ServerConfig into the settings.yaml file
-// in the given directory under the "server" key.
-func MergeServerIntoSettings(dir string, v1 *V1ServerConfig) error {
-	settingsPath := filepath.Join(dir, "settings.yaml")
-
-	// Load existing settings.yaml if it exists
-	var raw map[string]interface{}
-	if data, err := os.ReadFile(settingsPath); err == nil {
-		if err := yamlv3.Unmarshal(data, &raw); err != nil {
-			return fmt.Errorf("failed to parse existing settings.yaml: %w", err)
-		}
-	}
-	if raw == nil {
-		raw = make(map[string]interface{})
-	}
-
-	// Marshal the V1ServerConfig to get it as a map
-	serverData, err := yamlv3.Marshal(v1)
-	if err != nil {
-		return fmt.Errorf("failed to marshal server config: %w", err)
-	}
-
-	var serverMap interface{}
-	if err := yamlv3.Unmarshal(serverData, &serverMap); err != nil {
-		return fmt.Errorf("failed to unmarshal server config: %w", err)
-	}
-
-	raw["server"] = serverMap
-
-	// Ensure schema_version is set
-	if _, ok := raw["schema_version"]; !ok {
-		raw["schema_version"] = "1"
-	}
-
-	// Write back
-	newData, err := yamlv3.Marshal(raw)
-	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
-	}
-
-	return os.WriteFile(settingsPath, newData, 0644)
-}
-
 // loadServerConfigFile loads server config from a directory's server.yaml file.
 func loadServerConfigFile(k *koanf.Koanf, dir string) {
 	yamlPath := filepath.Join(dir, "server.yaml")

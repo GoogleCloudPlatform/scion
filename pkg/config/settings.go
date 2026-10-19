@@ -15,17 +15,14 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
-	"gopkg.in/yaml.v3"
 )
 
 // Note: Settings files support YAML (preferred) and JSONC formats.
@@ -496,65 +493,6 @@ func MergeSettings(base *Settings, data []byte) error {
 	}
 
 	return nil
-}
-
-// SaveSettings saves the settings to the specified location in YAML format.
-func SaveSettings(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.yaml")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.yaml")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(settings)
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
-}
-
-// SaveSettingsJSON saves the settings to the specified location in JSON format.
-// This is provided for backward compatibility.
-func SaveSettingsJSON(projectPath string, settings *Settings, global bool) error {
-	var targetPath string
-	if global {
-		globalDir, err := GetGlobalDir()
-		if err != nil {
-			return err
-		}
-		targetPath = filepath.Join(globalDir, "settings.json")
-	} else {
-		if projectPath == "" {
-			return fmt.Errorf("project path required for local settings")
-		}
-		targetPath = filepath.Join(projectPath, "settings.json")
-	}
-
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	return os.WriteFile(targetPath, data, 0644)
 }
 
 // UpdateSetting updates a specific setting key in the specified scope (global or local).
