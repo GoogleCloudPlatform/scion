@@ -67,9 +67,13 @@ func newTunnelFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *tunnelF
 // server before it starts serving (newRelayFixtureServer).
 func newTunnelFixtureServer(t *testing.T, srvMod func(*Server), mods ...func(*ConduitRelayOptions)) *tunnelFixture {
 	t.Helper()
-	tf := &tunnelFixture{relayClock: clock.NewFake(time.Now()), dials: make(chan net.Conn, 16)}
+	tf := &tunnelFixture{dials: make(chan net.Conn, 16)}
 	all := append([]func(*ConduitRelayOptions){func(o *ConduitRelayOptions) {
-		o.Clock = tf.relayClock
+		// The relay fixture's fake clock, which starts at the clock grants
+		// are minted on (newRelayFixtureServer).
+		fc, ok := o.Clock.(*clock.Fake)
+		require.True(t, ok, "the relay fixture runs on a fake clock")
+		tf.relayClock = fc
 		o.AuthzRecheckInterval = tunnelSweep
 	}}, mods...)
 	tf.ptyConduitFixture = newPTYConduitFixtureServer(t, srvMod, all...)

@@ -465,7 +465,11 @@ func newRelayFixtureServer(t *testing.T, srvMod func(*Server), mod func(*Conduit
 	_, _ = rand.Read(secret)
 	auth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: secret, SelfID: "hub-a"})
 	require.NoError(t, err)
-	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now()), sessionWriteWait: conduitFixtureWriteWait}
+	// The relay clock also drives the stream re-check and its renewal
+	// driver, so it starts at the clock the fixture mints grants on: a
+	// grant's authz_until is then ahead of it, as in production, where both
+	// read the same time.
+	opts := ConduitRelayOptions{InstanceID: "hub-a", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(f.clock.Now()), sessionWriteWait: conduitFixtureWriteWait}
 	if mod != nil {
 		mod(&opts)
 	}
