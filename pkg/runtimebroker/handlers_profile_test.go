@@ -97,7 +97,7 @@ runtimes:
 // TestResolveManagerForOpts_NilRuntimeResolverFallsBack proves that a nil
 // srv.resolveAuxiliaryRuntime does not panic when settings resolve to a
 // runtime other than the broker's default. New() always sets
-// resolveAuxiliaryRuntime to agent.ResolveRuntime, so this only matters for
+// resolveAuxiliaryRuntime to agent.ResolveRuntimeWithRecord, so this only matters for
 // a Server built without New() (e.g. a test literal, or some future
 // construction path) — but resolveManagerForOpts falls back to that exact
 // same function rather than a stand-in, so the fallback resolves

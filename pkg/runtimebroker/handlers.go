@@ -6907,7 +6907,7 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// that was just checked. When empty, GetRuntime falls back to settings
 	// the same way ResolveRuntime does.
 	//
-	// resolveAuxiliaryRuntime is set to agent.ResolveRuntime by New() and
+	// resolveAuxiliaryRuntime is set to agent.ResolveRuntimeWithRecord by New() and
 	// should never be nil in production; this falls back to the same
 	// function so a Server built without New() (e.g. a test literal)
 	// resolves identically to production instead of panicking.

@@ -435,11 +435,11 @@ type Server struct {
 	// and profile name when discovering or creating auxiliary runtimes, and
 	// in resolveManagerForOpts when settings resolve to something other than
 	// the broker's default runtime. It is a field (defaulting to
-	// agent.ResolveRuntime, set in New) rather than a direct call, so tests
-	// can substitute a stub that does not require live cluster/network
-	// access — resolving a real Kubernetes runtime calls Verify() against
-	// the API server. It returns the runtime's build record with it
-	// (agent.ResolveRuntimeWithRecord).
+	// agent.ResolveRuntimeWithRecord, set in New) rather than a direct call,
+	// so tests can substitute a stub that does not require live
+	// cluster/network access — resolving a real Kubernetes runtime calls
+	// Verify() against the API server. It returns the runtime's build
+	// record with it.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) (scionrt.Runtime, config.RuntimeBuildRecord)
 
 	// saDiscoveryCache holds the background ServiceAccount annotation
