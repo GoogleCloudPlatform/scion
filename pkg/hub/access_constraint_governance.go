@@ -136,8 +136,9 @@ type CommitRequest struct {
 }
 
 // errTokenRelaxationSessionOnly refuses a commit that relaxes a boundary
-// (delete, or an update that adds permissions to the maximum set) when it
-// is sent with a user access token: relaxing a boundary needs a session.
+// (delete, or an update that adds permissions, changes subject or scope,
+// or narrows or adds its time window) when it is sent with a user access
+// token: relaxing a boundary needs a session.
 var errTokenRelaxationSessionOnly = errors.New("relaxing an access constraint requires an interactive session")
 
 // commitSentWithToken reports whether the commit is sent with a user access
@@ -259,6 +260,16 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 			return nil, errTokenRelaxationSessionOnly
 		}
 		if err := gs.checkRelaxationAuthority(ctx, req, scopeType, scopeID); err != nil {
+			return nil, err
+		}
+	}
+
+	// A user access token may not narrow or add a constraint's time window:
+	// the constraint is inactive outside its window, so an update whose
+	// window does not cover the existing one relaxes the boundary and needs
+	// a session.
+	if req.Operation == "update" && commitSentWithToken(ctx, req) {
+		if err := gs.checkTokenWindowCovers(ctx, req); err != nil {
 			return nil, err
 		}
 	}
@@ -595,6 +606,24 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 	return ClassificationTighten, nil // No permission changes = default to tighten.
 }
 
+// checkTokenWindowCovers refuses, with errTokenRelaxationSessionOnly, an
+// update whose proposed time window does not cover the existing window:
+// the proposed NotBefore is later than the existing one or newly set, or
+// the proposed ExpiresAt is earlier than the existing one or newly set.
+func (gs *GovernanceService) checkTokenWindowCovers(ctx context.Context, req CommitRequest) error {
+	if req.ConstraintID == "" || req.Draft == nil {
+		return nil
+	}
+	existing, err := gs.store.GetAccessConstraint(ctx, req.ConstraintID)
+	if err != nil {
+		return fmt.Errorf("failed to load existing constraint: %w", err)
+	}
+	if !constraintWindowCovers(req.Draft, existing) {
+		return errTokenRelaxationSessionOnly
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Relaxation authority
 // ---------------------------------------------------------------------------
@@ -878,10 +907,23 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 // inner's, and outer's ExpiresAt is unset or no earlier than inner's,
 // where an inner binding with no expiry needs an outer one with none.
 func bindingWindowCovers(outer, inner *store.RoleBinding) bool {
-	if outer.NotBefore != nil && (inner.NotBefore == nil || outer.NotBefore.After(*inner.NotBefore)) {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
+
+// constraintWindowCovers reports whether the outer constraint's time window
+// covers the inner one: the outer constraint is active whenever the inner
+// one is. A nil bound is unbounded.
+func constraintWindowCovers(outer, inner *store.AccessConstraint) bool {
+	return timeWindowCovers(outer.NotBefore, outer.ExpiresAt, inner.NotBefore, inner.ExpiresAt)
+}
+
+// timeWindowCovers reports whether the window [outerNotBefore, outerExpiresAt]
+// covers [innerNotBefore, innerExpiresAt]. A nil bound is unbounded.
+func timeWindowCovers(outerNotBefore, outerExpiresAt, innerNotBefore, innerExpiresAt *time.Time) bool {
+	if outerNotBefore != nil && (innerNotBefore == nil || outerNotBefore.After(*innerNotBefore)) {
 		return false
 	}
-	if outer.ExpiresAt != nil && (inner.ExpiresAt == nil || outer.ExpiresAt.Before(*inner.ExpiresAt)) {
+	if outerExpiresAt != nil && (innerExpiresAt == nil || outerExpiresAt.Before(*innerExpiresAt)) {
 		return false
 	}
 	return true

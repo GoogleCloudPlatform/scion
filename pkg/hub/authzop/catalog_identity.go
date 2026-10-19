@@ -289,7 +289,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "access.constraint.update",
 		Domain:      "access.constraint",
-		Description: "Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that adds permissions to the maximum set relaxes the boundary and is session only. The commit re-checks judge the holder's authority within the token's selectors",
+		Description: "Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/access-constraints/{id}", Method: "PUT"},
 		},

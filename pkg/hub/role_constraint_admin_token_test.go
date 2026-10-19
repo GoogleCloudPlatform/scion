@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -639,11 +640,19 @@ func rcaPreview(t *testing.T, srv *Server, key string, body previewCreateRequest
 // subject through the preview and create routes with key, and returns it.
 func rcaCreateConstraint(t *testing.T, srv *Server, s store.Store, key, name, subject string, perms ...string) *store.AccessConstraint {
 	t.Helper()
+	return rcaCreateConstraintWindow(t, srv, s, key, name, subject, nil, perms...)
+}
+
+// rcaCreateConstraintWindow is rcaCreateConstraint with the time window
+// window (nil for none).
+func rcaCreateConstraintWindow(t *testing.T, srv *Server, s store.Store, key, name, subject string, window *constraintConditionReq, perms ...string) *store.AccessConstraint {
+	t.Helper()
 	d := rcaConstraintDraft(name, subject, perms...)
+	d.AppliesWhen = window
 	code, token := rcaPreview(t, srv, key, previewCreateRequest{Operation: "create", Draft: d})
 	require.Equal(t, http.StatusOK, code)
 	rec := rcaDo(t, srv, key, http.MethodPost, "/api/v1/admin/access-constraints", accessConstraintCreateRequest{
-		Name: d.Name, Purpose: d.Purpose, Subject: d.Subject, Scope: d.Scope, MaximumPermissions: d.MaximumPermissions, PreviewToken: token,
+		Name: d.Name, Purpose: d.Purpose, Subject: d.Subject, Scope: d.Scope, MaximumPermissions: d.MaximumPermissions, AppliesWhen: d.AppliesWhen, PreviewToken: token,
 	}, "")
 	require.Equal(t, http.StatusCreated, rec.Code, "create: %s", rec.Body.String())
 	var created mutationResponse
@@ -657,7 +666,15 @@ func rcaCreateConstraint(t *testing.T, srv *Server, s store.Store, key, name, su
 // and returns the update response (or the preview refusal).
 func rcaUpdateConstraint(t *testing.T, srv *Server, key string, c *store.AccessConstraint, subject string, perms ...string) *httptest.ResponseRecorder {
 	t.Helper()
+	return rcaUpdateConstraintWindow(t, srv, key, c, subject, nil, perms...)
+}
+
+// rcaUpdateConstraintWindow is rcaUpdateConstraint with the proposed time
+// window window (nil for none).
+func rcaUpdateConstraintWindow(t *testing.T, srv *Server, key string, c *store.AccessConstraint, subject string, window *constraintConditionReq, perms ...string) *httptest.ResponseRecorder {
+	t.Helper()
 	d := rcaConstraintDraft(c.Name, subject, perms...)
+	d.AppliesWhen = window
 	rev := strconv.FormatInt(c.Revision, 10)
 	preview := rcaDo(t, srv, key, http.MethodPost, "/api/v1/admin/access-constraint-previews",
 		previewCreateRequest{Operation: "update", ConstraintID: c.ID, BaseRevision: rev, Draft: d}, "")
@@ -667,7 +684,7 @@ func rcaUpdateConstraint(t *testing.T, srv *Server, key string, c *store.AccessC
 	var result PreviewResult
 	require.NoError(t, json.Unmarshal(preview.Body.Bytes(), &result))
 	return rcaDo(t, srv, key, http.MethodPut, "/api/v1/admin/access-constraints/"+c.ID, accessConstraintUpdateRequest{
-		Name: d.Name, Purpose: d.Purpose, Subject: d.Subject, Scope: d.Scope, MaximumPermissions: d.MaximumPermissions, PreviewToken: result.PreviewToken,
+		Name: d.Name, Purpose: d.Purpose, Subject: d.Subject, Scope: d.Scope, MaximumPermissions: d.MaximumPermissions, AppliesWhen: d.AppliesWhen, PreviewToken: result.PreviewToken,
 	}, `"`+rev+`"`)
 }
 
@@ -754,9 +771,11 @@ func TestConstraintAdminToken_RequiresConstraintAdminSelector(t *testing.T) {
 
 // TestConstraintRelaxToken_SessionOnly pins that relaxing a constraint
 // needs a session: a super-admin's hub token carrying every mintable
-// selector gets the session-only refusal on a constraint delete and on an
-// update that adds a permission to the maximum set, and the constraint is
-// kept as stored; the holder's session deletes and widens.
+// selector gets the session-only refusal on a constraint delete, on an
+// update that adds a permission to the maximum set, and on an update that
+// narrows or adds the constraint's time window, and the constraint is kept
+// as stored; the holder's session makes each of these changes. A token
+// update that widens or removes the time window is admitted.
 func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -785,6 +804,80 @@ func TestConstraintRelaxToken_SessionOnly(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, "session delete: %s", rec.Body.String())
 	_, err = s.GetAccessConstraint(ctx, doomed.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Time window: the constraint is inactive outside its window, so an
+	// update whose window does not cover the stored one is session only.
+	base := srv.governanceService.nowFunc().UTC().Truncate(time.Second)
+	at := func(d time.Duration) *time.Time {
+		v := base.Add(d)
+		return &v
+	}
+	for _, tc := range []struct {
+		name     string
+		stored   *constraintConditionReq
+		proposed *constraintConditionReq
+	}{
+		{"narrowed expiresAt", &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}, &constraintConditionReq{ExpiresAt: at(time.Hour)}},
+		{"added future notBefore", &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}, &constraintConditionReq{NotBefore: at(24 * time.Hour), ExpiresAt: at(72 * time.Hour)}},
+		{"window added to an unwindowed constraint", nil, &constraintConditionReq{ExpiresAt: at(72 * time.Hour)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := rcaCreateConstraintWindow(t, srv, s, key, "rca-cr-window-"+strings.ReplaceAll(tc.name, " ", "-"), subject.ID, tc.stored, "agent.read")
+			rec := rcaUpdateConstraintWindow(t, srv, key, c, subject.ID, tc.proposed, "agent.read")
+			requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, tc.name)
+			got, err := s.GetAccessConstraint(ctx, c.ID)
+			require.NoError(t, err)
+			assert.Equal(t, c.Revision, got.Revision, "the refused update changes nothing")
+			rcaRequireWindow(t, got, c.NotBefore, c.ExpiresAt)
+
+			rec = rcaUpdateConstraintWindow(t, srv, session, got, subject.ID, tc.proposed, "agent.read")
+			require.Equal(t, http.StatusOK, rec.Code, "session %s: %s", tc.name, rec.Body.String())
+			got, err = s.GetAccessConstraint(ctx, c.ID)
+			require.NoError(t, err)
+			rcaRequireWindow(t, got, tc.proposed.NotBefore, tc.proposed.ExpiresAt)
+		})
+	}
+
+	// Widening or removing the time window is a tightening: admitted.
+	for _, tc := range []struct {
+		name     string
+		proposed *constraintConditionReq
+	}{
+		{"widened window", &constraintConditionReq{ExpiresAt: at(96 * time.Hour)}},
+		{"removed window", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := rcaCreateConstraintWindow(t, srv, s, key, "rca-cr-window-"+strings.ReplaceAll(tc.name, " ", "-"), subject.ID,
+				&constraintConditionReq{NotBefore: at(time.Hour), ExpiresAt: at(48 * time.Hour)}, "agent.read")
+			rec := rcaUpdateConstraintWindow(t, srv, key, c, subject.ID, tc.proposed, "agent.read")
+			require.Equal(t, http.StatusOK, rec.Code, "token %s: %s", tc.name, rec.Body.String())
+			got, err := s.GetAccessConstraint(ctx, c.ID)
+			require.NoError(t, err)
+			var nb, ea *time.Time
+			if tc.proposed != nil {
+				nb, ea = tc.proposed.NotBefore, tc.proposed.ExpiresAt
+			}
+			rcaRequireWindow(t, got, nb, ea)
+		})
+	}
+}
+
+// rcaRequireWindow asserts that c's stored time window is
+// [notBefore, expiresAt] (nil for an unbounded side).
+func rcaRequireWindow(t *testing.T, c *store.AccessConstraint, notBefore, expiresAt *time.Time) {
+	t.Helper()
+	for _, side := range []struct {
+		name      string
+		got, want *time.Time
+	}{{"notBefore", c.NotBefore, notBefore}, {"expiresAt", c.ExpiresAt, expiresAt}} {
+		if side.want == nil {
+			assert.Nil(t, side.got, side.name)
+			continue
+		}
+		if assert.NotNil(t, side.got, side.name) {
+			assert.True(t, side.want.Equal(*side.got), "%s: got %v, want %v", side.name, *side.got, *side.want)
+		}
+	}
 }
 
 // TestConstraintCommit_AppliesTokenSelectors pins that the constraint commit

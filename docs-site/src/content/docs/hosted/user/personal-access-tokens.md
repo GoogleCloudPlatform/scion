@@ -253,9 +253,10 @@ The same per-request checks apply, with these limits:
   permission of the role in that project within the token's scopes. Deleting a system-scoped
   binding needs `role_binding:delete`. A token can never create a system-scoped binding or
   delete a super-admin binding. Constraint previews need `access_constraint:admin`; creating a
-  constraint, or an update that only removes permissions from its maximum set, also needs
-  `access_constraint:read`. Deleting a constraint, or adding permissions to its maximum set,
-  needs an interactive sign-in.
+  constraint, or an update that tightens it (removes permissions from its maximum set, or
+  widens or removes its time window), also needs `access_constraint:read`. Deleting a
+  constraint, or an update that relaxes it (adds permissions, changes its subject or scope, or
+  narrows or adds its time window), needs an interactive sign-in.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your
