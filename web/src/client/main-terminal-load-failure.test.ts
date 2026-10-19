@@ -65,7 +65,7 @@ describe('main.ts terminal route', () => {
     vi.unstubAllGlobals();
   });
 
-  it('a failed workspace load keeps the page, shows a toast, and the next visit retries', async () => {
+  it('a failed workspace load brings the page back with focus, shows a toast, and the next visit retries', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const main = await bootMainAt('/admin/users');
     await vi.waitFor(
@@ -73,11 +73,20 @@ describe('main.ts terminal route', () => {
       BOOT_WAIT
     );
     const outlet = document.getElementById('route-outlet')!;
+    // Something on the page has focus when the user opens /terminals.
+    const focused = document.createElement('button');
+    document.querySelector('scion-page-admin-users')!.appendChild(focused);
+    focused.focus();
+    expect(document.activeElement).toBe(focused);
 
     main.navigateTo('/terminals');
     await vi.waitFor(() => expect(loadTerminalWorkspace).toHaveBeenCalledTimes(1), BOOT_WAIT);
     // Hidden while the chunk loads; the failure brings the previous page back.
     expect(outlet.hidden).toBe(true);
+    // A browser blurs an element whose ancestor becomes hidden; jsdom does
+    // not, so do it here.
+    focused.blur();
+    expect(document.activeElement).toBe(document.body);
     rejectLoad!(new Error('Failed to fetch dynamically imported module'));
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1), BOOT_WAIT);
     expect(showToast).toHaveBeenCalledWith(
@@ -93,6 +102,8 @@ describe('main.ts terminal route', () => {
     expect(fakeTerminalRecord.coordinators).toHaveLength(0);
     expect(outlet.hidden).toBe(false);
     expect(document.querySelector('scion-page-admin-users')).not.toBeNull();
+    // Focus goes back to where it was before the outlet was hidden.
+    expect(document.activeElement).toBe(focused);
 
     // The failure was not cached: the next visit loads again and mounts.
     main.navigateTo('/terminals');

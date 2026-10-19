@@ -1115,6 +1115,8 @@ async function renderRoute(path: string): Promise<void> {
     // chunk was lazy: the URL already says /terminals, so the old page must
     // not stay interactive under it while the load runs. A newer navigation
     // un-hides it (and reuses the page, see returningFromTerminal below).
+    // Hiding blurs the focused element; a failed load gives focus back.
+    const focusBeforeLoad = document.activeElement;
     appContainer.hidden = true;
     let coordinator: TerminalCoordinator | null;
     try {
@@ -1126,6 +1128,9 @@ async function renderRoute(path: string): Promise<void> {
       console.error('[Scion] Failed to load the terminal workspace:', err);
       if (thisNav === navigationId) {
         appContainer.hidden = false;
+        if (focusBeforeLoad instanceof HTMLElement && focusBeforeLoad.isConnected) {
+          focusBeforeLoad.focus({ preventScroll: true });
+        }
         showToast('Could not load terminals. Reload the page to try again.', 'danger');
       }
       return;

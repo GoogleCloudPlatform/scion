@@ -83,7 +83,7 @@ describe('main.ts terminal route', () => {
     expect(fakeTerminalRecord.workspaces).toHaveLength(0);
     expect(fakeTerminalRecord.coordinators).toHaveLength(0);
     expect(document.querySelector('[data-fake-terminal-workspace]')).toBeNull();
-    // The newer navigation un-hid the outlet, and the late load did not hide it again.
+    // The newer navigation un-hid the outlet; the superseded load left it alone.
     expect(outlet.hidden).toBe(false);
   }, 15_000);
 });
