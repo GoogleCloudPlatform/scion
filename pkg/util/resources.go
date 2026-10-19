@@ -132,7 +132,7 @@ func FormatMemoryForApple(bytes int64) string {
 
 // ParseCPU parses a CPU quantity. Accepts whole numbers, decimals, and
 // Kubernetes millicore notation (e.g., "500m" = 0.5 cores).
-// Returns the value as a float64 number of cores.
+// Returns the value as a finite float64 number of cores.
 func ParseCPU(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -144,12 +144,18 @@ func ParseCPU(s string) (float64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid cpu value %q: %w", s, err)
 		}
+		if math.IsNaN(millis) || math.IsInf(millis, 0) {
+			return 0, fmt.Errorf("invalid cpu value %q: must be finite", s)
+		}
 		return millis / 1000.0, nil
 	}
 
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid cpu value %q: %w", s, err)
+	}
+	if math.IsNaN(val) || math.IsInf(val, 0) {
+		return 0, fmt.Errorf("invalid cpu value %q: must be finite", s)
 	}
 	return val, nil
 }
