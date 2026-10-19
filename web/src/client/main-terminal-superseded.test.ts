@@ -67,8 +67,9 @@ describe('main.ts terminal route', () => {
 
     main.navigateTo('/terminals');
     await vi.waitFor(() => expect(loadTerminalWorkspace).toHaveBeenCalledTimes(1), BOOT_WAIT);
-    // While the chunk loads, the previous page stays on screen.
-    expect(outlet.hidden).toBe(false);
+    // While the chunk loads, the previous page is hidden: the URL already
+    // says /terminals, so the old page must not stay interactive under it.
+    expect(outlet.hidden).toBe(true);
 
     main.navigateTo('/admin/groups');
     await vi.waitFor(
@@ -82,6 +83,7 @@ describe('main.ts terminal route', () => {
     expect(fakeTerminalRecord.workspaces).toHaveLength(0);
     expect(fakeTerminalRecord.coordinators).toHaveLength(0);
     expect(document.querySelector('[data-fake-terminal-workspace]')).toBeNull();
+    // The newer navigation un-hid the outlet, and the late load did not hide it again.
     expect(outlet.hidden).toBe(false);
   }, 15_000);
 });

@@ -1111,21 +1111,26 @@ async function renderRoute(path: string): Promise<void> {
       navigateTo('/login');
       return;
     }
+    // Hide the previous page before the workspace chunk loads, as before the
+    // chunk was lazy: the URL already says /terminals, so the old page must
+    // not stay interactive under it while the load runs. A newer navigation
+    // un-hides it (and reuses the page, see returningFromTerminal below).
+    appContainer.hidden = true;
     let coordinator: TerminalCoordinator | null;
     try {
       coordinator = await ensureTerminalCoordinator(thisNav);
     } catch (err) {
       // The chunk failed to load (for example after a deploy removed it).
-      // Like a failed page chunk, the previous page stays on screen; the
-      // loader does not cache the failure, so the next visit retries.
+      // Like a failed page chunk, the previous page comes back on screen;
+      // the loader does not cache the failure, so the next visit retries.
       console.error('[Scion] Failed to load the terminal workspace:', err);
       if (thisNav === navigationId) {
+        appContainer.hidden = false;
         showToast('Could not load terminals. Reload the page to try again.', 'danger');
       }
       return;
     }
     if (thisNav !== navigationId) return;
-    appContainer.hidden = true;
     setDocumentTitle('Terminals');
     // No coordinator (account torn down, or no #app): nothing to show or open.
     // Otherwise terminalModule is set too: it is assigned before the

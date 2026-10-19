@@ -16,7 +16,8 @@
 
 /**
  * A failed terminal workspace chunk load (for example after a deploy removed
- * the chunk) keeps the previous page, shows a toast, mounts nothing, and the
+ * the chunk) brings the previous page back (it is hidden while the chunk
+ * loads), shows a toast, mounts nothing, and the
  * next /terminals visit loads again (ptone/scion#5306). main.ts has no route
  * error view; this is the same as a failed page chunk plus the toast. A fresh
  * entry module (no coordinator yet) is needed, so it is its own file.
@@ -45,9 +46,15 @@ vi.mock('../utils/toast.js', async (importOriginal) => ({
   },
 }));
 
+let rejectLoad: ((err: Error) => void) | null = null;
 const loadTerminalWorkspace = vi
   .fn<() => Promise<TerminalWorkspaceModule>>()
-  .mockRejectedValueOnce(new Error('Failed to fetch dynamically imported module'))
+  .mockImplementationOnce(
+    () =>
+      new Promise<TerminalWorkspaceModule>((_resolve, reject) => {
+        rejectLoad = reject;
+      })
+  )
   .mockResolvedValue(fakeTerminalWorkspaceModule);
 vi.mock('./terminal-workspace-loader.js', () => ({
   loadTerminalWorkspace: (): Promise<TerminalWorkspaceModule> => loadTerminalWorkspace(),
@@ -68,6 +75,10 @@ describe('main.ts terminal route', () => {
     const outlet = document.getElementById('route-outlet')!;
 
     main.navigateTo('/terminals');
+    await vi.waitFor(() => expect(loadTerminalWorkspace).toHaveBeenCalledTimes(1), BOOT_WAIT);
+    // Hidden while the chunk loads; the failure brings the previous page back.
+    expect(outlet.hidden).toBe(true);
+    rejectLoad!(new Error('Failed to fetch dynamically imported module'));
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1), BOOT_WAIT);
     expect(showToast).toHaveBeenCalledWith(
       'Could not load terminals. Reload the page to try again.',

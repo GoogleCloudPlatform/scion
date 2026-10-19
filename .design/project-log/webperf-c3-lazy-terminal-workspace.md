@@ -15,10 +15,10 @@ vertical slice; C4 and C8 build on it.
 - `ensureTerminalCoordinator(thisNav)` is async. After the load it checks the
   `navigationId` guard (and account teardown) before creating or mounting
   anything, so a navigation away during the load wins. The route outlet is
-  hidden only after the load, so the previous page stays visible meanwhile.
-  A failed load logs, shows a toast, and keeps the previous page (the same as
-  a failed page chunk). The loader does not cache a rejection, so the next
-  visit retries.
+  hidden before the load starts, as it was before the chunk became lazy; a
+  newer navigation un-hides it. A failed load logs, shows a toast, and shows
+  the previous page again (the same as a failed page chunk). The loader does
+  not cache a rejection, so the next visit retries.
 - `main.ts` imports terminal modules as types only. `terminal-move.ts`,
   `terminal-palette-open.ts` and `terminal-palette-data.ts` already used
   type-only imports for the heavy modules; they did not need changes.
@@ -60,6 +60,17 @@ trimming `main.ts`.
   scenarios (lazy load, navigated away, load failure) are therefore separate
   test files that share
   `__fixtures__/main-boot.ts` and `__fixtures__/terminal-workspace-fake.ts`.
+- First version hid the outlet only after the load, to keep the previous
+  page on screen meanwhile. That left the old page (and its header)
+  interactive under a `/terminals` URL for the whole load. On the Vite dev
+  server, which the chat mobile e2e suite uses, the load is long, and two
+  e2e tests (dm-mode-switch, mode-switch-state) clicked the stale header's
+  mode switch and failed their first attempt. Fix: hide the outlet before
+  awaiting the load, as before the chunk was lazy. Vitest
+  `terminal route hides the previous page while the workspace loads`
+  fails without the fix. The cause was not Vite dependency optimization: its
+  scan follows literal `import()` calls, and xterm was already a dynamic
+  import before C3.
 - Mutation checks run at dev time: removing the `navigationId` check after the
   load makes `navigating away during workspace load does not mount` fail;
   putting back a static value import of `TerminalCoordinator` makes the budget
