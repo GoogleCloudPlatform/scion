@@ -30,6 +30,10 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// testHookTunnelEnded, when set (tests only), runs after a tunnel's splice
+// has ended and the tunnel is untracked and forgotten.
+var testHookTunnelEnded func()
+
 // MaxTunnelReResolves bounds how many times one tunnel request goes back to
 // the hub after the target session it named turned out stale (the same
 // budget the router gives one resolution).
@@ -51,8 +55,8 @@ type Tunnel struct {
 	OpenGrant []byte
 	// Bridge is the one internal stream to the owner relay when the
 	// target session is held by another relay (nil when it is held here).
-	// It is the one stream renewals for the target will use; nothing sends
-	// renewals on it yet.
+	// Renewals for the target go on it (the stream scheduler sends them); no
+	// second stream is opened for them.
 	Bridge relay.Bridge
 }
 
@@ -162,17 +166,18 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 	open := &conduitv1.StreamOpen{Kind: kind, Params: in.Params, Grant: in.Grant}
 	owner := in.Owner()
 	var (
-		target conduit.Stream
-		ids    relay.TargetStream
-		bridge relay.Bridge
-		err    error
+		target   conduit.Stream
+		ids      relay.TargetStream
+		bridge   relay.Bridge
+		targetLS conduit.LocalSession
+		err      error
 	)
 	if owner.InstanceID == ro.relay.InstanceID() {
 		// Same relay: the target stream is opened here, with no bridge.
 		if owner.Generation != ro.relay.Generation() {
 			return nil, &tunnelStaleError{err: &relay.StaleRouteError{Reason: "relay_target_mismatch"}}
 		}
-		target, ids, err = ro.relay.OpenLocal(ctx, in.TargetSessionID, in.Want(), open)
+		target, ids, targetLS, err = ro.relay.OpenLocalWithSession(ctx, in.TargetSessionID, in.Want(), open)
 	} else {
 		rec := registry.SessionRecord{
 			SessionID:       in.TargetSessionID,
@@ -222,10 +227,34 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		_ = target.CloseWithCode(conduit.CloseCancelled, relay.ReasonCancelled)
 		return unavailable, nil
 	}
-	// The tunnel is recorded with what its re-checks need (the target-side
-	// ids, the open grant, the bridge). It is not yet handed to the stream
-	// scheduler: until that wiring lands, nothing re-checks or renews it, and
-	// a target that enforces deadlines ends it at its authorization deadline.
+	// The tunnel is recorded and handed to the stream scheduler before the
+	// answer goes back, so it is re-checked for its whole life. Its timing
+	// comes from the unsigned scheduling hints alone; the grant is stored and
+	// passed on unparsed.
+	firstRecheck, interval, fallback := hintSchedule(ro.clk.Now(), in.AuthzUntil, in.AuthzIntervalS)
+	if fallback != "" {
+		ro.Streams.countHintFallback(fallback)
+		ro.log.Debug("Conduit tunnel: no usable scheduling hint; the stream is re-checked by the sweep", "session_id", userSessionID, "stream_id", user.ID(), "reason", fallback)
+	}
+	var renewer Renewer
+	if targetLS != nil {
+		renewer = LocalRenewer(targetLS, ids.StreamID)
+	} else {
+		renewer = HopRenewer(bridge)
+	}
+	untrack := ro.Streams.Track(TrackedStream{
+		UserSessionID:  userSessionID,
+		Target:         ids,
+		OpenJTI:        in.OpenJTI,
+		LatestGrant:    in.Grant,
+		Interval:       interval,
+		FirstRecheckAt: firstRecheck,
+		Renewer:        renewer,
+		Close: func(code uint32, reason string) {
+			_ = user.CloseWithCode(code, reason)
+			_ = target.CloseWithCode(code, reason)
+		},
+	})
 	remove := ro.tunnels.add(Tunnel{
 		UserSessionID: userSessionID,
 		UserStreamID:  user.ID(),
@@ -235,7 +264,13 @@ func (ro *Role) openTunnel(ctx context.Context, userSessionID string, accepted *
 		Bridge:        bridge,
 	})
 	go func() {
-		defer remove()
+		defer func() {
+			untrack()
+			remove()
+			if h := testHookTunnelEnded; h != nil {
+				h()
+			}
+		}()
 		relay.Splice(user, target)
 	}()
 	ro.log.Info("Conduit tunnel opened", "session_id", userSessionID, "stream_id", user.ID(),
