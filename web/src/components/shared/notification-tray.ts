@@ -38,6 +38,7 @@ import {
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
 
 /**
  * A scheduled dispatch blocked by an agent row in phase error. The row's
@@ -58,6 +59,43 @@ const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 /** Whether a notification row names an agent the "View agent" link can open. */
 function hasAgentLink(agentId: string | undefined): boolean {
   return !!agentId && agentId !== NIL_UUID;
+}
+
+/**
+ * The notification a `notification-created` event carries in full, or null.
+ *
+ * The user-scoped `user.{id}.notification` subject delivers the row itself
+ * (UserNotificationEvent): every field the tray renders (id, status,
+ * message, createdAt, agentId). The bare `notification.created` path, and
+ * anything malformed, yields null and is fetched instead.
+ *
+ * The payload has no `acknowledged` field: a notification that was just
+ * created is unacknowledged by definition, so a missing field passes and
+ * only an explicit `true` is rejected. A payload addressed to another user
+ * (`subscriberId`) is rejected too, as a second gate behind the subject.
+ */
+export function notificationFromEvent(data: unknown, userId: string | null): Notification | null {
+  if (!userId || !data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === 'string';
+  if (!str(d.id) || !d.id || !str(d.status) || !d.status || !str(d.message)) return null;
+  if (!str(d.createdAt) || Number.isNaN(Date.parse(d.createdAt))) return null;
+  if (!str(d.agentId)) return null;
+  if (d.acknowledged !== undefined && d.acknowledged !== false) return null;
+  if (d.subscriberId !== undefined && d.subscriberId !== userId) return null;
+  return {
+    id: d.id,
+    subscriptionId: str(d.subscriptionId) ? d.subscriptionId : '',
+    agentId: d.agentId,
+    projectId: str(d.projectId) ? d.projectId : '',
+    subscriberType: 'user',
+    subscriberId: userId,
+    status: d.status,
+    message: d.message,
+    dispatched: false,
+    acknowledged: false,
+    createdAt: d.createdAt,
+  };
 }
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
@@ -89,6 +127,32 @@ export class ScionNotificationTray extends LitElement {
 
   /** The user id that the list, seenIds and initialFetchDone belong to. */
   private stateUserId: string | null = null;
+
+  /** Counts list requests sent; each request knows its own number. */
+  private fetchSeq = 0;
+
+  /**
+   * The number of the newest list request whose response was applied. A
+   * response to an older request, landing after it, is stale and ignored.
+   */
+  private appliedSeq = 0;
+
+  /**
+   * Rows an event added, with the fetchSeq when it was added. A list request
+   * sent at or before that number may have been answered before the row
+   * existed, so its response must not drop the row.
+   */
+  private upsertedAtSeq = new Map<string, number>();
+
+  /**
+   * Fetches for events that carry no usable notification: the first of a
+   * burst fetches at once, the rest collapse into one trailing fetch.
+   */
+  private eventFetch: CoalescedRefresh = coalescedRefresh(() => this.fetchNotifications(), {
+    waitMs: 500,
+    maxWaitMs: 3000,
+    leading: true,
+  });
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -167,7 +231,11 @@ export class ScionNotificationTray extends LitElement {
     this.stateUserId = id;
     this.notifications = [];
     this.seenIds = new Set();
+    this.upsertedAtSeq.clear();
     this.initialFetchDone = false;
+    // The next user's first fetch answers any event the previous user's
+    // coalescer held, and their first event fetches at once.
+    this.eventFetch.cancel();
   }
 
   /**
@@ -254,12 +322,39 @@ export class ScionNotificationTray extends LitElement {
 
   private stopListeningForNotifications(): void {
     stateManager.removeEventListener('notification-created', this.boundOnNotification);
+    this.eventFetch.cancel();
   }
 
-  private onNotificationEvent(): void {
+  private onNotificationEvent(e: Event): void {
     // The stateManager fires notification-created when a notification SSE
-    // event arrives. Re-fetch to get the full notification objects.
-    void this.fetchNotifications();
+    // event arrives. A user-scoped event carries the whole row: show it
+    // without a request. Anything else is fetched, coalesced. Before the
+    // first fetch has finished there is no list to add to (and no seen set
+    // to tell a new row by), so that fetch is joined by fetching as well.
+    const detail = (e as CustomEvent<{ data?: unknown } | undefined>).detail;
+    const n = this.initialFetchDone
+      ? notificationFromEvent(detail?.data, this.user?.id ?? null)
+      : null;
+    if (n) {
+      this.upsertNotification(n);
+      return;
+    }
+    this.eventFetch.schedule(e.timeStamp > 0 ? e.timeStamp : undefined);
+  }
+
+  /** Adds a notification delivered by an event, or replaces its row. */
+  private upsertNotification(n: Notification): void {
+    // Chat rows no longer belong in the bell (see fetchNotifications).
+    if (RETIRED_CHAT_STATUSES.has(n.status)) return;
+    if (!this.seenIds.has(n.id)) {
+      this.dispatchBrowserNotification(n);
+      this.seenIds.add(n.id);
+    }
+    this.upsertedAtSeq.set(n.id, this.fetchSeq);
+    // The list is newest first, as the endpoint returns it.
+    const at = this.notifications.findIndex((x) => x.id === n.id);
+    this.notifications =
+      at < 0 ? [n, ...this.notifications] : this.notifications.map((x, i) => (i === at ? n : x));
   }
 
   // ---------------------------------------------------------------------------
@@ -268,11 +363,15 @@ export class ScionNotificationTray extends LitElement {
 
   private async fetchNotifications(): Promise<void> {
     const requestUserId = this.user?.id ?? null;
+    const seq = ++this.fetchSeq;
     try {
       const res = await apiFetch('/api/v1/notifications?acknowledged=false');
       if (!res.ok) return;
       const data = (await res.json()) as Notification[] | null;
       if (!this.isForCurrentUser(requestUserId)) return;
+      // A newer request's answer is already shown: this one is older.
+      if (seq < this.appliedSeq) return;
+      this.appliedSeq = seq;
       // Older chat rows can still be unacknowledged; chat no longer belongs
       // in the bell, so they are neither listed, counted nor popped.
       const incoming = (data ?? []).filter((n) => !RETIRED_CHAT_STATUSES.has(n.status));
@@ -288,10 +387,21 @@ export class ScionNotificationTray extends LitElement {
         }
       }
 
+      // Rows an event added after this request was sent are newer than its
+      // answer: keep them (they are already seen). Older ones are answered.
+      const incomingIds = new Set(incoming.map((n) => n.id));
+      const kept = this.notifications.filter(
+        (n) => !incomingIds.has(n.id) && (this.upsertedAtSeq.get(n.id) ?? -1) >= seq
+      );
+      for (const [id, at] of this.upsertedAtSeq) {
+        if (at < seq) this.upsertedAtSeq.delete(id);
+      }
+      const next = [...kept, ...incoming];
+
       // Update seen set to current snapshot
-      this.seenIds = new Set(incoming.map((n) => n.id));
+      this.seenIds = new Set(next.map((n) => n.id));
       this.initialFetchDone = true;
-      this.notifications = incoming;
+      this.notifications = next;
     } catch {
       // Silently ignore network errors during polling
     }
@@ -335,6 +445,7 @@ export class ScionNotificationTray extends LitElement {
       await apiFetch(`/api/v1/notifications/${id}/ack`, { method: 'POST' });
       if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
+      this.upsertedAtSeq.delete(id);
     } catch {
       // Ignore
     }
@@ -346,6 +457,7 @@ export class ScionNotificationTray extends LitElement {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
       if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = [];
+      this.upsertedAtSeq.clear();
     } catch {
       // Ignore
     }
