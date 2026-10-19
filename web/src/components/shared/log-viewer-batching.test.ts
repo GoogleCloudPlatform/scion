@@ -228,7 +228,7 @@ function expectedOrder(name: string, indices: number[]): string[] {
   return name === 'scion-unified-log-viewer' ? sorted : sorted.reverse();
 }
 
-describe.each(cases)('$name streaming', (c) => {
+describe.each(cases.map((c) => [c.name, c] as const))('%s streaming', (_name, c) => {
   it('500 streamed lines inside one frame produce exactly 1 render', async () => {
     const el = await c.mount();
     const source = FakeEventSource.instances[0];
