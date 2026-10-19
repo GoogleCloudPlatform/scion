@@ -648,10 +648,11 @@ func TestRenewalDriver_LastRetryStrictlyBeforeDeadline(t *testing.T) {
 
 // TestRenewalDriver_NonAdvancingUntilNeverLoops: a renewal whose
 // authz_until leaves no renewal point ahead of now (it did not move
-// forward, or it is already behind the driver's clock) is not re-armed at
-// once. Each Advance makes at most one attempt, and later attempts follow
-// the retry schedule (half the time left, a 30s floor, the last one 1s
-// before authz_until).
+// forward) is not re-armed at once. Each Advance makes at most one attempt,
+// and later attempts follow the retry schedule (half the time left, a 30s
+// floor, the last one 1s before authz_until). A stream whose authz_until is
+// already behind the driver's clock gets no renewal attempt at all: under
+// enforce it closes at its deadline, under off its renewals never start.
 func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 	// A regression renews in a loop inside one Advance. The stub turns
 	// unavailable after maxCalls, so a loop shows as a count, not a hang.
@@ -693,25 +694,49 @@ func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 		assert.Equal(t, []string{"4401 authz_expired"}, c.list(), "closed at authz_until")
 	})
 
-	t.Run("authz_until behind the driver clock", func(t *testing.T) {
-		f := newRenewalDriverFixture(t, false)
+	// behindClock tracks a stream whose authz_until is already an hour
+	// behind the driver's clock (the open grant was minted on a clock that
+	// lags it).
+	behindClock := func(f *renewalDriverFixture) (*closeRecorder, *renewRecorder) {
 		until := f.clk.Now().Add(-time.Hour)
 		f.setResult(sameUntil(until))
 		c, r := &closeRecorder{}, &renewRecorder{}
-		st := &conduitUserStream{
+		f.a.Track(&conduitUserStream{
 			Kind: grant.StreamKindPTY, Identity: NewAuthenticatedUser("u1", "u1@x", "u1", "member", "api"),
 			UserID: "u1", AgentID: "agent-x", ProjectID: "p1", SessionID: "sess-1", StreamID: 7,
 			Admitted: f.clk.Now(), Close: c.close, Renew: r.renew,
 			Grant: []byte("open"), OpenJTI: "open-jti", AuthzUntil: until, AuthzInterval: driverInterval,
-		}
-		f.a.Track(st)
+		})
+		return c, r
+	}
+
+	t.Run("authz_until behind the driver clock", func(t *testing.T) {
+		f := newRenewalDriverFixture(t, false)
+		c, r := behindClock(f)
 
 		f.clk.Advance(time.Millisecond)
-		require.Len(t, f.callTimes(), 1, "one attempt for a renewal point already passed, not a loop")
+		assert.Empty(t, f.callTimes(), "no renewal at or past authz_until")
 		f.clk.Advance(time.Hour)
-		assert.Len(t, f.callTimes(), 1, "no retry once authz_until has passed")
-		assert.Equal(t, 1, r.count())
+		assert.Empty(t, f.callTimes(), "none later either")
+		// Under off the in-process interval check (every driverInterval
+		// from admission) still renews and sends its grant-less notice;
+		// the driver sends nothing.
+		r.mu.Lock()
+		sent := append([][]byte(nil), r.grants...)
+		r.mu.Unlock()
+		assert.Equal(t, [][]byte{nil, nil, nil, nil, nil, nil}, sent, "only the six interval notices")
 		assert.Empty(t, c.list(), "no close action under off")
+	})
+
+	t.Run("authz_until behind the driver clock, enforce", func(t *testing.T) {
+		f := newRenewalDriverFixture(t, true)
+		c, r := behindClock(f)
+
+		f.clk.Advance(time.Millisecond)
+		assert.Equal(t, []string{"4401 authz_expired"}, c.list(), "closed at its deadline, authz_until")
+		assert.Empty(t, f.callTimes(), "no renewal at or past authz_until")
+		assert.Zero(t, r.count(), "nothing is sent")
+		assert.Zero(t, f.a.Len(), "untracked")
 	})
 }
 

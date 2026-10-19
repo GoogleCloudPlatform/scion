@@ -126,8 +126,16 @@ func (a *conduitStreamAuthz) armRenewalLocked(st *conduitUserStream, at time.Tim
 	}
 	if st.rtimer != nil {
 		st.rtimer.Stop()
+		st.rtimer = nil
 	}
-	d := at.Sub(a.cfg.Clock.Now())
+	now := a.cfg.Clock.Now()
+	if !st.AuthzUntil.After(now) {
+		// A stream at or past its authz_until is not renewed: under
+		// enforce it ends at its deadline (authz_until), under off its
+		// renewals stop.
+		return
+	}
+	d := at.Sub(now)
 	if d < 0 {
 		d = 0
 	}
