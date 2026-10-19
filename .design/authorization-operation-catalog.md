@@ -226,7 +226,7 @@
 - [hub.audit.effectiveaccess](#hubauditeffectiveaccess) — Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
 - [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
 - [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile
+- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
 - [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
 - [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
 - [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
@@ -8531,7 +8531,7 @@
 
 **Domain:** user
 
-**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile
+**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused
 
 ### Entry Points
 
@@ -8541,7 +8541,7 @@
 
 **Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `federated_user`
 
 **Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
 
@@ -8554,6 +8554,9 @@
 ### Tests
 
 - `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
+- `pkg/hub:TestSelfReadCredential_VisitorIdentityOnly`
+- `pkg/hub:TestVisitorRoute_AuthMeReturnsVisitorOwnProfile`
+- `pkg/hub:TestVisitorRoute_UnlinkedFederatedUserUnchanged`
 
 ### Exemptions
 

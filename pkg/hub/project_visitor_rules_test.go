@@ -1411,9 +1411,9 @@ func TestFederatedVisitor_ResolveDoesNotBindLaterTransportIdentity(t *testing.T)
 
 // A visitor whose account a visitor rule created on first contact gets the
 // same admission on /api/v1/auth/me through the full handler as a visitor
-// granted by email: GET and HEAD answer 200 with the federated account's
-// own profile; POST on the route, and a route with no VisitorMethods,
-// answer the uniform refusal.
+// granted by email: GET answers 200 with the federated account's own
+// profile, and HEAD the handler's 405; POST on the route, and a route
+// with no VisitorMethods, answer the uniform refusal.
 func TestVisitorRoute_AuthMeAdmitsRuleVisitorOnReadMethodsOnly(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	ctx := context.Background()
@@ -1441,7 +1441,7 @@ func TestVisitorRoute_AuthMeAdmitsRuleVisitorOnReadMethodsOnly(t *testing.T) {
 	assert.Equal(t, "viewer", me.Role)
 
 	rec = f.federatedRequest(t, http.MethodHead, "/api/v1/auth/me", token)
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
 
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/auth/me"},
