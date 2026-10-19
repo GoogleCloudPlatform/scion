@@ -416,7 +416,7 @@ func (s *Server) autoNormalizeTimestamps(ctx context.Context, db *sql.DB, dbDial
 			"path", snap.Path, "age", age)
 	default:
 		slog.Info("timestamp normalize: database snapshot written; it is a full copy of the database, "+
-			"store it like the database and delete it once the run is verified", "path", snap.Path)
+			"store it like the database. Start-up removes it automatically no earlier than 7 days after its last use", "path", snap.Path)
 	}
 
 	rep, err := entadapter.NormalizeUTCTimestamps(runCtx, db, dbDialect, &logs, entadapter.TimestampNormalizeOptions{})

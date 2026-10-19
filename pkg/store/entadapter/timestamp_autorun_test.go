@@ -137,6 +137,63 @@ func TestUTCTimestampNormalizeIncomplete(t *testing.T) {
 	assert.False(t, got, "a missing row")
 }
 
+// fakeMaintenanceStore returns a fixed maintenance operation or error and
+// records the key it was asked for.
+type fakeMaintenanceStore struct {
+	store.Store
+	op  *store.MaintenanceOperation
+	err error
+	key string
+}
+
+func (f *fakeMaintenanceStore) GetMaintenanceOperation(_ context.Context, key string) (*store.MaintenanceOperation, error) {
+	f.key = key
+	return f.op, f.err
+}
+
+// The predicate over each row state and read result, without a database.
+func TestUTCTimestampNormalizeIncomplete_Table(t *testing.T) {
+	op := func(status, startedBy, metadata string) *store.MaintenanceOperation {
+		return &store.MaintenanceOperation{Key: UTCTimestampNormalizeKey, Status: status, StartedBy: startedBy, Metadata: metadata}
+	}
+	const marked = `{"autoRunIncomplete":true}`
+	for _, tc := range []struct {
+		name    string
+		op      *store.MaintenanceOperation
+		err     error
+		want    bool
+		wantErr bool
+	}{
+		{name: "no row", err: store.ErrNotFound},
+		{name: "read error", err: errors.New("database is locked"), wantErr: true},
+		{name: "seeded pending row", op: op(store.MaintenanceStatusPending, "", "")},
+		{name: "running auto-run", op: op(store.MaintenanceStatusRunning, "system:hub-start", marked), want: true},
+		{name: "failed auto-run", op: op(store.MaintenanceStatusFailed, "system:hub-start", marked), want: true},
+		{name: "aborted auto-run back to pending", op: op(store.MaintenanceStatusPending, "system:hub-start", marked), want: true},
+		{name: "failed manual run after an unfinished auto-run", op: op(store.MaintenanceStatusFailed, "admin@example.com", marked), want: true},
+		{name: "completed", op: op(store.MaintenanceStatusCompleted, "system:hub-start", marked)},
+		{name: "dry run leaves pending with StartedBy", op: op(store.MaintenanceStatusPending, "admin@example.com", `{"dryRun":true}`)},
+		{name: "failed manual run", op: op(store.MaintenanceStatusFailed, "admin@example.com", "")},
+		{name: "key false", op: op(store.MaintenanceStatusFailed, "system:hub-start", `{"autoRunIncomplete":false}`)},
+		{name: "key a string", op: op(store.MaintenanceStatusFailed, "system:hub-start", `{"autoRunIncomplete":"true"}`)},
+		{name: "not JSON", op: op(store.MaintenanceStatusFailed, "system:hub-start", "autoRunIncomplete")},
+		{name: "JSON array", op: op(store.MaintenanceStatusFailed, "system:hub-start", `[true]`)},
+		{name: "empty JSON object", op: op(store.MaintenanceStatusFailed, "system:hub-start", `{}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeMaintenanceStore{op: tc.op, err: tc.err}
+			got, err := UTCTimestampNormalizeIncomplete(context.Background(), f)
+			assert.Equal(t, UTCTimestampNormalizeKey, f.key)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestClearUTCTimestampAutoRunKey(t *testing.T) {
 	ctx := context.Background()
 	cs, db, _ := newMaintenanceTestStore(t)
