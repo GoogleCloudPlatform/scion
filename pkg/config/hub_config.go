@@ -238,6 +238,11 @@ const hubIDFileName = "hub-id"
 // If the global config directory cannot be resolved, or the file cannot be
 // read/written, the function falls back to DefaultHubID() (the prior behavior)
 // and logs a warning.
+//
+// A call that persists the id (the first one, with no id file yet) takes the
+// settings lock for the global directory (LockSettingsDir), which is not
+// re-entrant: it must not run while the caller holds that lock, or it fails
+// after the lock's wait and falls back as above.
 func PersistentHubID() string {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
@@ -423,6 +428,10 @@ var (
 // This function is safe to call during early startup before the full config is
 // loaded. For post-config resolution, use HubServerConfig.ResolveHubID() which
 // additionally checks the struct-level HubID field.
+//
+// Its first call can persist the id through PersistentHubID, which takes the
+// settings lock for the global directory: it must not run while the caller
+// holds that lock (see PersistentHubID).
 func ResolveHubIDFromEnv() string {
 	// Explicit env var takes precedence and is not cached (it's a cheap lookup).
 	if v := os.Getenv(HubIDEnvVar); v != "" {

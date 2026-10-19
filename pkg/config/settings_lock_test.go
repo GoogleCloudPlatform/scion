@@ -907,6 +907,7 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 			ids := []string{"id-a", "id-b", "id-c", "id-d"}
 			cmds := make([]*exec.Cmd, len(ids))
 			outs := make([]*strings.Builder, len(ids))
+			errs := make([]*strings.Builder, len(ids))
 			for i, id := range ids {
 				env := []string{"SCION_TEST_SETTINGS_KEY=" + id}
 				if tc.noLinks {
@@ -914,8 +915,9 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 				}
 				cmds[i] = settingsHelper(t, "hubid", dir, env...)
 				outs[i] = &strings.Builder{}
+				errs[i] = &strings.Builder{}
 				cmds[i].Stdout = outs[i]
-				cmds[i].Stderr = outs[i]
+				cmds[i].Stderr = errs[i]
 			}
 			for _, c := range cmds {
 				if err := c.Start(); err != nil {
@@ -924,7 +926,7 @@ func TestPersistHubIDOnce_MultiProcessAgreeOnOneID(t *testing.T) {
 			}
 			for i, c := range cmds {
 				if err := c.Wait(); err != nil {
-					t.Fatalf("helper %s: %v\n%s", ids[i], err, outs[i].String())
+					t.Fatalf("helper %s: %v\nstdout: %s\nstderr: %s", ids[i], err, outs[i].String(), errs[i].String())
 				}
 			}
 			data, err := os.ReadFile(path)
