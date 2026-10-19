@@ -182,7 +182,10 @@ func TestBrokerIncarnationFlapReported(t *testing.T) {
 	admitted := admissions(a)
 	w.SetPrincipal("b1", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
 
-	first, _ := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	first, w1 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-1"), conduit.Config{})
+	// The test waits until first has completed admission (is registered)
+	// before the next dial.
+	waitAdmission(t, admitted, w1.GetSessionId())
 	second, w2 := a.MustDial("b1", relaytest.BrokerHello("broker-1", "proc-2"), conduit.Config{})
 	requireClosedWith(t, first, relay.CloseSupersededIncarnation, "proc-1 session")
 	waitAdmission(t, admitted, w2.GetSessionId())
