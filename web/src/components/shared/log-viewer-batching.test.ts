@@ -159,6 +159,8 @@ interface ViewerCase {
   mount: () => Promise<AnyEl>;
   /** Emits stream line `i` on the viewer's (fake) EventSource. */
   emit: (source: FakeEventSource, i: number) => void;
+  /** Ingests line `i` without a stream (the fetch path). */
+  ingest: (el: AnyEl, i: number) => void;
   rowSelector: string;
   /** Selector, inside a row, of the cell holding `line <i>` (the row's key text). */
   keyCell: string;
@@ -197,6 +199,7 @@ const cases: ViewerCase[] = [
       return el;
     },
     emit: (source, i) => source.emit('log', logLine(i)),
+    ingest: (el, i) => el.mergeEntries([logLine(i)]),
     rowSelector: 'tr.log-row',
     keyCell: 'td.msg',
     timeSelector: 'td.ts',
@@ -217,6 +220,7 @@ const cases: ViewerCase[] = [
       return el;
     },
     emit: (source, i) => source.emit('log', logLine(i, { source: 'hub' })),
+    ingest: (el, i) => el.mergeEntries([logLine(i, { source: 'hub' })]),
     rowSelector: '.log-row',
     keyCell: '.msg',
     timeSelector: '.log-row .ts',
@@ -238,6 +242,7 @@ const cases: ViewerCase[] = [
       return el;
     },
     emit: (source, i) => source.emit('message', hubMessage(i)),
+    ingest: (el, i) => el.mergeHubMessages([hubMessage(i)]),
     rowSelector: '.message-row',
     keyCell: '.msg-body',
     timeSelector: '.msg-time',
@@ -382,6 +387,26 @@ describe.each(cases.map((c) => [c.name, c] as const))('%s streaming', (_name, c)
     await Promise.resolve();
     expect(render).not.toHaveBeenCalled();
     if (scroll) expect(scroll).not.toHaveBeenCalled();
+
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(c.rowKeys(el)).toEqual(['line 0']);
+  });
+
+  it('renders lines ingested without a stream after a disconnect and reconnect', async () => {
+    // Not streaming, so no stopStream state change renders the detached
+    // element, and the cancelled frame leaves the line unrendered: only
+    // connectedCallback's requestUpdate shows it.
+    const el: AnyEl = document.createElement(c.name);
+    el.agentId = 'a1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    c.ingest(el, 0);
+    expect(frames).toHaveLength(1);
+    el.remove();
+    flushFrames();
+    await el.updateComplete;
+    expect(c.rowKeys(el)).toEqual([]);
 
     document.body.appendChild(el);
     await el.updateComplete;
