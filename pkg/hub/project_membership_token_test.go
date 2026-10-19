@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -195,7 +196,9 @@ func TestMembershipToken_GovernanceMatrixApplies(t *testing.T) {
 
 // TestMembershipToken_CannotGrantRoleAboveCaller pins CanDelegate for a
 // token: a role is granted only when the token's selectors carry every
-// permission of the role.
+// permission of the role. A token that lacks the selector of one
+// permission of project-member cannot grant it; with every selector it
+// can.
 func TestMembershipToken_CannotGrantRoleAboveCaller(t *testing.T) {
 	f := setupMMRFixture(t)
 	project := projectBoundary(f.projectID)
@@ -209,9 +212,9 @@ func TestMembershipToken_CannotGrantRoleAboveCaller(t *testing.T) {
 	assert.Equal(t, ErrCodeTargetRoleProtected, mtErrCode(rec), rec.Body.String())
 	assert.Empty(t, mmrBindingsFor(t, f.store, "user", target.ID, f.projectID))
 
-	// A built-in role that carries a permission no selector maps to cannot
-	// be granted by any token: here the token carries the selector of every
-	// other permission of project-member, and the grant is still refused.
+	// Every permission of project-member maps to a selector that is allowed
+	// on the project boundary. A token missing one of those selectors cannot
+	// grant the role on any route, and nothing is written.
 	var selectors, unmapped []string
 	for _, p := range f.memberRD.Permissions {
 		sel := bearerMatrixSelector(p)
@@ -223,23 +226,53 @@ func TestMembershipToken_CannotGrantRoleAboveCaller(t *testing.T) {
 			selectors = append(selectors, sel)
 		}
 	}
-	require.NotEmpty(t, unmapped, "project-member carries a permission that no selector maps to")
-	t.Logf("project-member permissions with no selector: %v", unmapped)
+	require.Empty(t, unmapped, "every project-member permission maps to a selector")
 	sort.Strings(selectors)
-	allMapped := mtMint(t, f.srv, f.owner.ID, project, append(selectors, "project:manage")...)
-	for _, c := range []struct {
+	const dropped = "scheduled_event:create"
+	var missingOne []string
+	for _, sel := range selectors {
+		if sel != dropped {
+			missingOne = append(missingOne, sel)
+		}
+	}
+	require.Len(t, missingOne, len(selectors)-1, "project-member carries %s", dropped)
+	lacksOne := mtMint(t, f.srv, f.owner.ID, project, append(missingOne, "project:manage")...)
+	grantRoutes := func(principalID string) []struct {
 		method, path string
 		body         interface{}
-	}{
-		{http.MethodPost, legacyMembersPath(f.projectID), addProjectMemberRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: target.ID}},
-		{http.MethodPut, mmrPrincipalPath(f.projectID, "user", target.ID), map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}}},
-		{http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: target.ID, ScopeType: store.RoleScopeProject, ScopeID: f.projectID}},
+		created      bool
 	} {
-		rec = doRequestWithUAT(t, f.srv, allMapped, c.method, c.path, c.body)
+		return []struct {
+			method, path string
+			body         interface{}
+			created      bool
+		}{
+			{http.MethodPost, legacyMembersPath(f.projectID), addProjectMemberRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: principalID}, true},
+			{http.MethodPut, mmrPrincipalPath(f.projectID, "user", principalID), map[string]interface{}{"roleDefinitionIds": []string{f.memberRD.ID}}, false},
+			{http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{RoleDefinitionID: f.memberRD.ID, PrincipalType: "user", PrincipalID: principalID, ScopeType: store.RoleScopeProject, ScopeID: f.projectID}, true},
+		}
+	}
+	for _, c := range grantRoutes(target.ID) {
+		rec = doRequestWithUAT(t, f.srv, lacksOne, c.method, c.path, c.body)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", c.method, c.path, rec.Body.String())
 		assert.Equal(t, ErrCodeTargetRoleProtected, mtErrCode(rec), "%s %s: %s", c.method, c.path, rec.Body.String())
 	}
 	assert.Empty(t, mmrBindingsFor(t, f.store, "user", target.ID, f.projectID))
+
+	// The owner's token with every member selector and project:manage
+	// grants project-member on each route; each grant goes to a new user.
+	allSelectors := mtMint(t, f.srv, f.owner.ID, project, append(selectors, "project:manage")...)
+	for i := range grantRoutes("") {
+		grantee := grpUser(t, f.store, fmt.Sprintf("%s-full%d", t.Name(), i), fmt.Sprintf("Full%d", i))
+		c := grantRoutes(grantee.ID)[i]
+		rec = doRequestWithUAT(t, f.srv, allSelectors, c.method, c.path, c.body)
+		if c.created {
+			require.Equal(t, http.StatusCreated, rec.Code, "%s %s: %s", c.method, c.path, rec.Body.String())
+		} else {
+			require.Less(t, rec.Code, 300, "%s %s: %s", c.method, c.path, rec.Body.String())
+		}
+		assert.Len(t, mmrBindingsFor(t, f.store, "user", grantee.ID, f.projectID), 1, "%s %s", c.method, c.path)
+	}
 
 	// With the member role narrowed to permissions the token covers, the
 	// grant goes through on every route, and project:manage alone is
