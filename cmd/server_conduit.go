@@ -148,15 +148,16 @@ func conduitAuthzRecheckIntervalSetting(cfg *config.GlobalConfig) time.Duration 
 }
 
 // warnConduitTargetStreamDeadlines logs a startup warning when
-// server.hub.conduit.target_stream_deadlines is enforce: the hub's renewal
-// driver for target-side deadlines lands in a follow-up change, so until
-// then enforce refuses user streams to renewal-capable targets.
+// server.hub.conduit.target_stream_deadlines is enforce in external relay
+// mode: renewals for streams held by or bridged through a separate relay
+// land later, so until then user streams to renewal-capable agents are
+// refused (503 stream_renewal_unavailable) on those routes.
 func warnConduitTargetStreamDeadlines(c config.HubConduitConfig) {
-	if c.TargetStreamDeadlinesValue() != config.ConduitTargetStreamDeadlinesEnforce {
+	if c.TargetStreamDeadlinesValue() != config.ConduitTargetStreamDeadlinesEnforce || !c.ExternalRelay() {
 		return
 	}
-	slog.Warn("server.hub.conduit.target_stream_deadlines is enforce, but this hub cannot renew target-side stream deadlines yet; " +
-		"user streams to renewal-capable targets are refused with 503 unavailable (stream_renewal_unavailable)")
+	slog.Warn("server.hub.conduit.target_stream_deadlines is enforce with relay_mode external: " +
+		"user streams to renewal-capable agents are refused (503 stream_renewal_unavailable) until relay renewals land")
 }
 
 // conduitLifetimeCapSetting returns the configured conduit session lifetime
