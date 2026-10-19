@@ -132,8 +132,8 @@ func TestExecInPodDialRetry(t *testing.T) {
 			wantSlept: []time.Duration{time.Second, 2 * time.Second},
 		},
 		{
-			// 1s backoff plus the 5s attempt margin reaches the deadline at
-			// +5s, so there is no retry at all.
+			// 1s backoff plus the 5s attempt margin ends at +6s, past the
+			// +5s deadline, so there is no retry at all.
 			name:      "deadline leaves no room for an attempt",
 			deadline:  5 * time.Second,
 			exec:      always(dialErr),
@@ -321,8 +321,9 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 		gateErr   error
 		wantErr   bool
 		wantGates int
+		wantSlept []time.Duration
 	}{
-		{name: "transient then success", gateErr: dialErr, wantGates: 2},
+		{name: "transient then success", gateErr: dialErr, wantGates: 2, wantSlept: []time.Duration{time.Second}},
 		{name: "403 not retried", gateErr: statusDialErr("403"), wantErr: true, wantGates: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -398,6 +399,9 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 			}
 			if gates != tc.wantGates {
 				t.Errorf("startup gate touches = %d, want %d", gates, tc.wantGates)
+			}
+			if !slices.Equal(clock.slept, tc.wantSlept) {
+				t.Errorf("slept = %v, want %v", clock.slept, tc.wantSlept)
 			}
 		})
 	}
