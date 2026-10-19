@@ -25,10 +25,10 @@
  * workflow artifact for debugging and bundle attribution.
  *
  * It fails closed: it exits 1 if any .map (or .map.br/.map.gz) file or any
- * symbolic link is left under `<clientDir>`, if any .js or .css file there
- * still has a `sourceMappingURL` comment, or if no
- * map was found at all (map generation broke). `npm run build` chains it with
- * `&&`, so a failure fails the build.
+ * symbolic link is left under `<clientDir>`, if any .js, .mjs or .css file
+ * there still has a `sourceMappingURL` comment, or if no map was found at all
+ * (map generation broke). `npm run build` chains it with `&&`, so a failure
+ * fails the build.
  *
  * Usage: node scripts/move-sourcemaps.mjs <clientDir> <mapsDir>
  *        (npm run build passes dist/client dist/sourcemaps)
