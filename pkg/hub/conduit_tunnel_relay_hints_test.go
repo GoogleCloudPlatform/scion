@@ -71,7 +71,7 @@ func TestRelayTunnel_HintsCopiedFromMintedClaims(t *testing.T) {
 	cf := newConduitFixture(t)
 	ts := newConduitTunnelSession(cf.srv, cf.owner, time.Time{})
 	_, open, err := ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", cf.agent, "pty",
-		map[string]string{"cols": "80", "rows": "24"}, relayTunnelResolution(cf, conduit.FeatureStreamRenewal))
+		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf, conduit.FeatureStreamRenewal))
 	require.NoError(t, err)
 	require.NotNil(t, open)
 	until, intervalS := grantDeadlineClaims(t, open.Grant)
@@ -87,7 +87,7 @@ func TestRelayTunnel_NoHintsWithoutDeadline(t *testing.T) {
 	cf := newConduitFixture(t)
 	ts := newConduitTunnelSession(cf.srv, cf.owner, time.Time{})
 	_, open, err := ts.mintRelayTunnel(context.Background(), slog.Default(), "user-session", cf.agent, "pty",
-		map[string]string{"cols": "80", "rows": "24"}, relayTunnelResolution(cf))
+		map[string]string{"cols": "80", "rows": "24", "session": conduitPTYSession}, relayTunnelResolution(cf))
 	require.NoError(t, err)
 	require.NotNil(t, open)
 	until, intervalS := grantDeadlineClaims(t, open.Grant)
