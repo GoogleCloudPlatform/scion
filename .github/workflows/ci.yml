@@ -212,8 +212,9 @@ jobs:
 
       # Bundle budget (ptone/scion#5306): main.js and entry-closure size
       # limits, the lazy terminal-workspace chunk exists, and no terminal-*
-      # module is in the login/home static closure. Limits live in
-      # web/bundle-budget.json. Not gated: it only reads the build above.
+      # module is in the static closure of the entry (client/main.ts) or of
+      # the login and home routes. Limits live in web/bundle-budget.json.
+      # Not gated: it only reads the build above.
       - name: Check web bundle budget
         working-directory: ./web
         run: node scripts/check-bundle-budget.mjs
