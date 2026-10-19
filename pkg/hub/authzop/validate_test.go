@@ -371,7 +371,7 @@ func TestValidate_AllValidCredentialKinds(t *testing.T) {
 		CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT,
 		CredentialBrokerToken, CredentialServiceAccount,
 		CredentialSystemInternal, CredentialIdentityToken, CredentialDelegatedAgent,
-		CredentialWorkloadDelegation,
+		CredentialWorkloadDelegation, CredentialFederatedUser,
 	}
 	for _, k := range kinds {
 		s := validSpec()

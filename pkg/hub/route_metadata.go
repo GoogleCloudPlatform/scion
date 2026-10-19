@@ -83,6 +83,16 @@ type RouteMetadata struct {
 	// capabilities, and its handler requires the one the identity's kind
 	// needs (WS4).
 	AlsoPermits []string
+	// VisitorMethods lists the HTTP methods on which the route admits a
+	// visitor (a request whose identity is a *VisitorIdentity). routeGuard
+	// refuses a visitor on every other method, and on every route whose
+	// list is empty, with 403 and visitorRouteRefusalMessage, before the
+	// handler runs (refuseVisitorRequest); an admitted visitor then passes
+	// the classification's guard like any other identity. List only the
+	// methods whose handler is safe for a visitor. validateVisitorRoutes
+	// limits the list to authenticated and policy routes and to methods
+	// the pattern serves.
+	VisitorMethods []string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -187,6 +197,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
+		// handleAuthMe reads the caller's own profile. The pattern has no
+		// method, so the mux serves every method, HEAD included; a
+		// visitor is admitted on the reads only. The handler serves GET
+		// and answers 405 to HEAD, as for any caller.
+		VisitorMethods: []string{http.MethodGet, http.MethodHead},
 	},
 	"/api/v1/experiments": {
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
@@ -1516,10 +1531,10 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
 		}
-		// A visitor (a federated account, VisitorIdentity) is refused on
-		// every route, whatever its classification, until per-route
-		// visitor admission replaces this check.
-		if refuseVisitorRequest(w, r) {
+		// A visitor (a federated account, VisitorIdentity) is admitted
+		// only on the methods a route lists in VisitorMethods, whatever
+		// the route's classification; any other request is refused here.
+		if refuseVisitorRequest(w, r, meta) {
 			return
 		}
 		// An agent delegated credential is admitted only on the routes in

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -498,12 +499,18 @@ func visitorLinkedAuditRecord(ctx context.Context, userID, before, after string)
 // visitor is refused, so the response does not distinguish routes.
 const visitorRouteRefusalMessage = "You don't have access to this resource"
 
-// refuseVisitorRequest is routeGuard's visitor check. Until per-route visitor
-// admission exists, it refuses every request whose identity is a
-// *VisitorIdentity with the same 403, whatever the route. It writes the
-// refusal and returns true when it refused.
-func refuseVisitorRequest(w http.ResponseWriter, r *http.Request) bool {
+// refuseVisitorRequest is routeGuard's visitor check. A request whose
+// identity is a *VisitorIdentity is admitted only when its method is in the
+// route's VisitorMethods; every other request, whatever the route's
+// classification, is refused with the same 403 before the handler runs. A
+// route with an empty list refuses visitors. Requests with any other
+// identity are left alone. It writes the refusal and returns true when it
+// refused.
+func refuseVisitorRequest(w http.ResponseWriter, r *http.Request, meta RouteMetadata) bool {
 	if !isVisitorIdentity(GetIdentityFromContext(r.Context())) {
+		return false
+	}
+	if slices.Contains(meta.VisitorMethods, r.Method) {
 		return false
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorRouteRefusalMessage, nil)
