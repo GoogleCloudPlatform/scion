@@ -994,7 +994,9 @@ There are two exceptions to the pattern:
 - Every setting under `server.broker` uses the `RUNTIMEBROKER` segment, for example `server.broker.port` -> `SCION_SERVER_RUNTIMEBROKER_PORT` and `server.broker.broker_id` -> `SCION_SERVER_RUNTIMEBROKER_BROKERID`.
 - `server.hub.public_url` is set by `SCION_SERVER_HUB_ENDPOINT`. `SCION_SERVER_HUB_PUBLICURL` and `SCION_SERVER_HUB_PUBLIC_URL` set nothing.
 
-Other spellings of a key are accepted as aliases and set the same key: the spelling that keeps a field's underscores (`SCION_SERVER_HUB_ADMIN_EMAILS`), the broker names under the `BROKER` segment (`SCION_SERVER_BROKER_PORT`, `SCION_SERVER_BROKER_BROKER_ID`) and the flattened CORS names (`SCION_SERVER_HUB_CORSENABLED`). Prefer the names above. When a key's name and one of its aliases are both set, the name above wins; when only aliases are set, the alias that sorts first wins.
+Other spellings of a key are accepted as aliases and set the same key: the spelling that keeps a field's underscores (`SCION_SERVER_HUB_ADMIN_EMAILS`), the broker names under the `BROKER` segment (`SCION_SERVER_BROKER_PORT`, `SCION_SERVER_BROKER_BROKER_ID`) and the flattened CORS names (`SCION_SERVER_HUB_CORSENABLED`). Prefer the names above. When a key's name and one of its aliases are both set, the name above wins; when only aliases are set, the alias that sorts first wins. At startup the server logs a warning for each alias that is set, naming the variable to use instead, and says so when another spelling of the same key overrides it. Aliases will be removed after the next release.
+
+When it starts, the server checks every `SCION_SERVER_*` and `SCION_SEED_*` variable it reads for a boolean, integer or number setting. It does not check a `SCION_SEED_*` variable of a setting that seeding does not seed, or an alias that another spelling of the same key overrides, since nothing reads those values. List values, such as the port list `SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS`, are not checked at this step. A boolean takes `true`/`false`, `1`/`0` or `t`/`f`, so `SCION_SERVER_HUB_AUTOSUSPENDSTALLED=false` turns the setting off. A value that does not parse, for example `SCION_SERVER_HUB_AUTOSUSPENDSTALLED=maybe`, stops the server with an error that names the variable and its setting (never the value). `SCION_SERVER_ADMIN_MODE` is checked with the spellings listed under [Tracked Boolean Variables](#tracked-boolean-variables). An empty value is unset and is not checked.
 
 :::caution[Upgrade note]
 Many alias spellings, for example `SCION_SERVER_HUB_ADMIN_EMAILS`, `SCION_SERVER_BROKER_PORT`, `SCION_SERVER_HUB_CORS_ENABLED` and `SCION_SERVER_LOG_LEVEL`, used to be ignored by the Hub and reported at startup as matching no setting. They now take effect. Before upgrading, remove any such variable that you do not want applied.
@@ -1029,7 +1031,7 @@ The env also now overrides the settings that live at the top level of `settings.
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
 
-A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make the server ignore the whole `server` section, at startup or when it reloads settings.
+A value in `settings.yaml`, or in a `SCION_*` environment variable other than the `SCION_SERVER_*` and `SCION_SEED_*` variables the server checks at startup (see above), that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make the server ignore the whole `server` section, at startup or when it reloads settings.
 
 ### Logging Environment Variables
 
@@ -1114,7 +1116,7 @@ For server and infrastructure configurations, Scion parses several boolean envir
 
 | Variable | Description | Default |
 | :--- | :--- | :--- |
-| `SCION_SERVER_ADMIN_MODE` | Forces the server into emergency maintenance mode (break-glass removal). | `false` |
+| `SCION_SERVER_ADMIN_MODE` | Forces the server into emergency maintenance mode (break-glass removal). An unrecognized non-empty value stops the server at startup instead of defaulting to `false`. | `false` |
 | `SCION_TRACING_ENABLED` | Enables Hub trace export when `server.hub.gcp_project_id` is set and [`server.hub.observability.tracing_enabled`](#observability-export-serverhubobservability) is unset. Ignored when that switch is set. | `false` |
 | `SCION_LOG_GCP` | Enables Google Cloud Logging JSON format on standard output. | `false` |
 | `SCION_REQUIRE_STABLE_SIGNING_KEY` | Demands a persistent session/JWT signing key. When enabled, startup aborts (fail-closed) if no stable key/secret can be resolved in hosted mode, preventing JWT signature mismatches across replica restarts. | `false` |

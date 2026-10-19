@@ -215,6 +215,12 @@ func serverEnvMatches(name string, isLayer1 func(string) bool) bool {
 	if rest == "" {
 		return false
 	}
+	// A name the env mapping table holds (canonical or alias) sets a
+	// setting. An alias that another spelling of the same setting
+	// overrides is reported by WarnDeprecatedServerEnvAliases, not here.
+	if _, _, ok := lookupServerEnv(name); ok && !isServerEnvInert(name) {
+		return true
+	}
 	if isLayer1(serverEnvToOpsettingsKey(rest)) {
 		return true
 	}
@@ -277,6 +283,11 @@ func seedEnvMatches(name string, isLayer1 func(string) bool) bool {
 	rest := strings.TrimPrefix(name, seedEnvPrefix)
 	if rest == "" {
 		return false
+	}
+	// As in serverEnvMatches: a table name matches whether or not another
+	// spelling overrides it, if the setting is one seed values seed.
+	if e, _, _, ok := lookupSettingsEnv(name); ok {
+		return isLayer1(e.Path)
 	}
 	return isLayer1(seedEnvToOpsettingsKey(rest))
 }
