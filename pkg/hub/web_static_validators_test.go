@@ -422,9 +422,10 @@ func validatorServers(t *testing.T) map[string][2]*WebServer {
 // TestStaticAsset_SiblingNameForms covers every spelling of a sibling
 // name, through the /assets/ handler (serveStaticAsset) and the root-file
 // path (tryServeStaticFile), in embedded and disk mode: none returns the
-// stored variant or any Content-Encoding. The /assets/ forms get a 404 (or
-// the mux's redirect for a literal dot segment); the root forms get the SPA
-// shell, as any missing root file does (or the mux's redirect).
+// stored variant or any Content-Encoding. The /assets/ forms get a 404; the
+// root forms get the SPA shell, as any missing root file does. A literal dot
+// segment gets the mux's redirect, which is followed once and checked the
+// same way.
 func TestStaticAsset_SiblingNameForms(t *testing.T) {
 	gzMain := gzipBytes(t, validatorMainJS)
 	gzFav := gzipBytes(t, validatorFavicon)
@@ -438,32 +439,56 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		{"/favicon.svg.br", validatorFavBr, true},
 		{"/favicon.svg.gz", gzFav, true},
 	}
+	// check asserts that a response never carries the stored variant.
+	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root bool) {
+		t.Helper()
+		body := rec.Body.Bytes()
+		assert.NotEqual(t, stored, body, target)
+		assert.False(t, bytes.Contains(body, stored), "%s: body holds the stored variant", target)
+		assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+		switch {
+		case !root && rec.Code == http.StatusNotFound:
+		case rec.Code == http.StatusOK:
+			// The SPA shell (root forms) or a directory listing (a dot-dot
+			// form under /assets/ redirected to /assets/).
+			assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be HTML", target)
+		default:
+			t.Errorf("%s: unexpected status %d", target, rec.Code)
+		}
+	}
+	isRedirect := func(code int) bool {
+		return code == http.StatusMovedPermanently || code == http.StatusTemporaryRedirect || code == http.StatusPermanentRedirect
+	}
 	for mode, servers := range validatorServers(t) {
 		t.Run(mode, func(t *testing.T) {
 			ws, wsAuth := servers[0], servers[1]
+			srv := func(root bool) http.Handler {
+				if root {
+					return wsAuth.Handler()
+				}
+				return ws.Handler()
+			}
 			for _, tc := range cases {
 				for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
 					target := tc.base + suffix
 					req := httptest.NewRequest(http.MethodGet, target, nil)
 					req.Header.Set("Accept-Encoding", "br, gzip")
 					rec := httptest.NewRecorder()
-					if tc.root {
-						wsAuth.Handler().ServeHTTP(rec, req)
-					} else {
-						ws.Handler().ServeHTTP(rec, req)
+					srv(tc.root).ServeHTTP(rec, req)
+					if isRedirect(rec.Code) {
+						// The mux cleans a literal dot segment with a
+						// redirect; follow it once and check where it lands.
+						assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+						loc := rec.Header().Get("Location")
+						require.NotEmpty(t, loc, "%s: redirect without Location", target)
+						assert.False(t, bytes.Contains(rec.Body.Bytes(), tc.stored), "%s: redirect body holds the stored variant", target)
+						req = httptest.NewRequest(http.MethodGet, loc, nil)
+						req.Header.Set("Accept-Encoding", "br, gzip")
+						rec = httptest.NewRecorder()
+						srv(tc.root).ServeHTTP(rec, req)
+						target += " -> " + loc
 					}
-					body := rec.Body.Bytes()
-					assert.NotEqual(t, tc.stored, body, target)
-					assert.False(t, bytes.Contains(body, tc.stored), "%s: body holds the stored variant", target)
-					assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
-					switch {
-					case rec.Code == http.StatusMovedPermanently:
-					case !tc.root && rec.Code == http.StatusNotFound:
-					case tc.root && rec.Code == http.StatusOK:
-						assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be the SPA shell", target)
-					default:
-						t.Errorf("%s: unexpected status %d", target, rec.Code)
-					}
+					check(t, target, rec, tc.stored, tc.root)
 				}
 			}
 		})
