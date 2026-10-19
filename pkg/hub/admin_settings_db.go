@@ -88,6 +88,12 @@ type ServerConfigDBResponse struct {
 	// file or metadata), as decided at startup. Read-only: the export
 	// project is not a settings key (ptone/scion#4914).
 	ObservabilityExport *hubexport.Status `json:"observability_export,omitempty"`
+
+	// ImageRegistryProvenance reports where the image_registry in effect
+	// comes from: the hub-scope source and value, every Runtime Broker that
+	// reports a node env, and each profile's value (ptone/scion#3916).
+	// Read-only.
+	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -246,6 +252,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
+	// Where image_registry comes from (ptone/scion#3916).
+	resp.ImageRegistryProvenance = s.imageRegistryProvenance(ctx, ops)
 
 	// Deprecated env keys (SCION_SERVER_* targeting Layer-1 keys).
 	resp.DeprecatedEnvKeys = s.computeDeprecatedEnvKeys(ops)
@@ -958,6 +966,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// answers as an update that changes nothing.
 	sentBody := rawBody
 	rawBody = dropEmptyPeerSecret(rawBody)
+	// The read-only image_registry provenance of a GET body sent back is
+	// ignored, so the echo of a changed report is not refused
+	// (ptone/scion#3916).
+	rawBody = dropImageRegistryProvenance(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}
