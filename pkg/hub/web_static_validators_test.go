@@ -382,21 +382,50 @@ func TestStaticAsset_IndexFollowsAssetSource(t *testing.T) {
 	assert.Equal(t, "// disk", string(readBody(t, resp)))
 }
 
+// writeValidatorDisk writes the validator build into a temp dir for disk
+// mode (--web-assets-dir).
+func writeValidatorDisk(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, f := range validatorAssets(t) {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, f.Data, 0o644))
+	}
+	return dir
+}
+
+// validatorServers returns, for embedded and disk mode, a plain server and
+// a dev-auth server over the validator build. The dev-auth server lets
+// root-level and deep-link requests reach the SPA catch-all (and so
+// tryServeStaticFile) rather than the login gate.
+func validatorServers(t *testing.T) map[string][2]*WebServer {
+	t.Helper()
+	embedded := newValidatorWebServer(t)
+	embeddedAuth := newDevAuthWebServer(t)
+	embeddedAuth.assets = validatorAssets(t)
+	embeddedAuth.assetsDisk = ""
+	embeddedAuth.hasAssets = embeddedAuth.detectWebAssets()
+	require.True(t, embeddedAuth.hasAssets)
+
+	dir := writeValidatorDisk(t)
+	disk := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
+	require.True(t, disk.hasAssets)
+	diskAuth := newDevAuthWebServer(t, func(cfg *WebServerConfig) { cfg.AssetsDir = writeValidatorDisk(t) })
+	require.True(t, diskAuth.hasAssets)
+	return map[string][2]*WebServer{
+		"embedded": {embedded, embeddedAuth},
+		"disk":     {disk, diskAuth},
+	}
+}
+
 // TestStaticAsset_SiblingNameForms covers every spelling of a sibling
 // name, through the /assets/ handler (serveStaticAsset) and the root-file
-// path (tryServeStaticFile), in embedded mode: none returns the stored
-// variant or any Content-Encoding. The /assets/ forms get a 404 (or the
-// mux's redirect for a literal dot segment); the root forms get the SPA
+// path (tryServeStaticFile), in embedded and disk mode: none returns the
+// stored variant or any Content-Encoding. The /assets/ forms get a 404 (or
+// the mux's redirect for a literal dot segment); the root forms get the SPA
 // shell, as any missing root file does (or the mux's redirect).
 func TestStaticAsset_SiblingNameForms(t *testing.T) {
-	ws := newValidatorWebServer(t)
-	// The root forms run with dev auth so that every one of them reaches
-	// the SPA catch-all (and so tryServeStaticFile), not the login gate.
-	wsAuth := newDevAuthWebServer(t)
-	wsAuth.assets = validatorAssets(t)
-	wsAuth.assetsDisk = ""
-	wsAuth.hasAssets = wsAuth.detectWebAssets()
-	require.True(t, wsAuth.hasAssets)
 	gzMain := gzipBytes(t, validatorMainJS)
 	gzFav := gzipBytes(t, validatorFavicon)
 	cases := []struct {
@@ -409,30 +438,59 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		{"/favicon.svg.br", validatorFavBr, true},
 		{"/favicon.svg.gz", gzFav, true},
 	}
-	for _, tc := range cases {
-		for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
-			target := tc.base + suffix
-			req := httptest.NewRequest(http.MethodGet, target, nil)
-			req.Header.Set("Accept-Encoding", "br, gzip")
-			rec := httptest.NewRecorder()
-			if tc.root {
+	for mode, servers := range validatorServers(t) {
+		t.Run(mode, func(t *testing.T) {
+			ws, wsAuth := servers[0], servers[1]
+			for _, tc := range cases {
+				for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
+					target := tc.base + suffix
+					req := httptest.NewRequest(http.MethodGet, target, nil)
+					req.Header.Set("Accept-Encoding", "br, gzip")
+					rec := httptest.NewRecorder()
+					if tc.root {
+						wsAuth.Handler().ServeHTTP(rec, req)
+					} else {
+						ws.Handler().ServeHTTP(rec, req)
+					}
+					body := rec.Body.Bytes()
+					assert.NotEqual(t, tc.stored, body, target)
+					assert.False(t, bytes.Contains(body, tc.stored), "%s: body holds the stored variant", target)
+					assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+					switch {
+					case rec.Code == http.StatusMovedPermanently:
+					case !tc.root && rec.Code == http.StatusNotFound:
+					case tc.root && rec.Code == http.StatusOK:
+						assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be the SPA shell", target)
+					default:
+						t.Errorf("%s: unexpected status %d", target, rec.Code)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestSPADeepLinks_EncodedSegmentsGetShell pins that client-side routes,
+// including encoded segments, still get the SPA shell in embedded and disk
+// mode: the static-file check only ever falls through to the shell.
+func TestSPADeepLinks_EncodedSegmentsGetShell(t *testing.T) {
+	for mode, servers := range validatorServers(t) {
+		t.Run(mode, func(t *testing.T) {
+			wsAuth := servers[1]
+			for _, target := range []string{
+				"/projects/x/agents/y",
+				"/projects/a%20b/agents/y",
+				"/projects/x/artifacts/a%2Fb",
+				"/projects/x/artifacts/a%2F%2Fb",
+			} {
+				req := httptest.NewRequest(http.MethodGet, target, nil)
+				rec := httptest.NewRecorder()
 				wsAuth.Handler().ServeHTTP(rec, req)
-			} else {
-				ws.Handler().ServeHTTP(rec, req)
+				assert.Equal(t, http.StatusOK, rec.Code, target)
+				assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", target)
+				assert.Contains(t, rec.Body.String(), "scion-app", target)
 			}
-			body := rec.Body.Bytes()
-			assert.NotEqual(t, tc.stored, body, target)
-			assert.False(t, bytes.Contains(body, tc.stored), "%s: body holds the stored variant", target)
-			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
-			switch {
-			case rec.Code == http.StatusMovedPermanently:
-			case !tc.root && rec.Code == http.StatusNotFound:
-			case tc.root && rec.Code == http.StatusOK:
-				assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", "%s: a 200 must be the SPA shell", target)
-			default:
-				t.Errorf("%s: unexpected status %d", target, rec.Code)
-			}
-		}
+		})
 	}
 }
 
