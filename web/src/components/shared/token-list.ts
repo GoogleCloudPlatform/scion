@@ -142,6 +142,13 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
   {
+    value: 'access_constraint:admin',
+    label: 'access_constraint:admin',
+    description: 'Administer access constraints (create, update, delete)',
+    resource: 'access_constraint',
+    isAlias: false,
+  },
+  {
     value: 'access_constraint:read',
     label: 'access_constraint:read',
     description: 'Read access constraints',
@@ -680,6 +687,41 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'role_binding:read',
     label: 'role_binding:read',
     description: 'Read role bindings',
+    resource: 'role_binding',
+    isAlias: false,
+  },
+  {
+    value: 'role:create',
+    label: 'role:create',
+    description: 'Create custom role definitions',
+    resource: 'role',
+    isAlias: false,
+  },
+  {
+    value: 'role:update',
+    label: 'role:update',
+    description: 'Update custom role definitions',
+    resource: 'role',
+    isAlias: false,
+  },
+  {
+    value: 'role:delete',
+    label: 'role:delete',
+    description: 'Delete custom role definitions',
+    resource: 'role',
+    isAlias: false,
+  },
+  {
+    value: 'role_binding:create',
+    label: 'role_binding:create',
+    description: 'Create role bindings',
+    resource: 'role_binding',
+    isAlias: false,
+  },
+  {
+    value: 'role_binding:delete',
+    label: 'role_binding:delete',
+    description: 'Delete role bindings',
     resource: 'role_binding',
     isAlias: false,
   },

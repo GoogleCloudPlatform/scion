@@ -126,6 +126,47 @@ type CommitRequest struct {
 	// envelope. It is nil for non-HTTP operations and tests without request
 	// middleware.
 	AuditRequest *auditevent.RequestRef
+
+	// Credential is the identity the request is sent with. The commit
+	// re-checks judge the actor's authority within its limits (a user
+	// access token's selectors), and a commit sent with a user access
+	// token may not relax a boundary. Nil for a caller with no request
+	// credential.
+	Credential Identity
+}
+
+// errTokenRelaxationSessionOnly refuses a commit that relaxes a boundary
+// (delete, or an update that adds permissions to the maximum set) when it
+// is sent with a user access token: relaxing a boundary needs a session.
+var errTokenRelaxationSessionOnly = errors.New("relaxing an access constraint requires an interactive session")
+
+// commitSentWithToken reports whether the commit is sent with a user access
+// token, by its credential identity or by the request credential kind.
+func commitSentWithToken(ctx context.Context, req CommitRequest) bool {
+	if req.Credential != nil && !isNilIdentity(req.Credential) && IsScopedUserIdentity(req.Credential) {
+		return true
+	}
+	return GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT
+}
+
+// commitActorPermissions returns the actor's effective permissions at the
+// scope, within the limits of the request credential: a user access token's
+// selectors are intersected as CanDelegate does
+// (intersectCredentialCaveats); a session carries no limits.
+func (gs *GovernanceService) commitActorPermissions(ctx context.Context, req CommitRequest, scopeType, scopeID string) ([]string, error) {
+	perms, err := gs.authz.getEffectivePermissions(
+		ctx,
+		NormalizePrincipalType(string(req.Actor.Kind)),
+		req.Actor.ID,
+		scopeType, scopeID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if req.Credential != nil && !isNilIdentity(req.Credential) {
+		perms = gs.authz.intersectCredentialCaveats(req.Credential, perms)
+	}
+	return perms, nil
 }
 
 // CommitResult is the outcome of a successful commit.
@@ -211,7 +252,12 @@ func (gs *GovernanceService) CommitBoundaryChange(ctx context.Context, req Commi
 	}
 
 	// Step g: For relaxations, verify the actor has sufficient authority.
+	// A relaxation sent with a user access token is refused: it needs a
+	// session.
 	if classification == ClassificationRelax || classification == ClassificationMixed {
+		if commitSentWithToken(ctx, req) {
+			return nil, errTokenRelaxationSessionOnly
+		}
 		if err := gs.checkRelaxationAuthority(ctx, req, scopeType, scopeID); err != nil {
 			return nil, err
 		}
@@ -449,17 +495,13 @@ func (gs *GovernanceService) compensateAuditFailure(ctx context.Context, req Com
 // Re-authorization
 // ---------------------------------------------------------------------------
 
-// reauthorizeActor verifies the actor still holds access_constraint.admin.
-// Uses getEffectivePermissions instead of Decide to avoid requiring a full
-// Identity object — the governance service operates at the principal level.
+// reauthorizeActor verifies the actor still holds access_constraint.admin,
+// within the limits of the request credential (commitActorPermissions).
+// Uses getEffectivePermissions instead of Decide: the governance service
+// operates at the principal level.
 func (gs *GovernanceService) reauthorizeActor(ctx context.Context, req CommitRequest) error {
 	scopeType, scopeID := gs.resolveScope(ctx, req)
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeMutationPermissionLost,
@@ -560,13 +602,9 @@ func (gs *GovernanceService) classifyOperation(ctx context.Context, req CommitRe
 // checkRelaxationAuthority verifies the actor has sufficient authority over
 // the permissions being restored by a relaxation.
 func (gs *GovernanceService) checkRelaxationAuthority(ctx context.Context, req CommitRequest, scopeType, scopeID string) error {
-	// Get the actor's effective permissions at the relevant scope.
-	actorPerms, err := gs.authz.getEffectivePermissions(
-		ctx,
-		NormalizePrincipalType(string(req.Actor.Kind)),
-		req.Actor.ID,
-		scopeType, scopeID,
-	)
+	// Get the actor's effective permissions at the relevant scope, within
+	// the request credential's limits.
+	actorPerms, err := gs.commitActorPermissions(ctx, req, scopeType, scopeID)
 	if err != nil {
 		return &GovernanceError{
 			Code:    ErrCodeInsufficientRelaxationAuthority,

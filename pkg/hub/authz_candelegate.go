@@ -409,9 +409,15 @@ func (a *AuthzService) kindCache() *testFixtureClampCache {
 //   - A system-scoped grant is denied for every UAT, of either boundary
 //     kind.
 //   - A grant with any other non-project scope type is denied.
-//   - A project-scoped grant must name its project, and the token boundary
-//     must allow that project (BoundaryAllows): a project boundary allows
-//     only its own project, a hub boundary allows any project.
+//   - A project-scoped custom role definition names no project: the
+//     definition can be bound in every project. Under a hub boundary it
+//     passes here, and canDelegateCustomRole judges its permissions on the
+//     holder's system-scope authority within the token ceiling
+//     (actorHoldsAllPermissions with no scope ID). Under a project boundary
+//     it is denied.
+//   - Any other project-scoped grant must name its project, and the token
+//     boundary must allow that project (BoundaryAllows): a project boundary
+//     allows only its own project, a hub boundary allows any project.
 //   - An agent delegation must name the same project in ProjectID and
 //     ScopeID, for every boundary kind, because the authority check runs
 //     on ProjectID and the boundary check runs on ScopeID.
@@ -438,6 +444,9 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 	}
 
 	if grant.ScopeID == "" {
+		if grant.Type == GrantTypeCustomRole && scoped.Boundary().Kind == BoundaryKindHub {
+			return nil
+		}
 		return deny("scoped credential cannot delegate a project grant that names no project")
 	}
 	if grant.Type == GrantTypeAgentDelegation && grant.ProjectID != grant.ScopeID {
@@ -737,7 +746,10 @@ func (a *AuthzService) canAgentDelegateToAgent(agentActor AgentIdentity, grant G
 }
 
 // canDelegateCustomRole checks whether the actor holds all permissions
-// defined in the custom role.
+// defined in the custom role. A project-scoped definition carries no scope
+// ID, so actorHoldsAllPermissions resolves only the actor's system-scope
+// bindings for it: the definition can be bound in every project. A token's
+// ceiling is intersected there as for every other grant.
 func (a *AuthzService) canDelegateCustomRole(ctx context.Context, actor Identity, grant GrantDescriptor) Decision {
 	if len(grant.CustomRolePermissions) == 0 {
 		return Decision{Allowed: true, Reason: "custom role has no permissions"}

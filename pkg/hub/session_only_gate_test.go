@@ -63,10 +63,11 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		requireSessionOnlyRefusal(t, rec, tc.want, tc.name)
 	}
 
-	// Sites a token cannot reach through the route layer, because the
-	// role_binding permissions carry no selector, are called directly with
-	// the same minted token, authenticated as the middleware does. Project
-	// delete is pinned at the service by TestRS3_ProjectDeleteScopedUATDenied.
+	// The super-admin binding delete site is called directly with the same
+	// minted token, authenticated as the middleware does;
+	// TestRoleBindingDeleteToken_SuperAdminBindingDenied drives it through
+	// the route with role_binding:delete. Project delete is pinned at the
+	// service by TestRS3_ProjectDeleteScopedUATDenied.
 	ctx := realTokenContext(t, m.srv, key)
 
 	bindings, err := m.store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, m.adminID)

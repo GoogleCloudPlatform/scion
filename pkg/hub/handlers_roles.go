@@ -358,7 +358,7 @@ func (s *Server) createRoleBindingScopeAware(w http.ResponseWriter, r *http.Requ
 			decision := s.authzService.Decide(r.Context(), AuthzRequest{
 				Principal:  principalContextForIdentity(user),
 				Credential: credentialContextForIdentity(user),
-				Resource:   Resource{Type: "role_binding", ID: "hub"},
+				Resource:   hubScopedResource("role_binding", "hub"),
 				Action:     Action("create"),
 				Permission: "role_binding.create",
 			})
@@ -1939,7 +1939,7 @@ func (s *Server) requireWritePermissionForRole(w http.ResponseWriter, r *http.Re
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role", ID: "hub"},
+		Resource:   hubScopedResource("role", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
@@ -1970,7 +1970,7 @@ func (s *Server) requireWritePermissionForRoleBinding(w http.ResponseWriter, r *
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(user),
 		Credential: credentialContextForIdentity(user),
-		Resource:   Resource{Type: "role_binding", ID: "hub"},
+		Resource:   hubScopedResource("role_binding", "hub"),
 		Action:     Action(action),
 		Permission: permission,
 	})
