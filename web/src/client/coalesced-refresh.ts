@@ -85,9 +85,7 @@ export function coalescedRefresh(
     const result = fn(at);
     // Owners fire and forget; a rejected refresh must not surface as an
     // unhandled rejection from a timer.
-    if (result && typeof (result as Promise<unknown>).catch === 'function') {
-      (result as Promise<unknown>).catch(() => {});
-    }
+    if (result) result.catch(() => {});
   };
 
   const onQuiet = (): void => {

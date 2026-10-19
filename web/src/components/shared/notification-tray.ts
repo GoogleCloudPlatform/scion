@@ -38,6 +38,7 @@ import {
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
 
 /**
  * A scheduled dispatch blocked by an agent row in phase error. The row's
@@ -58,6 +59,43 @@ const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 /** Whether a notification row names an agent the "View agent" link can open. */
 function hasAgentLink(agentId: string | undefined): boolean {
   return !!agentId && agentId !== NIL_UUID;
+}
+
+/**
+ * The notification a `notification-created` event carries in full, or null.
+ *
+ * The user-scoped `user.{id}.notification` subject delivers the row itself
+ * (UserNotificationEvent): every field the tray renders (id, status,
+ * message, createdAt, agentId). The bare `notification.created` path, and
+ * anything malformed, yields null and is fetched instead.
+ *
+ * The payload has no `acknowledged` field: a notification that was just
+ * created is unacknowledged by definition, so a missing field passes and
+ * only an explicit `true` is rejected. A payload addressed to another user
+ * (`subscriberId`) is rejected too, as a second gate behind the subject.
+ */
+export function notificationFromEvent(data: unknown, userId: string | null): Notification | null {
+  if (!userId || !data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const str = (v: unknown): v is string => typeof v === 'string';
+  if (!str(d.id) || !d.id || !str(d.status) || !d.status || !str(d.message)) return null;
+  if (!str(d.createdAt) || Number.isNaN(Date.parse(d.createdAt))) return null;
+  if (!str(d.agentId)) return null;
+  if (d.acknowledged !== undefined && d.acknowledged !== false) return null;
+  if (d.subscriberId !== undefined && d.subscriberId !== userId) return null;
+  return {
+    id: d.id,
+    subscriptionId: str(d.subscriptionId) ? d.subscriptionId : '',
+    agentId: d.agentId,
+    projectId: str(d.projectId) ? d.projectId : '',
+    subscriberType: 'user',
+    subscriberId: userId,
+    status: d.status,
+    message: d.message,
+    dispatched: false,
+    acknowledged: false,
+    createdAt: d.createdAt,
+  };
 }
 
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
@@ -89,6 +127,16 @@ export class ScionNotificationTray extends LitElement {
 
   /** The user id that the list, seenIds and initialFetchDone belong to. */
   private stateUserId: string | null = null;
+
+  /**
+   * Fetches for events that carry no usable notification: the first of a
+   * burst fetches at once, the rest collapse into one trailing fetch.
+   */
+  private eventFetch: CoalescedRefresh = coalescedRefresh(() => this.fetchNotifications(), {
+    waitMs: 500,
+    maxWaitMs: 3000,
+    leading: true,
+  });
 
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -168,6 +216,9 @@ export class ScionNotificationTray extends LitElement {
     this.notifications = [];
     this.seenIds = new Set();
     this.initialFetchDone = false;
+    // The next user's first fetch answers any event the previous user's
+    // coalescer held, and their first event fetches at once.
+    this.eventFetch.cancel();
   }
 
   /**
@@ -254,12 +305,38 @@ export class ScionNotificationTray extends LitElement {
 
   private stopListeningForNotifications(): void {
     stateManager.removeEventListener('notification-created', this.boundOnNotification);
+    this.eventFetch.cancel();
   }
 
-  private onNotificationEvent(): void {
+  private onNotificationEvent(e: Event): void {
     // The stateManager fires notification-created when a notification SSE
-    // event arrives. Re-fetch to get the full notification objects.
-    void this.fetchNotifications();
+    // event arrives. A user-scoped event carries the whole row: show it
+    // without a request. Anything else is fetched, coalesced. Before the
+    // first fetch has finished there is no list to add to (and no seen set
+    // to tell a new row by), so that fetch is joined by fetching as well.
+    const detail = (e as CustomEvent<{ data?: unknown } | undefined>).detail;
+    const n = this.initialFetchDone
+      ? notificationFromEvent(detail?.data, this.user?.id ?? null)
+      : null;
+    if (n) {
+      this.upsertNotification(n);
+      return;
+    }
+    this.eventFetch.schedule(e.timeStamp > 0 ? e.timeStamp : undefined);
+  }
+
+  /** Adds a notification delivered by an event, or replaces its row. */
+  private upsertNotification(n: Notification): void {
+    // Chat rows no longer belong in the bell (see fetchNotifications).
+    if (RETIRED_CHAT_STATUSES.has(n.status)) return;
+    if (!this.seenIds.has(n.id)) {
+      this.dispatchBrowserNotification(n);
+      this.seenIds.add(n.id);
+    }
+    // The list is newest first, as the endpoint returns it.
+    const at = this.notifications.findIndex((x) => x.id === n.id);
+    this.notifications =
+      at < 0 ? [n, ...this.notifications] : this.notifications.map((x, i) => (i === at ? n : x));
   }
 
   // ---------------------------------------------------------------------------
