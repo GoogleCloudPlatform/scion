@@ -621,11 +621,15 @@ func TestClientConnection_CM1(t *testing.T) {
 			Clusters: map[string]*clientcmdapi.Cluster{
 				"c-a":       {Server: "https://127.0.0.1:6443"},
 				"c-noserve": {},
+				"c-nil":     nil,
 			},
 			Contexts: map[string]*clientcmdapi.Context{
-				"ctx-a":         {Cluster: "c-a"},
-				"ctx-nocluster": {Cluster: "c-missing"},
-				"ctx-noserver":  {Cluster: "c-noserve"},
+				"ctx-a":            {Cluster: "c-a"},
+				"ctx-nocluster":    {Cluster: "c-missing"},
+				"ctx-noserver":     {Cluster: "c-noserve"},
+				"ctx-nil":          nil,
+				"ctx-nilcluster":   {Cluster: "c-nil"},
+				"ctx-emptycluster": {Cluster: ""},
 			},
 		}
 		rows := []struct {
@@ -641,6 +645,9 @@ func TestClientConnection_CM1(t *testing.T) {
 			{name: "requested context's cluster entry missing", requested: "ctx-nocluster", current: "ctx-a", want: ConnUnknown},
 			{name: "requested context's cluster has an empty server", requested: "ctx-noserver", current: "ctx-a", want: ConnUnknown},
 			{name: "selected context not defined", requested: "ctx-undefined", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context entry is nil", requested: "ctx-nil", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context's cluster entry is nil", requested: "ctx-nilcluster", current: "ctx-a", want: ConnUnknown},
+			{name: "selected context names no cluster", requested: "ctx-emptycluster", current: "ctx-a", want: ConnUnknown},
 			{name: "current context not defined", current: "ctx-undefined", want: ConnUnknown},
 		}
 		for _, r := range rows {
