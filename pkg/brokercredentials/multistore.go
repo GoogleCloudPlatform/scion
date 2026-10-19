@@ -93,6 +93,9 @@ func (s *MultiStore) Save(creds *BrokerCredentials) error {
 	if creds.BrokerID == "" {
 		return fmt.Errorf("brokerId is required")
 	}
+	if err := ValidateBrokerIDPathElement(creds.BrokerID); err != nil {
+		return err
+	}
 	if creds.SecretKey == "" {
 		return fmt.Errorf("secretKey is required")
 	}

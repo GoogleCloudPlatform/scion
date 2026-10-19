@@ -295,9 +295,9 @@ func TestAgentListReadRule_ListScopedTokenSeesRowsItsHolderCanRead(t *testing.T)
 
 // TestAgentListReadRule_ProjectReadTokenListsItsProjectOnly pins the
 // project:read part of the rule on the global list: a token bound to one
-// project with project:read lists that project's agents its holder (a
-// project member) can read, and nothing from another project the holder
-// can also read.
+// project with agent:list and project:read lists that project's agents its
+// holder (a project member) can read, and nothing from another project the
+// holder can also read.
 func TestAgentListReadRule_ProjectReadTokenListsItsProjectOnly(t *testing.T) {
 	f := readRuleSetup(t, 6, func(i int) bool { return i%2 == 0 })
 	ctx := context.Background()
@@ -313,7 +313,7 @@ func TestAgentListReadRule_ProjectReadTokenListsItsProjectOnly(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
 
-	key := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"project:read"})
+	key := mintScopedUAT(t, f.srv, f.member.ID, f.project.ID, []string{"agent:list", "project:read"})
 	all := func(q string) string { return "/api/v1/agents?" + q }
 	for _, mode := range readRuleModes {
 		ids, items := tokenWalk(t, f.srv, key, all, mode)

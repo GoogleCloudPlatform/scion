@@ -146,7 +146,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	pinProcessUTC()
 
 	// 1. Initialize logging
-	logCleanups, requestLogger, messageLogger, err := initServerLoggingFn(cmd)
+	logCleanups, requestLogger, messageLogger, artifactLogger, err := initServerLoggingFn(cmd)
 	if err != nil {
 		return err
 	}
@@ -352,6 +352,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := validateTestModeRequiresHub(enableHub); err != nil {
 		return err
 	}
+	if err := validateTestModeHubIDPinned(cfg); err != nil {
+		return err
+	}
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
@@ -432,7 +435,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, artifactLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
@@ -1037,7 +1040,7 @@ func warnShadowedBrokerEnv(ctx context.Context, w brokerEnvShadowWarner) {
 }
 
 // initServerLogging initializes all logging subsystems and returns cleanup functions.
-func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *slog.Logger, messageLogger *slog.Logger, err error) {
+func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, messageLogger, artifactLogger *slog.Logger, err error) {
 	useGCP := parseBoolEnv("SCION_LOG_GCP")
 	if cloudrunenv.IsService() {
 		useGCP = true
@@ -1155,7 +1158,33 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 		cleanups = append(cleanups, msgLogCleanup)
 	}
 
-	return cleanups, requestLogger, messageLogger, nil
+	// Initialize the artifact decision logger (hub only; the broker serves
+	// no artifacts).
+	if enableHub {
+		artLogCfg := logging.ArtifactLoggerConfig{
+			Component: component,
+			HubName:   hubName,
+			HubID:     hubID,
+			UseGCP:    useGCP,
+			Level:     logging.ResolveLogLeveler(enableDebug),
+		}
+		if ch, ok := cloudHandler.(*logging.ResilientCloudHandler); ok && ch != nil {
+			artLogCfg.CloudClient = ch.Client()
+			artLogCfg.CircuitOpen = ch.CircuitOpen
+		}
+		var artLogCleanup func()
+		var artErr error
+		artifactLogger, artLogCleanup, artErr = logging.NewArtifactLogger(artLogCfg)
+		if artErr != nil {
+			slog.Warn("Failed to initialize artifact logger", "error", artErr)
+			artifactLogger = nil
+		}
+		if artLogCleanup != nil {
+			cleanups = append(cleanups, artLogCleanup)
+		}
+	}
+
+	return cleanups, requestLogger, messageLogger, artifactLogger, nil
 }
 
 // applyServerLogLevelSetting applies the server.log_level setting to the
@@ -1697,7 +1726,7 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// such rows, so this cannot move into runBootDataMigrations. It uses raw
 	// SQL only, snapshots the database before writing, and is a no-op on
 	// Postgres and on a store with nothing to repair.
-	tsRepair := repairUnreadableTimestamps(ctx, s)
+	snaps := &startupSnapshots{tsRepair: repairUnreadableTimestamps(ctx, s)}
 
 	// On Postgres, refuse to migrate when the search_path would build a
 	// fresh table set that shadows existing hub tables in a later schema,
@@ -1708,16 +1737,20 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// On SQLite, snapshot the database when the migration (after
 	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
 	// rows. A snapshot that is needed but fails stops startup before the
-	// reconcile changes any rows.
-	s.SetBeforeFKReconcile(snapshotBeforeFKReconcile)
+	// reconcile changes any rows. The snapshot's path is recorded so the
+	// prune below keeps it.
+	s.SetBeforeFKReconcile(func(ctx context.Context, db *sql.DB, groups []entc.FKRepairGroup) error {
+		return snapshotBeforeFKReconcileRecord(ctx, db, groups, snaps.recordFK)
+	})
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
-	// operations (parity with the former raw-SQL store).
-	if err := migrateStore(ctx, s); err != nil {
+	// operations (parity with the former raw-SQL store). After it succeeds,
+	// the repair snapshots unused for 7 days are removed; see
+	// migrateThenPrune.
+	if err := migrateThenPrune(ctx, s, func(ctx context.Context) error { return migrateStore(ctx, s) }, snaps); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
-	markUTCTimestampRepairComplete(ctx, s, tsRepair)
 
 	runBootDataMigrations(ctx, s)
 
@@ -2453,6 +2486,7 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
 	return hub.ServerConfig{
 		HubID:                        cfg.Hub.ResolveHubID(),
+		HubIDPinned:                  hubIDPinned(cfg),
 		HubName:                      cfg.Hub.ResolveHubName(),
 		DisableLegacyStorageFallback: cfg.Hub.DisableLegacyStorageFallback,
 		Port:                         cfg.Hub.Port,
@@ -2647,6 +2681,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
 	}
 
+	if brokerRPCRec, err := hub.NewOTelConduitBrokerRPCMetrics(mp); err != nil {
+		log.Printf("WARNING: hub conduit broker rpc metrics disabled: %v", err)
+	} else {
+		hubSrv.SetConduitBrokerRPCMetrics(brokerRPCRec)
+	}
+
 	if conflictRec, err := hub.NewOTelQuotaScopeConflictMetrics(mp); err != nil {
 		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
 	} else {
@@ -2704,7 +2744,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
 	warnNonConformingHubName(cfg.Hub.HubName)
@@ -2803,6 +2843,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
 	hubCfg.TestAdminGate = testMode.TestAdminGate
 	hubCfg.TestMode = testMode.TestMode
+	hubCfg.TestAdminWebSessions = testMode.TestAdminWebSessions
 	if testMode.EnableTestIdentities {
 		slog.Warn("Test identity issuance is ENABLED (--test-mode). Holders of test_identity.issue can create short-lived synthetic users on this hub. Use on test hubs only; MUST NOT be enabled in production!",
 			"test_mode", string(testMode.TestMode.Level), "preconditions", testMode.TestMode.Preconditions)
@@ -2833,6 +2874,9 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	hubSrv.SetIntegrationHA(cfg.Database.Driver, entClient, cfg.Database.URL)
 	if messageLogger != nil {
 		hubSrv.SetMessageLogger(messageLogger)
+	}
+	if artifactLogger != nil {
+		hubSrv.SetArtifactLogger(artifactLogger)
 	}
 
 	// Load notification channels from versioned settings. With operational
@@ -3867,7 +3911,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	brokerID, err := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	if err != nil {
+		return err
+	}
 	// Resolve broker name
 	brokerName := resolveBrokerName(cfg, settings, vsBroker)
 
@@ -3925,10 +3972,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			colocatedBrokerRegistered = true
 			if effectiveID != brokerID {
 				log.Printf("Broker ID updated from %s to %s (name-based dedup)", brokerID, effectiveID)
-				brokerID = effectiveID
-				if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-					log.Printf("Warning: failed to persist deduplicated broker ID: %v", err)
+				if err := adoptDedupedBrokerID(globalDir, effectiveID, log.Printf); err != nil {
+					return err
 				}
+				brokerID = effectiveID
 			}
 			log.Printf("Registered global project with runtime broker %s (endpoint: %s, autoProvide: %v)", brokerName, rhEndpoint, serverAutoProvide)
 			if statelessCloudRunBroker {
@@ -4290,7 +4337,7 @@ var cloudRunLogicalBrokerNamespace = uuid.MustParse("c10f7a0a-6f03-5f9f-8d52-1d9
 // It checks (in order): versioned settings, legacy settings, global config,
 // deterministic Cloud Run ID, DB recovery (single embedded broker), and
 // finally generates a new UUID as a last resort.
-func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) string {
+func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *config.Settings, vsBroker *config.V1BrokerConfig, globalDir, defaultBrokerID string, s store.Store) (string, error) {
 	var brokerID string
 	if vsBroker != nil && vsBroker.BrokerID != "" {
 		brokerID = vsBroker.BrokerID
@@ -4302,7 +4349,7 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 	}
 	if brokerID == "" && defaultBrokerID != "" {
 		log.Printf("Using deterministic logical broker ID: %s", defaultBrokerID)
-		return defaultBrokerID
+		brokerID = defaultBrokerID
 	}
 
 	// Recover from DB: if exactly one embedded broker exists, reuse its ID.
@@ -4311,12 +4358,8 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 		if err != nil {
 			log.Printf("Warning: failed to query database for broker ID recovery: %v", err)
 		} else if embedded != nil {
-			brokerID = embedded.ID
-			log.Printf("NOTICE: recovered broker ID %s from database (single embedded broker)", brokerID)
-			// Persist so we don't re-recover on next boot (writes to both legacy
-			// hub.brokerId and versioned server.broker.broker_id via UpdateSetting).
-			if err := config.UpdateSetting(globalDir, "hub.brokerId", brokerID, true); err != nil {
-				log.Printf("Warning: failed to persist recovered broker ID to settings: %v", err)
+			if brokerID, err = recoverEmbeddedBrokerID(globalDir, embedded.ID, log.Printf); err != nil {
+				return "", err
 			}
 		}
 	}
@@ -4329,7 +4372,12 @@ func resolveBrokerID(ctx context.Context, cfg *config.GlobalConfig, settings *co
 			log.Printf("Generated and persisted new broker ID: %s", brokerID)
 		}
 	}
-	return brokerID
+	// Every source of the ID (configured, deterministic default, recovered,
+	// generated) is checked before it is used.
+	if err := brokercredentials.ValidateBrokerIDPathElement(brokerID); err != nil {
+		return "", fmt.Errorf("broker ID: %w", err)
+	}
+	return brokerID, nil
 }
 
 func deriveCloudRunLogicalBrokerID(settings *config.VersionedSettings, rt runtime.Runtime) (string, error) {

@@ -73,8 +73,8 @@ def env_vars(**values: str | None):
 ANTIGRAVITY_MODEL_ALIASES = {
     "small": "Gemini 3.1 Flash Lite",
     "medium": "Gemini 3.8 Flash (Medium)",
-    "large": "Gemini 3.1 Pro (Low)",
-    "extra-large": "Gemini 3.1 Pro (Low)",
+    "large": "Gemini 4 Argon (Medium)",
+    "extra-large": "Gemini 4 Argon (High)",
 }
 
 
@@ -286,7 +286,21 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL=None):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.1 Pro (Low)")
+        self.assertEqual(model, "Gemini 4 Argon (Medium)")
+
+    def test_scion_model_unset_uses_harness_config_model_extra_large(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="extra-large")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
+
+    def test_scion_model_unset_uses_harness_config_model_xl_shorthand(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp, model="xl")
+            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
+                model = provision._resolve_model(ctx)
+        self.assertEqual(model, "Gemini 4 Argon (High)")
 
     def test_agy_model_env_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -326,7 +340,7 @@ class ModelResolutionTest(unittest.TestCase):
             ctx = make_ctx(tmp, model="large")
             with env_vars(SCION_MODEL=None, AGY_MODEL="agy-operator-model"):
                 model = provision._resolve_model(ctx)
-        self.assertEqual(model, "Gemini 3.1 Pro (Low)")
+        self.assertEqual(model, "Gemini 4 Argon (Medium)")
 
     def test_agy_model_wins_over_flash_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -611,7 +625,7 @@ class ProvisionModelWiringTest(unittest.TestCase):
         # "Gemini 3.8 Flash (Medium)", the same string the "medium" alias
         # resolves to, so a mutant that falls all the way back to FLASH_MODEL
         # would coincidentally match and go undetected. "large" resolves to
-        # "Gemini 3.1 Pro (Low)", which differs from FLASH_MODEL, so the
+        # "Gemini 4 Argon (Medium)", which differs from FLASH_MODEL, so the
         # wiring mutant (reverting this call site to main's raw expression)
         # is actually caught here -- confirmed by hand.
         with tempfile.TemporaryDirectory() as tmp:
@@ -627,7 +641,7 @@ class ProvisionModelWiringTest(unittest.TestCase):
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "Gemini 3.1 Pro (Low)")
+        self.assertEqual(settings["model"], "Gemini 4 Argon (Medium)")
 
 
 

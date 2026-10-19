@@ -585,7 +585,7 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 
 	// Mint UAT scoped to project A.
 	// Use project:read — project-member does not hold project:manage under A2.
-	uatA := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+	uatA := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "project:list"})
 
 	// Get page 1 with UAT A — should see only project A (scoped)
 	rec := doRequestWithUAT(t, srv, uatA, http.MethodGet, "/api/v1/projects", nil)
@@ -628,8 +628,8 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 		// Mint two UATs for the same user, same project, same scope.
 		// Each CreateToken call generates a distinct credential record with a unique ID.
 		// Use project:read — project-member does not hold project:manage under A2.
-		uatA1 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
-		uatA2 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read"})
+		uatA1 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "agent:list"})
+		uatA2 := mintScopedUAT(t, srv, user.ID, projA.ID, []string{"project:read", "agent:list"})
 
 		// Both UATs see projA's agents
 		recA1 := doRequestWithUAT(t, srv, uatA1, http.MethodGet, "/api/v1/agents", nil)
@@ -697,7 +697,7 @@ func TestRS2_CredentialChangeCursorReplay(t *testing.T) {
 
 		// Mint a different UAT scoped to projB.
 		// Use project:read — project-member does not hold project:manage under A2.
-		uatB := mintScopedUAT(t, srv, user.ID, projB.ID, []string{"project:read"})
+		uatB := mintScopedUAT(t, srv, user.ID, projB.ID, []string{"project:read", "project:list"})
 
 		// Even without pagination, the cursor binding includes credential context.
 		// Use session JWT to get a cursor, then replay with UAT B.

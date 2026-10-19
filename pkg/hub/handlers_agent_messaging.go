@@ -1147,6 +1147,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		ValidationError(w, fmt.Sprintf("message exceeds %d character limit (current: %d chars). Consider splitting into multiple messages using multiple scion message invocations", messages.MaxMessageLength, msgLen), nil)
 		return
 	}
+	// Rewrite agent-prefixed mentions once, here, so every branch below
+	// (agent DM, mention fan-out, human mentions, the stored row) sees the
+	// same body.
+	req.Msg = rewriteIncomingAgentMentions(req.Msg)
 
 	// Validate DM key format when the thread_id looks like a DM key.
 	// Non-DM thread IDs (topic UUIDs, etc.) pass through as-is.
@@ -1954,6 +1958,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "message or structured_message is required", nil)
 		return
 	}
+
+	// Rewrite agent-prefixed mentions once, before validation, so the group,
+	// direct and mention fan-out paths below all see the same body.
+	structuredMsg.Msg = rewriteIncomingAgentMentions(structuredMsg.Msg)
+	plainMessage = structuredMsg.Msg
 
 	// Validate the assembled message through the new envelope choke point.
 	// The structuredMsg is still the primary type during the transition;

@@ -729,6 +729,30 @@ func (f ProjectSyncStateFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectSyncStateMutation", m)
 }
 
+// The ProjectVisitorExclusionFunc type is an adapter to allow the use of ordinary
+// function as ProjectVisitorExclusion mutator.
+type ProjectVisitorExclusionFunc func(context.Context, *ent.ProjectVisitorExclusionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ProjectVisitorExclusionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ProjectVisitorExclusionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectVisitorExclusionMutation", m)
+}
+
+// The ProjectVisitorRuleFunc type is an adapter to allow the use of ordinary
+// function as ProjectVisitorRule mutator.
+type ProjectVisitorRuleFunc func(context.Context, *ent.ProjectVisitorRuleMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ProjectVisitorRuleFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ProjectVisitorRuleMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ProjectVisitorRuleMutation", m)
+}
+
 // The RelayInstanceFunc type is an adapter to allow the use of ordinary
 // function as RelayInstance mutator.
 type RelayInstanceFunc func(context.Context, *ent.RelayInstanceMutation) (ent.Value, error)

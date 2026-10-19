@@ -74,7 +74,6 @@ capabilities:
     streamable_http: { support: "yes" }
     project_scope: { support: "no", reason: "Project-scoped MCP not implemented; entries demoted to global" }
   resume: { support: "partial", reason: "Interactive slash command only, no CLI flag" }
-  agent_plugins: { support: "partial", reason: "Skills install natively via muse plugins install; muse <=1.4.7 keeps Agent Plugins MCP servers inactive" }
 
 no_auth:
   behavior: drop-to-shell

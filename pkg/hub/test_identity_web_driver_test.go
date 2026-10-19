@@ -450,7 +450,7 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"handleAdminAllowListAdd": true, "handleAdminAllowListImport": true, "handleAdminUserInviteBulk": true,
 		"createPendingUserTx": true, "provisionNewUser": true, "provisionUser": true, "handleTestLogin": true,
 		"seedDevUser": true, "proxyAuthMiddleware": true, "handleOAuthCallback": true,
-		"grantProjectVisitor": true,
+		"grantProjectVisitor": true, "linkPendingVisitor": true,
 	}, creators, "every function that calls CreateUser, CreateFederatedUser or another checked Create*User method")
 	for fn := range creators {
 		if reason, ok := exempt[fn]; ok {

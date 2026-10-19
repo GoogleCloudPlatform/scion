@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -121,6 +122,10 @@ func entRoleBindingToStore(rb *ent.RoleBinding) *store.RoleBinding {
 	}
 	if rb.RoleDefinitionID != nil {
 		result.RoleDefinitionID = rb.RoleDefinitionID.String()
+	}
+	if rb.SourceRuleID != nil {
+		ruleID := rb.SourceRuleID.String()
+		result.SourceRuleID = &ruleID
 	}
 	return result
 }
@@ -722,6 +727,48 @@ func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id strin
 	return entRoleBindingToStore(updated), nil
 }
 
+// visitorBindingSourceRule checks the source rule ruleID of a visitor
+// binding at project scope projectID for the federated account u: the
+// rule must exist, be of that project and of the account's home issuer,
+// and be active now (ProjectVisitorRule.ActiveAt). It returns the rule,
+// whose window the binding takes, or ErrVisitorBindingRefused.
+//
+// On Postgres the rule row is read FOR SHARE, so in a transaction the
+// rule cannot be removed or have its window changed until the binding
+// commits: DeleteProjectVisitorRule and UpdateProjectVisitorRuleWindow
+// take the row FOR UPDATE before they touch bindings, so they either wait
+// for this binding and then include it, or run first, and this read then
+// sees the removed rule or the new window. SQLite serializes writes, so a
+// plain read gives the same order.
+func (r *RoleStore) visitorBindingSourceRule(ctx context.Context, ruleID, projectID string, u *ent.User) (*ent.ProjectVisitorRule, error) {
+	ruleUID, err := uuid.Parse(ruleID)
+	if err != nil {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	q := r.client.ProjectVisitorRule.Query().Where(projectvisitorrule.IDEQ(ruleUID))
+	if r.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForShare()
+	}
+	rule, err := q.Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, store.ErrVisitorBindingRefused
+		}
+		return nil, mapError(err)
+	}
+	if rule.ProjectID != projectID || u.HomeIssuer == nil || *u.HomeIssuer != rule.Issuer {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	nowFn := r.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	if !entProjectVisitorRuleToStore(rule).ActiveAt(nowFn()) {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	return rule, nil
+}
+
 // isVisitorRole reports whether rd is the seeded project-visitor role: a
 // system role of that name, at project scope, that does not confer
 // membership. A custom role of the same name is not.
@@ -764,6 +811,11 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 	} else if !rd.ConfersMembership {
 		return nil, fmt.Errorf("%w: role %q", store.ErrNonMembershipRoleRefused, rd.Name)
 	}
+	// Only the visitor path records the visitor rule that created a
+	// binding.
+	if rb.SourceRuleID != nil && !visitor {
+		return nil, fmt.Errorf("%w: a source rule is set only on a visitor binding", store.ErrInvalidInput)
+	}
 
 	// Scope type must match the role definition's scope type.
 	if rb.ScopeType != string(rd.ScopeType) {
@@ -785,6 +837,12 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		stored := *rb
 		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
 		rb = &stored
+	}
+	// A visitor rule's binding is written only at a visitor's first
+	// contact, never under shaping: an admin-kind test identity adds no
+	// visitor rule (CreateProjectVisitorRule).
+	if shaping != nil && rb.SourceRuleID != nil {
+		return nil, store.ErrTestAdminGrantRefused
 	}
 
 	// No super-admin binding is ever written under shaping, whatever
@@ -816,7 +874,9 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		return nil, fmt.Errorf("%w: system scope must have empty scope_id", store.ErrInvalidInput)
 	}
 
-	// Principal existence validation.
+	// Principal existence validation. sourceRuleUID is the checked
+	// SourceRuleID of a visitor binding (set in the user case below).
+	var sourceRuleUID *uuid.UUID
 	principalUID, err := parseUUID(rb.PrincipalID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid principal_id: %s", store.ErrInvalidInput, rb.PrincipalID)
@@ -836,6 +896,20 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		}
 		if !visitor && federated {
 			return nil, store.ErrFederatedAccountRefused
+		}
+		if visitor && rb.SourceRuleID != nil {
+			rule, err := r.visitorBindingSourceRule(ctx, *rb.SourceRuleID, rb.ScopeID, u)
+			if err != nil {
+				return nil, err
+			}
+			ruleUID := rule.ID
+			sourceRuleUID = &ruleUID
+			// A rule's binding carries the rule's current window, read
+			// in this transaction, whatever window the caller passed.
+			stored := *rb
+			stored.NotBefore = rule.NotBefore
+			stored.ExpiresAt = rule.ExpiresAt
+			rb = &stored
 		}
 		exp, err := checkTestAdminSystemBinding(u, rb, rd.Name)
 		if err != nil {
@@ -900,6 +974,15 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		// ent.NotFoundError means no existing membership — proceed.
 	}
 
+	// The shaping clamp is applied again last, after every window set
+	// above (a visitor rule's, an issuance binding's), so none of them can
+	// end the binding after the identity.
+	if shaping != nil {
+		stored := *rb
+		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
+		rb = &stored
+	}
+
 	builder := r.client.RoleBinding.Create().
 		SetNillableRoleDefinitionID(&rdUID).
 		SetPrincipalType(rolebinding.PrincipalType(rb.PrincipalType)).
@@ -907,6 +990,7 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
 		SetScopeID(rb.ScopeID).
 		SetNillableMembershipKind(membershipKind).
+		SetNillableSourceRuleID(sourceRuleUID).
 		SetNillableIssuanceID(issuanceStamp(shaping))
 
 	if rb.ID != "" {
