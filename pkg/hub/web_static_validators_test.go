@@ -27,6 +27,7 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -347,10 +348,15 @@ func TestStaticAsset_IndexFollowsAssetSource(t *testing.T) {
 func writeValidatorDisk(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	// One shared mtime: the files are written in map order, and DiskIndex
+	// ignores a sibling older than its source, so a clock tick between a
+	// sibling and its source must not drop the sibling.
+	mtime := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	for name, f := range validatorAssets(t) {
 		p := filepath.Join(dir, filepath.FromSlash(name))
 		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 		require.NoError(t, os.WriteFile(p, f.Data, 0o644))
+		require.NoError(t, os.Chtimes(p, mtime, mtime))
 	}
 	return dir
 }
