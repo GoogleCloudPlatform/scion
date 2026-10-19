@@ -350,6 +350,13 @@ func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
 
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -434,7 +441,7 @@ func AddSelfManagedPluginWithBrokerType(entry SelfManagedPluginEntry) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // AddPluginToSettings adds a broker plugin entry to the global settings.yaml.
@@ -445,6 +452,13 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
@@ -489,7 +503,7 @@ func AddPluginToSettings(pluginName, configFilePath string) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // AddPluginToMessageBrokerTypes appends pluginName to
@@ -503,6 +517,13 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 	}
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
+
+	// Held from the read to the write (see LockSettingsDir).
+	lock, err := LockSettingsDir(globalDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
 
 	var raw map[string]interface{}
 	data, err := os.ReadFile(settingsPath)
@@ -578,7 +599,7 @@ func AddPluginToMessageBrokerTypes(pluginName string) error {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
 
-	return os.WriteFile(settingsPath, out, 0644)
+	return writeSettingsFileAtomic(lock, settingsPath, out)
 }
 
 // CreatePluginConfigFile creates a default config file for a newly installed plugin.

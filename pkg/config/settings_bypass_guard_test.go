@@ -37,19 +37,11 @@ var settingsBypassScanRoots = []string{".", "../../cmd", "../hub", "../hubsync",
 // tracked exception; an entry that no longer matches fails the test, so the
 // list cannot go stale.
 var settingsBypassAllowed = map[string]string{
-	// Rewritten from a map, without the lock; moved to the locked writer
-	// in a follow-up change (ptone/scion#3918, part B).
-	"integration_config.go:AddSelfManagedPluginWithBrokerType": "part B",
-	"integration_config.go:AddPluginToSettings":                "part B",
-	"integration_config.go:AddPluginToMessageBrokerTypes":      "part B",
-	"admin_settings.go:handlePutServerConfig":                  "part B",
-	"handlers_github_app.go:persistGitHubAppConfig":            "part B",
-	"handlers_projects_core.go:initHubManagedProject":          "part B",
 	// The legacy hub.grove_id key migration: it runs from the settings
 	// loaders, sometimes while the caller already holds the settings lock,
 	// so it cannot take the (non-re-entrant) lock and uses compare-then-
 	// rename instead (see its comment). Retired with the legacy loader in
-	// ptone/scion#3919, or else moved to the locked writer in part B.
+	// ptone/scion#3919.
 	"legacy_grove_migration.go:migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
 }
 

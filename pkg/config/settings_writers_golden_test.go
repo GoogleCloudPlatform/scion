@@ -116,11 +116,39 @@ var settingsWriterGoldens = []settingsWriterGolden{
 		}, "settings.yaml"},
 }
 
+// settingsWriterGlobalGoldens write the global settings file: the fixture
+// is written to $HOME/.scion with HOME set to a temporary directory.
+var settingsWriterGlobalGoldens = []settingsWriterGolden{
+	{"integration_self_managed_plugin", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error {
+			return AddSelfManagedPluginWithBrokerType(SelfManagedPluginEntry{Name: "a2a-bridge", Address: "localhost:9090", ConfigFile: "/cfg/a2a.yaml"})
+		}, "settings.yaml"},
+	{"integration_add_plugin", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error { return AddPluginToSettings("slack", "/cfg/slack.yaml") }, "settings.yaml"},
+	{"integration_message_broker_type", "settings.yaml", goldenSettingsFixture,
+		func(t *testing.T, dir string) error { return AddPluginToMessageBrokerTypes("slack") }, "settings.yaml"},
+	{"integration_self_managed_plugin_new_file", "", "",
+		func(t *testing.T, dir string) error {
+			return AddSelfManagedPluginWithBrokerType(SelfManagedPluginEntry{Name: "a2a-bridge", Address: "localhost:9090", ConfigFile: "/cfg/a2a.yaml"})
+		}, "settings.yaml"},
+}
+
 func TestSettingsWriters_Golden(t *testing.T) {
 	update := os.Getenv("SCION_UPDATE_SETTINGS_GOLDEN") == "1"
-	for _, g := range settingsWriterGoldens {
+	global := map[string]bool{}
+	all := append([]settingsWriterGolden{}, settingsWriterGoldens...)
+	for _, g := range settingsWriterGlobalGoldens {
+		global[g.name] = true
+		all = append(all, g)
+	}
+	for _, g := range all {
 		t.Run(g.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "proj")
+			if global[g.name] {
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				dir = filepath.Join(home, ".scion")
+			}
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				t.Fatal(err)
 			}
