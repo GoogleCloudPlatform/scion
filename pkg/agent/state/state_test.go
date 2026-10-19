@@ -583,6 +583,8 @@ func TestExitReasonIsValid(t *testing.T) {
 		{ExitReasonEvicted, true},
 		{ExitReasonOOMKilled, true},
 		{"oom_killed", true},
+		{ExitReasonSignaled, true},
+		{"signaled", true},
 		// Unrecognised values.
 		{"OOMKilled", false},
 		{"bogus", false},
@@ -678,6 +680,7 @@ func TestExitReasonLabel(t *testing.T) {
 		ExitReasonContainerMissing: "container lost",
 		ExitReasonCrashed:          "crashed",
 		ExitReasonLimitsExceeded:   "limits exceeded",
+		ExitReasonSignaled:         "signal",
 		"":                         "unknown",
 		"something-else":           "unknown",
 	}

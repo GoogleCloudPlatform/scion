@@ -312,7 +312,7 @@ func TestAdminWebSessions_MintNeedsTheKindsIssuerChecks(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 	// The issuer's token scoped to the member capability: 403 from the
-	// kind's capability check (testAdminWebCodeIssuer).
+	// kind's capability check (testAdminCredentialIssuer).
 	memberKey, _ := taPAT(t, e.srv, iss.ID, "test_identity:issue")
 	rec = doRequestWithToken(t, e.srv, memberKey, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
