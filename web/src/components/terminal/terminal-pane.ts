@@ -39,6 +39,7 @@ import {
   type TerminalDisconnectReason,
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
 import '../shared/status-badge.js';
@@ -186,9 +187,9 @@ export class ScionTerminalPane extends LitElement {
   private captureAuthSelectedScope: CaptureAuthScope = 'project';
 
   /**
-   * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
-   * /api/v1/settings/public each time the capture scope dialog opens
-   * (design ptone/scion#2291 §7). When true, Project is disabled and
+   * Hub admin policy (agent_secrets.user_scope_only), read from
+   * /api/v1/settings/public (shared cache, see openCaptureAuthScopeDialog)
+   * each time the capture scope dialog opens (design ptone/scion#2291 §7). When true, Project is disabled and
    * Profile is preselected. Fails open (false) if the fetch fails.
    */
   @state()
@@ -1804,25 +1805,22 @@ export class ScionTerminalPane extends LitElement {
   private captureAuthSettingsRequestSeq = 0;
 
   /**
-   * Opens the capture scope dialog and fetches /api/v1/settings/public fresh
-   * (design ptone/scion#2291 §7), so an admin toggling the policy while the
-   * terminal is open takes effect the next time the dialog opens — this is
-   * also how the "retry after a rejection" flow picks up a since-changed
-   * policy. Fails open (today's dialog, unrestricted) if the fetch fails.
+   * Opens the capture scope dialog and reads /api/v1/settings/public through
+   * the shared per-page cache (getPublicSettings, ptone/scion#5311). The
+   * cache is dropped when an admin saves hub settings in this tab, and when
+   * a capture is rejected with secret_scope_restricted, so the "retry after
+   * a rejection" flow still picks up a since-changed policy (design
+   * ptone/scion#2291 §7). Fails open (today's dialog, unrestricted) if the
+   * fetch fails.
    */
   private async openCaptureAuthScopeDialog(): Promise<void> {
     this.captureAuthScopeDialogOpen = true;
     this.captureAuthSettingsLoading = true;
     const requestSeq = ++this.captureAuthSettingsRequestSeq;
     let agentSecretsUserScopeOnly = false;
-    try {
-      const response = await fetch('/api/v1/settings/public', { credentials: 'include' });
-      if (response.ok) {
-        const data = (await response.json()) as { agentSecretsUserScopeOnly?: boolean };
-        agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to fetch public settings for capture auth dialog:', err);
+    const settings = await getPublicSettings();
+    if (settings) {
+      agentSecretsUserScopeOnly = settings.agentSecretsUserScopeOnly ?? false;
     }
     // A newer open has since started its own fetch; let that one own the
     // final state instead of overwriting it with this stale result.
@@ -1874,7 +1872,10 @@ export class ScionTerminalPane extends LitElement {
         // Checked before the conflict regex (design §7): a policy rejection
         // is not a conflict, and must not open the conflict/force-update
         // dialog. Covers the race where an admin turns the setting on while
-        // this dialog was already open with "project" selected.
+        // this dialog was already open with "project" selected. The
+        // cached public settings are stale in that case: drop them so the
+        // retry's dialog reads the hub's current policy.
+        invalidatePublicSettings();
         showToast(
           'Your hub administrator only allows capturing credentials to your profile. Choose Profile and try again.'
         );

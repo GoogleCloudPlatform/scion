@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -1041,6 +1042,9 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
 
   beforeEach(() => {
     showToast.mockClear();
+    // The settings are cached per page load (ptone/scion#5311); each test
+    // starts as a fresh page.
+    invalidatePublicSettings();
   });
 
   // Design §10 test 6: setting off — both radios enabled, default is
@@ -1179,6 +1183,58 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(conflicts).toBeNull();
   });
 
+  // ptone/scion#5311: the settings are read through the per-page cache, so
+  // reopening the dialog sends no request; a secret_scope_restricted
+  // rejection drops the cache, so the retry sees a since-changed policy.
+  it('reopening reuses cached settings; a secret_scope_restricted rejection refetches them', async () => {
+    await makeCaptureEligible();
+    let policy = false;
+    let settingsFetches = 0;
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        settingsFetches += 1;
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: policy }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(
+          json({
+            output:
+              'hub returned error 403: {"error":{"code":"secret_scope_restricted","message":"..."}}',
+            exitCode: 1,
+          })
+        );
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+    const close = async (): Promise<void> => {
+      (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen =
+        false;
+      await page.updateComplete;
+    };
+
+    await openDialog();
+    await close();
+    await openDialog();
+    expect(settingsFetches).toBe(1);
+
+    // An admin turns the policy on elsewhere; the capture is rejected.
+    policy = true;
+    clickCapture();
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
+    await vi.waitFor(() =>
+      expect((page as unknown as { captureAuthLoading: boolean }).captureAuthLoading).toBe(false)
+    );
+    await close();
+
+    await openDialog();
+    expect(settingsFetches).toBe(2);
+    expect((page as unknown as { captureAuthSelectedScope: string }).captureAuthSelectedScope).toBe(
+      'user'
+    );
+    expect(radio('project')?.hasAttribute('disabled')).toBe(true);
+  });
+
   /** A promise plus its resolver, for controlling exactly when a mocked fetch settles. */
   function deferred<T>() {
     let resolve!: (value: T) => void;
@@ -1252,9 +1308,13 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
     // Close and reopen before the first fetch resolves — this starts the
-    // second (fast) fetch while the first is still pending.
+    // second (fast) fetch while the first is still pending. The reopen only
+    // fetches again because the cache was dropped in between (an admin save
+    // or a secret_scope_restricted rejection); otherwise it would join the
+    // first request.
     (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
     await page.updateComplete;
+    invalidatePublicSettings();
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
@@ -1310,9 +1370,11 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
-    // Close and reopen before it resolves — starts the second (newer) fetch.
+    // Close and reopen before it resolves — starts the second (newer) fetch
+    // (the cache is dropped in between, as in the test above).
     (page as unknown as { captureAuthScopeDialogOpen: boolean }).captureAuthScopeDialogOpen = false;
     await page.updateComplete;
+    invalidatePublicSettings();
     captureAuthButton()!.click();
     await vi.waitFor(() => expect(scopeDialog()).not.toBeNull());
 
