@@ -120,6 +120,34 @@ function mockApiPlugin(): Plugin {
 
 const proxyBase = process.env.PROXY_BASE_PATH;
 
+/**
+ * @lezer packages that are not a language parser. common and highlight are
+ * part of the editor core; lr (the LR parser runtime) is used only by the
+ * language parsers, so it gets its own chunk that the first language pulls in.
+ */
+const LEZER_SHARED: Record<string, string> = {
+    common: 'codemirror',
+    highlight: 'codemirror',
+    lr: 'lezer-lr',
+};
+
+/**
+ * The chunk name for an @lezer package or a CodeMirror language package, or
+ * undefined for anything else: node_modules/@codemirror/lang-go and
+ * node_modules/@lezer/go both map to 'lang-go'.
+ */
+function codemirrorChunk(id: string): string | undefined {
+    const lang = id.match(/node_modules\/@codemirror\/lang-([^/]+)\//);
+    if (lang) {
+        return `lang-${lang[1]}`;
+    }
+    const lezer = id.match(/node_modules\/@lezer\/([^/]+)\//);
+    if (lezer) {
+        return LEZER_SHARED[lezer[1]] ?? `lang-${lezer[1]}`;
+    }
+    return undefined;
+}
+
 export default defineConfig({
     root: '.',
     publicDir: 'public',
@@ -153,6 +181,14 @@ export default defineConfig({
                     }
                     if (id.includes('node_modules/lit') || id.includes('node_modules/@lit')) {
                         return 'lit';
+                    }
+                    // Each CodeMirror language (its @codemirror/lang-* package and
+                    // its @lezer parser) gets its own lang-<name> chunk, loaded only
+                    // when an editor needs it (languageFor in code-editor.ts). The
+                    // shared editor core stays in one codemirror chunk.
+                    const cmChunk = codemirrorChunk(id);
+                    if (cmChunk) {
+                        return cmChunk;
                     }
                     if (id.includes('node_modules/@codemirror') || id.includes('node_modules/@lezer')) {
                         return 'codemirror';

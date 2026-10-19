@@ -28,12 +28,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type * as CMView from '@codemirror/view';
 import type { EditorView } from '@codemirror/view';
 import type * as CMState from '@codemirror/state';
-import type { Extension } from '@codemirror/state';
+import type { Compartment, Extension } from '@codemirror/state';
 import type * as CMCommands from '@codemirror/commands';
 import type * as CMLanguage from '@codemirror/language';
 import type * as CMSearch from '@codemirror/search';
 import type * as CMAutocomplete from '@codemirror/autocomplete';
-import type * as CMLangJavascript from '@codemirror/lang-javascript';
 
 // ────────────────────────────────────────────────────────────
 // Language mode mapping
@@ -84,15 +83,6 @@ interface CMModules {
   autocomplete: typeof CMAutocomplete;
 }
 
-/**
- * A language support module. Modules export a function named after the
- * language (javascript, json, ...), so members are looked up by name.
- */
-type LanguageModule = Record<string, unknown>;
-
-/** A language module's main export, such as json() or markdown(). */
-type LanguageSupportFn = () => Extension;
-
 let cmPromise: Promise<CMModules> | null = null;
 
 async function loadCodeMirror(): Promise<CMModules> {
@@ -112,29 +102,40 @@ async function loadCodeMirror(): Promise<CMModules> {
   return cmPromise;
 }
 
-async function loadLanguageSupport(lang: string): Promise<LanguageModule | null> {
-  switch (lang) {
-    case 'javascript':
-    case 'typescript':
-      return import('@codemirror/lang-javascript');
-    case 'json':
-      return import('@codemirror/lang-json');
-    case 'markdown':
-      return import('@codemirror/lang-markdown');
-    case 'yaml':
-      return import('@codemirror/lang-yaml');
-    case 'go':
-      return import('@codemirror/lang-go');
-    case 'python':
-      return import('@codemirror/lang-python');
-    case 'rust':
-      return import('@codemirror/lang-rust');
-    case 'html':
-      return import('@codemirror/lang-html');
-    case 'css':
-      return import('@codemirror/lang-css');
-    default:
-      return null;
+/**
+ * Language support per language id (the ids getLanguageFromPath returns).
+ * Each entry is a dynamic import, so every language is its own lazily loaded
+ * chunk (lang-<name>, see vite.config.ts) and opening a file fetches only
+ * the language it needs.
+ */
+const LANGUAGE_LOADERS: Record<string, () => Promise<Extension>> = {
+  javascript: async () => (await import('@codemirror/lang-javascript')).javascript({ jsx: true }),
+  typescript: async () =>
+    (await import('@codemirror/lang-javascript')).javascript({ jsx: true, typescript: true }),
+  json: async () => (await import('@codemirror/lang-json')).json(),
+  markdown: async () => (await import('@codemirror/lang-markdown')).markdown(),
+  yaml: async () => (await import('@codemirror/lang-yaml')).yaml(),
+  go: async () => (await import('@codemirror/lang-go')).go(),
+  python: async () => (await import('@codemirror/lang-python')).python(),
+  rust: async () => (await import('@codemirror/lang-rust')).rust(),
+  html: async () => (await import('@codemirror/lang-html')).html(),
+  css: async () => (await import('@codemirror/lang-css')).css(),
+};
+
+/**
+ * The CodeMirror extension for a language id. A language without support
+ * (plaintext, shell, toml, ...) resolves to no extension without importing
+ * anything; a failed import also resolves to no extension (plain text), so
+ * the editor still works. Never rejects.
+ */
+export async function languageFor(language: string): Promise<Extension> {
+  const load = LANGUAGE_LOADERS[language];
+  if (!load) return [];
+  try {
+    return await load();
+  } catch (err) {
+    console.warn(`Failed to load ${language} syntax highlighting:`, err);
+    return [];
   }
 }
 
@@ -175,6 +176,10 @@ export class ScionCodeEditor extends LitElement {
 
   private editorView: EditorView | null = null;
   private contentInitialized = false;
+  /** Holds the language extension, reconfigured once the language loads. */
+  private languageCompartment: Compartment | null = null;
+  /** Bumped per language request; only the latest request may apply. */
+  private languageRequest = 0;
 
   static override styles = css`
     :host {
@@ -242,6 +247,7 @@ export class ScionCodeEditor extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.languageRequest++;
     if (this.editorView) {
       this.editorView.destroy();
       this.editorView = null;
@@ -258,6 +264,9 @@ export class ScionCodeEditor extends LitElement {
           changes: { from: 0, to: currentContent.length, insert: this.content },
         });
       }
+    }
+    if (changed.has('language') && !changed.has('readonly') && this.editorView) {
+      void this.applyLanguage(languageFor(this.language));
     }
     if (changed.has('readonly') && this.editorView) {
       this.editorView.dispatch({
@@ -306,9 +315,27 @@ export class ScionCodeEditor extends LitElement {
     return this.editorView?.state.doc.toString() ?? this.content;
   }
 
+  /**
+   * Puts a requested language extension into the editor once it has loaded.
+   * Only the latest request applies: a slower earlier import (the language
+   * changed meanwhile, or the editor was rebuilt or removed) is dropped.
+   */
+  private async applyLanguage(extension: Promise<Extension>): Promise<void> {
+    const request = ++this.languageRequest;
+    const view = this.editorView;
+    const ext = await extension;
+    if (request !== this.languageRequest || !view || view !== this.editorView) return;
+    if (!this.languageCompartment) return;
+    view.dispatch({ effects: this.languageCompartment.reconfigure(ext) });
+  }
+
   private async initEditor(): Promise<void> {
     this.loading = true;
     this.error = null;
+    // Start the language chunk download alongside the editor core; the
+    // editor shows plain text until it arrives.
+    const language = this.language;
+    const languageReady = languageFor(language);
 
     try {
       const cm = await loadCodeMirror();
@@ -323,7 +350,7 @@ export class ScionCodeEditor extends LitElement {
         highlightSpecialChars,
         dropCursor,
       } = cm.view;
-      const { EditorState } = cm.state;
+      const { EditorState, Compartment } = cm.state;
       const { defaultKeymap, history, historyKeymap, indentWithTab } = cm.commands;
       const {
         syntaxHighlighting,
@@ -461,25 +488,9 @@ export class ScionCodeEditor extends LitElement {
         }),
       ];
 
-      // Add language support if available
-      const langMod = await loadLanguageSupport(this.language);
-      if (langMod) {
-        if (this.language === 'javascript') {
-          extensions.push((langMod as typeof CMLangJavascript).javascript({ jsx: true }));
-        } else if (this.language === 'typescript') {
-          extensions.push(
-            (langMod as typeof CMLangJavascript).javascript({ jsx: true, typescript: true })
-          );
-        } else {
-          // Most language modules export a function named after the language
-          const langFn = (langMod[this.language] || langMod.default) as
-            | LanguageSupportFn
-            | undefined;
-          if (typeof langFn === 'function') {
-            extensions.push(langFn());
-          }
-        }
-      }
+      // Language support arrives through the compartment once loaded.
+      const languageCompartment = new Compartment();
+      extensions.push(languageCompartment.of([]));
 
       // Read-only mode
       if (this.readonly) {
@@ -522,8 +533,12 @@ export class ScionCodeEditor extends LitElement {
         }),
         parent: container,
       });
+      this.languageCompartment = languageCompartment;
 
       this.contentInitialized = true;
+      void this.applyLanguage(
+        language === this.language ? languageReady : languageFor(this.language)
+      );
     } catch (err) {
       console.error('Failed to initialize code editor:', err);
       this.error = 'Failed to load editor';
