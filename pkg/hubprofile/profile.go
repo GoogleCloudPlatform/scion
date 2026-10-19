@@ -59,17 +59,24 @@ const (
 	// TransportNone sends no transport credential.
 	TransportNone = "none"
 
-	// TierMember is the only delegation tier a profile supports: member
-	// and viewer test identities.
+	// TierMember is the member delegation tier: member and viewer test
+	// identities.
 	TierMember = "member"
+	// TierHubAdmin and TierSuperAdmin are the admin delegation tiers
+	// (ptone/scion#4240, X4b): test hub-admin and test super-admin
+	// identities, each through its own admin-scope delegation.
+	TierHubAdmin   = "hub-admin"
+	TierSuperAdmin = "super-admin"
 
 	profilesDirName = "hub-profiles"
 	profileFileExt  = ".yaml"
 )
 
-// adminTiers are the admin delegation tiers, refused by name with a clear
-// message until the admin tiers support workload delegation.
-var adminTiers = map[string]bool{"hub-admin": true, "super-admin": true, "admin": true}
+// delegationTiers are the issuer delegation tiers a profile accepts.
+var delegationTiers = map[string]bool{TierMember: true, TierHubAdmin: true, TierSuperAdmin: true}
+
+// IsAdminTier reports whether tier is an admin delegation tier.
+func IsAdminTier(tier string) bool { return tier == TierHubAdmin || tier == TierSuperAdmin }
 
 // nameRE bounds profile names, run labels and aliases: they become path
 // components, so they are restricted to a safe alphabet.
@@ -96,6 +103,11 @@ type Profile struct {
 	// IssuerServiceAccount is the target's issuer service account email.
 	// Issuer ID tokens are minted as this account.
 	IssuerServiceAccount string `yaml:"issuerServiceAccount,omitempty" json:"issuerServiceAccount,omitempty"`
+	// AdminIssuerServiceAccount is the target's admin issuer service
+	// account email (<T>-admin-issuer), the account the target's admin
+	// delegations pin. It is required with an admin delegation and must
+	// differ from IssuerServiceAccount (ptone/scion#4240, X4b).
+	AdminIssuerServiceAccount string `yaml:"adminIssuerServiceAccount,omitempty" json:"adminIssuerServiceAccount,omitempty"`
 	// UATServiceAccount is the target's IAP service account email. IAP
 	// transport tokens are minted as this account.
 	UATServiceAccount string `yaml:"uatServiceAccount,omitempty" json:"uatServiceAccount,omitempty"`
@@ -127,24 +139,27 @@ func (p *Profile) Validate() error {
 	default:
 		return fmt.Errorf("invalid transport %q: must be %q or %q", p.Transport, TransportIAP, TransportNone)
 	}
-	for _, sa := range []struct{ flag, v string }{{"--issuer-sa", p.IssuerServiceAccount}, {"--uat-sa", p.UATServiceAccount}} {
+	for _, sa := range []struct{ flag, v string }{{"--issuer-sa", p.IssuerServiceAccount}, {"--admin-issuer-sa", p.AdminIssuerServiceAccount}, {"--uat-sa", p.UATServiceAccount}} {
 		if sa.v != "" && !validServiceAccountEmail(sa.v) {
 			return fmt.Errorf("invalid %s %q: must be a service account email", sa.flag, sa.v)
 		}
 	}
 	for tier, id := range p.IssuerDelegations {
-		if adminTiers[tier] {
-			return fmt.Errorf("issuer delegation tier %q is not supported: profiles support the member tier only", tier)
-		}
-		if tier != TierMember {
-			return fmt.Errorf("invalid issuer delegation tier %q: must be %q", tier, TierMember)
+		if !delegationTiers[tier] {
+			return fmt.Errorf("invalid issuer delegation tier %q: must be %q, %q or %q", tier, TierMember, TierHubAdmin, TierSuperAdmin)
 		}
 		if !validDelegationID(id) {
 			return fmt.Errorf("invalid issuer delegation id %q", id)
 		}
 	}
-	if len(p.IssuerDelegations) > 0 && p.IssuerServiceAccount == "" {
+	if p.MemberDelegation() != "" && p.IssuerServiceAccount == "" {
 		return errors.New("an issuer delegation needs the target's issuer service account (--issuer-sa)")
+	}
+	if (p.Delegation(TierHubAdmin) != "" || p.Delegation(TierSuperAdmin) != "") && p.AdminIssuerServiceAccount == "" {
+		return errors.New("an admin issuer delegation needs the target's admin issuer service account (--admin-issuer-sa)")
+	}
+	if p.AdminIssuerServiceAccount != "" && strings.EqualFold(p.AdminIssuerServiceAccount, p.IssuerServiceAccount) {
+		return errors.New("the admin issuer service account (--admin-issuer-sa) must differ from the issuer service account (--issuer-sa)")
 	}
 	return nil
 }
@@ -152,6 +167,15 @@ func (p *Profile) Validate() error {
 // MemberDelegation returns the member delegation id, or "".
 func (p *Profile) MemberDelegation() string {
 	return p.IssuerDelegations[TierMember]
+}
+
+// Delegation returns the delegation id of tier, or "" when the profile has
+// none (or tier is not a delegation tier).
+func (p *Profile) Delegation(tier string) string {
+	if !delegationTiers[tier] {
+		return ""
+	}
+	return p.IssuerDelegations[tier]
 }
 
 var delegationIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)

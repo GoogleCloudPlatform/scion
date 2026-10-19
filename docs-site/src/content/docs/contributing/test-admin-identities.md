@@ -19,6 +19,8 @@ All three commands are for human operators only:
 - They do not run with a hub profile (`--hub-profile` or `SCION_HUB_PROFILE`).
 - They use your own hub sign-in on the hub itself.
 
+A test runner (for example an agent driving journeys on another test hub) does not use these commands. It issues admin test identities through an admin issuer delegation with `scion hub test-identity issue-admin` and a target-hub profile; see [Which command issues admin test identities](/scion/hosted/user/test-identity-target-hubs/#which-command-issues-admin-test-identities).
+
 ## Before you start: the hub
 
 A hub issues test identities with admin roles only when it was started for that. There is no runtime switch.
