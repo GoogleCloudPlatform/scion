@@ -24,10 +24,10 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Create an agent in a project",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents", Method: "POST", Response: ResponseCredential},
 			// The project form takes the project from the path; both forms
 			// authorize agent.create on that project (authorizeAgentCreate).
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -157,8 +157,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Submit environment values to an agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/env", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/env", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/env", Method: "POST", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/env", Method: "POST", Response: ResponseCallerSpecific},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -236,8 +236,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Read a single agent's metadata by ID",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "GET", Response: ResponseCallerSpecific},
 		},
 		// An agent delegated credential is admitted here behind
 		// hub.agent_delegation (agentDelegationAdmittedRoutes in pkg/hub).
@@ -308,8 +308,8 @@ var agentOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			// handleAgentByID (handlers_agents_core.go) dispatches the
 			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PATCH", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}", Method: "PATCH", Response: ResponseCallerSpecific},
 		},
 		Principals:  []PrincipalKind{PrincipalUser},
 		Credentials: []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -686,8 +686,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Refresh the calling agent's own hub token",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/token/refresh", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/refresh-token", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/token/refresh", Method: "POST", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/refresh-token", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialAgentJWT},
@@ -758,7 +758,7 @@ var agentOperations = []OperationSpec{
 		Description: "List, read and write the secrets available to the calling agent: its project's and its creating user's",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "PUT"},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
