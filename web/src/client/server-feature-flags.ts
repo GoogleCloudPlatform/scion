@@ -112,7 +112,9 @@ export function getPublicSettings(): Promise<Readonly<PublicSettings> | null> {
 
 /**
  * Drop the cached public settings so the next getPublicSettings() call
- * fetches them again. Called after an admin saves hub settings, and by tests.
+ * fetches them again. Called after a successful admin server-config save or
+ * section reset (admin-server-config.ts), before each open of the terminal
+ * capture-scope dialog (which must read the policy fresh), and by tests.
  */
 export function invalidatePublicSettings(): void {
   publicSettings = null;
