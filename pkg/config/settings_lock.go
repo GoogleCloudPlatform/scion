@@ -264,7 +264,9 @@ func WriteSettingsFileLocked(lock *SettingsLock, path string, data []byte) error
 
 // CreateSettingsFileIfMissing writes data to the settings file at path
 // unless a file already exists there, checked under the settings lock for
-// path's directory so a concurrent writer's new file is never replaced.
+// path's directory so a concurrent writer's new file is never replaced. A
+// dangling symlink at path counts as missing: its target is created and the
+// link kept, as a plain os.WriteFile would.
 func CreateSettingsFileIfMissing(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	lock, err := LockSettingsDir(dir)
@@ -272,7 +274,9 @@ func CreateSettingsFileIfMissing(path string, data []byte) error {
 		return err
 	}
 	defer lock.Unlock()
-	if _, err := os.Lstat(path); err == nil {
+	// os.Stat, as the hub's own pre-check does: a dangling symlink counts as
+	// missing, and the write then creates its target (keeping the link).
+	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err

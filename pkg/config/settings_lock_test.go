@@ -978,3 +978,61 @@ func TestSettingsLock_UnreadableLockFileIsAClearError(t *testing.T) {
 		t.Errorf("written despite the error: %q", got)
 	}
 }
+
+// CreateSettingsFileIfMissing writes a missing file, never replaces an
+// existing one, creates the target of a dangling symlink (keeping the link),
+// and writes nothing when the lock cannot be taken.
+func TestCreateSettingsFileIfMissing(t *testing.T) {
+	const seed = "schema_version: \"1\"\n"
+	t.Run("missing file is written", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.yaml")
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(path); string(data) != seed {
+			t.Errorf("content = %q", data)
+		}
+	})
+	t.Run("existing file is left byte-identical", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.yaml")
+		if err := os.WriteFile(path, []byte(lockTestSettings), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if data, _ := os.ReadFile(path); string(data) != lockTestSettings {
+			t.Errorf("existing file replaced: %q", data)
+		}
+	})
+	t.Run("dangling symlink: target created, link kept", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "real-settings.yaml")
+		path := filepath.Join(dir, "settings.yaml")
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("link not kept: %v %v", fi, err)
+		}
+		if data, _ := os.ReadFile(target); string(data) != seed {
+			t.Errorf("target content = %q", data)
+		}
+	})
+	t.Run("held lock: timeout, nothing written", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.yaml")
+		setSettingsLockWait(t, 100*time.Millisecond)
+		l := mustLockSettingsDir(t, dir)
+		defer l.Unlock()
+		if err := CreateSettingsFileIfMissing(path, []byte(seed)); !errors.Is(err, ErrSettingsLockTimeout) {
+			t.Fatalf("err = %v, want ErrSettingsLockTimeout", err)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Errorf("written without the lock: %v", err)
+		}
+	})
+}

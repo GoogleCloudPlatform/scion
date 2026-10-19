@@ -694,7 +694,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("Failed to lock settings file", "error", err)
 		if errors.Is(err, config.ErrSettingsLockTimeout) {
-			writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "Settings are being written by another process; try again", nil)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Settings are being written; try again", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to lock settings file", nil)
