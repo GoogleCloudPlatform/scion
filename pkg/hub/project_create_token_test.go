@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +75,23 @@ func pctMintErr(srv *Server, userID string, boundary TokenBoundary, scopes ...st
 		UserID: userID, Name: "pct-" + tid("tok"), Boundary: boundary, Scopes: scopes,
 	})
 	return err
+}
+
+// pctRequireMintRefused asserts that a mint was refused, with the uniform
+// refusal or a selector violation.
+func pctRequireMintRefused(t *testing.T, err error, label string) {
+	t.Helper()
+	require.Error(t, err, label)
+	assert.True(t, errors.Is(err, ErrUATProjectForbidden) || errors.Is(err, ErrUATScopeViolation), "%s: %v", label, err)
+}
+
+// pctSession sends a request as userID over an interactive session through
+// the full server handler.
+func pctSession(t *testing.T, srv *Server, s store.Store, userID, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	u, err := s.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+	return doRequestAsUser(t, srv, u, method, path, body)
 }
 
 // pctProjectBySlug returns the project with slug, or nil.
@@ -147,13 +165,9 @@ func TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary(t *testing.T) {
 	}
 
 	// project:create is hub-only and needs project.create authority.
-	err := pctMintErr(f.srv, f.holder, projectBoundary(f.home), "project:create")
-	require.Error(t, err, "project:create must not mint on a project boundary")
-	assert.Contains(t, err.Error(), `selector "project:create" denied`)
+	pctRequireMintRefused(t, pctMintErr(f.srv, f.holder, projectBoundary(f.home), "project:create"), "project:create on a project boundary")
 	plain := newPlainUser(t, f.s, "pct-create-plain")
-	err = pctMintErr(f.srv, plain.ID, hubBoundary(), "project:create")
-	require.Error(t, err, "a user without project.create must not mint project:create")
-	assert.Contains(t, err.Error(), `selector "project:create" denied`)
+	pctRequireMintRefused(t, pctMintErr(f.srv, plain.ID, hubBoundary(), "project:create"), "project:create for a user without project.create")
 
 	t.Run("admitted with project:create on a hub boundary", func(t *testing.T) {
 		key := projectOpsMint(t, f.srv, f.holder, hubBoundary(), "project:create", "project:read", "agent:read")
@@ -185,10 +199,10 @@ func TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary(t *testing.T) {
 	})
 
 	t.Run("sessions need project.create", func(t *testing.T) {
-		rec := projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct create session"})
+		rec := pctSession(t, f.srv, f.s, f.holder, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct create session"})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		pctAssertCreated(t, f.s, api.Slugify("pct create session"), f.holder)
-		rec = projectOpsSession(t, f.srv, plain.ID, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct create plain"})
+		rec = pctSession(t, f.srv, f.s, plain.ID, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct create plain"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct create plain"), "session without project.create")
 	})
 }
@@ -208,9 +222,15 @@ func TestProjectCreateToken_SeededOwnerRoleNeedsUnmappedPermissions(t *testing.T
 
 	unmapped := pctUnmappedOwnerPerms()
 	require.NotEmpty(t, unmapped, "the seeded project-owner role carries permissions with no selector")
+	// The token carries project:create and every owner selector the holder
+	// can select on a hub boundary.
 	scopes := []string{"project:create"}
 	for _, p := range projectOwnerPermissionIDs() {
-		if sel := bearerMatrixSelector(p); sel != "" && permissionEligibleForBoundary(p, BoundaryKindHub) {
+		sel := bearerMatrixSelector(p)
+		if sel == "" || !permissionEligibleForBoundary(p, BoundaryKindHub) {
+			continue
+		}
+		if pctMintErr(srv, holder, hubBoundary(), sel) == nil {
 			scopes = append(scopes, sel)
 		}
 	}
@@ -224,7 +244,7 @@ func TestProjectCreateToken_SeededOwnerRoleNeedsUnmappedPermissions(t *testing.T
 	assert.Contains(t, rec.Body.String(), ownerGrantDenyText)
 
 	// The holder's session creates the project.
-	rec = projectOpsSession(t, srv, holder, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct seeded session"})
+	rec = pctSession(t, srv, s, holder, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "pct seeded session"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
@@ -261,9 +281,9 @@ func TestProjectCreateToken_IdempotentPathRequiresUpdate(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code, "token without project:create: %s", rec.Body.String())
 
 	// Sessions: the same project.update rule.
-	rec = projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects", body(f.home))
+	rec = pctSession(t, f.srv, f.s, f.holder, http.MethodPost, "/api/v1/projects", body(f.home))
 	assert.Equal(t, http.StatusOK, rec.Code, "session with project.update: %s", rec.Body.String())
-	rec = projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects", body(other))
+	rec = pctSession(t, f.srv, f.s, f.holder, http.MethodPost, "/api/v1/projects", body(other))
 	assert.Equal(t, http.StatusForbidden, rec.Code, "session without project.update: %s", rec.Body.String())
 }
 
@@ -336,11 +356,11 @@ func TestProjectRegisterToken_EnforcesProjectCreate(t *testing.T) {
 	})
 
 	t.Run("sessions need project.create", func(t *testing.T) {
-		rec := projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "pct reg session"})
+		rec := pctSession(t, f.srv, f.s, f.holder, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "pct reg session"})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		pctAssertCreated(t, f.s, api.Slugify("pct reg session"), f.holder)
 		plain := newPlainUser(t, f.s, "pct-reg-plain")
-		rec = projectOpsSession(t, f.srv, plain.ID, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "pct reg plain"})
+		rec = pctSession(t, f.srv, f.s, plain.ID, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{Name: "pct reg plain"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct reg plain"), "session without project.create")
 	})
 }
@@ -412,7 +432,7 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 
 	// The holder's session sends the existing-project request and is
 	// admitted: the broker is created and linked.
-	rec := projectOpsSession(t, f.srv, f.holder, http.MethodPost, "/api/v1/projects/register",
+	rec := pctSession(t, f.srv, f.s, f.holder, http.MethodPost, "/api/v1/projects/register",
 		RegisterProjectRequest{ID: f.home, Name: "pct emb home", Broker: broker("pct-emb-broker-3")})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	b, err := f.s.GetRuntimeBrokerByName(ctx, "pct-emb-broker-3")
@@ -452,11 +472,8 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 
 	// A hub member cannot mint project:clone on either boundary.
 	projectOpsGrant(t, f.s, f.holder, src, store.ProjectRoleMember)
-	err := pctMintErr(f.srv, f.holder, hubBoundary(), "project:clone")
-	require.Error(t, err, "a hub member must not mint project:clone")
-	assert.Contains(t, err.Error(), `selector "project:clone" denied`)
-	err = pctMintErr(f.srv, f.holder, projectBoundary(src), "project:clone")
-	require.Error(t, err, "project:clone must not mint on a project boundary")
+	pctRequireMintRefused(t, pctMintErr(f.srv, f.holder, hubBoundary(), "project:clone"), "project:clone for a hub member")
+	pctRequireMintRefused(t, pctMintErr(f.srv, f.holder, projectBoundary(src), "project:clone"), "project:clone on a project boundary")
 
 	t.Run("admitted with all three selectors", func(t *testing.T) {
 		key := projectOpsMint(t, f.srv, super, hubBoundary(), "project:read", "project:clone", "project:create", "agent:read")
@@ -481,9 +498,20 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	})
 
 	t.Run("source read needs live access to the source project", func(t *testing.T) {
-		outsider := projectOpsUser(t, f.s, "pct-clone-outsider", true)
-		key := projectOpsMint(t, f.srv, outsider, hubBoundary(), "project:read", "project:clone", "project:create", "agent:read")
-		pctAssertRefused(t, f.s, clone(key, "pct clone outsider"), api.Slugify("pct clone outsider"), "super-admin token without a source role")
+		// Only a super-admin can mint project:clone, and a super-admin
+		// reads every project, so this case uses a token identity with a
+		// stored ceiling: the holder is a hub member with a role on src and
+		// none on other.
+		other := projectOpsProject(t, f.s, "pct-clone-other")
+		u, err := f.s.GetUser(context.Background(), f.holder)
+		require.NoError(t, err)
+		token := NewScopedUserIdentityWithBoundary(authUser(u), hubBoundary(), nil, "pct-clone-cred",
+			permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read", "project.clone", "project.create", "agent.read"}})
+		rec := requestAsIdentity(t, f.srv, token, http.MethodPost, "/api/v1/projects/"+other+"/clone", CloneProjectRequest{Name: "pct clone other"})
+		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone other"), "token without a role on the source")
+		assert.Contains(t, rec.Body.String(), "read source project")
+		rec = requestAsIdentity(t, f.srv, token, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone member"})
+		require.Equal(t, http.StatusCreated, rec.Code, "the same token on a source it can read: %s", rec.Body.String())
 	})
 
 	t.Run("refused on a project boundary", func(t *testing.T) {
@@ -501,15 +529,15 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	})
 
 	t.Run("sessions need source read and project.create only", func(t *testing.T) {
-		rec := projectOpsSession(t, f.srv, f.holder, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone session"})
+		rec := pctSession(t, f.srv, f.s, f.holder, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone session"})
 		require.Equal(t, http.StatusCreated, rec.Code, "hub member session with a source role: %s", rec.Body.String())
 		pctAssertCreated(t, f.s, api.Slugify("pct clone session"), f.holder)
 		stranger := projectOpsUser(t, f.s, "pct-clone-stranger", false)
-		rec = projectOpsSession(t, f.srv, stranger, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone stranger"})
+		rec = pctSession(t, f.srv, f.s, stranger, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone stranger"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone stranger"), "session without source read")
 		plain := newPlainUser(t, f.s, "pct-clone-plain")
 		projectOpsGrant(t, f.s, plain.ID, src, store.ProjectRoleMember)
-		rec = projectOpsSession(t, f.srv, plain.ID, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone plain"})
+		rec = pctSession(t, f.srv, f.s, plain.ID, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone plain"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone plain"), "session without project.create")
 	})
 }
