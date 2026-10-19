@@ -2438,6 +2438,49 @@ describe('scion-chat-thread SSE message filtering', () => {
     expect(historyCalls()).toBe(0);
   });
 
+  it('event for another conversation does not backfill', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    apiFetch.mockClear();
+
+    // Another conversation by key, and a keyless event routed to another
+    // project (no conversation of another project can be this one).
+    emitChatMessage({ threadId: 'some-other-topic', id: 'm1' });
+    emitChatMessage({ projectId: 'project-other', id: 'm2' });
+    await new Promise((r) => setTimeout(r, 400));
+
+    expect(historyCalls()).toBe(0);
+  });
+
+  it('a keyless event of its own project still backfills', async () => {
+    const el = await mount();
+    el.projectId = 'project-mine';
+    await el.updateComplete;
+    apiFetch.mockClear();
+
+    emitChatMessage({ projectId: 'project-mine', id: 'm1' });
+    await vi.waitFor(() => expect(historyCalls()).toBe(1));
+  });
+
+  it('lightweight event burst issues at most 2 history requests', async () => {
+    await mount();
+    vi.useFakeTimers();
+    try {
+      // 10 lightweight events in 300 ms.
+      for (let i = 0; i < 10; i++) {
+        emitChatMessage({ threadId: CONVERSATION_KEY, id: `m${i}` });
+        await vi.advanceTimersByTimeAsync(30);
+      }
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(historyCalls()).toBeGreaterThanOrEqual(1);
+      expect(historyCalls()).toBeLessThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('refetches history for its own conversation', async () => {
     await mount();
 

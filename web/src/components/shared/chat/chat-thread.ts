@@ -115,6 +115,7 @@ import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
 import { findDefaultAgent } from './default-agent.js';
+import { coalescedRefresh, type CoalescedRefresh } from '../../../client/coalesced-refresh.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -891,6 +892,19 @@ export class ScionChatThread extends LitElement {
   /** Backfill single-flight guard: another backfill was requested while one was running. */
   private _backfillPending = false;
 
+  /**
+   * Backfills asked for by lightweight message events (no full payload).
+   * The first of a burst backfills at once; the rest collapse into one
+   * trailing backfill, capped so a steady stream cannot postpone it. In
+   * front of backfillV2's single-flight, a burst of N events costs at most
+   * two history requests per window.
+   */
+  private _eventBackfill: CoalescedRefresh = coalescedRefresh(() => this.backfillV2(), {
+    waitMs: 300,
+    maxWaitMs: 1500,
+    leading: true,
+  });
+
   /** Idempotency keys of currently in-flight optimistic messages. */
   private _pendingIdempotencyKeys = new Set<string>();
 
@@ -1523,6 +1537,9 @@ export class ScionChatThread extends LitElement {
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
 
+    // A backfill queued by the previous conversation's events is not owed.
+    this._eventBackfill.cancel();
+
     // Clear message state
     this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
@@ -1583,6 +1600,7 @@ export class ScionChatThread extends LitElement {
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
     this.cancelArtifactRefresh();
+    this._eventBackfill.cancel();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -2164,7 +2182,8 @@ export class ScionChatThread extends LitElement {
     // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
     const eventData: ChatEventData | undefined = detail?.data ?? detail;
     if (!eventData) {
-      void this.backfillV2();
+      // No routing data at all: it may be for this conversation.
+      this._eventBackfill.schedule();
       return;
     }
 
@@ -2172,6 +2191,16 @@ export class ScionChatThread extends LitElement {
     const eventKey = eventData.threadId || eventData.conversationKey || eventData.topicId || '';
     if (eventKey && eventKey !== this.conversationKey) {
       return; // Not for this conversation
+    }
+    // No conversation key, but routed to another project: a conversation
+    // belongs to one project, so it cannot be this one.
+    if (
+      !eventKey &&
+      eventData.projectId &&
+      this.projectId &&
+      eventData.projectId !== this.projectId
+    ) {
+      return;
     }
     if (this.viewingAroundMessage) return;
 
@@ -2274,7 +2303,7 @@ export class ScionChatThread extends LitElement {
     }
 
     // Lightweight notification (no full message) — fall back to backfill.
-    void this.backfillV2();
+    this._eventBackfill.schedule();
   }
 
   /**
