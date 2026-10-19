@@ -21,6 +21,7 @@ import {
   currentDocumentTiming,
   initialPageDataFor,
   MAX_SSR_PAGE_DATA_AGE_MS,
+  readInitialPageData,
   setInitialPageData,
   takeInitialPageData,
   type DocumentTiming,
@@ -170,5 +171,59 @@ describe('currentDocumentTiming', () => {
     vi.spyOn(performance, 'now').mockReturnValue(100);
     setInitialPageData(payload);
     expect(takeInitialPageData('/projects/p-1', { id: 'u-1' })).toBe(payload.data);
+  });
+});
+
+describe('readInitialPageData with the hub shell layout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    setInitialPageData(null);
+  });
+
+  // The hub shell: the entry module script is in the head, __SCION_DATA__
+  // is the last element of the body. Values are escaped the way the hub
+  // escapes them (\u003c for "<", and so on).
+  const shell = (data: string): string => `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="modulepreload" href="/assets/lit-BwvvpRRW.js">
+    <script type="module" src="/assets/main.js"></script>
+</head>
+<body>
+    <div id="app"><scion-app></scion-app></div>
+
+    <script id="__SCION_DATA__" type="application/json">${data}</script>
+</body>
+</html>`;
+
+  const parse = (html: string): Document => new DOMParser().parseFromString(html, 'text/html');
+
+  it('reads the payload from the end of the body and hands it to the first render', () => {
+    const doc = parse(
+      shell(
+        '{"path":"/projects/p-1","title":"Scion","user":{"id":"u-1","email":"u@example.com","name":"U"},' +
+          '"data":{"id":"p-1","name":"\\u003c/script\\u003e Project One"}}'
+      )
+    );
+    const read = readInitialPageData(doc);
+    expect(read?.path).toBe('/projects/p-1');
+    expect(read?.data).toEqual({ id: 'p-1', name: '</script> Project One' });
+
+    setInitialPageData(read);
+    expect(takeInitialPageData('/projects/p-1', { id: 'u-1' }, fresh)).toEqual({
+      id: 'p-1',
+      name: '</script> Project One',
+    });
+    expect(takeInitialPageData('/projects/p-1', { id: 'u-1' }, fresh)).toBeUndefined();
+  });
+
+  it('returns null when the shell has no data script', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(readInitialPageData(parse('<html><head></head><body></body></html>'))).toBeNull();
+  });
+
+  it('returns null, without throwing, for a payload that does not parse', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(readInitialPageData(parse(shell('{"path":')))).toBeNull();
   });
 });
