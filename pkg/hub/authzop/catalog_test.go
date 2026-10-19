@@ -261,10 +261,8 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.federation.update":     "Reserved in the permission registry: no route checks it",
 		"hub.teams_manifest.update": "Reserved in the permission registry: no route checks it",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
-		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":                    "Reserved in the permission registry: no route checks it",
 		"project.clone":                "NonRouteUse only, no route declaration",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
@@ -275,9 +273,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// base permission is test_identity.issue_admin; the route guard also
 		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
 		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
-
-		// Global catalog permissions — handler-enforced, not a standalone route.
-		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",

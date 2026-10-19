@@ -37,7 +37,7 @@ permissions). Available scopes:
 | `project:read` | Read project metadata |
 | `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
-| `project:manage` | Manage project administration (membership operations) |
+| `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
@@ -253,6 +253,13 @@ The same per-request checks apply, with these limits:
   configurations for your user scope needs `template:create` or `harness_config:create`. A
   project token is refused for all of these, because these records belong to no project. Any
   token can list your injected skills.
+- **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
+  and managing skill registries needs `skill:register`; both can be selected only on a hub
+  token. Importing or discovering templates or harness configurations for the global catalog
+  needs `template:create` or `harness_config:create` on a hub token. Discovering skills for a
+  project needs `skill:create` on a token whose boundary contains the project; discovering
+  them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
+  references with no project needs `skill:read` on a hub token.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).

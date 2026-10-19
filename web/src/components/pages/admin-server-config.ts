@@ -2585,8 +2585,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     if (Object.keys(broker).length > 0) server.broker = broker;
 
@@ -2758,8 +2758,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
     if (ok('server.broker.container_hub_endpoint'))
       broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
-    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
-    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
+    if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
@@ -5922,7 +5922,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Name</label>
             ${this.renderFieldValue(
-              'server.broker.name',
+              'server.broker.broker_name',
               this.brokerName || '—',
               html`<sl-input
                 value=${this.brokerName}
@@ -5935,7 +5935,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Broker Nickname</label>
             ${this.renderFieldValue(
-              'server.broker.nickname',
+              'server.broker.broker_nickname',
               this.brokerNickname || '—',
               html`<sl-input
                 value=${this.brokerNickname}

@@ -1717,6 +1717,11 @@ type Server struct {
 	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
 	// until SetConduitBrokerRPCMetrics.
 	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
+	// conduitBrokerIncarnationMetrics counts broker sessions closed with
+	// 4409 superseded_incarnation and broker incarnation flaps
+	// (conduit_broker_incarnation.go); nil until
+	// SetConduitBrokerIncarnationMetrics.
+	conduitBrokerIncarnationMetrics atomic.Pointer[OTelConduitBrokerIncarnationMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
 	conduitAuthzBindMu sync.Mutex
@@ -2239,6 +2244,10 @@ type Server struct {
 	// sweeper (ptone/scion#4424) so CleanupResources can join it.
 	threadGroupMigration threadGroupMigrationRuntime
 
+	// timestampAutoRun tracks the background stored-timestamp check and its
+	// run of utc-timestamp-normalize at start (see startStoredTimestampCheck).
+	timestampAutoRun timestampAutoRunner
+
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
@@ -2329,6 +2338,9 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
+	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
 	// The test-identity expiry and feature checks run in the auth
@@ -6402,7 +6414,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
-	// Report non-canonical stored timestamps (SQLite). It runs in the
+	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
+	// run utc-timestamp-normalize once, after a snapshot. It runs in the
 	// background: on a large store the check is a full scan per time column,
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
@@ -6648,6 +6661,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.
 		s.stopThreadGroupMigrationSweeper()
+
+		// Stop the stored-timestamp check and its run at start, and wait for
+		// it (bounded by its own grace) so that a snapshot being copied is
+		// interrupted and its temporary file removed before the process exits.
+		s.stopStoredTimestampCheck()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
@@ -7174,6 +7192,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
+	// Issuer-scoped orphan cleanup and the provenance explain endpoint
+	// (Phase 3c), behind the same flag.
+	s.mux.HandleFunc("POST /api/v1/test-identities/cleanup", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/cleanup", s.handleTestIdentityCleanup)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/provenance", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities/provenance", s.handleTestIdentityProvenance)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
 	s.mux.HandleFunc("GET /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identity-delegations", s.handleListTestIdentityDelegations)))

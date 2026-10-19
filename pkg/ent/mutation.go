@@ -57481,6 +57481,7 @@ type MutationAuditMutation struct {
 	exchange_agent_credential_id   *string
 	actor_kind                     *string
 	agent_delegation_code          *string
+	provenance_basis               *string
 	clearedFields                  map[string]struct{}
 	done                           bool
 	oldValue                       func(context.Context) (*MutationAudit, error)
@@ -58836,6 +58837,55 @@ func (m *MutationAuditMutation) ResetAgentDelegationCode() {
 	delete(m.clearedFields, mutationaudit.FieldAgentDelegationCode)
 }
 
+// SetProvenanceBasis sets the "provenance_basis" field.
+func (m *MutationAuditMutation) SetProvenanceBasis(s string) {
+	m.provenance_basis = &s
+}
+
+// ProvenanceBasis returns the value of the "provenance_basis" field in the mutation.
+func (m *MutationAuditMutation) ProvenanceBasis() (r string, exists bool) {
+	v := m.provenance_basis
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProvenanceBasis returns the old "provenance_basis" field's value of the MutationAudit entity.
+// If the MutationAudit object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MutationAuditMutation) OldProvenanceBasis(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProvenanceBasis is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProvenanceBasis requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProvenanceBasis: %w", err)
+	}
+	return oldValue.ProvenanceBasis, nil
+}
+
+// ClearProvenanceBasis clears the value of the "provenance_basis" field.
+func (m *MutationAuditMutation) ClearProvenanceBasis() {
+	m.provenance_basis = nil
+	m.clearedFields[mutationaudit.FieldProvenanceBasis] = struct{}{}
+}
+
+// ProvenanceBasisCleared returns if the "provenance_basis" field was cleared in this mutation.
+func (m *MutationAuditMutation) ProvenanceBasisCleared() bool {
+	_, ok := m.clearedFields[mutationaudit.FieldProvenanceBasis]
+	return ok
+}
+
+// ResetProvenanceBasis resets all changes to the "provenance_basis" field.
+func (m *MutationAuditMutation) ResetProvenanceBasis() {
+	m.provenance_basis = nil
+	delete(m.clearedFields, mutationaudit.FieldProvenanceBasis)
+}
+
 // Where appends a list predicates to the MutationAuditMutation builder.
 func (m *MutationAuditMutation) Where(ps ...predicate.MutationAudit) {
 	m.predicates = append(m.predicates, ps...)
@@ -58870,7 +58920,7 @@ func (m *MutationAuditMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MutationAuditMutation) Fields() []string {
-	fields := make([]string, 0, 27)
+	fields := make([]string, 0, 28)
 	if m.timestamp != nil {
 		fields = append(fields, mutationaudit.FieldTimestamp)
 	}
@@ -58952,6 +59002,9 @@ func (m *MutationAuditMutation) Fields() []string {
 	if m.agent_delegation_code != nil {
 		fields = append(fields, mutationaudit.FieldAgentDelegationCode)
 	}
+	if m.provenance_basis != nil {
+		fields = append(fields, mutationaudit.FieldProvenanceBasis)
+	}
 	return fields
 }
 
@@ -59014,6 +59067,8 @@ func (m *MutationAuditMutation) Field(name string) (ent.Value, bool) {
 		return m.ActorKind()
 	case mutationaudit.FieldAgentDelegationCode:
 		return m.AgentDelegationCode()
+	case mutationaudit.FieldProvenanceBasis:
+		return m.ProvenanceBasis()
 	}
 	return nil, false
 }
@@ -59077,6 +59132,8 @@ func (m *MutationAuditMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldActorKind(ctx)
 	case mutationaudit.FieldAgentDelegationCode:
 		return m.OldAgentDelegationCode(ctx)
+	case mutationaudit.FieldProvenanceBasis:
+		return m.OldProvenanceBasis(ctx)
 	}
 	return nil, fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -59275,6 +59332,13 @@ func (m *MutationAuditMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAgentDelegationCode(v)
 		return nil
+	case mutationaudit.FieldProvenanceBasis:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProvenanceBasis(v)
+		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)
 }
@@ -59368,6 +59432,9 @@ func (m *MutationAuditMutation) ClearedFields() []string {
 	if m.FieldCleared(mutationaudit.FieldAgentDelegationCode) {
 		fields = append(fields, mutationaudit.FieldAgentDelegationCode)
 	}
+	if m.FieldCleared(mutationaudit.FieldProvenanceBasis) {
+		fields = append(fields, mutationaudit.FieldProvenanceBasis)
+	}
 	return fields
 }
 
@@ -59444,6 +59511,9 @@ func (m *MutationAuditMutation) ClearField(name string) error {
 		return nil
 	case mutationaudit.FieldAgentDelegationCode:
 		m.ClearAgentDelegationCode()
+		return nil
+	case mutationaudit.FieldProvenanceBasis:
+		m.ClearProvenanceBasis()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit nullable field %s", name)
@@ -59533,6 +59603,9 @@ func (m *MutationAuditMutation) ResetField(name string) error {
 		return nil
 	case mutationaudit.FieldAgentDelegationCode:
 		m.ResetAgentDelegationCode()
+		return nil
+	case mutationaudit.FieldProvenanceBasis:
+		m.ResetProvenanceBasis()
 		return nil
 	}
 	return fmt.Errorf("unknown MutationAudit field %s", name)

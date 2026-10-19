@@ -83,6 +83,16 @@ type RouteMetadata struct {
 	// capabilities, and its handler requires the one the identity's kind
 	// needs (WS4).
 	AlsoPermits []string
+	// VisitorMethods lists the HTTP methods on which the route admits a
+	// visitor (a request whose identity is a *VisitorIdentity). routeGuard
+	// refuses a visitor on every other method, and on every route whose
+	// list is empty, with 403 and visitorRouteRefusalMessage, before the
+	// handler runs (refuseVisitorRequest); an admitted visitor then passes
+	// the classification's guard like any other identity. List only the
+	// methods whose handler is safe for a visitor. validateVisitorRoutes
+	// limits the list to authenticated and policy routes and to methods
+	// the pattern serves.
+	VisitorMethods []string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -187,6 +197,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
+		// handleAuthMe reads the caller's own profile. The pattern has no
+		// method, so the mux serves every method, HEAD included; a
+		// visitor is admitted on the reads only. The handler serves GET
+		// and answers 405 to HEAD, as for any caller.
+		VisitorMethods: []string{http.MethodGet, http.MethodHead},
 	},
 	"/api/v1/experiments": {
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
@@ -513,11 +528,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
@@ -954,17 +971,22 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Role management (PR-C1)
+	// Hub admin: Role management (PR-C1). The read routes admit a
+	// hub-boundary token carrying role:read; every write method on them is
+	// checked again inline with its own permission, which no token selector
+	// admits.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/roles": {
 		Pattern: "/api/v1/admin/roles", RouteID: "admin.roles",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/export": {
 		Pattern: "/api/v1/admin/roles/export", RouteID: "admin.roles.export",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/roles/import": {
 		Pattern: "/api/v1/admin/roles/import", RouteID: "admin.roles.import",
@@ -975,6 +997,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/roles/", RouteID: "admin.roles.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/role-bindings": {
 		Pattern: "/api/v1/admin/role-bindings", RouteID: "admin.roleBindings",
@@ -991,33 +1014,41 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// RouteAuthenticated: authorization is method-aware and handled
 		// inline, matching the collection endpoint's pattern.
 		// GET /user/{userID} checks role_binding.read inline.
-		// DELETE /{id} checks role_binding.delete inline via
-		// requireWritePermissionForRoleBinding.
+		// DELETE /{id} of a project-scoped binding checks project.manage on
+		// the binding's project first and defers to the membership
+		// service; otherwise it checks role_binding.delete at hub scope
+		// (authorizeRoleBindingDelete).
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {
 		Pattern: "/api/v1/admin/permissions", RouteID: "admin.permissions",
 		Classification: RouteHubAdmin,
 		Permission:     "role.read", Resource: "role", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
-	// Hub admin: Access Constraints (AC1)
+	// Hub admin: Access Constraints (AC1). The read routes admit a
+	// hub-boundary token carrying access_constraint:read; every write method
+	// on them is checked again inline with access_constraint.admin, which no
+	// token selector admits.
 	// -------------------------------------------------------------------------
 	"/api/v1/admin/access-constraints": {
 		Pattern: "/api/v1/admin/access-constraints", RouteID: "admin.accessConstraints",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/access-constraints/": {
 		Pattern: "/api/v1/admin/access-constraints/", RouteID: "admin.accessConstraints.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
+		BearerTarget: "hub_instance",
 	},
 	"GET /api/v1/admin/access-constraints/{id}/audit": {
 		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
 		Classification: RoutePolicy,
-		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "manage",
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "read",
 	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
@@ -1033,7 +1064,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/admin/effective-access": {
 		Pattern: "/api/v1/admin/effective-access", RouteID: "admin.effectiveAccess",
 		Classification: RouteAuthenticated,
-		Permission:     "hub.audit.read", Resource: "hub", Action: "manage",
+		Permission:     "hub.audit.read", Resource: "hub", Action: "read",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1139,6 +1170,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// and user.delete (canDeleteTestIdentity).
 	"DELETE /api/v1/test-identities/{id}": {
 		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Issuer-scoped orphan cleanup (Phase 3c). The handler selects the
+	// targets from the provenance stamps of expired or deleted test
+	// identities of the caller's issuer scope (its own identities, its own
+	// workload delegation's, or every issuer's for an unscoped platform
+	// admin session); the request names none.
+	"POST /api/v1/test-identities/cleanup": {
+		Pattern: "POST /api/v1/test-identities/cleanup", RouteID: "testIdentities.cleanup",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Provenance explain (Phase 3c): proven or unproven for one resource;
+	// no owner or creator data for an unproven one.
+	"GET /api/v1/test-identities/provenance": {
+		Pattern: "GET /api/v1/test-identities/provenance", RouteID: "testIdentities.provenance",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
@@ -1481,10 +1531,10 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
 		}
-		// A visitor (a federated account, VisitorIdentity) is refused on
-		// every route, whatever its classification, until per-route
-		// visitor admission replaces this check.
-		if refuseVisitorRequest(w, r) {
+		// A visitor (a federated account, VisitorIdentity) is admitted
+		// only on the methods a route lists in VisitorMethods, whatever
+		// the route's classification; any other request is refused here.
+		if refuseVisitorRequest(w, r, meta) {
 			return
 		}
 		// An agent delegated credential is admitted only on the routes in
