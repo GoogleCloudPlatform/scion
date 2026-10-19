@@ -263,6 +263,49 @@ func TestHaltedDispatch_SelfReportedStopThenRuntimeReason(t *testing.T) {
 	w.settle(t, []string{"HALTED"}, []string{"halted", "stopped"})
 }
 
+func TestHaltedDispatch_SignaledStopThenCleanPreempt(t *testing.T) {
+	// Durable workspace: the stopped hook fires on the agent's signaled
+	// stop report; the runtime's preempted with exit code 0 then halts the
+	// row in place: one HALTED and only the halted hook.
+	f := newHaltFixture(t)
+	w := wireHaltDispatch(t, f.srv, f.s)
+	w.watch(t, f.agent.ID, f.project.ID, "HALTED")
+
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
+	require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
+		3*time.Second, 20*time.Millisecond)
+
+	code := 0
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", ExitCode: &code, RunID: "run-1"})
+	require.Equal(t, "halted", f.get(t).Phase)
+
+	w.settle(t, []string{"HALTED"}, []string{"halted", "stopped"})
+}
+
+func TestHaltedDispatch_SignaledStopThenCleanEvictErrorUpgrade(t *testing.T) {
+	// The workspace did not survive: the runtime reports error + evicted
+	// with exit code 0 after the signaled stop report. The error and halted
+	// hooks fire; an ERROR subscriber gets ERROR and a HALTED subscriber
+	// gets HALTED.
+	for _, watch := range []string{"ERROR", "HALTED"} {
+		t.Run(watch, func(t *testing.T) {
+			f := newHaltFixture(t)
+			w := wireHaltDispatch(t, f.srv, f.s)
+			w.watch(t, f.agent.ID, f.project.ID, watch)
+
+			require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
+			require.Eventually(t, func() bool { return assert.ObjectsAreEqual([]string{"stopped"}, w.triggers()) },
+				3*time.Second, 20*time.Millisecond)
+
+			code := 0
+			f.heartbeat(t, brokerAgentHeartbeat{Phase: "error", ExitReason: "evicted", ExitCode: &code, RunID: "run-1"})
+			require.Equal(t, "halted", f.get(t).Phase)
+
+			w.settle(t, []string{watch}, []string{"error", "halted", "stopped"})
+		})
+	}
+}
+
 func TestOnAgentHalted_NothingWired(t *testing.T) {
 	srv, _ := testServer(t)
 	done := srv.onAgentHalted(context.Background(), &store.Agent{ID: "a", Slug: "a"}, "")

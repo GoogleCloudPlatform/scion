@@ -1553,28 +1553,7 @@ waitLoop:
 	// Report final status to Hub, distinguishing clean stop from crash.
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		var hubErr error
-		if outcome.isCrash {
-			s := state.AgentState{Phase: state.PhaseError}
-			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-				Phase:    state.PhaseError,
-				Activity: "",
-				Status:   s.DisplayStatus(),
-				Message:  outcome.message,
-				ExitCode: &finalCode,
-			})
-		} else if limitsExceeded {
-			s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
-			hubErr = hubClient.UpdateStatus(hubCtx, hub.StatusUpdate{
-				Phase:    state.PhaseStopped,
-				Activity: state.ActivityLimitsExceeded,
-				Status:   s.DisplayStatus(),
-				Message:  "Agent stopped: limits exceeded",
-				ExitCode: &finalCode,
-			})
-		} else {
-			hubErr = hubClient.ReportState(hubCtx, state.PhaseStopped, "", "Agent stopped")
-		}
+		hubErr := hubClient.UpdateStatus(hubCtx, finalStatusUpdate(outcome))
 		if hubErr != nil {
 			log.Error("Failed to report final status to Hub: %v", hubErr)
 		} else {
@@ -1777,6 +1756,46 @@ type exitOutcome struct {
 	limitsExceeded bool
 	isCrash        bool
 	message        string
+	// signaled is true when init received SIGTERM/SIGINT before the child
+	// exited and the outcome is neither a crash nor a limits stop.
+	signaled bool
+}
+
+// finalStatusUpdate is the final status report sent to the Hub for a
+// classified exit: a crash (phase error), a limits stop, or a plain stop,
+// which carries exit reason "signaled" when the stop followed a
+// termination signal.
+func finalStatusUpdate(outcome exitOutcome) hub.StatusUpdate {
+	switch {
+	case outcome.isCrash:
+		s := state.AgentState{Phase: state.PhaseError}
+		return hub.StatusUpdate{
+			Phase:    state.PhaseError,
+			Activity: "",
+			Status:   s.DisplayStatus(),
+			Message:  outcome.message,
+			ExitCode: &outcome.exitCode,
+		}
+	case outcome.limitsExceeded:
+		s := state.AgentState{Phase: state.PhaseStopped, Activity: state.ActivityLimitsExceeded}
+		return hub.StatusUpdate{
+			Phase:    state.PhaseStopped,
+			Activity: state.ActivityLimitsExceeded,
+			Status:   s.DisplayStatus(),
+			Message:  "Agent stopped: limits exceeded",
+			ExitCode: &outcome.exitCode,
+		}
+	}
+	s := state.AgentState{Phase: state.PhaseStopped}
+	u := hub.StatusUpdate{
+		Phase:   state.PhaseStopped,
+		Status:  s.DisplayStatus(),
+		Message: "Agent stopped",
+	}
+	if outcome.signaled {
+		u.ExitReason = string(state.ExitReasonSignaled)
+	}
+	return u
 }
 
 // classifyExit applies the HYBRID exit mapping. It is a pure function so it can
@@ -1785,6 +1804,7 @@ type exitOutcome struct {
 //   - limitsExceeded                  → stopped + limits_exceeded (handled by caller)
 //   - clean exit (code 0, no error)   → stopped
 //   - requestedShutdown + code -1     → stopped (signal-killed by intentional SIGTERM)
+//   - requestedShutdown + clean exit  → stopped, marked signaled
 //   - unexpected non-zero exit/error  → error (crash), restartable
 //
 // harnessCode, when non-nil, is the authoritative harness exit code recovered
@@ -1812,7 +1832,7 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 	// When init was told to shut down (SIGTERM/SIGINT), the child is killed by
 	// signal and Go reports exit code -1. This is expected, not a crash.
 	if requestedShutdown && finalCode == -1 {
-		return exitOutcome{exitCode: 0}
+		return exitOutcome{exitCode: 0, signaled: true}
 	}
 
 	// A supervisor error with a zero exit code is itself a failure.
@@ -1823,7 +1843,7 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 
 	isCrash := finalCode != 0
 	if !isCrash {
-		return exitOutcome{exitCode: 0}
+		return exitOutcome{exitCode: 0, signaled: requestedShutdown}
 	}
 
 	var msg string
