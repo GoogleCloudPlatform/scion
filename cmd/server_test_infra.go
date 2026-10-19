@@ -87,7 +87,9 @@ The command:
   - refuses, writing nothing, unless the hub id is pinned in server.hub.hub_id
     (or SCION_SERVER_HUB_HUBID) and --hub-id equals the hub id resolved from
     that same configuration; pin the hub's CURRENT resolved id, never a new
-    value
+    value (when unpinned, the error prints the id read from ~/.scion/hub-id
+    or K_SERVICE in this user's environment, to confirm against the running
+    hub's GET /healthz; without that file it points to GET /healthz)
   - opens the configured database directly (no running server is needed)
   - writes one marker row (hub id, class "test", time, host, attested JSON)
   - generates the hub-local test-identity web session key (64 random bytes)
@@ -219,7 +221,7 @@ func checkTestInfraMarkHubID(cfg *config.GlobalConfig, hubID string) error {
 	if !hubIDPinned(cfg) {
 		current := "unknown: no ~/.scion/hub-id file yet; read hub_id from the running hub's GET /healthz"
 		if id, ok := config.ResolveHubIDFromEnvReadOnly(); ok {
-			current = fmt.Sprintf("%q", id)
+			current = fmt.Sprintf("%q; it comes from this user's environment, confirm it against the running hub's GET /healthz", id)
 		}
 		return fmt.Errorf("%w: set server.hub.hub_id (or SCION_SERVER_HUB_HUBID) to this hub's CURRENT resolved hub id (%s), never a new value; nothing was written", ErrTestInfraMarkHubIDNotPinned, current)
 	}
@@ -315,6 +317,9 @@ func unmarkTestInfra(ctx context.Context, client *ent.Client, out io.Writer) err
 
 // markTestInfra writes the marker through pkg/testinfra and reports it.
 func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalConfig, out io.Writer) error {
+	if err := checkTestInfraMarkHubID(cfg, testInfraMarkHubID); err != nil {
+		return err
+	}
 	var attested json.RawMessage
 	if testInfraMarkAttested != "" {
 		a, err := parseAttestedJSON(testInfraMarkAttested)
@@ -328,10 +333,6 @@ func markTestInfra(ctx context.Context, client *ent.Client, cfg *config.GlobalCo
 		operator = resolveOperatorIdentity()
 	}
 	host, _ := os.Hostname()
-
-	if err := checkTestInfraMarkHubID(cfg, testInfraMarkHubID); err != nil {
-		return err
-	}
 
 	m, err := testinfra.Mark(ctx, client, testinfra.MarkInput{
 		HubID:    testInfraMarkHubID,

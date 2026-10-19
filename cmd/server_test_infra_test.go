@@ -135,7 +135,8 @@ func TestTestInfraMark_RefusesUnpinnedHubID(t *testing.T) {
 		err := markTestInfra(ctx, client, cfg, &out)
 		require.ErrorIs(t, err, ErrTestInfraMarkHubIDNotPinned, "a derived id is refused even when it equals --hub-id")
 		assert.Contains(t, err.Error(), "server.hub.hub_id")
-		assert.Contains(t, err.Error(), `CURRENT resolved hub id ("`+tiaCmdHubID+`")`)
+		assert.Contains(t, err.Error(), `CURRENT resolved hub id ("`+tiaCmdHubID+`"; `)
+		assert.Contains(t, err.Error(), "confirm it against the running hub's GET /healthz")
 		assertNoTestInfraMarkWritten(t, client)
 	})
 
