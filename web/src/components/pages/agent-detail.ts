@@ -105,6 +105,7 @@ import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import {
   launchCodeLabel,
   launchFailedTitle,
@@ -821,7 +822,7 @@ export class ScionPageAgentDetail extends LitElement {
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
   /**
    * Pending SPA-redirect timer for the deleted state; cancellable on
    * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
@@ -844,17 +845,15 @@ export class ScionPageAgentDetail extends LitElement {
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
 
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
     if (this.deleteRedirectTimer) {
       clearTimeout(this.deleteRedirectTimer);
       this.deleteRedirectTimer = null;
