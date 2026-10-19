@@ -219,16 +219,16 @@ func TestSPAShell_InitialDataAtEndOfBody(t *testing.T) {
 	assert.Less(t, strings.Index(whole, "</head>"), strings.Index(whole, open))
 }
 
-// TestSPAShell_HostileValuesStayInsideInitialData: values that come from
+// TestSPAShell_SpecialCharactersStayInsideInitialData: special characters in
 // the request path, the session user and the prefetched API response
 // cannot end the data script, open a comment or another element, or break
 // the JSON; each comes back unchanged when the JSON is parsed.
-func TestSPAShell_HostileValuesStayInsideInitialData(t *testing.T) {
-	const hostile = "</script><script>alert(1)</script><!--<script \u2028\u2029<>&'\"`${x}"
+func TestSPAShell_SpecialCharactersStayInsideInitialData(t *testing.T) {
+	const special = "</script><script>alert(1)</script><!--<script \u2028\u2029<>&'\"`${x}"
 	ws := newTestWebServer(t, WebServerConfig{})
 	ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"id": "p-1", "name": hostile, "description": hostile})
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "p-1", "name": special, "description": special})
 	}), func(ctx context.Context) error { return nil })
 
 	benignRec := httptest.NewRecorder()
@@ -239,7 +239,7 @@ func TestSPAShell_HostileValuesStayInsideInitialData(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)
 			req = req.WithContext(setWebSessionUser(req.Context(), &webSessionUser{
-				UserID: "u-1", Email: hostile + "@example.com", Name: hostile, AvatarURL: "https://example.com/" + hostile, Role: hostile,
+				UserID: "u-1", Email: special + "@example.com", Name: special, AvatarURL: "https://example.com/" + special, Role: special,
 			}))
 			rec := httptest.NewRecorder()
 			ws.spaHandler()(rec, req)
@@ -262,16 +262,16 @@ func TestSPAShell_HostileValuesStayInsideInitialData(t *testing.T) {
 			fields := shellInitialData(t, html)
 			var user map[string]string
 			require.NoError(t, json.Unmarshal(fields["user"], &user))
-			assert.Equal(t, hostile, user["name"])
-			assert.Equal(t, hostile+"@example.com", user["email"])
-			assert.Equal(t, hostile, user["role"])
+			assert.Equal(t, special, user["name"])
+			assert.Equal(t, special+"@example.com", user["email"])
+			assert.Equal(t, special, user["role"])
 			var gotPath string
 			require.NoError(t, json.Unmarshal(fields["path"], &gotPath))
 			assert.Equal(t, req.URL.Path, gotPath)
 			if path == "/projects/p-1" {
 				var data map[string]string
 				require.NoError(t, json.Unmarshal(fields["data"], &data))
-				assert.Equal(t, hostile, data["name"])
+				assert.Equal(t, special, data["name"])
 			}
 		})
 	}
