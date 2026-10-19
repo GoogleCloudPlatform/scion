@@ -1593,6 +1593,147 @@ func TestUpdateReincarnationStep_StoresCopyOfAppliedConfig(t *testing.T) {
 	assert.Equal(t, "api-key", cfg.HarnessAuth, "an echo written onto the returned agent must not leak into the caller's struct")
 }
 
+// TestUpdateReincarnationStep_ClearExit covers the step's clearExit field:
+// unset leaves the recorded exit code and reason alone, set clears both.
+func TestUpdateReincarnationStep_ClearExit(t *testing.T) {
+	ctx := context.Background()
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "crashed", 1)
+
+	written, err := srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	assert.Equal(t, "crashed", written.ExitReason, "a step without clearExit keeps the reason")
+	require.NotNil(t, written.ExitCode, "a step without clearExit keeps the exit code")
+	assert.Equal(t, 1, *written.ExitCode)
+
+	written, err = srv.updateReincarnationStep(ctx, agent.ID, reincarnationStepUpdate{
+		reincarnationState: store.ReincarnationStateProvisioning,
+		clearExit:          true,
+	}, reincarnationStepMaxAttempts)
+	require.NoError(t, err)
+	assert.Empty(t, written.ExitReason)
+	assert.Nil(t, written.ExitCode)
+	stored, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.ExitReason, "clearExit clears the stored reason")
+	assert.Nil(t, stored.ExitCode, "clearExit clears the stored exit code")
+}
+
+// recordPreviousRunExit writes phase and a previous run's exit reason and
+// code onto the agent row, and checks that both are stored.
+func recordPreviousRunExit(t *testing.T, s store.Store, agentID, phase, reason string, code int) {
+	t.Helper()
+	ctx := context.Background()
+	a, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	a.Phase = phase
+	a.ExitReason = reason
+	a.ExitCode = &code
+	require.NoError(t, s.UpdateAgent(ctx, a))
+	got, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	require.Equal(t, reason, got.ExitReason, "the previous run's reason is stored")
+	require.NotNil(t, got.ExitCode, "the previous run's exit code is stored")
+	require.Equal(t, code, *got.ExitCode)
+}
+
+// exitFieldsAtStop records the agent row's exit fields as the worker's
+// stop dispatch sees them, that is, after the stopping step's write.
+type exitFieldsAtStop struct {
+	mu     sync.Mutex
+	seen   bool
+	err    error
+	reason string
+	code   *int
+}
+
+// observeExitFieldsAtStop installs a stop hook on disp that reads the
+// agent row.
+func observeExitFieldsAtStop(t *testing.T, s store.Store, disp *reincarnateTestDispatcher, agentID string) *exitFieldsAtStop {
+	t.Helper()
+	obs := &exitFieldsAtStop{}
+	disp.mu.Lock()
+	disp.stopHook = func() {
+		a, err := s.GetAgent(context.Background(), agentID)
+		obs.mu.Lock()
+		defer obs.mu.Unlock()
+		obs.seen = true
+		obs.err = err
+		if err != nil {
+			return
+		}
+		obs.reason = a.ExitReason
+		obs.code = a.ExitCode
+	}
+	disp.mu.Unlock()
+	return obs
+}
+
+// assertCleared checks that the stop dispatch ran, read the agent row and
+// saw no exit fields.
+func (o *exitFieldsAtStop) assertCleared(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	require.True(t, o.seen, "the stop dispatch ran")
+	require.NoError(t, o.err, "the stop hook read the agent row")
+	assert.Empty(t, o.reason, "the stopping step clears the previous run's exit reason")
+	assert.Nil(t, o.code, "the stopping step clears the previous run's exit code")
+}
+
+// TestReincarnateAgent_ClearsPreviousRunExitFields covers
+// ptone/scion#5282: a reincarnation clears the previous run's exit code and
+// reason when it begins, so the new generation never carries them.
+func TestReincarnateAgent_ClearsPreviousRunExitFields(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "oom_killed", 137)
+	obs := observeExitFieldsAtStop(t, s, disp, agent.ID)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateCompleted, r.State, r.Error)
+	obs.assertCleared(t)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, final.ExitReason, "the new generation does not carry the previous run's exit reason")
+	assert.Nil(t, final.ExitCode, "the new generation does not carry the previous run's exit code")
+}
+
+// TestReincarnateAgent_StopFailureClearsExitFields: a reincarnation whose
+// stop fails has already begun, so the previous run's exit fields stay
+// cleared, and the failure still records why in the phase and message.
+func TestReincarnateAgent_StopFailureClearsExitFields(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.stopErr = fmt.Errorf("broker unreachable")
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	recordPreviousRunExit(t, s, agent.ID, "stopped", "crashed", 1)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", final.Phase, "the failed step still sets phase error")
+	assert.Contains(t, final.Message, "reincarnation failed: stop failed", "the failed step still records why")
+	assert.Empty(t, final.ExitReason, "the previous run's exit reason stays cleared")
+	assert.Nil(t, final.ExitCode, "the previous run's exit code stays cleared")
+}
+
 // TestCopyBrokerEcho covers the helper the worker takes broker echoes with:
 // non-empty fields win, empty fields leave dst alone, and the image is only
 // taken when asked.
