@@ -10,6 +10,8 @@
   (`clean-public-generated`, `check-orphans`).
 - `web/README.md`: the script table notes that the precompress suite also
   checks the output of a prior build.
+- `.github/workflows/ci.yml`: the "Check Web Build Orphans" step runs
+  `REQUIRE_BUILD=1 npm run test:build-scripts`.
 
 ## Why this is enough
 
@@ -17,7 +19,8 @@ CI's "Check Web Build Orphans" step (ci.yml) already runs
 `npm run test:build-scripts` right after `npm run build`. So the suite's unit
 tests and its real-build checks (every `.br`/`.gz` sibling decodes to its
 source; the A1 byte budgets for `main.js.br`, the Shoelace chunk and the
-entry closure) now run against CI's build output, with no workflow change.
+entry closure) now run against CI's build output; the only workflow change
+is the `REQUIRE_BUILD=1` prefix.
 
 ## Notes
 
@@ -25,6 +28,6 @@ entry closure) now run against CI's build output, with no workflow change.
   Build & Test. Measured on this build: main.js.br 79,708 B (limit 85,000),
   shoelace 47,111 B (50,000), entry closure 139,421 B (160,000).
 - Without a build the real-build checks skip, so a local
-  `npm run test:build-scripts` on a fresh checkout still passes. Making a
-  missing build fail in CI would mean setting `REQUIRE_BUILD=1` in the
-  workflow step; not done here, since CI always builds first.
+  `npm run test:build-scripts` on a fresh checkout still passes. In CI the
+  step runs with `REQUIRE_BUILD=1`, so a missing build output fails the
+  checks instead of skipping them and the budget gate cannot pass silently.
