@@ -2477,10 +2477,12 @@ func isProxyRoute(path string) bool {
 //     fetch), agent token refresh, delegation exchange, broker registration,
 //     join and secret rotation, project registration, invite creation, test
 //     identities, and every env or secrets route;
-//   - responses with signed object-store or capability URLs: agent workspace
-//     sync, template, user template, harness-config and skill upload and
-//     download, skill versions, artifact links, version views, and the
-//     artifact view and shared routes (isSignedURLPath);
+//   - responses with signed object-store or capability URLs: every agent
+//     workspace route (sync-from, sync-to; the status GET is included as a
+//     fail-safe), template, user template, harness-config and skill upload
+//     and download, skill versions and skill resolve, artifact links,
+//     version views, and the artifact view and shared routes
+//     (isSignedURLPath);
 //   - agent item responses (/api/v1/agents/{id} and
 //     /api/v1/projects/{projectId}/agents/{id}).
 //
@@ -2549,7 +2551,12 @@ func isCompressBypassPath(path string) bool {
 // isSignedURLPath reports /api/v1/ routes (as path segments after
 // /api/v1/) whose responses carry signed object-store or capability URLs:
 // template, user template, harness-config and skill upload and download
-// routes and skill versions, and artifact links and version views.
+// routes, skill versions and skill resolve (the batch POST
+// /api/v1/skills/resolve returns signed download URLs; the per-skill resolve
+// is included as a fail-safe), and artifact links and version views. The upload, download and versions segments match at any depth
+// below the resource (for example a file path starting with download/):
+// that over-match is intentional, as it only leaves more responses
+// uncompressed.
 func isSignedURLPath(segs []string) bool {
 	if len(segs) == 0 {
 		return false
@@ -2573,7 +2580,7 @@ func isSignedURLPath(segs []string) bool {
 		switch seg {
 		case "upload", "download":
 			return true
-		case "versions":
+		case "versions", "resolve":
 			if segs[0] == "skills" {
 				return true
 			}

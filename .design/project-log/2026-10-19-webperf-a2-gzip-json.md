@@ -36,9 +36,9 @@ and phase A2.
     registration, invites, test identities, and env and secrets routes;
   - agent item responses (`/api/v1/agents/{id}` and the project-scoped form).
   - responses with signed object-store or capability URLs (`isSignedURLPath`):
-    agent workspace sync, template, user template, harness-config and skill
-    upload and download, skill versions, artifact links and version views,
-    and the artifact view and shared routes.
+    every agent workspace route, template, user template, harness-config and
+    skill upload and download, skill versions and skill resolve, artifact
+    links and version views, and the artifact view and shared routes.
   `MountHubAPI` also sends non-GET requests to the create collections
   (`/api/v1/agents`, `/api/v1/projects/{projectId}/agents`, `/api/v1/templates`,
   `/api/v1/users/me/templates`, `/api/v1/harness-configs`, `/api/v1/skills`;
@@ -64,8 +64,8 @@ and phase A2.
     unencoded before the handler ends;
   - PTY/tunnel upgrades, the port proxy, `/events` and the SPA shell;
   - non-2xx JSON passthrough;
-  - every signed-URL route through the mount (large JSON stays identity,
-    neighbouring routes are gzipped);
+  - every signed-URL route form through the mount (large JSON stays
+    identity, neighbouring routes are gzipped), plus the path matcher table;
   - `TestCompressBypass_StreamRoutesFromCatalog`, which walks the authz
     catalog's SSE and websocket entry points and the agent sub-route table, and
     fails on any route the bypass does not cover.
