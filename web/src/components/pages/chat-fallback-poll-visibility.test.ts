@@ -114,8 +114,11 @@ describe('chat page — fallback poll in a hidden tab', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     chatDMsLoad.invalidate();
     chatSpacesLoad.invalidate();
-    // Only the interval and the clock: startup awaits imports and requests.
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    // Timers and the clock, but not the microtask queue: startup awaits
+    // imports and requests. Timeouts too, for a visibleInterval built on them.
+    vi.useFakeTimers({
+      toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'Date'],
+    });
     hidden = false;
     pages = [];
     vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);

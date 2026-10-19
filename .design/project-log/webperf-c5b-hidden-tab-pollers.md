@@ -63,6 +63,18 @@ a later visibility change. Existing tests that read the old timer fields
 chat file also keeps the real DM loader in one test: a regular tick fetches
 the DM list fresh.
 
+The tests do not depend on how `visibleInterval` builds its timer (C5a's
+fix moves it from `setInterval` to a `setTimeout` chain):
+
+- Tests that fake only some timers fake `setTimeout`/`clearTimeout` as well
+  (`chat-fallback-poll-visibility`, `notification-tray-user-switch`,
+  `tray-count-events`). The last two keep the real `setTimeout` for their
+  `flush()` helper.
+- `chat.test.ts` counts live polls through a pass-through mock of
+  `visibleInterval` (`livePolls`: stop functions handed out and not yet
+  called), not live `setInterval` handles.
+- The touched suites pass with the current helper and with C5a fix1's.
+
 ## Learnings
 
 - The chat page startup awaits dynamic imports and requests, so faking all
