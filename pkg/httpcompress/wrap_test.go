@@ -68,7 +68,7 @@ func doReq(t *testing.T, method, url, acceptEncoding string, body io.Reader) *ht
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -222,7 +222,7 @@ func TestWrap_EventStreamPassthroughUnbuffered(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if ce := resp.Header.Get("Content-Encoding"); ce != "" {
 				t.Fatalf("Content-Encoding = %q, want none", ce)
 			}
@@ -264,7 +264,7 @@ func TestWrap_UpgradeNotWrapped(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
 		_ = rw.Flush()
 	}), nil)
@@ -280,7 +280,7 @@ func TestWrap_UpgradeNotWrapped(t *testing.T) {
 		_, _ = io.WriteString(conn, "GET /api/v1/agents/a1/pty HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n"+hdrs+"\r\n")
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		status, err := bufio.NewReader(conn).ReadString('\n')
-		conn.Close()
+		_ = conn.Close()
 		if err != nil {
 			t.Fatalf("read status: %v", err)
 		}
@@ -429,7 +429,7 @@ func TestWrap_QZeroGzip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			assertIdentity(t, resp, body)
 		})
 	}
@@ -439,7 +439,7 @@ func TestWrap_QZeroGzip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		assertIdentity(t, resp, body)
 	})
 	t.Run("gzip;q=0.5", func(t *testing.T) {
@@ -488,7 +488,7 @@ func TestWrap_EventStreamAcceptBypass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if sawWrapper {
 		t.Fatal("event-stream request got the compress wrapper")
 	}

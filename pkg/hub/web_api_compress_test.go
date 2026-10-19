@@ -213,7 +213,7 @@ func TestWebAPI_AgentListGzip(t *testing.T) {
 	req.Header.Set("Authorization", env.auth["Authorization"])
 	plain, err := compressClient().Do(req)
 	require.NoError(t, err)
-	defer plain.Body.Close()
+	defer func() { _ = plain.Body.Close() }()
 	require.Equal(t, http.StatusOK, plain.StatusCode)
 	assert.Empty(t, plain.Header.Get("Content-Encoding"))
 	identity, err := io.ReadAll(plain.Body)
@@ -297,7 +297,7 @@ func TestWebAPI_AgentItemNotCompressed(t *testing.T) {
 		req.Header.Set("Authorization", env.auth["Authorization"])
 		resp, err := compressClient().Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode, "%.300s", body)
@@ -324,7 +324,7 @@ func TestWebAPI_AgentCreateNotCompressed(t *testing.T) {
 		req.Header.Set("Authorization", env.auth["Authorization"])
 		resp, err := compressClient().Do(req)
 		require.NoError(t, err)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		got, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusCreated, resp.StatusCode, "%.300s", got)
@@ -477,7 +477,7 @@ func TestWebAPI_PTYRouteNotWrapped(t *testing.T) {
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
 			_ = rw.Flush()
 			return
@@ -492,7 +492,7 @@ func TestWebAPI_PTYRouteNotWrapped(t *testing.T) {
 			// An upgrade request reaches the hub with a hijackable writer.
 			conn, err := net.Dial("tcp", strings.TrimPrefix(ts.URL, "http://"))
 			require.NoError(t, err)
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			_, err = io.WriteString(conn, "GET "+p+" HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n")
 			require.NoError(t, err)
 			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
