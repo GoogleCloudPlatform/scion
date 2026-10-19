@@ -143,8 +143,9 @@ func blankKeyValues(re *regexp.Regexp, s string) string {
 
 // extendValue returns the end of an unquoted value that ends at i in s,
 // extended over each following word that is separated from it by spaces or
-// tabs only, ends at whitespace, a delimiter or the end of s, and holds no
-// '=' or ':' (which would make it the next key).
+// tabs only, ends at whitespace, a delimiter or the end of s, and is not a
+// key: it holds no '=' or ':', and the next non-space character after it is
+// not one either. A redactedMarker counts as one word.
 func extendValue(s string, i int) int {
 	for {
 		j := i
@@ -155,10 +156,21 @@ func extendValue(s string, i int) int {
 			return i
 		}
 		k := j
-		for k < len(s) && !strings.ContainsRune(" \t\r\n"+causeValueDelimiters, rune(s[k])) {
-			k++
+		if strings.HasPrefix(s[j:], redactedMarker) {
+			k = j + len(redactedMarker)
+		} else {
+			for k < len(s) && !strings.ContainsRune(" \t\r\n"+causeValueDelimiters, rune(s[k])) {
+				k++
+			}
 		}
 		if k == j || strings.ContainsAny(s[j:k], "=:") {
+			return i
+		}
+		n := k
+		for n < len(s) && (s[n] == ' ' || s[n] == '\t') {
+			n++
+		}
+		if n < len(s) && (s[n] == '=' || s[n] == ':') {
 			return i
 		}
 		i = k
