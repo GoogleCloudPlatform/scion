@@ -110,7 +110,7 @@ project is a hub-level resource; a project's own groups belong to that project.
   member of the group, adds members, even when you are a super-admin.
 - The members of a project's agents group are the project's agents; no one adds members to it.
 - Removing a member from, or deleting, a group that is the subject of an access constraint is
-  session only: a token is refused with `403` and the reason `GOV_PENDING`.
+  session only: a token is refused with `403` and `details.reason` `GOV_PENDING`.
 
 ### Scopes are restrictions, not grants
 
