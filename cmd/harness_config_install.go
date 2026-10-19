@@ -66,16 +66,6 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	nameOverride, _ := cmd.Flags().GetString("name")
 	force, _ := cmd.Flags().GetBool("force")
 
-	var gp string
-	if projectPath != "" {
-		resolved, err := config.GetResolvedProjectDir(projectPath)
-		if err == nil {
-			gp = resolved
-		}
-	} else if projectDir, err := config.GetResolvedProjectDir(""); err == nil {
-		gp = projectDir
-	}
-
 	localSourcePath, cleanup, err := resolveInstallSource(source)
 	if err != nil {
 		return err
@@ -103,7 +93,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid harness-config name %q; name cannot contain path components or separators", name)
 	}
 
-	hubCtx, err := requireHub(gp)
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
