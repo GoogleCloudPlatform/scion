@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -714,4 +715,95 @@ func TestHumanDelegation_UnchangedRegression(t *testing.T) {
 	// check is the grantor.
 	e.unmark(t)
 	assert.Equal(t, http.StatusCreated, e.mint(t, d.ID).Code)
+}
+
+// OPT-1 (ti-dl-rev round 1): testAdminIssuer refuses a workload delegation
+// whose grantor kind is not human even when its scope covers the admin
+// kind, and even with gate-passed offline state (defence in depth: the
+// arm and checkDelegationLive already refuse such a row). The control (a
+// human-kind state of the same scope) passes this branch and is refused
+// later, by the caller-kind check, with its distinct detail reason.
+func TestTestAdminIssuer_RefusesNonHumanGrantorKind(t *testing.T) {
+	e := newDLEnv(t)
+	spec := testAdminKindSpecs[testAdminRoleHubAdmin]
+	call := func(d *store.TestIdentityDelegation, passed bool) *httptest.ResponseRecorder {
+		ctx, _ := dlOfflineCtx(t, d, passed)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/test-identities/admin", nil).WithContext(ctx)
+		rr := httptest.NewRecorder()
+		user, _, st, ok := e.srv.testAdminIssuer(rr, req, spec)
+		assert.False(t, ok)
+		assert.Nil(t, user)
+		assert.Nil(t, st)
+		return rr
+	}
+	offline := dlGateDelegation(time.Now())
+	offline.Scope = testIdentityDelegationAdminScope
+	for _, passed := range []bool{true, false} {
+		rr := call(offline, passed)
+		assert.Equal(t, http.StatusForbidden, rr.Code)
+		assert.NotContains(t, rr.Body.String(), testAdminReasonCallerNotHuman, "refused at the grantor-kind branch, before the caller-kind check")
+	}
+	unknown := *offline
+	unknown.GrantorKind = "robot"
+	rr := call(&unknown, false)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.NotContains(t, rr.Body.String(), testAdminReasonCallerNotHuman)
+
+	// A forged human-kind state carrying offline gate state is refused too.
+	human := *offline
+	human.GrantorKind = store.DelegationGrantorHuman
+	rr = call(&human, true)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.NotContains(t, rr.Body.String(), testAdminReasonCallerNotHuman)
+
+	// Control: a clean human-kind state passes the grantor-kind branch and
+	// is refused by the caller-kind check (the reserved id names no user).
+	rr = call(&human, false)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), testAdminReasonCallerNotHuman)
+}
+
+// OPT-5 (ti-dl-rev round 1): token re-issue and the web-login code for an
+// identity issued through an offline delegation share the mint-transaction
+// recheck: they work while the gate passes and are refused once the marker
+// is gone.
+func TestOfflineDelegation_ReissueAndWebCode(t *testing.T) {
+	e := newDLEnv(t)
+	x2EnableWebSessions(t, e.x2Env)
+	d := e.offline(t, 0)
+	rec := e.mint(t, d.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	id := tiDecode(t, rec).Identity.ID
+	tok := func() string { return x2Token(t, x2TokenOpts{}) }
+
+	rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/token", tok(), d.ID, nil, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/web-login-code", tok(), d.ID, nil, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	webAudits := x2WebCodeAudits(t, e.x2Env, id)
+	require.Len(t, webAudits, 1)
+	assert.Equal(t, store.TestInfraOfflineGrantorID(x2HubID), webAudits[0].ActorPrincipalID)
+
+	// Refused inside the mint transaction: the marker goes away between
+	// authentication and the re-issue/web-code transaction.
+	orig := e.srv.testIdentities.hooks.writeAudit
+	unmarkNext := false
+	e.srv.testIdentities.hooks.writeAudit = func(ctx context.Context, tx store.Store, record *store.MutationAuditRecord) error {
+		if err := orig(ctx, tx, record); err != nil {
+			return err
+		}
+		if unmarkNext && record.MutationType == testIdentityDelegationRedeemOfflineMutation {
+			unmarkNext = false
+			e.unmark(t)
+		}
+		return nil
+	}
+	unmarkNext = true
+	rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/token", tok(), d.ID, nil, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	e.mark(t)
+	// A new marker does not revive the delegation (marker instance binding).
+	rec = e.workload(t, http.MethodPost, "/api/v1/test-identities/"+id+"/web-login-code", tok(), d.ID, nil, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Len(t, x2WebCodeAudits(t, e.x2Env, id), 1, "no second web-login code was minted")
 }

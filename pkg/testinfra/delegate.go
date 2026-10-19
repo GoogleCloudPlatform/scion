@@ -177,6 +177,14 @@ func Delegate(ctx context.Context, client *ent.Client, in DelegateInput) (*store
 		return nil, cause
 	}
 
+	// The per-hub live cap is a count-then-insert: on PostgreSQL, take the
+	// transaction-scoped test identity issuance advisory lock first, so two
+	// concurrent delegate runs cannot both pass the count (SQLite
+	// serializes writers; the lock is a no-op there).
+	if err := entadapter.NewUserStore(tx.Client()).LockTestFixtureIssuance(ctx); err != nil {
+		return rollback(fmt.Errorf("lock offline delegation create: %w", err))
+	}
+
 	marker, err := tx.TestInfraMarker.Get(ctx, MarkerID)
 	if err != nil {
 		if ent.IsNotFound(err) {

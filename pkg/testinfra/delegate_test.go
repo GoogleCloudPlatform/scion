@@ -18,7 +18,9 @@ package testinfra
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -254,4 +257,53 @@ func TestRevokeDelegation_RefusesHumanGrantor(t *testing.T) {
 	row, err := client.TestIdentityDelegation.Get(ctx, human.ID)
 	require.NoError(t, err)
 	assert.Nil(t, row.RevokedAt)
+}
+
+// OPT-3 (ti-dl-rev round 1): the per-hub live cap holds under concurrent
+// delegate runs on PostgreSQL (READ COMMITTED), where a plain
+// count-then-insert would let two runs both pass the count. Delegate takes
+// the test identity issuance advisory lock first. Runs only with
+// -tags integration and SCION_TEST_POSTGRES_URL (Makefile
+// test-store-postgres-tail, CI's T1 "other packages" job); skips on SQLite.
+func TestDelegate_ConcurrentLiveCapHolds_Postgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires -tags integration and SCION_TEST_POSTGRES_URL")
+	}
+	client := enttest.NewClient(t)
+	ctx := context.Background()
+	_, err := Mark(ctx, client, MarkInput{HubID: dlHubID, Operator: "op", Host: "host-1", Now: time.Now()})
+	require.NoError(t, err)
+
+	const runs = 3 * store.TestInfraOfflineMaxLiveDelegations
+	start := make(chan struct{})
+	errs := make(chan error, runs)
+	var wg sync.WaitGroup
+	for i := 0; i < runs; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := Delegate(ctx, client, dlInput())
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	ok, capped := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrDelegateTooManyLive):
+			capped++
+		default:
+			t.Errorf("unexpected delegate error: %v", err)
+		}
+	}
+	assert.Equal(t, store.TestInfraOfflineMaxLiveDelegations, ok, "exactly the cap succeeds")
+	assert.Equal(t, runs-store.TestInfraOfflineMaxLiveDelegations, capped)
+	n, err := client.TestIdentityDelegation.Query().Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, store.TestInfraOfflineMaxLiveDelegations, n)
 }

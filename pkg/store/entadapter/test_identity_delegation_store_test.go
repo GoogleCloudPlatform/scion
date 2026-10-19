@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -351,4 +352,30 @@ func TestGetTestInfraBinding(t *testing.T) {
 	assert.Equal(t, "hub-1", b.HubID)
 	assert.Equal(t, "test", b.Class)
 	assert.True(t, b.CreatedAt.Equal(at))
+}
+
+// OPT-4 (ti-dl-rev round 1): a row written without grantor_kind, hub_id
+// and marker_created_at (as every row that predates phase DL was) reads
+// back as a human-grantor delegation with no hub or marker binding: the
+// migration's column default is "human". Raw SQL bypasses ent's create
+// default, so this pins the DDL default itself.
+func TestTestIdentityDelegation_PreDLRowsReadAsHuman(t *testing.T) {
+	cs := newFixtureTestStore(t)
+	ctx := context.Background()
+	db := cs.DB()
+	require.NotNil(t, db)
+	id := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+	q := "INSERT INTO test_identity_delegations (id, grantor_id, workload_sub, scope, member_cap, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+	if cs.Dialect() == dialect.Postgres {
+		q = "INSERT INTO test_identity_delegations (id, grantor_id, workload_sub, scope, member_cap, label, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+	}
+	_, err := db.ExecContext(ctx, q, id, uuid.NewString(), "100000000000000000042", "test_identity:issue", 5, "", now, now.Add(time.Hour))
+	require.NoError(t, err)
+
+	got, err := cs.GetTestIdentityDelegation(ctx, id.String())
+	require.NoError(t, err)
+	assert.Equal(t, store.DelegationGrantorHuman, got.GrantorKind, "the column default reads as human")
+	assert.Empty(t, got.HubID)
+	assert.Nil(t, got.MarkerCreatedAt)
 }
