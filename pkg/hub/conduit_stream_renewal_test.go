@@ -646,6 +646,75 @@ func TestRenewalDriver_LastRetryStrictlyBeforeDeadline(t *testing.T) {
 	}
 }
 
+// TestRenewalDriver_NonAdvancingUntilNeverLoops: a renewal whose
+// authz_until leaves no renewal point ahead of now (it did not move
+// forward, or it is already behind the driver's clock) is not re-armed at
+// once. Each Advance makes at most one attempt, and later attempts follow
+// the retry schedule (half the time left, a 30s floor, the last one 1s
+// before authz_until).
+func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
+	// A regression renews in a loop inside one Advance. The stub turns
+	// unavailable after maxCalls, so a loop shows as a count, not a hang.
+	const maxCalls = 8
+	sameUntil := func(until time.Time) func(n int) (*conduitRenewal, error) {
+		return func(n int) (*conduitRenewal, error) {
+			if n > maxCalls {
+				return nil, fmt.Errorf("%w: loop guard", errConduitAuthzUnavailable)
+			}
+			return &conduitRenewal{Token: []byte(fmt.Sprintf("renewal-%d", n)), AuthzUntil: until}, nil
+		}
+	}
+
+	t.Run("authz_until does not move", func(t *testing.T) {
+		f := newRenewalDriverFixture(t, true)
+		st, c, r := f.track()
+		start, until := f.clk.Now(), st.AuthzUntil
+		f.setResult(sameUntil(until))
+
+		for i, step := range []struct {
+			advance time.Duration
+			calls   int
+		}{
+			{8 * time.Minute, 1},  // the renewal at 80%
+			{time.Minute, 2},      // half of the 2m left
+			{30 * time.Second, 3}, // half of 1m left is the 30s floor
+			{29 * time.Second, 4}, // the floor would pass 1s before authz_until
+			{time.Second, 4},      // none after that
+		} {
+			f.clk.Advance(step.advance)
+			require.Len(t, f.callTimes(), step.calls, "step %d: one attempt at most per Advance", i)
+		}
+		want := []time.Time{start.Add(8 * time.Minute), start.Add(9 * time.Minute), start.Add(9*time.Minute + 30*time.Second), until.Add(-conduitRenewalLastAttempt)}
+		for i, at := range f.callTimes() {
+			assert.True(t, at.Equal(want[i]), "attempt %d at %v, want %v", i, at, want[i])
+		}
+		assert.Equal(t, 4, r.count(), "each renewal was sent")
+		assert.True(t, st.Deadline().Equal(until), "a renewal that does not move authz_until does not move the deadline")
+		assert.Equal(t, []string{"4401 authz_expired"}, c.list(), "closed at authz_until")
+	})
+
+	t.Run("authz_until behind the driver clock", func(t *testing.T) {
+		f := newRenewalDriverFixture(t, false)
+		until := f.clk.Now().Add(-time.Hour)
+		f.setResult(sameUntil(until))
+		c, r := &closeRecorder{}, &renewRecorder{}
+		st := &conduitUserStream{
+			Kind: grant.StreamKindPTY, Identity: NewAuthenticatedUser("u1", "u1@x", "u1", "member", "api"),
+			UserID: "u1", AgentID: "agent-x", ProjectID: "p1", SessionID: "sess-1", StreamID: 7,
+			Admitted: f.clk.Now(), Close: c.close, Renew: r.renew,
+			Grant: []byte("open"), OpenJTI: "open-jti", AuthzUntil: until, AuthzInterval: driverInterval,
+		}
+		f.a.Track(st)
+
+		f.clk.Advance(time.Millisecond)
+		require.Len(t, f.callTimes(), 1, "one attempt for a renewal point already passed, not a loop")
+		f.clk.Advance(time.Hour)
+		assert.Len(t, f.callTimes(), 1, "no retry once authz_until has passed")
+		assert.Equal(t, 1, r.count())
+		assert.Empty(t, c.list(), "no close action under off")
+	})
+}
+
 // TestConduitTestSeamsNeverSetInProduction: no non-test file of pkg/hub or
 // cmd sets a conduit test seam, as a composite-literal key or by
 // assignment: ConduitRelayOptions.AuthzClock, and the Server fields
