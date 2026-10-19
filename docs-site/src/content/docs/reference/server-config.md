@@ -1143,7 +1143,7 @@ A server that runs only the Runtime Broker takes `server.hub.public_url` (or `SC
 
 **Upgrade note:** earlier releases ranked `server.hub.public_url` from `settings.yaml` (and `SCION_SERVER_HUB_ENDPOINT`) above `--base-url` and `SCION_SERVER_BASE_URL`. A server that sets `--base-url` or `SCION_SERVER_BASE_URL` to a different URL than its `settings.yaml` value now uses the flag or environment value, and so do the values derived from the Hub endpoint, including the OIDC issuer default and the `cloudrun_invoker` audience default. Remove the setting you do not want, or make the two agree.
 
-The server reads `hub.endpoint` and its other settings (such as `active_profile` and the broker identity) from the global settings directory (`~/.scion`) only. Starting the server from inside a project directory does not merge that project's settings.
+At startup the server reads `hub.endpoint` and its other settings (such as `active_profile`, the default runtime, `image_registry`, the broker identity, plugins, notification channels and maintenance settings) from the global settings directory (`~/.scion`) only. Starting the server from inside a project directory does not merge that project's settings, and `--global` makes no difference to them.
 
 Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is deprecated: the server logs a warning at startup, `scion doctor` reports it, and the fallback is removed in the next release. Set `server.hub.public_url` or `server.broker.hub_endpoint` instead. A workstation whose `hub.endpoint` is its own loopback URL is not affected.
 

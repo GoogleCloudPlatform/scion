@@ -276,8 +276,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// (ptone/scion#3916).
 	registryDecisionDeferred := false
 	registryFromHubDB := false
+	// The env and file check reads the global settings only, like the
+	// readiness check before a daemon start (server_start_ready.go), never
+	// a project found from the working directory (ptone/scion#5362).
+	requireServerImageRegistry := func() error { return requireImageRegistryForBrokerAt(globalDir) }
 	if !hostedMode {
-		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireImageRegistryForBroker)
+		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireServerImageRegistry)
 		if err != nil {
 			return err
 		}
@@ -659,7 +663,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	cloudrunruntime.WarnCPUAllocationIfNeeded(slog.Default(), os.Getenv, cfg.RuntimeBroker.Enabled)
 	if cfg.RuntimeBroker.Enabled {
 		if !registryFromHubDB {
-			if err := requireImageRegistryForBroker(); err != nil {
+			if err := requireServerImageRegistry(); err != nil {
 				return err
 			}
 		}
@@ -739,7 +743,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 		// Initialize message broker from versioned settings.
 		// Uses FanOutBroker to support multiple simultaneous broker plugins.
-		if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil {
+		if vs, err := loadServerVersionedSettings(); err == nil && vs.Server != nil {
 			// Auto-enable message broker when broker plugins are configured
 			// but message_broker.enabled was not explicitly set (#472).
 			if vs.Server.Plugins != nil && len(vs.Server.Plugins.Broker) > 0 {
@@ -1117,11 +1121,8 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger, me
 	if os.Getenv(logging.EnvCloudLogging) != "" {
 		cloudLoggingEnabled = logging.IsCloudLoggingEnabled()
 	} else {
-		projectPath := ""
-		if globalMode {
-			projectPath = "global"
-		}
-		if vs, err := config.LoadVersionedSettings(projectPath); err == nil && vs.Telemetry != nil && vs.Telemetry.Cloud != nil && vs.Telemetry.Cloud.CloudLogging != nil {
+		// The global settings, whether or not --global is given.
+		if vs, err := loadServerVersionedSettings(); err == nil && vs.Telemetry != nil && vs.Telemetry.Cloud != nil && vs.Telemetry.Cloud.CloudLogging != nil {
 			cloudLoggingEnabled = *vs.Telemetry.Cloud.CloudLogging
 		}
 	}
@@ -2973,7 +2974,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// Load notification channels from versioned settings. With operational
 	// settings (any DB driver), ApplySnapshot rebuilds the registry from the
 	// notifications section at startup and on every change.
-	if vs, err := config.LoadVersionedSettings(""); err == nil && vs.Server != nil && len(vs.Server.NotificationChannels) > 0 {
+	if vs, err := loadServerVersionedSettings(); err == nil && vs.Server != nil && len(vs.Server.NotificationChannels) > 0 {
 		registry := hub.NewChannelRegistryFromSettings(vs.Server.NotificationChannels)
 		hubSrv.SetChannelRegistry(registry)
 		log.Printf("Notification channels configured: %d channel(s) registered", registry.Len())
@@ -3929,7 +3930,7 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime
-// GetRuntime("", "") resolves to at startup. A per-request profile whose
+// GetRuntime(serverRuntimeProjectPath, "") resolves to at startup. A per-request profile whose
 // construction fails is not memoized on the error, so it retries
 // construction on the next request rather than staying degraded until a
 // restart (see resolveManagerForOpts).
@@ -3948,7 +3949,7 @@ func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
 // the broker's manager is built on, so the refusal cannot be skipped without
 // also losing the runtime itself.
 func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) runtime.Runtime, logf func(format string, args ...interface{})) (runtime.Runtime, error) {
-	rt := getRuntime("", "")
+	rt := getRuntime(serverRuntimeProjectPath, "")
 	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
 		return nil, err
 	}
@@ -3972,7 +3973,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		autoProvide := serverAutoProvide
 		if enableHub && !cmd.Flags().Changed("auto-provide") {
 			autoProvide = true
-			if vs, _, vsErr := config.LoadEffectiveSettings(""); vsErr == nil && vs != nil && vs.Server != nil && vs.Server.Broker != nil && vs.Server.Broker.AutoProvide != nil {
+			if vs, _, vsErr := loadServerEffectiveSettings(); vsErr == nil && vs != nil && vs.Server != nil && vs.Server.Broker != nil && vs.Server.Broker.AutoProvide != nil {
 				autoProvide = *vs.Server.Broker.AutoProvide
 			}
 		}
@@ -3994,7 +3995,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	settings := brokerSettings
 
 	// Try loading versioned settings to get broker identity from server.broker
-	versionedSettings, _, vsErr := config.LoadEffectiveSettings("")
+	versionedSettings, _, vsErr := loadServerEffectiveSettings()
 	var vsBroker *config.V1BrokerConfig
 	if vsErr != nil {
 		log.Printf("Warning: failed to load settings; broker identity from server.broker is not applied: %v", vsErr)
@@ -4239,7 +4240,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// engine without a full server restart (fixes onboarding wizard flow).
 	if hubSrv != nil && colocatedBrokerRegistered {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
-			newRT := runtime.GetRuntime("", "")
+			newRT := runtime.GetRuntime(serverRuntimeProjectPath, "")
 			if newRT.Name() == rhSrv.RuntimeName() {
 				return false
 			}
@@ -4365,7 +4366,7 @@ func initPluginManager(ctx context.Context, secretBackend secret.SecretBackend, 
 	grpcbroker.SetADCSourceConstructor(adcsource.New)
 	mgr.NewGRPCBrokerAdapter = grpcbroker.NewAdapterFromEntry
 
-	vs, err := config.LoadVersionedSettings("")
+	vs, err := loadServerVersionedSettings()
 	if err != nil {
 		log.Printf("Warning: failed to load settings; plugins are not loaded: %v", err)
 		return mgr
@@ -4623,7 +4624,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	// Pull from versioned settings if available.
-	if vs, err := config.LoadVersionedSettings(""); err == nil {
+	if vs, err := loadServerVersionedSettings(); err == nil {
 		// The maintenance build registry is resolved at build time
 		// (hub.Server.maintenanceImageRegistry), not here.
 		// Collect harness names from configured harness configs.
