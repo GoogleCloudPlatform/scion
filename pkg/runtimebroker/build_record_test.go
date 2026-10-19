@@ -82,6 +82,10 @@ type brFixture struct {
 func newBRFixture(t *testing.T) *brFixture {
 	t.Helper()
 	clearSCIONEnv(t)
+	// Keep the embedded default settings on the workstation tier, whose
+	// profiles (local, remote) the tests account for.
+	t.Setenv("K_SERVICE", "")
+	t.Setenv("CLOUD_RUN_INSTANCE", "")
 	t.Setenv("HOME", t.TempDir())
 	t.Chdir(t.TempDir())
 	prev := config.GetGlobalSettingsOverlay()
@@ -398,10 +402,14 @@ func TestBuildRecord_BR3_PinnedRestartResolution(t *testing.T) {
 // manager over it.
 func TestBuildRecord_BR4_DiscoveryStoresRecord(t *testing.T) {
 	f := newBRFixture(t)
-	// Every profile in the project is resolved; "local" and "alias" resolve
-	// to the default's identity and "broken" to an error runtime, so only
-	// "k8s-a" is registered.
+	// Discovery resolves every profile in the effective settings: the
+	// project's own, plus "remote" (runtime "kubernetes"), which the
+	// embedded default settings always add. "local" and "alias" resolve to
+	// the default's identity, and "broken" and "remote" to error runtimes,
+	// so they are all skipped and only "k8s-a" is registered.
 	f.builds["local"] = brBuild{rt: &scionrt.MockRuntime{NameFunc: func() string { return "docker" }}, rec: brDefaultRecord}
+	f.builds["remote"] = brBuild{rt: &scionrt.ErrorRuntime{Err: errors.New("no cluster in this test")},
+		rec: config.RuntimeBuildRecord{Present: true, EntryName: "kubernetes"}}
 	auxRT := f.builds["k8s-a"].rt
 
 	f.srv.discoverAuxiliaryRuntimesForProjects([]string{f.projectDir})
