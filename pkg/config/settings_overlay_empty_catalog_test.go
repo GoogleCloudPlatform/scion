@@ -46,7 +46,7 @@ func emptyCatalogFileFixture() *VersionedSettings {
 // resolves to the file's default runtime.
 func TestSettingsOverlay_EmptyStoredCatalogUsesFile(t *testing.T) {
 	o := NewSettingsOverlay()
-	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, map[string]HarnessConfigEntry{}, "")
+	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, map[string]HarnessConfigEntry{})
 	vs := emptyCatalogFileFixture()
 	o.Apply(vs)
 
@@ -85,7 +85,7 @@ func TestSettingsOverlay_EmptyStoredCatalogUsesFile(t *testing.T) {
 // replace the file's, and resolve against the file's runtimes.
 func TestSettingsOverlay_StoredProfilesWithEmptyStoredRuntimesUseFileRuntimes(t *testing.T) {
 	o := NewSettingsOverlay()
-	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{"stored": {Runtime: "docker"}}, nil, "")
+	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{"stored": {Runtime: "docker"}}, nil)
 	vs := emptyCatalogFileFixture()
 	vs.ActiveProfile = "stored"
 	o.Apply(vs)
@@ -108,7 +108,7 @@ func TestSettingsOverlay_StoredProfilesWithEmptyStoredRuntimesUseFileRuntimes(t 
 // Stored nil (unset) leaves the file's maps in place, as before.
 func TestSettingsOverlay_UnsetStoredCatalogUsesFile(t *testing.T) {
 	o := NewSettingsOverlay()
-	o.Update(nil, nil, nil, "")
+	o.Update(nil, nil, nil)
 	vs := emptyCatalogFileFixture()
 	o.Apply(vs)
 
@@ -127,8 +127,8 @@ func TestSettingsOverlay_EmptiedStoredCatalogReturnsToFile(t *testing.T) {
 	o.Update(
 		map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
 		map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}, "batch": {Runtime: "k8s"}},
-		map[string]HarnessConfigEntry{"gemini": {Harness: "gemini"}}, "")
-	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, map[string]HarnessConfigEntry{}, "")
+		map[string]HarnessConfigEntry{"gemini": {Harness: "gemini"}})
+	o.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, map[string]HarnessConfigEntry{})
 	vs := emptyCatalogFileFixture()
 	o.Apply(vs)
 

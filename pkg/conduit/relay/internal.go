@@ -386,7 +386,10 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	if r, ok := st.(conduit.StreamRenewer); ok {
 		hop.setRenewalHandler(func(credential []byte) { _ = r.Renew(credential) })
 	}
-	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: sessionID, StreamID: st.ID()}); err != nil {
+	// The target-side ids are this relay's own view of the stream it just
+	// opened: the id of the session it holds and the stream's id on it,
+	// never anything the caller sent.
+	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: ls.Info().SessionID, StreamID: st.ID()}); err != nil {
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return

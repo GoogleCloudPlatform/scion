@@ -35,3 +35,14 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// TestAmbientSettingsEnvCleared: TestMain leaves no SCION_SERVER_* or
+// SCION_SEED_* variable from the environment running the tests.
+func TestAmbientSettingsEnvCleared(t *testing.T) {
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "SCION_SERVER_") || strings.HasPrefix(name, "SCION_SEED_") {
+			t.Errorf("%s is set in the test process; TestMain must clear it", name)
+		}
+	}
+}
