@@ -74,8 +74,8 @@ const (
 
 // memberActorAuthority is the actor-side input to memberRoleDecision.
 type memberActorAuthority struct {
-	// credentialDenial, when set, refuses every role (the credential gate
-	// runs before any other check).
+	// credentialDenial, when set, refuses every role (the actor admission
+	// check, checkMembershipActor, runs before any other check).
 	credentialDenial *MembershipDecision
 	// authorityDenial, when set, refuses every role: the actor has no
 	// project role and lacks the hub role_binding.* authority the request

@@ -60,7 +60,7 @@ func TestWebPTYCapability_PerRuntime(t *testing.T) {
 				t.Fatalf("precondition: runtime Name() = %q, want %q", got, tc.name)
 			}
 
-			if got := StaticCapabilities(tc.rt).WebPTY; got != tc.want {
+			if got := StaticCapabilities(tc.rt, "").WebPTY; got != tc.want {
 				t.Errorf("StaticCapabilities(%s).WebPTY = %v, want %v", tc.name, got, tc.want)
 			}
 			if got := slices.Contains(StaticCapabilityNames(tc.rt), "webPty"); got != tc.want {
@@ -91,7 +91,7 @@ func TestWebPTYCapability_PerRuntime(t *testing.T) {
 // TestWebPTYCapability_NilRuntime pins that a broker with no runtime yet
 // reports no web terminal, in both the static capabilities and their names.
 func TestWebPTYCapability_NilRuntime(t *testing.T) {
-	if StaticCapabilities(nil).WebPTY {
+	if StaticCapabilities(nil, "").WebPTY {
 		t.Error("StaticCapabilities(nil).WebPTY = true, want false")
 	}
 	if slices.Contains(StaticCapabilityNames(nil), "webPty") {

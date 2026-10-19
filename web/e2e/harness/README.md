@@ -267,6 +267,12 @@ await page.goto('/', { waitUntil: 'domcontentloaded' });
   where the hub trusts Google tokens).
 - `web/e2e/iap-driver/` checks the hook in a real browser against two local
   servers (no IAP needed).
+- On a Scion runner, `driverIdTokenSource()` in `driver-id-token.ts` is the
+  token callback: it gets the driver's ID token in-process from the metadata
+  emulator (directly, or through IAM Credentials when the runner's account
+  is not the driver), never from a file. `web/e2e/iap-journey/` is the
+  operator-run journey that uses it (see the docs-site guide "IAP Driver
+  Tokens for Browser Journeys").
 
 ## Seeding test data
 

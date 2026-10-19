@@ -68,12 +68,18 @@ The environment variable for this key is `SCION_SERVER_HUB_ENDPOINT`, and its se
 - **Layer-1:** a save applies without a restart. The serving node applies it immediately, and other replicas pick it up through the settings event (within about 2 seconds), with a 60-second poll as a backstop. A few Layer-1 keys take effect only after a restart. The schema endpoint (`GET /api/v1/admin/server-config/schema`) lists them per section in `restart_required`: today `server.hub.public_url` and `server.github_app.app_id`.
 - **Layer-0:** changes take effect only when the Hub restarts. On a workstation Hub, a save that changes a Layer-0 key in `settings.yaml` lists it in the response's `reload.requires_restart`. `log_level` is the exception and applies immediately.
 
-Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `image_registry`, `auto_expose_ports.enabled` and `telemetry.enabled`. Two sections revert as a whole:
+Clearing one of these Layer-1 keys returns the running Hub to the value it started with (from `settings.yaml`, the seed or the environment): `soft_delete_retention`, `soft_delete_retain_files`, `auto_expose_ports.enabled` and `telemetry.enabled`. Clearing `image_registry` returns it to the settings-file value (see below). Two sections revert as a whole:
 
 - **GitHub App:** clearing `app_id` returns all the non-secret GitHub App fields to their startup values. While `app_id` is set, clearing another field applies the empty value, except `private_key_path`, which keeps the startup path.
 - **Telemetry:** a telemetry section with no keys returns to the startup telemetry config. Clearing one telemetry key while others remain applies the config without that key, not its startup value.
 
-For `soft_delete_retention`, `soft_delete_retain_files` and `image_registry`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
+For `soft_delete_retention` and `soft_delete_retain_files`, `GET` returns that running value while no value is stored. A save that sends the same value back leaves the key unset: it is not stored and not reported. A retention is compared as a duration, so `72h0m0s` matches `72h`.
+
+`image_registry` follows one order everywhere; see [Image registry order](/scion/reference/settings-precedence/#image-registry-order). In the admin settings:
+
+- The top-level field shows the saved value, or else this Hub replica's settings-file value (`settings.yaml`, `SCION_SEED_IMAGEREGISTRY` and `SCION_SERVER_IMAGEREGISTRY`). It never shows an environment value such as `SCION_IMAGE_REGISTRY`. A save stores the field only when it differs from the value shown, so saving the page unchanged stores nothing. To pin the settings-file value, change it once.
+- Each profile's field shows only a value saved for that profile. A hint shows what the profile inherits and from where. Typing a value saves it.
+- `image_registry_provenance` in the `GET` response is read-only and tells you where the value in effect comes from: the Hub-wide source and value, every Runtime Broker that reports `SCION_IMAGE_REGISTRY` (which beats every saved or file value for that Runtime Broker's agents), and each profile's value. The page shows it as one badge on the field.
 
 #### Save report
 

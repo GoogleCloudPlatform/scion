@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -425,8 +424,13 @@ func hubRoleBindingPermission(op MembershipOp) string {
 // It is suitable for pre-transaction checks (governance gate) but NOT for
 // authoritative in-transaction decisions. Use actorHasHubRoleBindingAuthorityTx
 // for the transactional recheck that closes the TOCTOU window.
+//
+// A request sent with a user access token never holds this authority
+// (membershipCallerIsToken): a token acts on membership only through its
+// holder's own project role, under the governance matrix and the
+// direct-owner rule.
 func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthority(ctx context.Context, actorID string, op MembershipOp) bool {
-	if svc.authz == nil {
+	if svc.authz == nil || membershipCallerIsToken(ctx) {
 		return false
 	}
 	permission := hubRoleBindingPermission(op)
@@ -465,7 +469,13 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthority(ctx context
 //
 // Returns (bool, error) so callers can distinguish "no authority" from
 // "store failure" and surface 500 instead of a misleading 403.
+//
+// A request sent with a user access token never holds this authority, as
+// for actorHasHubRoleBindingAuthority.
 func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx context.Context, tx store.Store, actorID string, op MembershipOp) (bool, error) {
+	if membershipCallerIsToken(ctx) {
+		return false, nil
+	}
 	permission := hubRoleBindingPermission(op)
 	if permission == "" {
 		return false, nil
@@ -523,13 +533,16 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 }
 
 // ---------------------------------------------------------------------------
-// Credential-kind enforcement at the service boundary (R2-2)
+// Actor admission at the service boundary
 // ---------------------------------------------------------------------------
 
 // allowedMembershipCredentials is the closed allowlist of credential kinds
-// permitted for exported ProjectMembershipService mutations (AddMember,
-// UpdateMemberRole, RemoveMember, TransferOwnership). Only interactive
-// session JWTs and dev credentials are admitted.
+// admitted for every exported ProjectMembershipService mutation and for the
+// assignable-roles view (AddMember, UpdateMemberRole, RemoveMember,
+// TransferOwnership, SetMemberRoles, AssignableRoles) without a further
+// token check: interactive session JWTs and dev credentials. A user access
+// token is admitted by checkMembershipActor under the token rules below;
+// every other kind is refused.
 //
 // HTTP handler-level checks remain as defense-in-depth, but cannot be the
 // only enforcement — direct service callers (e.g., via admin role-binding
@@ -567,17 +580,32 @@ func isSystemCaller(ctx context.Context) bool {
 	return v
 }
 
-// checkMembershipCredential enforces the credential-kind allowlist and
-// actor-identity binding at the service boundary. Returns a denial
-// decision if the credential is rejected; nil if accepted.
+// membershipCallerIsToken reports whether the request is sent with a user
+// access token: the credential kind is a user access token, or the
+// identity is a token identity. Either one marks a token caller, so a
+// context that carries only one of them is still treated as a token.
+func membershipCallerIsToken(ctx context.Context) bool {
+	return GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT ||
+		IsScopedUserIdentity(GetIdentityFromContext(ctx))
+}
+
+// checkMembershipActor admits the caller of a membership operation on
+// projectID at the service boundary. It returns a denial decision if the
+// caller is refused, nil if admitted.
 //
-// System callers (marked via WithSystemCaller) bypass the credential
-// check but are logged.
+//   - System callers (marked via WithSystemCaller) are admitted.
+//   - Interactive session and dev credentials are admitted.
+//   - A user access token is admitted only when its identity is a token
+//     identity and it passes project.manage on the project through the
+//     authorization service: its selectors must carry project:manage, its
+//     boundary must cover the project, and a project-boundary token's
+//     holder must still be a member of the project. The governance matrix,
+//     CanDelegate and the other invariants of the operation apply after
+//     this, through the holder's own project role.
+//   - Every other credential kind, and a missing one, is refused.
 //
-// Membership mutations are session-only with the GOV_PENDING reason: a
-// credential-kind refusal carries the session-only details
-// (session_only_gate.go) in MembershipDecision.Details.
-func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Context, actorID string) *MembershipDecision {
+// In every admitted case the context identity must be the request actor.
+func (svc *ProjectMembershipService) checkMembershipActor(ctx context.Context, actorID, projectID string) *MembershipDecision {
 	// Trusted internal callers bypass the credential gate.
 	if isSystemCaller(ctx) {
 		return nil
@@ -590,27 +618,25 @@ func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Conte
 		return &MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodeMembershipCredentialInsufficient,
-			Reason:     "membership mutations require an interactive session credential",
+			Reason:     "membership changes require a user session or a user access token",
 			HTTPStatus: 403,
-			Details:    sessionOnlyDenialDetails(authzop.ReasonGovernancePending),
 		}
 	}
 
-	// Enforce closed allowlist.
-	if !allowedMembershipCredentials[cred.Kind] {
+	token := cred.Kind == CredentialKindUAT
+	if !token && !allowedMembershipCredentials[cred.Kind] {
 		return &MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodeMembershipCredentialInsufficient,
-			Reason:     fmt.Sprintf("membership mutations require an interactive session; credential kind %q is not allowed", cred.Kind),
+			Reason:     fmt.Sprintf("membership changes require a user session or a user access token; credential kind %q is not allowed", cred.Kind),
 			HTTPStatus: 403,
-			Details:    sessionOnlyDenialDetails(authzop.ReasonGovernancePending),
 		}
 	}
 
 	// Bind credential identity to actor ID: the context identity must
 	// match the actor specified in the request.
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
+	if isNilIdentity(identity) {
 		return &MembershipDecision{
 			Allowed:    false,
 			DenialCode: ErrCodeMembershipCredentialInsufficient,
@@ -626,7 +652,53 @@ func (svc *ProjectMembershipService) checkMembershipCredential(ctx context.Conte
 			HTTPStatus: 403,
 		}
 	}
+	if !token {
+		if IsScopedUserIdentity(identity) {
+			// A token identity is admitted only under the token rules.
+			return &MembershipDecision{
+				Allowed:    false,
+				DenialCode: ErrCodeMembershipCredentialInsufficient,
+				Reason:     "a user access token identity requires a user access token credential",
+				HTTPStatus: 403,
+			}
+		}
+		return nil // accepted
+	}
 
+	// A user access token: the identity must be a token identity, so its
+	// selectors and boundary are known.
+	if !IsScopedUserIdentity(identity) {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     "a user access token credential requires a token identity",
+			HTTPStatus: 403,
+		}
+	}
+	if svc.authz == nil {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeMembershipCredentialInsufficient,
+			Reason:     "membership changes by user access token require the authorization service",
+			HTTPStatus: 403,
+		}
+	}
+	if projectID == "" {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeForbidden,
+			Reason:     "membership changes by user access token require a project",
+			HTTPStatus: 403,
+		}
+	}
+	if d := svc.authz.CheckAccess(ctx, identity, Resource{Type: "project", ID: projectID}, ActionManage); !d.Allowed {
+		return &MembershipDecision{
+			Allowed:    false,
+			DenialCode: ErrCodeForbidden,
+			Reason:     "the user access token does not allow project.manage on this project",
+			HTTPStatus: 403,
+		}
+	}
 	return nil // accepted
 }
 
@@ -805,8 +877,8 @@ func principalEligibleForRole(principalType, roleName string) bool {
 // AddMember adds a member to a project with governance, delegation, one-binding
 // enforcement, and audit.
 func (svc *ProjectMembershipService) AddMember(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
-	// R2-2: credential-kind enforcement at the service boundary.
-	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+	// Actor admission at the service boundary (checkMembershipActor).
+	if denial := svc.checkMembershipActor(ctx, req.Actor.ID(), req.ProjectID); denial != nil {
 		return nil, denial
 	}
 
@@ -1096,8 +1168,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 // UpdateMemberRole changes a member's role with governance, delegation,
 // last-owner guard, one-binding enforcement, and audit.
 func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
-	// R2-2: credential-kind enforcement at the service boundary.
-	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+	// Actor admission at the service boundary (checkMembershipActor).
+	if denial := svc.checkMembershipActor(ctx, req.Actor.ID(), req.ProjectID); denial != nil {
 		return nil, denial
 	}
 
@@ -1351,8 +1423,8 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 // RemoveMember removes a project member with governance, last-owner guard,
 // and audit.
 func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
-	// R2-2: credential-kind enforcement at the service boundary.
-	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+	// Actor admission at the service boundary (checkMembershipActor).
+	if denial := svc.checkMembershipActor(ctx, req.Actor.ID(), req.ProjectID); denial != nil {
 		return nil, denial
 	}
 
@@ -1544,7 +1616,12 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 // store.ErrVisitorBindingRefused. The caller publishes the conduit
 // authorization change once RemoveVisitor returns, as the callers of
 // RemoveMember do.
-func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID string) (*store.RoleBinding, error) {
+//
+// Removing a binding a visitor rule created also records an exclusion of
+// the visitor from that rule, by actorID, in the same transaction, so the
+// rule does not create the binding again; the rule's other visitors are
+// unchanged.
+func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID, actorID string) (*store.RoleBinding, error) {
 	var removed *store.RoleBinding
 	err := svc.store.WithTx(ctx, func(tx store.Store) error {
 		u, rb, err := projectVisitorBinding(ctx, tx, projectID, visitorID)
@@ -1553,6 +1630,17 @@ func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectI
 		}
 		if err := requireProjectVisitorBinding(ctx, tx, rb, projectID); err != nil {
 			return err
+		}
+		if rb.SourceRuleID != nil {
+			// The exclusion is recorded before the binding is deleted. The rule
+			// read is plain and the exclusion table has no foreign key, so the
+			// revoke locks no rule or project row and cannot wait in a cycle
+			// with a rule change or a project deletion. A binding whose rule no
+			// longer exists is still removed, with no rule to exclude them from.
+			err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actorID)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
 		}
 		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
 			return err
@@ -1599,8 +1687,8 @@ func requireProjectVisitorBinding(ctx context.Context, st store.Store, rb *store
 // owner binding is downgraded to project-member. This is one atomic operation
 // with post-state owner invariant verification per CT1 D1.
 func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req MembershipRequest) (*MembershipResult, *MembershipDecision) {
-	// R2-2: credential-kind enforcement at the service boundary.
-	if denial := svc.checkMembershipCredential(ctx, req.Actor.ID()); denial != nil {
+	// Actor admission at the service boundary (checkMembershipActor).
+	if denial := svc.checkMembershipActor(ctx, req.Actor.ID(), req.ProjectID); denial != nil {
 		return nil, denial
 	}
 
@@ -1651,6 +1739,27 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	memberRoleDef, err := svc.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "cannot resolve member role", HTTPStatus: 500}
+	}
+
+	// A user access token transfers ownership only when it may grant the
+	// owner role (CanDelegate): its selectors must carry every permission
+	// of project-owner, so a token never grants a role above its own
+	// authority.
+	if membershipCallerIsToken(ctx) {
+		if svc.authz == nil {
+			return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodeMembershipCredentialInsufficient, Reason: "ownership transfer by user access token requires the authorization service", HTTPStatus: 403}
+		}
+		delDecision := svc.authz.CanDelegate(ctx, req.Actor, GrantDescriptor{
+			Type:             GrantTypeRoleBinding,
+			RoleDefinitionID: ownerRoleDef.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          req.ProjectID,
+			GranteeType:      store.RoleBindingPrincipalUser,
+			GranteeID:        req.NewOwnerID,
+		})
+		if !delDecision.Allowed {
+			return nil, canDelegateRefusal(ownerRoleDef, delDecision.Reason)
+		}
 	}
 
 	// All transfer mutations, post-state invariant, and audit happen in one

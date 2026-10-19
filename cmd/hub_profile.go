@@ -42,7 +42,11 @@ import (
 //     every other command is refused before it runs;
 //   - a profile whose endpoint names the agent's own hub (SCION_HUB_ENDPOINT,
 //     SCION_HUB_URL) is refused; the comparison is by parsed host name and
-//     port (hubprofile.CheckNotOwnHub) and does not resolve DNS aliases.
+//     port (hubprofile.CheckNotOwnHub). Before a profile bearer is minted
+//     or sent, the session also compares hub identities: a target that
+//     reports the agent's own hub id is refused under any name
+//     (Session.CheckNotOwnHubByID; the name check alone applies when an id
+//     is unavailable).
 
 var (
 	hubProfileFlag string // --hub-profile
@@ -55,35 +59,37 @@ var (
 // explicitly. Each one builds its client through openHubProfileClient (or
 // needs none) and reads no local project state under a profile.
 var hubProfileAllowed = map[string]bool{
-	"hub":                        true,
-	"hub.status":                 true,
-	"hub.profile":                true,
-	"hub.profile.add":            true,
-	"hub.profile.list":           true,
-	"hub.profile.show":           true,
-	"hub.profile.remove":         true,
-	"hub.test-identity":          true,
-	"hub.test-identity.issue":    true,
-	"hub.test-identity.token":    true,
-	"hub.test-identity.list":     true,
-	"hub.test-identity.delete":   true,
-	"hub.test-identity.teardown": true,
-	"hub.test-identity.web-code": true,
-	"hub.projects":               true,
-	"hub.projects.info":          true,
-	"hub.projects.create":        true,
-	"hub.projects.delete":        true,
-	"artifact":                   true,
-	"artifact.publish":           true,
-	"artifact.get":               true,
-	"artifact.versions":          true,
-	"artifact.delete":            true,
-	"help":                       true,
-	"global-flags":               true,
-	"version":                    true,
-	"completion":                 true,
-	"__complete":                 true,
-	"__completeNoDesc":           true,
+	"hub":                          true,
+	"hub.status":                   true,
+	"hub.profile":                  true,
+	"hub.profile.add":              true,
+	"hub.profile.list":             true,
+	"hub.profile.show":             true,
+	"hub.profile.remove":           true,
+	"hub.test-identity":            true,
+	"hub.test-identity.issue":      true,
+	"hub.test-identity.token":      true,
+	"hub.test-identity.list":       true,
+	"hub.test-identity.delete":     true,
+	"hub.test-identity.teardown":   true,
+	"hub.test-identity.web-code":   true,
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
+	"hub.projects":                 true,
+	"hub.projects.info":            true,
+	"hub.projects.create":          true,
+	"hub.projects.delete":          true,
+	"artifact":                     true,
+	"artifact.publish":             true,
+	"artifact.get":                 true,
+	"artifact.versions":            true,
+	"artifact.delete":              true,
+	"help":                         true,
+	"global-flags":                 true,
+	"version":                      true,
+	"completion":                   true,
+	"__complete":                   true,
+	"__completeNoDesc":             true,
 	// hub.test-identity.delegate is deliberately absent: the delegation
 	// routes take a human session, which a profile never uses.
 
@@ -113,16 +119,18 @@ var hubProfileNoSession = map[string]bool{
 // own hub (ptone/scion#4240). hub.profile.list is not here: it reads only the local
 // profile directory and contacts no hub.
 var hubProfileAgentRuntime = map[string]bool{
-	"hub.status":                 true,
-	"hub.profile.add":            true,
-	"hub.profile.show":           true,
-	"hub.profile.remove":         true,
-	"hub.test-identity.issue":    true,
-	"hub.test-identity.token":    true,
-	"hub.test-identity.list":     true,
-	"hub.test-identity.delete":   true,
-	"hub.test-identity.teardown": true,
-	"hub.test-identity.web-code": true,
+	"hub.status":                   true,
+	"hub.profile.add":              true,
+	"hub.profile.show":             true,
+	"hub.profile.remove":           true,
+	"hub.test-identity.issue":      true,
+	"hub.test-identity.token":      true,
+	"hub.test-identity.list":       true,
+	"hub.test-identity.delete":     true,
+	"hub.test-identity.teardown":   true,
+	"hub.test-identity.web-code":   true,
+	"hub.test-identity.cleanup":    true,
+	"hub.test-identity.provenance": true,
 }
 
 // commandPath returns cmd's dot-separated path below the root.

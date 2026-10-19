@@ -180,3 +180,62 @@ func TestHubTestIdentityDelegate_RefusedWithAProfile(t *testing.T) {
 	assert.Contains(t, err.Error(), "never a hub profile")
 	assert.Empty(t, hub.requests())
 }
+
+// X4: --scope maps to the one hub scope and --admin-cap is sent for an
+// admin scope; the member scope stays the default.
+func TestHubTestIdentityDelegate_AdminScopes(t *testing.T) {
+	hub := newDelegateHub(t)
+	delegateEnv(t, hub)
+	for _, tc := range []struct {
+		scope, want string
+		adminCap    string
+	}{
+		{"hub-admin", "test_identity:issue_admin", "1"},
+		{"super-admin", "test_identity:issue_super_admin", ""},
+		{"member", "test_identity:issue", ""},
+	} {
+		args := []string{"hub", "test-identity", "delegate", "create", "--workload-sub", "123456789", "--scope", tc.scope}
+		if tc.adminCap != "" {
+			args = append(args, "--admin-cap", tc.adminCap)
+		}
+		r, err := runProfileRoot(t, args...)
+		require.NoError(t, err, r.stderr)
+		hub.mu.Lock()
+		body := hub.body
+		hub.body = nil
+		hub.mu.Unlock()
+		assert.Equal(t, []interface{}{tc.want}, body["scopes"], tc.scope)
+		_, hasAdminCap := body["adminCap"]
+		assert.Equal(t, tc.adminCap != "", hasAdminCap, tc.scope)
+		if tc.adminCap != "" {
+			assert.Equal(t, float64(1), body["adminCap"], tc.scope)
+		}
+		_, hasMemberCap := body["memberCap"]
+		assert.False(t, hasMemberCap, tc.scope)
+	}
+}
+
+// X4: an unknown --scope, a cap of the other tier, and an --admin-cap above
+// the scope's maximum are refused before any request.
+func TestHubTestIdentityDelegate_ScopeAndCapRefusedBeforeRequest(t *testing.T) {
+	hub := newDelegateHub(t)
+	delegateEnv(t, hub)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--scope", "admin"}, "invalid --scope"},
+		{[]string{"--scope", "viewer"}, "invalid --scope"},
+		{[]string{"--scope", "member", "--admin-cap", "1"}, "--admin-cap applies to the hub-admin and super-admin scopes only"},
+		{[]string{"--scope", "hub-admin", "--member-cap", "1"}, "--member-cap applies to the member scope only"},
+		{[]string{"--scope", "hub-admin", "--admin-cap", "3"}, "invalid --admin-cap 3"},
+		{[]string{"--scope", "super-admin", "--admin-cap", "2"}, "invalid --admin-cap 2"},
+		{[]string{"--scope", "super-admin", "--admin-cap", "-1"}, "invalid --admin-cap -1"},
+	} {
+		args := append([]string{"hub", "test-identity", "delegate", "create", "--workload-sub", "1"}, tc.args...)
+		_, err := runProfileRoot(t, args...)
+		require.Error(t, err, tc.args)
+		assert.Contains(t, err.Error(), tc.want, tc.args)
+	}
+	assert.Empty(t, hub.requests())
+}

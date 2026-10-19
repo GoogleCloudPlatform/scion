@@ -339,7 +339,7 @@ func TestHubTestIdentityDelete(t *testing.T) {
 	stderr.Reset()
 	require.NoError(t, deleteTestIdentity(ctx, &stdout, &stderr, gone.client(t).TestIdentities(), "fx-1"))
 	assert.Empty(t, stdout.String())
-	assert.Equal(t, "Notice: test identity fx-1 was not found (already deleted, or not one you may delete); nothing to do.\n", stderr.String())
+	assert.Equal(t, "Notice: test identity fx-1 was not found as a member or viewer identity (already deleted, or not one you may delete); nothing was deleted.\n", stderr.String())
 
 	agents := &tiCLIHub{deleteStatus: http.StatusConflict, deleteBody: `{"error":{"code":"conflict","message":"owns agents","details":{"agents":[{"id":"a-1","slug":"worker","projectId":"p-1"}]}}}`}
 	err := deleteTestIdentity(ctx, &stdout, &stderr, agents.client(t).TestIdentities(), "fx-1")
@@ -424,6 +424,8 @@ func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
 		"hub.test-identity.delete",
 		"hub.test-identity.teardown",
 		"hub.test-identity.web-code",
+		"hub.test-identity.cleanup",
+		"hub.test-identity.provenance",
 	}
 	humanOnly := []string{
 		"hub.test-identity.delegate",

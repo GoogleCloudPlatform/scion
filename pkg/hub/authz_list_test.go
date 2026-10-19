@@ -418,7 +418,7 @@ func collectRoleDefinitionIDsFromShims(shims []*storeRoleBindingShim) []string {
 // with a project scope narrows ScopeSetAll to only that project.
 func TestApplyCredentialCaveats_ScopedUser(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
-	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
+	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read", "agent:list"})
 
 	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetAll())
 	want := ScopeSetExplicit("proj-1")
@@ -432,7 +432,7 @@ func TestApplyCredentialCaveats_ScopedUser(t *testing.T) {
 // common project.
 func TestApplyCredentialCaveats_ScopedUserExplicitIntersection(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
-	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
+	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read", "agent:list"})
 
 	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetExplicit("proj-1", "proj-2"))
 	want := ScopeSetExplicit("proj-1")
@@ -445,7 +445,7 @@ func TestApplyCredentialCaveats_ScopedUserExplicitIntersection(t *testing.T) {
 // ScopedUserIdentity produces None when its project is not in the scope set.
 func TestApplyCredentialCaveats_ScopedUserDisjoint(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
-	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
+	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read", "agent:list"})
 
 	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetExplicit("proj-other"))
 	if !result.IsNone() {

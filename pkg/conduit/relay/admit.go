@@ -271,6 +271,7 @@ func capabilitiesFromProto(c *conduitv1.Capabilities, inc Incarnation, execScope
 		EndpointIncarnation: inc.Value,
 		ExecScope:           execScope,
 		IncarnationSource:   inc.Source,
+		Features:            append([]string(nil), c.GetFeatures()...),
 		TransportLimits: registry.TransportLimits{
 			MaxFrame:     int64(c.GetTransportLimits().GetMaxFrame()),
 			IdleTimeoutS: int64(c.GetTransportLimits().GetIdleTimeoutS()),

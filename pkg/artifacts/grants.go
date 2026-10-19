@@ -46,7 +46,10 @@ import (
 //	DELETE /api/v1/artifacts/{id}/grants/{grantId}   remove a grant
 //	PATCH  /api/v1/artifacts/{id}                    set or clear the expiry; move to another home project
 //
-// All of them need canAdminister, with one exception (design D24): on an
+// All of them need administration (adminAuthorityWith): the owner, an
+// admin grantee, or, on an artifact owned by an agent, a steward (design
+// D25; steward.go), who may not give admin or move the artifact. One
+// exception (design D24): on an
 // artifact owned by an agent, the agent's delegating user and an admin of
 // the home project may also POST a review grant to a user who can already
 // read the artifact through the home project or a grant to one of their
@@ -280,13 +283,13 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
-	allowed, err := s.canAdminister(r.Context(), b, a)
+	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return
 	}
-	if !allowed {
+	if authority == "" {
 		s.putReviewGrant(w, r, b, a)
 		return
 	}
@@ -303,6 +306,12 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, "bad_request", `permission must be "read", "review", "write" or "admin"`)
 		return
 	}
+	if isSteward(authority) && req.Permission == GrantAdmin {
+		// Non-amplification: a steward's authority is computed, so it
+		// may not mint a stored admin grant that would outlive it.
+		s.refuseStewardAction(w, r, logActionShare, a)
+		return
+	}
 	if !reviewSubjectOK(req.Permission, req.SubjectKind, req.SubjectRef) {
 		writeError(w, http.StatusBadRequest, "bad_request", `permission "review" may only be given to a user`)
 		return
@@ -313,20 +322,24 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if req.SubjectKind == SubjectScope && !home && !s.crossScopeAllowed(r.Context()) {
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
 	}
-	kind, ref, _, _ := s.host.Principal(r.Context())
+	actor := s.callerActor(r.Context(), a, authority)
 	g := &Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: req.SubjectKind, SubjectRef: req.SubjectRef,
-		Permission: req.Permission, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
+		Permission: req.Permission, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
 	}
 	// The store decides the home and cross-project rules again under the
 	// artifact's lock, against the home scope as it is then (a concurrent
 	// move may have changed it); the checks above answer early.
-	created, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()))
+	put, err := b.store.PutGrant(r.Context(), g, MaxGrantsPerArtifact, s.crossScopeAllowed(r.Context()), actor)
 	switch {
+	case errors.Is(err, ErrStewardActionNotAllowed):
+		s.refuseStewardAction(w, r, logActionShare, a)
+		return
 	case errors.Is(err, ErrHomeGrantAdmin):
 		writeError(w, http.StatusBadRequest, "bad_request", "the home project's grant may be read or write")
 		return
@@ -334,6 +347,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
@@ -345,6 +359,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 			"the artifact already has "+strconv.Itoa(MaxGrantsPerArtifact)+" grants; remove one first")
 		return
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionShare, a, err)
 		writeNotFound(w)
 		return
 	case err != nil:
@@ -353,9 +368,10 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	status := http.StatusOK
-	if created {
+	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
+	s.logGrantPut(r, a, g, put, authority)
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
 }
 
@@ -380,19 +396,22 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // cannot read the artifact, and code CodeReviewReplacesAccess when the
 // user holds a principal read, write or admin grant. A refusal by the
 // store's re-check of the home and owner under the artifact's lock keeps
-// the uniform 403. Every 403 here is logged once (logReviewGrantRefusal).
+// the uniform 403. Every 403 here writes one decision log entry
+// (logReviewGrantRefusal).
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
+	var clause string // the review clause that allowed the grant, for the decision log
+	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
 	ctx := r.Context()
 	subject, refusal := s.reviewGrantSubject(r, a)
 	if refusal != "" {
-		s.logReviewGrantRefusal(ctx, a, refusal, subject)
+		s.logReviewGrantRefusal(r, a, refusal, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	}
 	if _, ok := s.host.(ReviewSubjectAuthority); !ok {
 		// Without the subject check nobody passes it (fail closed), but
 		// saying the user cannot read would not be true: the uniform 403.
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	}
@@ -416,16 +435,16 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 			s.refuseReviewReplacesAccess(w, r, a, subject)
 			return
 		}
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalSubjectUnreadable, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalSubjectUnreadable, subject)
 		writeError(w, http.StatusForbidden, CodeReviewSubjectCannotRead, reviewSubjectCannotReadMessage)
 		return
 	}
-	kind, ref, _, _ := s.host.Principal(ctx)
+	actor := s.callerActor(ctx, a, reviewGrantAuthority(clause))
 	g := &Grant{
 		ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal, SubjectRef: subject,
-		Permission: GrantReview, CreatedByRef: PrincipalRef(kind, ref), CreatedAt: time.Now().UTC(),
+		Permission: GrantReview, CreatedByRef: PrincipalRef(actor.Kind, actor.Ref), CreatedAt: time.Now().UTC(),
 	}
-	created, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef)
+	put, err := b.store.PutReviewGrant(ctx, g, MaxGrantsPerArtifact, a.ScopeRef, actor)
 	switch {
 	case errors.Is(err, ErrReviewReplacesAccess):
 		s.refuseReviewReplacesAccess(w, r, a, subject)
@@ -433,7 +452,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	case errors.Is(err, ErrReviewGrantRefused):
 		// The home or owner changed since the caller's authority was
 		// checked: the uniform 403.
-		s.logReviewGrantRefusal(ctx, a, reviewRefusalStoreRefused, subject)
+		s.logReviewGrantRefusal(r, a, reviewRefusalStoreRefused, subject)
 		s.writeAdminForbidden(w, r)
 		return
 	case errors.Is(err, ErrAttachmentNotShareable):
@@ -451,8 +470,9 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
+	s.logGrantPut(r, a, g, put, actor.Authority)
 	status := http.StatusOK
-	if created {
+	if put == GrantPutCreated {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
@@ -461,7 +481,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 // refuseReviewReplacesAccess logs and answers putReviewGrant's refusal of
 // a user who holds a principal read, write or admin grant on a.
 func (s *Service) refuseReviewReplacesAccess(w http.ResponseWriter, r *http.Request, a *Artifact, subject string) {
-	s.logReviewGrantRefusal(r.Context(), a, reviewRefusalExistingAccess, subject)
+	s.logReviewGrantRefusal(r, a, reviewRefusalExistingAccess, subject)
 	writeError(w, http.StatusForbidden, CodeReviewReplacesAccess, reviewReplacesAccessMessage)
 }
 
@@ -499,10 +519,20 @@ func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 // reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
 // lets the caller of ctx give review access on a (the delegating user of
 // a's owning agent, the project owners and admins of a's home project, and
-// super-admins). A host without the authority answers no.
+// super-admins). A host without the authority answers no. A host with
+// ReviewGrantClauser is asked that instead, and the clause is kept for the
+// decision log when ctx carries a reviewClauseNote (putReviewGrant).
 func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
-	authority, ok := s.host.(ReviewGrantAuthority)
-	return ok && authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef)
+	clause := reviewClauseUnnamed
+	if clauser, ok := s.host.(ReviewGrantClauser); ok {
+		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef)
+	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+		clause = ""
+	}
+	if note, ok := ctx.Value(reviewClauseNote{}).(*string); ok {
+		*note = clause
+	}
+	return clause != ""
 }
 
 // mayGrantReview is the caller half of the review-grant decision (design
@@ -567,15 +597,18 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 	if !ok {
 		return
 	}
+	removed := s.grantForLog(r, b, a, grantID)
 	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionAdminister, a, err)
 		writeNotFound(w)
 	case err != nil:
 		slog.ErrorContext(r.Context(), "artifacts: delete grant failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not remove the grant")
 	default:
+		s.logGrantRemoved(r, a, removed, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -588,8 +621,9 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 // links cut short and the grants that will be removed (design A1, A2).
 //
 // scopeRef moves the artifact to another home project (D16). It needs, on
-// top of canAdminister, exactly the gate publishing into that project has
-// (Permits and Authorize for artifact.create there, for every caller), and
+// top of adminAuthorityWith (and never a steward authority), exactly the
+// gate publishing into that project has (Permits and Authorize for
+// artifact.create there, for every caller), and
 // because it gives that project's members access, the host's switch for
 // sharing across projects. The old home project's grant is removed (a
 // move is not a share; keeping access takes an explicit grant); the new
@@ -615,16 +649,25 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	if req.ScopeRef != nil && *req.ScopeRef != a.ScopeRef {
+		if isSteward(actor.Authority) {
+			// A move re-homes the artifact (and re-points its
+			// project-owner stewards), so it stays with the owner and
+			// admin grantees.
+			s.refuseStewardAction(w, r, logActionMove, a)
+			return
+		}
 		scope := *req.ScopeRef
 		if !validSubjectID(scope) {
 			writeError(w, http.StatusBadRequest, "bad_request", "scopeRef must be a project id")
 			return
 		}
 		if !canCreateIn(ctx, s.host, scope) {
+			s.logRefusal(r, logActionMove, logReasonNotAuthorizedInScope, a)
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}
 		if !s.crossScopeAllowed(ctx) {
+			s.logRefusal(r, logActionMove, logReasonCrossProjectDisabled, a)
 			writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 				"moving artifacts to other projects is turned off on this hub")
 			return
@@ -642,9 +685,10 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 	if u.HomeGrant != nil || u.SetExpiry {
 		var err error
 		updated, err = b.store.UpdateArtifact(ctx, a.ID, u)
-		if !s.patchStored(w, r, err) {
+		if !s.patchStored(w, r, a, err) {
 			return
 		}
+		s.logPatch(r, a, updated, u)
 	}
 	resp := PatchArtifactResponse{Artifact: artifactInfo(updated)}
 	if updated.ExpiresAt != nil {
@@ -670,10 +714,12 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 
 // patchStored writes the response for a failed store write of a patch and
 // reports whether the write succeeded.
-func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error) bool {
+func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, a *Artifact, err error) bool {
 	switch {
 	case err == nil:
 		return true
+	case errors.Is(err, ErrStewardActionNotAllowed):
+		s.refuseStewardAction(w, r, logActionMove, a)
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the owner already has an artifact with this key in that project")
 	case errors.Is(err, ErrAttachmentNotShareable):
@@ -685,6 +731,7 @@ func (s *Service) patchStored(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusConflict, "home_admin_grant",
 			"the target project holds an admin grant on this artifact; lower it to read or write before moving")
 	case errors.Is(err, ErrNotFound):
+		s.logStewardPrecondition(r, logActionAdminister, a, err)
 		writeNotFound(w)
 	default:
 		slog.ErrorContext(r.Context(), "artifacts: update artifact failed", "error", err)

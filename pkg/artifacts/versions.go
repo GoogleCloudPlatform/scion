@@ -89,6 +89,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if !canCreateIn(ctx, s.host, scope) {
 		// A credential that does not permit artifact.create may be
 		// explained; the decision itself is canCreateIn's.
+		s.logCreateRefusal(r, scope)
 		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
 			return
 		}
@@ -161,9 +162,11 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: create pending version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
+	s.logAllowed(r, logEntry{action: logActionCreated, artifact: a, seq: v.Seq, authority: logAuthorityOwner})
 	writePending(w, a, v, files)
 }
 
@@ -208,11 +211,13 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		return
 	}
 	if access == accessNone {
+		s.logWriteRefusal(r, a)
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return
 	}
 	// Refusal 1 of 3 for a review grantee: starting a publish version.
 	if refuseKind(w, access, versionKind(req.Kind)) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
 		return
 	}
 	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
@@ -247,9 +252,11 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "artifacts: create version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the version")
 		return
 	}
+	s.logVersion(r, logActionVersionCreated, a, v.Seq, access)
 	writePending(w, a, v, files)
 }
 
@@ -586,6 +593,7 @@ func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id st
 		return b, nil, accessNone, false
 	}
 	if access == accessNone {
+		s.logWriteRefusal(r, a)
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
 		return b, nil, accessNone, false
 	}
@@ -609,6 +617,7 @@ func (s *Service) pendingVersionOf(w http.ResponseWriter, r *http.Request, b bac
 	}
 	kind, ref, _, _ := s.host.Principal(r.Context())
 	if v.CreatedByKind != kind || v.CreatedByRef != ref {
+		s.logRefusal(r, logActionWrite, logReasonNotVersionPublisher, a)
 		writeError(w, http.StatusForbidden, "forbidden", "only the publisher of a pending version may upload to it")
 		return nil, false
 	}
@@ -641,6 +650,7 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 	// Refusal 2 of 3 for a review grantee: uploading to a publish version
 	// (one it started while it still held write access).
 	if refuseKind(w, access, v.Kind) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
 		return
 	}
 	f, err := b.store.GetFile(ctx, v.ID, filePath)
@@ -738,6 +748,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	// Refusal 3 of 3 for a review grantee: finalizing a publish version.
 	// It comes before the claim, so a refused request changes nothing.
 	if refuseKind(w, access, v.Kind) {
+		s.logRefusal(r, logActionWrite, logReasonReviewOnly, a)
 		return
 	}
 	if v.Kind == VersionKindReview && freq.Base <= 0 {
@@ -815,11 +826,11 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
 	if errors.Is(err, ErrStaleBase) {
 		// A version was published between the review check and now.
-		s.discardStaleReview(w, r, b, a.ID, seq, claim)
+		s.discardStaleReview(w, r, b, a, seq, claim)
 		return
 	}
 	if errors.Is(err, ErrPendingNewer) {
-		s.discardReview(w, r, b, a.ID, seq, claim, FailReasonNewerPublishPending,
+		s.discardReview(w, r, b, a, seq, claim, FailReasonNewerPublishPending,
 			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
 		return
 	}
@@ -839,9 +850,12 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "artifacts: finalize failed", "error", err)
+		s.logVersionError(r, a, seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
 		return
 	}
+	// The version is committed: log it before the read-back, which may fail.
+	s.logVersion(r, logActionVersionFinalized, updated, seq, access)
 	ready, err := b.store.GetVersion(ctx, a.ID, seq)
 	if err == nil {
 		files, err = b.store.ListFiles(ctx, ready.ID)
