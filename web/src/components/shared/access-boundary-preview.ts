@@ -597,8 +597,12 @@ export class ScionAccessBoundaryPreview extends LitElement {
 
   private startExpiryTimer(): void {
     this.stopExpiryTimer?.();
+    this.stopExpiryTimer = null;
     this.updateExpiryTime();
-    this.stopExpiryTimer = visibleInterval(() => this.updateExpiryTime(), 1000);
+    // An already expired preview needs no countdown.
+    if (!this.isExpired) {
+      this.stopExpiryTimer = visibleInterval(() => this.updateExpiryTime(), 1000);
+    }
   }
 
   private updateExpiryTime(): void {

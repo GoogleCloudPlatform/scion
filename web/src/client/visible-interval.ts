@@ -22,6 +22,8 @@
  * stops the timer when `document.hidden` turns true. When the tab is shown
  * again it calls `fn` once if at least one tick was missed while hidden
  * (unless `catchUpOnVisible` is false), then resumes the normal cadence.
+ * If no tick was missed, the next one comes when it was due, so the time the
+ * tab spent hidden still counts toward the current interval.
  */
 
 export interface VisibleIntervalOptions {
@@ -47,27 +49,45 @@ export function visibleInterval(
     return () => clearInterval(id);
   }
 
-  let timer: ReturnType<typeof setInterval> | null = null;
-  // Wall-clock time of the last tick (or of the start). A tick is missed
-  // when a full interval has elapsed since then.
-  let lastTickAt = Date.now();
+  // A chain of timeouts rather than setInterval, so that showing the tab
+  // again resumes with the time left in the current interval instead of a
+  // full one. Otherwise switching tabs faster than `ms` would never tick.
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  // Wall-clock time the next tick is due. Ticks are scheduled against it,
+  // not `ms` after the previous one ran, so lateness does not add up. Wall
+  // clock, not performance.now(), which can stop while a device sleeps.
+  let dueAt = Date.now() + ms;
   let stopped = false;
 
-  const tick = (): void => {
-    lastTickAt = Date.now();
-    fn();
-  };
-
-  const startTimer = (): void => {
-    if (timer === null) timer = setInterval(tick, ms);
+  const schedule = (): void => {
+    if (timer !== null) return;
+    const now = Date.now();
+    // The wall clock stepped backwards: never wait more than one interval.
+    if (dueAt - now > ms) dueAt = now + ms;
+    timer = setTimeout(tick, Math.max(0, dueAt - now));
   };
 
   const stopTimer = (): void => {
     if (timer !== null) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = null;
     }
   };
+
+  function tick(): void {
+    timer = null;
+    const now = Date.now();
+    dueAt += ms;
+    // After a catch-up (or a very late tick) restart the cadence from now
+    // rather than firing the missed ticks back to back.
+    if (dueAt <= now) dueAt = now + ms;
+    try {
+      fn();
+    } finally {
+      // fn may have thrown, or called the returned stop function.
+      if (!stopped) schedule();
+    }
+  }
 
   const onVisibilityChange = (): void => {
     if (stopped) return;
@@ -76,15 +96,20 @@ export function visibleInterval(
       return;
     }
     if (timer !== null) return;
-    if (catchUpOnVisible && Date.now() - lastTickAt >= ms) {
+    if (Date.now() < dueAt) {
+      schedule();
+    } else if (catchUpOnVisible) {
       tick();
+    } else {
+      // A tick was missed but no catch-up was asked for: start a fresh
+      // interval from now.
+      dueAt = Date.now() + ms;
+      schedule();
     }
-    // tick() may have called the returned stop function.
-    if (!stopped) startTimer();
   };
 
   document.addEventListener('visibilitychange', onVisibilityChange);
-  if (!document.hidden) startTimer();
+  if (!document.hidden) schedule();
 
   return () => {
     stopped = true;
