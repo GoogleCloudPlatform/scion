@@ -284,6 +284,14 @@ func TestProjectRegisterToken_EnforcesProjectCreate(t *testing.T) {
 		}
 	}
 
+	// register, clone and list are hub-level collection actions: none
+	// applies to an existing project target.
+	for _, id := range []string{"project.register", "project.clone", "project.list", "project.create"} {
+		applies, listed := permissions.AppliesToExistingProjectTarget(id)
+		assert.True(t, listed, "%s has an applicability entry", id)
+		assert.False(t, applies, "%s does not apply to an existing project target", id)
+	}
+
 	f := newPCTFixture(t, "pct-reg")
 	register := func(key string, req RegisterProjectRequest) *httptest.ResponseRecorder {
 		return doRequestWithToken(t, f.srv, key, http.MethodPost, "/api/v1/projects/register", req)

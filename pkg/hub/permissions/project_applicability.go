@@ -50,8 +50,10 @@ var ProjectTargetApplicability = map[string]bool{
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
-	// actions (create: no project exists yet; register/clone/list reviewed
-	// conservatively false — flagged for D.2 confirmation, not blocking).
+	// actions (create: no project exists yet). register and clone are false:
+	// their creation half is project.create on hub collection evidence, and
+	// a clone's source half is project.read on the source project. list is
+	// a collection list.
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
