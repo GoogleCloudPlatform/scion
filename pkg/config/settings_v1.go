@@ -1990,9 +1990,9 @@ type V1ServerHubConduitConfig struct {
 	// TargetStreamDeadlines is "off" (default) or "enforce": whether
 	// targets enforce user streams' authorization deadlines locally
 	// (design §3.5, Target-side deadlines). The value is published to
-	// targets with the grant keys. Enforce requires the hub's renewal
-	// driver, which lands in a follow-up change; until then, enforce
-	// refuses user streams to renewal-capable targets (503 unavailable,
+	// targets with the grant keys. The hub renews hub-held user streams
+	// to renewal-capable targets in both modes; with enforce, an open it
+	// cannot keep renewed is refused (503 unavailable,
 	// stream_renewal_unavailable). Requires the hub.conduit experiment.
 	TargetStreamDeadlines string `json:"target_stream_deadlines,omitempty" yaml:"target_stream_deadlines,omitempty" koanf:"target_stream_deadlines"`
 	// PeerSecret is the dedicated relay-peer secret: raw octets (one

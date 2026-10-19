@@ -392,7 +392,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		return nil, errors.New("stream re-check is not running")
 	}
 
-	target, bridge, renew, err := ts.openTarget(ctx, rt.router, agent, kind, params)
+	target, bridge, opened, err := ts.openTarget(ctx, rt.router, agent, kind, params)
 	if err != nil {
 		if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
 			log.Info("Conduit tunnel refused", "cause", te.message, "error", err)
@@ -421,9 +421,11 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		SessionID: info.SessionID,
 		StreamID:  user.ID(),
 		Close:     t.closeBoth,
-		Renew:     renew,
+		Renew:     opened.renew,
 		Bridge:    bridge,
 	}
+	applyConduitOpenGrant(tracked, opened.grant, opened.claims)
+	tracked.TargetSessionID, tracked.TargetStreamID = opened.target.SessionID, opened.target.StreamID
 	t.untrack = s.trackConduitUserStream(tracked)
 	t.tracked.Store(tracked)
 	resp := &conduitTunnelResponse{
@@ -642,14 +644,13 @@ func (s *Server) conduitTunnelBrokerOffline(ctx context.Context, agent *store.Ag
 
 // openTarget resolves the agent's session that serves kind, mints a grant
 // for exactly that session and opens the target stream with the same
-// params, as the agent PTY path does. It also returns the stream's
-// renewal notice sender (conduitStreamRenewal: nil when this node does not
-// hold the target's session).
-func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, relay.Bridge, func() error, error) {
+// params, as the agent PTY path does. It also returns what it learned
+// about the target stream (conduitTunnelOpened).
+func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Router, agent *store.Agent, kind string, params map[string]string) (conduit.Stream, relay.Bridge, *conduitTunnelOpened, error) {
 	var (
 		st     conduit.Stream
 		bridge relay.Bridge
-		renew  func() error
+		opened = &conduitTunnelOpened{}
 	)
 	req := router.Request{
 		Op:    router.OpStream,
@@ -659,11 +660,11 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		Agent: agentIncarnationFacts(agent),
 	}
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
-		renews, canRenew := conduitTargetRenews(res), conduitRouteCanRenew(res)
+		renews, canRenew := conduitTargetRenews(res), ts.s.conduitRouteCanRenew(res)
 		if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteTunnel, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
-		tok, _, err := ts.s.mintConduitGrant(ctx, conduitGrantRequest{
+		tok, claims, err := ts.s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: ts.identity,
 			Agent:    agent,
 			Stream:   grant.StreamHeader{Kind: kind, Params: params},
@@ -693,13 +694,25 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		if err != nil {
 			return err
 		}
-		renew = conduitStreamRenewal(res, st.ID())
+		opened.grant, opened.claims = tok, claims
+		opened.target = conduitLeafTarget(res, st, bridge)
+		opened.renew = conduitStreamRenewal(res, st, claims != nil && !claims.AuthzUntil.IsZero())
 		return nil
 	})
 	if err != nil {
 		return nil, nil, nil, conduitTunnelOpenError(err)
 	}
-	return st, bridge, renew, nil
+	return st, bridge, opened, nil
+}
+
+// conduitTunnelOpened is what openTarget learned about the target stream:
+// its open grant and claims, its ids on the target's own session, and its
+// renewal sender (conduitStreamRenewal).
+type conduitTunnelOpened struct {
+	grant  []byte
+	claims *grant.Claims
+	target relay.TargetStream
+	renew  func(grant []byte) error
 }
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant

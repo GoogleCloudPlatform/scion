@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +75,10 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -338,6 +343,26 @@ func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStre
 		Port:        st.Port,
 		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
 	})
+	if verdict != conduitAuthzAllowed {
+		return verdict, reason
+	}
+	// The flat placement guard, as at open (mintConduitGrant) and renewal
+	// (conduitRenewalPlacement), after the authorization verdict: a pinned
+	// agent whose saved placement is inconsistent, or whose placement
+	// cannot be read, is not a deny (design v2.21.36 §3.5, Refusal
+	// meaning). It is unavailable: the stream is not closed early and ends
+	// at its deadline. An unpinned agent whose read fails keeps today's
+	// path, and a managed runtime is not checked.
+	if !isManagedAgentRuntime(agent.Runtime) {
+		if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+			if _, refused := placementRefusalOf(err); refused {
+				return conduitAuthzUnavailable, "agent placement inconsistent"
+			}
+			if agent.IsPinned() {
+				return conduitAuthzUnavailable, "agent placement check failed"
+			}
+		}
+	}
 	return verdict, reason
 }
 
