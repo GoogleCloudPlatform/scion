@@ -24,8 +24,9 @@
  * dist/client) and the release images copy. CI uploads `<mapsDir>` as a
  * workflow artifact for debugging and bundle attribution.
  *
- * It fails closed: it exits 1 if any .map file is left under `<clientDir>`,
- * if any .js or .css file there still mentions `sourceMappingURL`, or if no
+ * It fails closed: it exits 1 if any .map (or .map.br/.map.gz) file or any
+ * symbolic link is left under `<clientDir>`, if any .js or .css file there
+ * still has a `sourceMappingURL` comment, or if no
  * map was found at all (map generation broke). `npm run build` chains it with
  * `&&`, so a failure fails the build.
  *
@@ -37,19 +38,32 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } 
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Lists every regular file under dir, recursively, as absolute paths. */
-function walk(dir) {
-  const out = [];
+/**
+ * Lists every entry under dir, recursively, as absolute paths. Directories
+ * are descended into; symbolic links are listed but never followed.
+ */
+function walk(dir, out = { files: [], symlinks: [] }) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...walk(p));
+    if (entry.isSymbolicLink()) {
+      out.symlinks.push(p);
+    } else if (entry.isDirectory()) {
+      walk(p, out);
     } else if (entry.isFile()) {
-      out.push(p);
+      out.files.push(p);
     }
   }
   return out;
 }
+
+// A source map, also precompressed (in case a build step that writes .br/.gz
+// siblings ever runs before the move).
+const MAP_FILE = /\.map(\.br|\.gz)?$/;
+
+// The comment that points a bundle at its map: //# sourceMappingURL=... or
+// /*# sourceMappingURL=... */ (also the legacy @ form). Matching the comment
+// form, not the bare word, avoids failing on code that merely mentions it.
+const MAP_COMMENT = /[#@]\s*sourceMappingURL=/;
 
 function isInside(child, parent) {
   const rel = relative(parent, child);
@@ -58,31 +72,33 @@ function isInside(child, parent) {
 
 /**
  * Returns the problems that would leave source maps reachable from clientDir:
- * any remaining .map file, and any .js/.css file mentioning sourceMappingURL.
- * Paths are relative to clientDir.
+ * any remaining .map (or .map.br/.map.gz) file, any .js/.css file with a
+ * sourceMappingURL comment, and any symbolic link (not followed, so whatever
+ * it points at cannot be checked). Paths are relative to clientDir.
  */
-export function findSourcemapLeaks(clientDir) {
+export function findSourcemapLeftovers(clientDir) {
   const root = resolve(clientDir);
-  const leaks = [];
-  for (const file of walk(root)) {
+  const leftovers = [];
+  const { files, symlinks } = walk(root);
+  for (const link of symlinks) {
+    leftovers.push(`${relative(root, link)}: symbolic link (not followed)`);
+  }
+  for (const file of files) {
     const rel = relative(root, file);
-    if (file.endsWith('.map')) {
-      leaks.push(`${rel}: source map file`);
-    } else if (
-      /\.(m?js|css)$/.test(file) &&
-      readFileSync(file, 'utf8').includes('sourceMappingURL')
-    ) {
-      leaks.push(`${rel}: contains sourceMappingURL`);
+    if (MAP_FILE.test(file)) {
+      leftovers.push(`${rel}: source map file`);
+    } else if (/\.(m?js|css)$/.test(file) && MAP_COMMENT.test(readFileSync(file, 'utf8'))) {
+      leftovers.push(`${rel}: contains sourceMappingURL`);
     }
   }
-  return leaks.sort();
+  return leftovers.sort();
 }
 
 /**
  * Moves every .map file under clientDir to the same relative path under
  * mapsDir (emptied first, so maps from earlier builds do not linger).
  * Returns the moved paths, relative to clientDir. Throws if mapsDir and
- * clientDir overlap, if no map was found, or if any leak remains afterwards.
+ * clientDir overlap, if no map was found, or if anything is left behind afterwards.
  */
 export function moveSourcemaps(clientDir, mapsDir) {
   const client = resolve(clientDir);
@@ -98,7 +114,7 @@ export function moveSourcemaps(clientDir, mapsDir) {
   mkdirSync(maps, { recursive: true });
 
   const moved = [];
-  for (const file of walk(client)) {
+  for (const file of walk(client).files) {
     if (!file.endsWith('.map')) continue;
     const rel = relative(client, file);
     const dest = join(maps, rel);
@@ -110,9 +126,13 @@ export function moveSourcemaps(clientDir, mapsDir) {
     throw new Error(`no source maps found under ${client}; is build.sourcemap still 'hidden'?`);
   }
 
-  const leaks = findSourcemapLeaks(client);
-  if (leaks.length > 0) {
-    throw new Error(`source map references remain under ${client}:\n  ${leaks.join('\n  ')}`);
+  const leftovers = findSourcemapLeftovers(client);
+  if (leftovers.length > 0) {
+    throw new Error(
+      `source map files or references left behind under ${client}:\n  ${leftovers.join('\n  ')}\n` +
+        'Vite copies public/ into the build: if web/public/assets holds chunks from ' +
+        'an earlier build, remove that directory and build again.'
+    );
   }
   return moved.sort();
 }

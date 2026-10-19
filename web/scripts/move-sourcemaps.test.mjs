@@ -17,12 +17,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { findSourcemapLeaks, moveSourcemaps } from './move-sourcemaps.mjs';
+import { findSourcemapLeftovers, moveSourcemaps } from './move-sourcemaps.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'move-sourcemaps.mjs');
 
@@ -46,6 +54,8 @@ const BUILD = {
   'assets/lit-abc123.js.map': '{"version":3,"file":"lit-abc123.js"}',
   'assets/main-def456.css': 'body{}\n',
   'assets/main-def456.css.map': '{"version":3}',
+  'assets/workers/deep/pdf-ghi789.js': 'export {};\n',
+  'assets/workers/deep/pdf-ghi789.js.map': '{"version":3,"file":"pdf-ghi789.js"}',
   '.vite/manifest.json': '{}',
 };
 
@@ -56,6 +66,7 @@ test('moves every .map to the same relative path outside the client tree', (t) =
     'assets/lit-abc123.js.map',
     'assets/main-def456.css.map',
     'assets/main.js.map',
+    'assets/workers/deep/pdf-ghi789.js.map',
   ]);
   for (const rel of moved) {
     assert.equal(existsSync(join(client, rel)), false, `${rel} left in client`);
@@ -64,7 +75,7 @@ test('moves every .map to the same relative path outside the client tree', (t) =
   // Non-map files are untouched.
   assert.equal(readFileSync(join(client, 'assets/main.js'), 'utf8'), BUILD['assets/main.js']);
   assert.ok(existsSync(join(client, '.vite/manifest.json')));
-  assert.deepEqual(findSourcemapLeaks(client), []);
+  assert.deepEqual(findSourcemapLeftovers(client), []);
 });
 
 test('empties the maps directory first so stale maps do not linger', (t) => {
@@ -105,16 +116,65 @@ test('refuses overlapping directories', (t) => {
   assert.ok(existsSync(join(client, 'assets/main.js.map')));
 });
 
-test('findSourcemapLeaks reports leftover map files', (t) => {
+test('findSourcemapLeftovers reports map files left behind', (t) => {
   const { client } = fixture(t, BUILD);
-  assert.deepEqual(findSourcemapLeaks(client), [
+  assert.deepEqual(findSourcemapLeftovers(client), [
     'assets/lit-abc123.js.map: source map file',
     'assets/main-def456.css.map: source map file',
     'assets/main.js.map: source map file',
+    'assets/workers/deep/pdf-ghi789.js.map: source map file',
   ]);
 });
 
-test('CLI exits non-zero on a leak and zero on a clean move', (t) => {
+test('findSourcemapLeftovers reports precompressed map siblings', (t) => {
+  const { client } = fixture(t, {
+    'assets/main.js': 'console.log(1);\n',
+    'assets/main.js.map.br': 'x',
+    'assets/main.js.map.gz': 'x',
+  });
+  assert.deepEqual(findSourcemapLeftovers(client), [
+    'assets/main.js.map.br: source map file',
+    'assets/main.js.map.gz: source map file',
+  ]);
+});
+
+test('fails on a symlinked .map, which is neither followed nor moved', (t) => {
+  const { root, client, maps } = fixture(t, BUILD);
+  writeFileSync(join(root, 'outside.js.map'), '{}');
+  symlinkSync(join(root, 'outside.js.map'), join(client, 'assets', 'linked.js.map'));
+  assert.throws(
+    () => moveSourcemaps(client, maps),
+    /assets\/linked\.js\.map: symbolic link \(not followed\)/
+  );
+  assert.ok(existsSync(join(root, 'outside.js.map')), 'link target untouched');
+});
+
+test('the leftover error points at stale files in public/assets', (t) => {
+  const { client, maps } = fixture(t, {
+    ...BUILD,
+    'assets/old-zzz.js': 'x;\n//# sourceMappingURL=old-zzz.js.map\n',
+  });
+  assert.throws(() => moveSourcemaps(client, maps), /remove that directory and build again/);
+});
+
+test('code that only mentions sourceMappingURL is not a leftover', (t) => {
+  const { client, maps } = fixture(t, {
+    ...BUILD,
+    'assets/lit-abc123.js': 'const k = "sourceMappingURL";\nexport { k };\n',
+  });
+  assert.equal(moveSourcemaps(client, maps).length, 4);
+  assert.deepEqual(findSourcemapLeftovers(client), []);
+});
+
+test('fails on the legacy //@ sourceMappingURL comment', (t) => {
+  const { client, maps } = fixture(t, {
+    ...BUILD,
+    'assets/main.js': 'console.log(1);\n//@ sourceMappingURL=main.js.map\n',
+  });
+  assert.throws(() => moveSourcemaps(client, maps), /assets\/main\.js: contains sourceMappingURL/);
+});
+
+test('CLI exits non-zero on a leftover and zero on a clean move', (t) => {
   const bad = fixture(t, { ...BUILD, 'assets/main.js': '//# sourceMappingURL=main.js.map\n' });
   const r1 = spawnSync(process.execPath, [SCRIPT, bad.client, bad.maps], { encoding: 'utf8' });
   assert.equal(r1.status, 1);
@@ -123,7 +183,7 @@ test('CLI exits non-zero on a leak and zero on a clean move', (t) => {
   const good = fixture(t, BUILD);
   const r2 = spawnSync(process.execPath, [SCRIPT, good.client, good.maps], { encoding: 'utf8' });
   assert.equal(r2.status, 0, r2.stderr);
-  assert.match(r2.stdout, /moved 3 source maps/);
+  assert.match(r2.stdout, /moved 4 source maps/);
 
   const r3 = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
   assert.equal(r3.status, 2);

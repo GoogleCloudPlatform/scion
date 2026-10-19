@@ -228,24 +228,27 @@ jobs:
 
       # npm run build moves the source maps out of web/dist/client (the tree
       # web/embed.go embeds and the release images copy) into
-      # web/dist/sourcemaps (scripts/move-sourcemaps.mjs). Not gated: the
-      # embed check protects every build of the binary below.
+      # web/dist/sourcemaps (scripts/move-sourcemaps.mjs). Not gated on
+      # changes: this re-checks the dist/client that the Go tests and Build
+      # Binary below embed, on every run.
       - name: Check Web Source Maps
         working-directory: ./web
         run: |
           npm run test:move-sourcemaps
-          if find dist/client -name '*.map' | grep -q .; then
+          if find dist/client \( -name '*.map' -o -name '*.map.br' -o -name '*.map.gz' \) | grep .; then
             echo "::error::source maps left in web/dist/client"; exit 1
           fi
-          if grep -rl --include='*.js' --include='*.css' sourceMappingURL dist/client; then
-            echo "::error::sourceMappingURL left in web/dist/client"; exit 1
+          if grep -rlE --include='*.js' --include='*.mjs' --include='*.css' '[#@][[:space:]]*sourceMappingURL=' dist/client; then
+            echo "::error::sourceMappingURL comment left in web/dist/client"; exit 1
           fi
           test -f dist/sourcemaps/assets/main.js.map
 
       # The maps hold only the TypeScript sources already in this repository.
-      # Kept for debugging and bundle attribution; short retention, and the
-      # release workflow never uploads or attaches them.
+      # Kept for debugging and bundle attribution: uploaded only for pushes to
+      # main, with short retention. The release workflow never uploads or
+      # attaches them.
       - name: Upload web source maps
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: web-sourcemaps
