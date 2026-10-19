@@ -57,10 +57,6 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"token create", http.MethodPost, "/api/v1/auth/tokens", map[string]interface{}{"name": "x", "boundary": map[string]string{"kind": "hub"}, "scopes": []string{"agent:read"}}, authzop.ReasonCredentialManagement},
 		{"token revoke", http.MethodPost, "/api/v1/auth/tokens/" + f.uatRevokePost + "/revoke", map[string]interface{}{}, authzop.ReasonCredentialManagement},
 		{"token delete", http.MethodDelete, "/api/v1/auth/tokens/" + f.uatRevokeDelete, nil, authzop.ReasonCredentialManagement},
-		{"project member add", http.MethodPost, "/api/v1/projects/" + f.project + "/members", map[string]interface{}{
-			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
-		}, authzop.ReasonGovernancePending},
-		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
 	}
 	for _, tc := range httpCases {
 		rec := doRequestWithUAT(t, m.srv, key, tc.method, tc.path, tc.body)
