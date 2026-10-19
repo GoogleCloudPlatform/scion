@@ -249,8 +249,8 @@ func nfsWorktreeSubPath(workspaceRel, name string) string {
 
 // nfsWorktreeLockWait bounds how long RemoveNFSWorktree waits for the
 // project's provisioning lock, so a delete is never held up for long. The
-// steps under the lock are quick renames and git worktree prune, and run to
-// completion. A variable so tests can shorten it.
+// steps under the lock are quick renames and the removal of the worktree's
+// own git entry, and run to completion. A variable so tests can shorten it.
 var nfsWorktreeLockWait = 30 * time.Second
 
 // nfsWorktreeBackend selects the workspace backend RemoveNFSWorktree
