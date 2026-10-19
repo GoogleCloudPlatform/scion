@@ -183,11 +183,12 @@ type HTTPAgentDispatcher struct {
 	commandBus      CommandBus
 	dispatchMetrics dispatchmetrics.Recorder
 
-	// imageRegistryProvider returns the configured image registry prefix
-	// for rewriting bare image names before dispatching to brokers. It is
+	// imageRegistryProvider returns the image registry prefix for
+	// rewriting bare image names before dispatching an agent to a broker,
+	// for that broker and the agent's profile ("" = no rewrite). It is
 	// read at each dispatch, so a saved image_registry change (or its
 	// clear) applies to the next agent. Nil = no rewrite.
-	imageRegistryProvider func() string
+	imageRegistryProvider func(brokerID, profile string) string
 
 	// Resource hash repair callbacks sync a resource's DB manifest from GCS
 	// when a hash mismatch is detected during dispatch. Nil = no repair.
@@ -471,19 +472,20 @@ func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
 }
 
 // SetImageRegistryProvider registers the accessor for the image registry
-// prefix used to rewrite bare image names before dispatching to brokers. It
-// is read at each dispatch.
-func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func() string) {
+// prefix used to rewrite bare image names before dispatching to a broker
+// (per broker and profile). It is read at each dispatch.
+func (d *HTTPAgentDispatcher) SetImageRegistryProvider(fn func(brokerID, profile string) string) {
 	d.imageRegistryProvider = fn
 }
 
-// ImageRegistry returns the registry prefix this dispatcher rewrites bare
-// image names to at send time ("" = no rewrite).
-func (d *HTTPAgentDispatcher) ImageRegistry() string {
+// ImageRegistryFor returns the registry prefix this dispatcher rewrites
+// bare image names to when sending an agent with profile to brokerID
+// ("" = no rewrite).
+func (d *HTTPAgentDispatcher) ImageRegistryFor(brokerID, profile string) string {
 	if d.imageRegistryProvider == nil {
 		return ""
 	}
-	return d.imageRegistryProvider()
+	return d.imageRegistryProvider(brokerID, profile)
 }
 
 // SetTemplateRepairer registers a callback that syncs a template's DB manifest
@@ -882,7 +884,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Only the user's explicit image travels as Config.Image (the
 		// broker's top tier); a template-derived AppliedConfig.Image does
 		// not — see explicitDispatchImage (ptone/scion#1799).
-		image := d.dispatchImageForBroker(agent.AppliedConfig)
+		image := d.dispatchImageForBroker(agent)
 		req.Config = &RemoteAgentConfig{
 			Template:                  agent.Template,
 			Image:                     image,
@@ -3650,7 +3652,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
@@ -3847,7 +3849,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		Workspace:            startEnv.workspace,
 		HubAgentDefaults:     startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()),
 		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent.AppliedConfig),
+		Image:                d.dispatchImageForBroker(agent),
 		SharedWorkspace:      projectInfo.sharedWorkspace,
 		TemplateName:         agent.Template,
 		ProjectPath:          projectInfo.projectPath,

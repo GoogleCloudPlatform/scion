@@ -74,6 +74,14 @@ func fkReconcileSnapshotLabel(groups []entc.FKRepairGroup) string {
 // rows permanently, so it does not run without a copy to recover from. An
 // in-memory database has no file to copy and is skipped.
 func snapshotBeforeFKReconcile(ctx context.Context, db *sql.DB, groups []entc.FKRepairGroup) error {
+	return snapshotBeforeFKReconcileRecord(ctx, db, groups, nil)
+}
+
+// snapshotBeforeFKReconcileRecord is snapshotBeforeFKReconcile that also
+// passes the path of the snapshot written or reused to record, when record
+// is not nil. Hub startup uses it to keep that snapshot when it prunes old
+// ones.
+func snapshotBeforeFKReconcileRecord(ctx context.Context, db *sql.DB, groups []entc.FKRepairGroup, record func(path string)) error {
 	const label = "foreign key reconcile"
 	for _, g := range groups {
 		slog.Warn(label+": orphaned rows will get their key's declared ON DELETE action before the schema migration",
@@ -99,8 +107,11 @@ func snapshotBeforeFKReconcile(ctx context.Context, db *sql.DB, groups []entc.FK
 	case snap.Reused:
 		slog.Warn(label+": reusing the database snapshot from an earlier attempt; no new snapshot written", "path", snap.Path)
 	default:
-		slog.Warn(label+": database snapshot written before repairing orphaned rows; it is a full copy of the database, "+
-			"delete it once the repair is verified", "path", snap.Path)
+		slog.Warn(label+": database snapshot written before repairing orphaned rows; it is a full copy of the database. "+
+			"Start-up removes it automatically no earlier than 7 days after its last use", "path", snap.Path)
+	}
+	if record != nil {
+		record(snap.Path)
 	}
 	return nil
 }
@@ -117,5 +128,6 @@ func snapshotSpaceHint(file string) string {
 		}
 		hint += ")"
 	}
+	hint += ". Older database snapshots next to it (" + filepath.Base(file) + ".pre-*.bak) can be removed once their repairs are verified"
 	return hint
 }

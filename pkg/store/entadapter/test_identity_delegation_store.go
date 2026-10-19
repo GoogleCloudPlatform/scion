@@ -180,6 +180,21 @@ func (s *TestIdentityDelegationStore) CountLiveTestFixtureUsersByDelegation(ctx 
 	return n, nil
 }
 
+// CountLiveTestAdminUsersByDelegation counts live admin-kind test
+// identities issued through one delegation.
+func (s *TestIdentityDelegationStore) CountLiveTestAdminUsersByDelegation(ctx context.Context, delegationID string, now time.Time) (int, error) {
+	if delegationID == "" {
+		return 0, fmt.Errorf("%w: a delegation ID is required", store.ErrInvalidInput)
+	}
+	n, err := s.client.User.Query().
+		Where(user.KindIn(testAdminKinds...), user.IssuerDelegationIDEQ(delegationID), user.ExpiresAtGT(now)).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // ListTestFixtureUsersByDelegation lists fixtures issued through one
 // delegation, newest first.
 func (s *TestIdentityDelegationStore) ListTestFixtureUsersByDelegation(ctx context.Context, delegationID string, liveAt time.Time, limit int) ([]store.User, error) {

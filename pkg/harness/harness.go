@@ -40,6 +40,7 @@ func newFromEmbedFS(name string) api.Harness {
 	if err != nil {
 		return nil
 	}
+	config.ApplyAgentPluginsSidecarFS(&entry, harnessesEmbed.FS, name)
 	entry.Harness = name
 	return NewDeclarativeGenericHarness(entry)
 }

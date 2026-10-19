@@ -24,6 +24,7 @@
     "./test-hub-banner/*.ts",
     "./test-identity-session/*.ts",
     "./iap-driver/*.ts",
+    "./iap-journey/*.ts",
     "./harness-selftest/*.ts",
     "./async-create/*.ts",
     "./client-main-stub.ts",

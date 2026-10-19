@@ -197,13 +197,21 @@ func (s *OwnershipStore) SetConflicting(keys map[string]bool) {
 }
 
 // ConflictingLabels reports whether a runtime object's labels name an agent
-// or slug whose ownership is conflicting.
-func (s *OwnershipStore) ConflictingLabels(labels map[string]string) bool {
+// or slug whose ownership is conflicting. labelKey maps each label key to
+// the key the object's runtime stores it under (runtime.LabelKey), so the
+// project ID, agent ID and slug are read where that runtime keeps them.
+// While any key is conflicting, an object whose project ID, agent ID or
+// slug label is missing or empty counts as conflicting too: without them
+// it cannot be shown to name an uncontested agent.
+func (s *OwnershipStore) ConflictingLabels(labels map[string]string, labelKey func(string) string) bool {
 	if len(s.conflicting) == 0 {
 		return false
 	}
-	p := labels["scion.project_id"]
-	return s.conflicting[OwnershipAgentKey(p, labels["agent_id"])] || s.conflicting[OwnershipSlugKey(p, labels["scion.name"])]
+	p, agentID, slug := labels[labelKey("scion.project_id")], labels[labelKey("agent_id")], labels[labelKey("scion.name")]
+	if p == "" || agentID == "" || slug == "" {
+		return true
+	}
+	return s.conflicting[OwnershipAgentKey(p, agentID)] || s.conflicting[OwnershipSlugKey(p, slug)]
 }
 
 func (s *OwnershipStore) agentConflict(projectID, agentID string) error {

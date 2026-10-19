@@ -156,7 +156,7 @@ func warnUnhostedFlatIdentities(globalDir string) {
 // (runtimebroker.StaticCapabilities), so registration and heartbeat never
 // disagree.
 func flatInstanceCapabilities(rt runtime.Runtime) *store.BrokerCapabilities {
-	return storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
+	return storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt, config.ImageRegistryFromEnv()))
 }
 
 // storeBrokerCapabilities converts the broker's reported capabilities to
@@ -175,5 +175,6 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		AgentMove:                c.AgentMove,
 		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
 		StartsInFlight:           c.StartsInFlight,
+		NodeImageRegistry:        c.NodeImageRegistry,
 	}
 }

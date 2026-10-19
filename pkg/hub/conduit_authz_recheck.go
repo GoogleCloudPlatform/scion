@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +75,10 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -81,6 +86,8 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 	runCtx, cancel := context.WithCancel(ctx)
 	a.Start(runCtx)
 	s.bindConduitAuthzEvents()
+	s.bindConduitGrantKeyEvents()
+	go s.runConduitGrantKeySettle(runCtx, a.cfg.Clock)
 	stop = func() {
 		cancel()
 		s.conduitAuthz.CompareAndSwap(a, nil)
@@ -336,6 +343,26 @@ func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStre
 		Port:        st.Port,
 		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
 	})
+	if verdict != conduitAuthzAllowed {
+		return verdict, reason
+	}
+	// The flat placement guard, as at open (mintConduitGrant) and renewal
+	// (conduitRenewalPlacement), after the authorization verdict: a pinned
+	// agent whose saved placement is inconsistent, or whose placement
+	// cannot be read, is not a deny (design v2.21.36 §3.5, Refusal
+	// meaning). It is unavailable: the stream is not closed early and ends
+	// at its deadline. An unpinned agent whose read fails keeps today's
+	// path, and a managed runtime is not checked.
+	if !isManagedAgentRuntime(agent.Runtime) {
+		if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+			if _, refused := placementRefusalOf(err); refused {
+				return conduitAuthzUnavailable, "agent placement inconsistent"
+			}
+			if agent.IsPinned() {
+				return conduitAuthzUnavailable, "agent placement check failed"
+			}
+		}
+	}
 	return verdict, reason
 }
 
@@ -373,6 +400,10 @@ type conduitUserStreamAuthz struct {
 	ViaTunnel bool
 	// Port is the agent-local port of a tcp stream.
 	Port int
+	// DeferTCPTarget leaves the tcp port check to the caller. Only the
+	// tunnel open sets it, so that a stopped agent is reported before the
+	// port it no longer exposes. Re-checks never set it.
+	DeferTCPTarget bool
 	// ConfirmDeny, if set, is asked before an action deny is reported;
 	// false makes the decision unavailable instead.
 	ConfirmDeny func() bool
@@ -408,8 +439,12 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if len(actions) == 0 {
 		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
 	}
+	authorize := s.authorizeConduitAction
+	if hook := s.conduitAuthorizeActionTestHook; hook != nil {
+		authorize = hook
+	}
 	for _, action := range actions {
-		if err := s.authorizeConduitAction(ctx, req.Identity, req.Agent, action); err != nil {
+		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {
 			if errors.Is(err, errConduitAuthzUnavailable) {
 				return conduitAuthzUnavailable, "authorization lookup failed", err
 			}
@@ -419,7 +454,7 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			return conduitAuthzDenied, "permission no longer held", err
 		}
 	}
-	if req.Kind == grant.StreamKindTCP {
+	if req.Kind == grant.StreamKindTCP && !req.DeferTCPTarget {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {
 			return conduitAuthzDenied, "port no longer an authorized target", err
 		}

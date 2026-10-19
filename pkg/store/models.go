@@ -57,7 +57,7 @@ type Agent struct {
 	ContainerStatus string `json:"containerStatus,omitempty"` // Container-level status
 	RuntimeState    string `json:"runtimeState,omitempty"`    // Low-level runtime state
 	ExitCode        *int   `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
+	ExitReason      string `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
 
 	// Limits tracking (updated by sciontool status reports)
 	CurrentTurns      int       `json:"currentTurns,omitempty"`
@@ -1182,6 +1182,12 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
+	// layer the hub resolves this broker's dispatches with
+	// (ptone/scion#3916). It is a node configuration value, not a feature
+	// flag. Sent at registration and in every heartbeat with capabilities;
+	// empty (an old broker, or none set) means no node env.
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1548,9 +1554,10 @@ type User struct {
 	// Never bound from a request body (json:"-").
 	FederatedEmail *string `json:"-"`
 	HomeIssuer     *string `json:"-"`
-	// IssuerDelegationID is set only on a test-fixture row issued through
-	// a workload-bound issuer delegation (TestIdentityDelegation), at
-	// create, and never changes. Nil for session and PAT issuance.
+	// IssuerDelegationID is set only on a test identity row (test fixture,
+	// or an admin kind since phase X4) issued through a workload-bound
+	// issuer delegation (TestIdentityDelegation), at create, and never
+	// changes. Nil for session and PAT issuance.
 	IssuerDelegationID *string `json:"-"`
 
 	// Timestamps
@@ -1785,10 +1792,13 @@ type TestIdentityDelegation struct {
 	ID          string
 	GrantorID   string
 	WorkloadSub string
-	// Scope is the single delegated scope (test_identity:issue).
+	// Scope is the single delegated scope: test_identity:issue, or
+	// test_identity:issue_admin or test_identity:issue_super_admin (X4).
 	Scope string
 	// MemberCap is the number of live test identities the delegation may
-	// hold at once.
+	// hold at once: member and viewer identities for test_identity:issue,
+	// identities of the scope's admin kind for an admin scope (the API
+	// calls it adminCap there).
 	MemberCap int
 	Label     string
 	Created   time.Time
@@ -2098,6 +2108,16 @@ const (
 // pkg/store/models_test.go — if this literal ever needs to change, that
 // change must ship together with a data migration for existing rows.
 const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
+
+// ExpiredPendingMessage names one message that
+// ExpireAndListStuckPendingMessages moved from "pending" to "failed" at the
+// stuck-pending TTL. It holds only identifiers and the routing target, never
+// the body, so the sweep can log what it expired (ptone/scion#5211).
+type ExpiredPendingMessage struct {
+	ID        string    // message UUID
+	Recipient string    // target, e.g. "agent:<slug>"
+	CreatedAt time.Time // when the row was written; pending since then
+}
 
 // =============================================================================
 // Notifications (Agent Status Notification System)
@@ -3685,6 +3705,10 @@ type RoleBinding struct {
 	ExpiresAt        *time.Time `json:"expiresAt"` // Binding is inactive after this time (kernel evaluates)
 	CreatedBy        string     `json:"createdBy"`
 	CreatedAt        time.Time  `json:"createdAt"`
+	// SourceRuleID is set only on a project-visitor binding created by a
+	// project visitor rule (ProjectVisitorRule.ID); removing the rule
+	// deletes the binding. Only CreateVisitorRoleBinding sets it.
+	SourceRuleID *string `json:"sourceRuleId,omitempty"`
 	// IssuanceID is the issuance ID of the admin-kind test identity whose
 	// request created the row (admin tier A3 grant shaping). The store sets
 	// it only from the context's GrantShaping; a value supplied by the
@@ -3911,8 +3935,12 @@ type AuthorityProvenance struct {
 type EdgeDeactivationCause string
 
 const (
-	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
-	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
+	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// Agent deletes deactivate only the edges where the agent is the
+	// delegate, and a project delete records agent_hard_delete on both
+	// sides. ValidEdgeDeactivationCause accepts it.
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
@@ -4493,6 +4521,12 @@ type MutationAuditRecord struct {
 	ExchangeAgentCredentialID string
 	ActorKind                 string
 	AgentDelegationCode       string
+
+	// ProvenanceBasis is the JSON provenance basis of a delete made by the
+	// test identity purge (3b), the purge of admin kinds (A3) or the
+	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
+	// delete relied on and its run. Empty for every other record.
+	ProvenanceBasis string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.

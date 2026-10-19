@@ -418,6 +418,12 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
+	// layer of image_registry that beats every settings value for agents
+	// this broker runs (ptone/scion#3916). It is a node configuration value
+	// carried with the capabilities, not a feature flag; empty means none
+	// (store.BrokerCapabilities.NodeImageRegistry is its counterpart).
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

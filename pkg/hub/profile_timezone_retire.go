@@ -307,7 +307,12 @@ func retireDBTierProfileTimezones(ctx context.Context, ops *OperationalSettings,
 			"default_timezone", decision.copyZone)
 	}
 
-	// 2. Then strip the profiles row, keeping its origin.
+	// 2. Then strip the profiles row, keeping its origin. This write is
+	// outside the image_registry persistence rule (ptone/scion#3916): it
+	// keeps the origin and only deletes timezone keys. A seeded row never
+	// reaches it today (the boot sync re-seeds it without timezones first);
+	// if it ever does, write updated_by "seed", or the next boot's origin
+	// backfill adopts the row, file copies included, as managed.
 	if len(rowValues) > 0 {
 		for _, v := range rowValues {
 			if p, ok := profDoc[v.Profile].(map[string]any); ok {

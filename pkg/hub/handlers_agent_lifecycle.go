@@ -80,8 +80,8 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		s.recordAgentSSHHostKey(r, id, body.SSHHostKey)
 	}
 
-	// Validate ExitReason before passing to the store: only terminal
-	// activities are valid exit reasons. Silently drop invalid values
+	// Validate ExitReason before passing to the store: only known
+	// state.ExitReason values are valid. Silently drop invalid values
 	// rather than rejecting the entire status update.
 	if status.ExitReason != "" && !isValidExitReason(status.ExitReason) {
 		status.ExitReason = "" // silently drop invalid values
