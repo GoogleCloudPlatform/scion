@@ -85,6 +85,26 @@ func TestList_PendingPodPhase(t *testing.T) {
 			wantContainerStatus: "Pending (PodInitializing)",
 		},
 		{
+			// waitForPodReady owns classifying this as a launch failure;
+			// List does not add a second terminal signal.
+			name:     "pending image pull backoff",
+			podPhase: corev1.PodPending,
+			containerStatuses: agentState(corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+			}),
+			wantPhase:           string(state.PhaseStarting),
+			wantContainerStatus: "Pending (ImagePullBackOff)",
+		},
+		{
+			// A stop in progress: a deletionTimestamp without a
+			// disruption signal is not a disruption.
+			name:                "pending pod being deleted without disruption",
+			podPhase:            corev1.PodPending,
+			deleting:            true,
+			wantPhase:           string(state.PhaseStarting),
+			wantContainerStatus: "Pending",
+		},
+		{
 			name:     "running pod keeps empty phase",
 			podPhase: corev1.PodRunning,
 			containerStatuses: agentState(corev1.ContainerState{
