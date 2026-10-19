@@ -10,8 +10,12 @@
   "requiredChunks": ["assets/terminal-workspace-"],
   "forbiddenModules": [
     {
-      "$comment": "The terminal workspace loads lazily (client/terminal-workspace-loader.ts). No terminal-* module may be in what the login and home routes load statically.",
-      "roots": ["src/components/pages/login.ts", "src/components/pages/home.ts"],
+      "$comment": "The terminal workspace loads lazily (client/terminal-workspace-loader.ts). No terminal-* module may be in what the entry, the login route or the home route load statically. main.ts is listed itself so the entry is checked even if a route chunk stops importing it.",
+      "roots": [
+        "src/client/main.ts",
+        "src/components/pages/login.ts",
+        "src/components/pages/home.ts"
+      ],
       "pattern": "^terminal-",
       "allow": [
         {

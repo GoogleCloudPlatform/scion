@@ -19,10 +19,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   checkBudget,
   closureFiles,
+  findSourceMap,
   forbiddenIn,
   mapSources,
   staticClosure,
@@ -239,4 +243,59 @@ test('allowlist entries must be exact paths with a reason', () => {
   assert.equal(failures.length, 2);
   assert.match(failures[0], /needs an exact path and a reason/);
   assert.match(failures[1], /needs an exact path and a reason/);
+});
+
+test('the entry is checked as a root even when no route chunk imports it', () => {
+  // Same build, but login no longer lists main.ts among its imports: only the
+  // main.ts root still sees a terminal module inlined into main.js.
+  const detached = {
+    ...manifest,
+    'src/components/pages/login.ts': {
+      ...manifest['src/components/pages/login.ts'],
+      imports: ['_lit.js'],
+    },
+  };
+  const all = Object.values(detached).flatMap((c) => [c.file, ...(c.css ?? [])]);
+  const args = {
+    manifest: detached,
+    readFile: (f) => (all.includes(f) ? Buffer.alloc(100, 'a') : null),
+    listFiles: () => all,
+    readMapModules: (f) =>
+      f === 'assets/main.js' ? ['src/client/main.ts', 'src/client/terminal-coordinator.ts'] : [],
+  };
+  const loginOnly = budget({
+    forbiddenModules: [{ roots: ['src/components/pages/login.ts'], pattern: '^terminal-', allow }],
+  });
+  assert.deepEqual(checkBudget({ ...args, budget: loginOnly }).failures, []);
+  const withEntry = budget({
+    forbiddenModules: [
+      {
+        roots: ['src/client/main.ts', 'src/components/pages/login.ts'],
+        pattern: '^terminal-',
+        allow,
+      },
+    ],
+  });
+  assert.deepEqual(checkBudget({ ...args, budget: withEntry }).failures, [
+    'src/client/main.ts: static closure contains src/client/terminal-coordinator.ts (in assets/main.js)',
+  ]);
+});
+
+test('findSourceMap prefers the map next to the chunk, then dist/sourcemaps, else null', () => {
+  const root = mkdtempSync(join(tmpdir(), 'bundle-budget-'));
+  try {
+    const dist = join(root, 'dist', 'client');
+    const moved = join(root, 'dist', 'sourcemaps');
+    mkdirSync(join(dist, 'assets'), { recursive: true });
+    mkdirSync(join(moved, 'assets'), { recursive: true });
+    writeFileSync(join(dist, 'assets', 'both.js.map'), '{}');
+    writeFileSync(join(moved, 'assets', 'both.js.map'), '{}');
+    writeFileSync(join(moved, 'assets', 'moved.js.map'), '{}');
+
+    assert.equal(findSourceMap(dist, 'assets/both.js'), join(dist, 'assets', 'both.js.map'));
+    assert.equal(findSourceMap(dist, 'assets/moved.js'), join(moved, 'assets', 'moved.js.map'));
+    assert.equal(findSourceMap(dist, 'assets/none.js'), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -25,13 +25,16 @@ vertical slice; C4 and C8 build on it.
 - `web/scripts/check-bundle-budget.mjs` + `web/bundle-budget.json`: limits on
   `main.js` raw/gzip and the entry static closure gzip (JS and CSS), a
   required `assets/terminal-workspace-` chunk, and no `terminal-*` module in
-  the static closure of `pages/login.ts` / `pages/home.ts`. Module lists come
+  the static closure of `client/main.ts`, `pages/login.ts` and `pages/home.ts`
+  (the entry is its own root, so it is checked even if a route chunk stops
+  importing it). Module lists come
   from source maps, found next to the chunk or under `dist/sourcemaps/`, so the
   check keeps working if A5 moves maps out of `dist/client`. Two exact-path
   allowlist entries, each with a reason: `terminal-workspace-events.ts`
   (constants imported by the header) and `terminal-workspace-loader.ts`
   (the loader itself). CI runs the check after the web build, plus its
-  `node --test` unit tests.
+  `node --test` unit tests; `make ci-full` runs both through a new
+  `web-budget` target.
 
 ## Numbers (dev-time vite build)
 
@@ -53,8 +56,9 @@ trimming `main.ts`.
 - The Vite manifest lists chunks, not modules, so a module that is inlined
   into `main.js` can only be found through the source map.
 - Testing `main.ts` routes needs a fresh module per scenario: once the
-  coordinator exists, the lazy path never runs again. The two route
-  scenarios are therefore separate test files that share
+  coordinator exists, the lazy path never runs again. The three route
+  scenarios (lazy load, navigated away, load failure) are therefore separate
+  test files that share
   `__fixtures__/main-boot.ts` and `__fixtures__/terminal-workspace-fake.ts`.
 - Mutation checks run at dev time: removing the `navigationId` check after the
   load makes `navigating away during workspace load does not mount` fail;

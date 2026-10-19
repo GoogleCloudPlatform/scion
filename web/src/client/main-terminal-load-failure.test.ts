@@ -1,0 +1,95 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * A failed terminal workspace chunk load (for example after a deploy removed
+ * the chunk) keeps the previous page, shows a toast, mounts nothing, and the
+ * next /terminals visit loads again (ptone/scion#5306). main.ts has no route
+ * error view; this is the same as a failed page chunk plus the toast. A fresh
+ * entry module (no coordinator yet) is needed, so it is its own file.
+ */
+
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { BOOT_WAIT, bootMainAt } from './__fixtures__/main-boot.js';
+import {
+  fakeTerminalRecord,
+  fakeTerminalWorkspaceModule,
+} from './__fixtures__/terminal-workspace-fake.js';
+import type { TerminalWorkspaceModule } from './terminal-workspace-loader.js';
+
+vi.mock('../components/pages/admin-users.js', () => {
+  if (!customElements.get('scion-page-admin-users')) {
+    customElements.define('scion-page-admin-users', class extends HTMLElement {});
+  }
+  return {};
+});
+
+const showToast = vi.fn();
+vi.mock('../utils/toast.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/toast.js')>()),
+  showToast: (...args: unknown[]): void => {
+    showToast(...args);
+  },
+}));
+
+const loadTerminalWorkspace = vi
+  .fn<() => Promise<TerminalWorkspaceModule>>()
+  .mockRejectedValueOnce(new Error('Failed to fetch dynamically imported module'))
+  .mockResolvedValue(fakeTerminalWorkspaceModule);
+vi.mock('./terminal-workspace-loader.js', () => ({
+  loadTerminalWorkspace: (): Promise<TerminalWorkspaceModule> => loadTerminalWorkspace(),
+}));
+
+describe('main.ts terminal route', () => {
+  afterAll(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('a failed workspace load keeps the page, shows a toast, and the next visit retries', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const main = await bootMainAt('/admin/users');
+    await vi.waitFor(
+      () => expect(document.querySelector('scion-page-admin-users')).not.toBeNull(),
+      BOOT_WAIT
+    );
+    const outlet = document.getElementById('route-outlet')!;
+
+    main.navigateTo('/terminals');
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1), BOOT_WAIT);
+    expect(showToast).toHaveBeenCalledWith(
+      'Could not load terminals. Reload the page to try again.',
+      'danger'
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      '[Scion] Failed to load the terminal workspace:',
+      expect.any(Error)
+    );
+    expect(loadTerminalWorkspace).toHaveBeenCalledTimes(1);
+    expect(fakeTerminalRecord.workspaces).toHaveLength(0);
+    expect(fakeTerminalRecord.coordinators).toHaveLength(0);
+    expect(outlet.hidden).toBe(false);
+    expect(document.querySelector('scion-page-admin-users')).not.toBeNull();
+
+    // The failure was not cached: the next visit loads again and mounts.
+    main.navigateTo('/terminals');
+    await vi.waitFor(() => expect(fakeTerminalRecord.workspaces).toHaveLength(1), BOOT_WAIT);
+    expect(loadTerminalWorkspace).toHaveBeenCalledTimes(2);
+    expect(fakeTerminalRecord.workspaces[0]!.element.isConnected).toBe(true);
+    await vi.waitFor(() => expect(outlet.hidden).toBe(true), BOOT_WAIT);
+    expect(showToast).toHaveBeenCalledTimes(1);
+    errorSpy.mockRestore();
+  }, 15_000);
+});

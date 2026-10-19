@@ -1125,29 +1125,33 @@ async function renderRoute(path: string): Promise<void> {
       return;
     }
     if (thisNav !== navigationId) return;
-    const t = terminalModule;
     appContainer.hidden = true;
+    setDocumentTitle('Terminals');
+    // No coordinator (account torn down, or no #app): nothing to show or open.
+    // Otherwise terminalModule is set too: it is assigned before the
+    // coordinator is created.
+    const t = terminalModule;
+    if (!coordinator || !t) return;
     terminalWorkspace?.setUser(currentUser);
     terminalWorkspace?.setCurrentPath(path);
     terminalWorkspace?.show(true);
-    setDocumentTitle('Terminals');
 
     // ── URL layout restoration (#1715) ──────────────────────────────
     // Parse layout state from query params BEFORE default single-agent
     // selection to avoid a flash of single → multi layout transition.
     const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
-    const layoutUrl = t ? t.parseLayoutUrl(queryString) : null;
+    const layoutUrl = t.parseLayoutUrl(queryString);
 
     // ── Persisted terminal list restore (ptone/scion#2278) ──────────
     // Runs for every render into /terminals…, before the URL-driven code
     // below: an explicit URL decides what is visible and connected, and
     // the saved list decides rail membership only.
-    if (t && coordinator && terminalPersistence) {
+    if (terminalPersistence) {
       await terminalPersistence.restore(t.restoreUrlIntent(pathname, queryString));
       if (thisNav !== navigationId) return;
     }
 
-    if (t && layoutUrl && coordinator && terminalWorkspace) {
+    if (layoutUrl && terminalWorkspace) {
       // Suppress URL sync while restoring to avoid feedback loops
       terminalWorkspace.setSuppressUrlSync(true);
       try {
@@ -1175,7 +1179,7 @@ async function renderRoute(path: string): Promise<void> {
     // Default behavior: single-agent from path
     const agentId = pathname.match(terminalAgentRoute)?.[1];
     terminalRouteAgentId = agentId?.toLowerCase() ?? null;
-    if (t && agentId && coordinator) {
+    if (agentId) {
       const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
       if (requestId) terminalNavigations.set(requestId, thisNav);
       const result = await coordinator.open(agentId, requestId);
@@ -1188,7 +1192,7 @@ async function renderRoute(path: string): Promise<void> {
           if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
         }
       }
-    } else if (t && !agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+    } else if (terminalPersistence && !terminalMoveRunning) {
       // A bare /terminals in a window that does not own the terminals
       // (for example a new window): show the same "open in another
       // window" state as the other non-owner screens, not the empty one.
