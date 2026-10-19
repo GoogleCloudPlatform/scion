@@ -19,21 +19,30 @@ import (
 // constraint or foreign key.
 var templateLegacyColumns = []string{"config", "image"}
 
+// templateColumnsQuery lists the templates table's column names, per dialect.
+// On Postgres it reads the connection's current schema, the one ent migrates.
+var templateColumnsQuery = map[string]string{
+	dialect.SQLite: "SELECT name FROM pragma_table_info('templates')",
+	dialect.Postgres: "SELECT column_name FROM information_schema.columns " +
+		"WHERE table_schema = current_schema() AND table_name = 'templates'",
+}
+
 // dropTemplateLegacyColumns physically removes the retired templates.config
 // and templates.image columns after schema migration. AutoMigrate runs with
 // migrate.WithDropColumn(false), so removing the ent fields alone leaves the
 // columns (and their values) in place.
 //
-// It is idempotent: on Postgres each column is dropped with DROP COLUMN IF
-// EXISTS; on SQLite, which has no IF EXISTS form, each column is dropped only
-// when pragma_table_info lists it. Both drops run in one transaction, so a
-// failure leaves the table unchanged. No other table or column is modified.
+// It is idempotent: it first lists the table's columns and drops only the
+// retired ones still present, so a database that no longer has them runs no
+// DDL at all (on Postgres, no ACCESS EXCLUSIVE lock on templates at every
+// startup). The Postgres statement also says IF EXISTS. The probe and the
+// drops run in one transaction, so a failure leaves the table unchanged. No
+// other table or column is modified.
 func dropTemplateLegacyColumns(ctx context.Context, client *ent.Client) error {
 	driver := client.Driver()
 	name := driver.Dialect()
-	switch name {
-	case dialect.SQLite, dialect.Postgres:
-	default:
+	query, ok := templateColumnsQuery[name]
+	if !ok {
 		return fmt.Errorf("drop retired template columns: unsupported dialect %q", name)
 	}
 	tx, err := driver.Tx(ctx)
@@ -46,13 +55,14 @@ func dropTemplateLegacyColumns(ctx context.Context, client *ent.Client) error {
 			_ = tx.Rollback()
 		}
 	}()
-	drop := templateLegacyColumns
-	if name == dialect.SQLite {
-		if drop, err = sqliteTemplateLegacyColumnsPresent(ctx, tx); err != nil {
-			return err
-		}
+	present, err := templateColumnsPresent(ctx, tx, query)
+	if err != nil {
+		return err
 	}
-	for _, col := range drop {
+	for _, col := range templateLegacyColumns {
+		if !present[col] {
+			continue
+		}
 		stmt := "ALTER TABLE templates DROP COLUMN " + col
 		if name == dialect.Postgres {
 			stmt = "ALTER TABLE templates DROP COLUMN IF EXISTS " + col
@@ -68,11 +78,11 @@ func dropTemplateLegacyColumns(ctx context.Context, client *ent.Client) error {
 	return nil
 }
 
-// sqliteTemplateLegacyColumnsPresent returns the templateLegacyColumns that
-// the SQLite templates table still has, in templateLegacyColumns order.
-func sqliteTemplateLegacyColumnsPresent(ctx context.Context, tx dialect.Tx) ([]string, error) {
+// templateColumnsPresent runs query (a templateColumnsQuery) and returns the
+// templates table's column names as a set.
+func templateColumnsPresent(ctx context.Context, tx dialect.Tx, query string) (map[string]bool, error) {
 	var rows entsql.Rows
-	if err := tx.Query(ctx, "SELECT name FROM pragma_table_info('templates')", []any{}, &rows); err != nil {
+	if err := tx.Query(ctx, query, []any{}, &rows); err != nil {
 		return nil, fmt.Errorf("list template columns: %w", err)
 	}
 	present := map[string]bool{}
@@ -91,11 +101,5 @@ func sqliteTemplateLegacyColumnsPresent(ctx context.Context, tx dialect.Tx) ([]s
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("list template columns: %w", err)
 	}
-	var out []string
-	for _, col := range templateLegacyColumns {
-		if present[col] {
-			out = append(out, col)
-		}
-	}
-	return out, nil
+	return present, nil
 }

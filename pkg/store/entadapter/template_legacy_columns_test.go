@@ -23,7 +23,8 @@ import (
 )
 
 // Tests for the removal of the retired templates.config and templates.image
-// columns (ptone/scion#4224). The Postgres case is always compiled and skips
+// columns (ptone/scion#4224). The Postgres case is compiled in the default
+// (!no_sqlite) build and skips
 // unless the enttest Postgres backend is built (-tags integration) and
 // SCION_TEST_POSTGRES_URL is set; CI runs it in the
 // make test-store-postgres-entadapter jobs:
