@@ -153,10 +153,10 @@ func TestBrokerHubConnectionDisplayStatus(t *testing.T) {
 }
 
 func TestBrokerLocalStatePaths(t *testing.T) {
-	paths := brokerLocalStatePaths("/g", "/h/.scion", "b-1")
+	paths := brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", "b-1")
 	assert.Equal(t, []string{"/g/broker.log", "/h/.scion/runtime-broker-state/b-1", "/h/.scion/cache/templates"}, paths)
 	for _, bad := range []string{"", "..", "a/b"} {
-		assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", bad), bad)
+		assert.Equal(t, []string{"/g/broker.log", "/h/.scion/cache/templates"}, brokerLocalStatePaths("/g", "/h/.scion", "/h/.scion/runtime-broker-state", bad), bad)
 	}
 }
 
@@ -171,13 +171,13 @@ func brokerStateFixture(t *testing.T) (home string, paths []string) {
 	for _, f := range []string{"broker.log", "settings.yaml", "hub-id", "runtime-broker-state/b-1/state.db"} {
 		require.NoError(t, os.WriteFile(filepath.Join(home, f), []byte("x"), 0o644))
 	}
-	return home, brokerLocalStatePaths(home, home, "b-1")
+	return home, brokerLocalStatePaths(home, home, filepath.Join(home, "runtime-broker-state"), "b-1")
 }
 
 func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, false, true, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, nil, false, true, paths))
 
 	for _, gone := range []string{"hub-credentials", "broker.log", "runtime-broker-state/b-1", "cache/templates"} {
 		assert.NoFileExists(t, filepath.Join(home, gone))
@@ -193,7 +193,7 @@ func TestCleanupAfterDeregister_PurgeLocal(t *testing.T) {
 func TestCleanupAfterDeregister_NoPurgeListsResidue(t *testing.T) {
 	home, paths := brokerStateFixture(t)
 	var out bytes.Buffer
-	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, false, false, paths))
+	require.NoError(t, cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), nil, nil, nil, false, false, paths))
 	assert.NoDirExists(t, filepath.Join(home, "hub-credentials"), "the empty credentials dir is always removed")
 	assert.FileExists(t, filepath.Join(home, "broker.log"))
 	assert.Contains(t, out.String(), "Local broker state left in place")
@@ -220,7 +220,7 @@ func TestCleanupAfterDeregister_PurgeSkipped(t *testing.T) {
 			home, paths := brokerStateFixture(t)
 			require.NoError(t, os.WriteFile(filepath.Join(home, "hub-credentials", "other.json"), []byte("{}"), 0o600))
 			var out bytes.Buffer
-			err := cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), tt.remaining, tt.listErr, tt.running, true, paths)
+			err := cleanupAfterDeregister(&out, filepath.Join(home, "hub-credentials"), tt.remaining, tt.listErr, nil, tt.running, true, paths)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "--purge-local skipped")
 			assert.Contains(t, err.Error(), tt.wantErr)
