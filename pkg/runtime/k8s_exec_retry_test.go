@@ -33,8 +33,8 @@ import (
 	utilexec "k8s.io/client-go/util/exec"
 )
 
-// dialErr is the live #5370 error as execInPod returns it.
-var dialErr = fmt.Errorf("exec failed: %w (stderr: )", errors.New("error dialing backend: No agent available"))
+// errDial is the live #5370 error as execInPod returns it.
+var errDial = fmt.Errorf("exec failed: %w (stderr: )", errors.New("error dialing backend: No agent available"))
 
 // statusDialErr returns an API status error of the given kind whose message
 // also carries the dial text, so only the status check can refuse it.
@@ -61,7 +61,7 @@ func TestIsExecDialTransientError(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"live wording wrapped by execInPod", dialErr, true},
+		{"live wording wrapped by execInPod", errDial, true},
 		{"error dialing backend only", errors.New("error dialing backend: dial tcp 10.0.0.1:10250: i/o timeout"), true},
 		{"no agent available only", errors.New("No agent available"), true},
 		{"internal status error with dial text", k8serrors.NewInternalError(errors.New("error dialing backend: No agent available")), true},
@@ -109,7 +109,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 			name: "transient then success",
 			exec: func(call int) error {
 				if call <= 2 {
-					return dialErr
+					return errDial
 				}
 				return nil
 			},
@@ -126,7 +126,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 			// after the third attempt.
 			name:      "deadline expiring",
 			deadline:  10 * time.Second,
-			exec:      always(dialErr),
+			exec:      always(errDial),
 			wantErr:   true,
 			wantCalls: 3,
 			wantSlept: []time.Duration{time.Second, 2 * time.Second},
@@ -136,7 +136,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 			// +5s deadline, so there is no retry at all.
 			name:      "deadline leaves no room for an attempt",
 			deadline:  5 * time.Second,
-			exec:      always(dialErr),
+			exec:      always(errDial),
 			wantErr:   true,
 			wantCalls: 1,
 		},
@@ -146,7 +146,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 			// is made (8s unshortened would give 68 and stop one early).
 			name:      "backoff shortened to the cap before the deadline check",
 			deadline:  66 * time.Second,
-			exec:      always(dialErr),
+			exec:      always(errDial),
 			wantErr:   true,
 			wantCalls: 11,
 			wantSlept: []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second,
@@ -156,7 +156,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 		{
 			// 1+2+4+8*6 = 55s, then 5s to reach the 60s cap, then give up.
 			name:      "persistent dial error hits the cap",
-			exec:      always(dialErr),
+			exec:      always(errDial),
 			wantErr:   true,
 			wantCalls: 11,
 			wantSlept: []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second,
@@ -225,7 +225,7 @@ func TestExecInPodDialRetry_CancelStopsWait(t *testing.T) {
 	rt.podExec = func(context.Context, string, string, []string) (string, error) {
 		calls++
 		cancel()
-		return "", dialErr
+		return "", errDial
 	}
 	_, err := rt.execInPodDialRetry(ctx, "default", "p", []string{"true"}, "a", "home-files")
 	if !errors.Is(err, context.Canceled) {
@@ -265,7 +265,7 @@ func TestPlaceK8sHomeFiles_RetriesDialError(t *testing.T) {
 					return "", errors.New("call limit reached")
 				}
 				if seen[joined] == 1 {
-					return "", dialErr
+					return "", errDial
 				}
 				return "", nil
 			}
@@ -323,7 +323,7 @@ func TestRun_StartupGateRetriesDialError(t *testing.T) {
 		wantGates int
 		wantSlept []time.Duration
 	}{
-		{name: "transient then success", gateErr: dialErr, wantGates: 2, wantSlept: []time.Duration{time.Second}},
+		{name: "transient then success", gateErr: errDial, wantGates: 2, wantSlept: []time.Duration{time.Second}},
 		{name: "403 not retried", gateErr: statusDialErr("403"), wantErr: true, wantGates: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
