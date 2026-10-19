@@ -227,7 +227,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
-	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
+	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
 	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
@@ -399,12 +399,12 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level
-	// registry action.
+	// registry action and create_global a hub-level catalog action.
 	"skill.create": {TargetClassKindProjectScoped},
 	"skill.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.update": {TargetClassKindProjectScoped}, "skill.delete": {TargetClassKindProjectScoped},
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"skill.register": {TargetClassKindHubResource},
+	"skill.register": {TargetClassKindHubResource}, "skill.create_global": {TargetClassKindHubResource},
 
 	// template.*, harness_config.* — unlike skill, a single create
 	// permission covers every scope (templateScopeResource/

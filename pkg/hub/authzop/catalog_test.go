@@ -274,9 +274,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
 		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
 
-		// Global catalog permissions — handler-enforced, not a standalone route.
-		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
-
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
 		"agent.log_append":     "Reserved in the permission registry: no handler checks it",
