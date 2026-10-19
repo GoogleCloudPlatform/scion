@@ -193,7 +193,7 @@
 - [group.member.remove](#groupmemberremove) — Remove a member from a group
 - [group.delete](#groupdelete) — Delete a group
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
-- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that adds permissions to the maximum set relaxes the boundary and is session only. The commit re-checks judge the holder's authority within the token's selectors
+- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
 - [access.constraint.preview](#accessconstraintpreview) — Generate an access constraint preview and read a preview job and its result. A token needs access_constraint:admin on a hub boundary and the holder's live access_constraint.admin authority
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
@@ -6954,7 +6954,7 @@
 
 ### Exemptions
 
-- **authentication_only:** Role CRUD currently requires hub-admin via route guard; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
+- **authentication_only:** audit obligation waived; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
 
 ---
 
@@ -7299,7 +7299,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that adds permissions to the maximum set relaxes the boundary and is session only. The commit re-checks judge the holder's authority within the token's selectors
+**Description:** Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
 
 ### Entry Points
 
