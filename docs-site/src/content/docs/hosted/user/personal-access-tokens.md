@@ -38,6 +38,8 @@ permissions). Available scopes:
 | `project:list` | List projects. A project token lists only its own project; on a hub token this scope can be selected only by holders of a hub-wide role that grants it |
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
+| `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
@@ -274,8 +276,8 @@ The same per-request checks apply, with these limits:
   interactive sign-in. Naming an existing project by id also needs `project:update` on it.
   Registering a project with an embedded broker needs an interactive sign-in; a token registers
   brokers with `POST /api/v1/brokers`.
-  Cloning a project also needs `project:read` on the source project and `project:clone`; only a
-  super-admin can select `project:clone`.
+  Cloning a project also needs `project:read` on the source project and `project:clone`;
+  selecting `project:clone` needs `project.clone`, which the built-in super-admin role carries.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your
