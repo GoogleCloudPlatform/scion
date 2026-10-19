@@ -216,9 +216,12 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 			set("config.resources.limits.memory", r.Limits.Memory)
 			set("config.resources.disk", r.Disk)
 		}
-		if ic.Telemetry != nil && ic.Telemetry.Enabled != nil {
-			dispatched["config.telemetry"] = strconv.FormatBool(*ic.Telemetry.Enabled)
-		}
+		require.Nil(t, ic.Telemetry, "telemetry is never sent inline (ptone/scion#4224)")
+	}
+	// The project telemetry policy travels as its own tier
+	// (ptone/scion#4224); the form shows it as config.telemetry.
+	if p := req.Config.TelemetryPolicy; p != nil {
+		dispatched["config.telemetry"] = strconv.FormatBool(*p)
 	}
 	// Every agent gets a role and a message mode; record them only where
 	// the case's sources set one, the values the web can know.
