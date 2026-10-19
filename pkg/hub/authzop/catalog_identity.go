@@ -182,7 +182,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "group.member.remove",
 		Domain:      "group",
-		Description: "Remove a member from a group",
+		Description: "Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only",
 		EntryPoints: []EntryPoint{
 			// handleGroupMemberByID (handlers_groups.go) requires the
 			// member type ("user", "group", or "agent") as its own path
@@ -210,13 +210,15 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+			{Package: "pkg/hub", Function: "TestConstraintSubjectGroupToken_MemberRemoveSessionOnly"},
+			{Package: "pkg/hub", Function: "TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted"},
 		},
 		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "group.delete",
 		Domain:      "group",
-		Description: "Delete a group",
+		Description: "Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/groups/{id}", Method: "DELETE"},
 		},
@@ -237,6 +239,8 @@ var identityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestGroupChangeToken_SelectorAndBoundaryPerRoute"},
+			{Package: "pkg/hub", Function: "TestConstraintSubjectGroupToken_DeleteSessionOnly"},
+			{Package: "pkg/hub", Function: "TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted"},
 		},
 		Bearer: AdmitOn(BearerTargetGroupRecord, BearerBoundaryHub),
 	},
