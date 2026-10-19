@@ -375,8 +375,8 @@ var agentOperations = []OperationSpec{
 		Domain:      "agent",
 		Description: "Sync an agent's workspace from or to the agent",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-from", Method: "POST"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-from", Method: "POST", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/workspace/sync-to/finalize", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},

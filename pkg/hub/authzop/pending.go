@@ -121,7 +121,7 @@ var PendingBearerDispositions = []PendingEntry{
 	// --- catalog_resources ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/local-image", Method: "DELETE", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/pull-image", Method: "POST", Area: AreaCatalogResources},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=registry", Area: AreaCatalogResources},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=registry", Area: AreaCatalogResources, Response: ResponseCredential},
 	// --- brokers ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/rotate-secret", Method: "POST", Area: AreaBrokers, Response: ResponseCredential},
 	// --- material ---

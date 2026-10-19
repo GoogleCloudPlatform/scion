@@ -135,6 +135,27 @@ var compressBypassedUntagged = map[string]string{
 	"POST /api/v1/test-identities/admin/revoke-all":  "test identities prefix",
 	"GET /api/v1/test-identities/admin/{id}/residue": "test identities prefix",
 
+	// Signed-URL routes: the workspace, artifact links, upload, download,
+	// versions and resolve paths are bypassed as a whole. These carry no
+	// signed URL: workspace status and finalize, the link list and revoke,
+	// skill version reads and deprecation, and the per-skill resolve.
+	"GET /api/v1/agents/{id}/workspace":                   "signed-URL path",
+	"POST /api/v1/agents/{id}/workspace/sync-to/finalize": "signed-URL path",
+	"GET /api/v1/artifacts/{id}/links":                    "signed-URL path",
+	"DELETE /api/v1/artifacts/{id}/links/{linkId}":        "signed-URL path",
+	"GET /api/v1/skills/{id}/resolve":                     "signed-URL path",
+	"GET /api/v1/skills/{id}/versions":                    "signed-URL path",
+	"GET /api/v1/skills/{id}/versions/{vid}":              "signed-URL path",
+	"POST /api/v1/skills/{id}/versions/{vid}/deprecate":   "signed-URL path",
+
+	// Artifact capability routes: the shared link answers with a redirect
+	// whose Location header carries the view capability, and the view route
+	// serves the artifact's own files under that capability; neither body
+	// carries a credential.
+	"pending GET /api/v1/artifacts/shared/{token}": "artifact capability route",
+	"exemption /api/v1/artifacts/shared/":          "artifact capability route",
+	"exemption /api/v1/artifacts/view/":            "artifact capability route",
+
 	// Agent auth reset: the path ends in agents/{segment} like an agent item.
 	"POST /api/v1/admin/agents/reset-auth-all": "item route",
 }
@@ -142,13 +163,13 @@ var compressBypassedUntagged = map[string]string{
 // compressRequestBypassed mirrors the MountHubAPI decision: the request
 // reaches the hub handler without the compression wrapper when
 // isCompressBypassPath matches its path, or when it is a non-GET request to
-// an agent collection path. method "" stands for every method, so it is
-// checked as GET, the compressible case.
+// a create collection path (isCreateCollectionPath). method "" stands for
+// every method, so it is checked as GET, the compressible case.
 func compressRequestBypassed(method, path string) bool {
 	if isCompressBypassPath(path) {
 		return true
 	}
-	return method != "" && method != http.MethodGet && isAgentCollectionPath(path)
+	return method != "" && method != http.MethodGet && isCreateCollectionPath(path)
 }
 
 // compressCatalogRoutes returns every /api/v1/ HTTP route entry point,
@@ -222,7 +243,9 @@ func compressCatalogRoutes() []compressCatalogRoute {
 // served without the MountHubAPI compression wrapper, and every bypassed,
 // untagged route to be listed in compressBypassedUntagged. A new route that
 // returns a credential or caller-specific configuration is tagged in the
-// catalog; this test then fails until the bypass covers it.
+// catalog; this test then fails until the bypass covers it. It is a
+// regression guard, not a discovery tool: it cannot find a route that nobody
+// tagged, so tagging stays a manual audit of each new route's response.
 func TestCompressBypass_SensitiveResponsesFromCatalog(t *testing.T) {
 	routes := compressCatalogRoutes()
 	seen := make(map[string]bool, len(routes))
@@ -289,6 +312,11 @@ func TestCompressBypass_SensitiveResponsesFromCatalog(t *testing.T) {
 		"exemption POST /api/v1/agent/secrets",
 		"exemption /api/v1/brokers/",
 		"pending PUT /api/v1/env/{key}",
+		"POST /api/v1/artifacts/{id}/links",
+		"POST /api/v1/artifacts/{id}/versions/{seq}/view",
+		"POST /api/v1/agents/{id}/workspace/sync-from",
+		"POST /api/v1/skills/resolve #ref=skill",
+		"pending POST /api/v1/skills/resolve #ref=registry",
 	} {
 		assert.True(t, tagged[want], "expected tagged catalog route %s is missing or untagged", want)
 	}

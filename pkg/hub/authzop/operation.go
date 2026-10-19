@@ -185,9 +185,10 @@ type ResponseSensitivity string
 const (
 	// ResponseCredential marks a response that can carry a credential:
 	// an access, refresh or identity token, a device code, a secret or
-	// environment value, or a join, invite or one-time login code. Agent
-	// create is tagged because its response carries the new agent's
-	// environment values.
+	// environment value, a join, invite or one-time login code, or a
+	// signed object-store or capability URL. Agent create is tagged
+	// because its response carries the new agent's environment values
+	// and signed upload URLs.
 	ResponseCredential ResponseSensitivity = "credential"
 
 	// ResponseCallerSpecific marks a response that carries caller-specific

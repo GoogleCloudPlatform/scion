@@ -1073,7 +1073,7 @@ var identityOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "GET"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/download", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/download", Method: "GET", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1093,7 +1093,7 @@ var identityOperations = []OperationSpec{
 		Domain:      "template",
 		Description: "Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
@@ -1115,7 +1115,7 @@ var identityOperations = []OperationSpec{
 		Description: "Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "PUT"},
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/upload", Method: "POST", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}/finalize", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
