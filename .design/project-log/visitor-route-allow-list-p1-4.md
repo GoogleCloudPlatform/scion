@@ -85,6 +85,37 @@
 
 - 2026-10-15: merged upstream main forward; the visitor grant code now comes from upstream, and this item's changes are unchanged.
 - 2026-10-17: merged the visitor rule and federation principal check work, then upstream main, forward; visitors added by a domain rule get the same per-route admission as visitors granted by email, and this item's changes are unchanged.
+- 2026-10-19: merged upstream main forward (to ecb55e3b7700). Upstream now
+  makes `/api/v1/auth/me` an entry point of the `user.self.profile` catalog
+  operation: `handleAuthMe` answers `405` to any method but `GET`, then
+  admits only the credentials the operation declares (`selfReadCredential`).
+  The federation credential kind was not among them, so a visitor got `403`
+  on its own profile. See "Own profile read under the catalog credentials".
+
+## Own profile read under the catalog credentials
+
+- **Catalog.** A new catalog credential kind, `federated_user`
+  (`authzop.CredentialFederatedUser`): a trusted issuer's credential for
+  one of its users, presented as the federation credential. Only
+  `user.self.profile` declares it; it maps to the request kind
+  `CredentialKindFederation` in `catalogCredentialRequestKinds`.
+- **Pairing.** `selfReadCredential` admits the federation kind only with a
+  federated user identity (`isFederatedUserIdentity`: a `VisitorIdentity`
+  or an unlinked `FederatedUserIdentity`), and such an identity only with
+  the federation kind, the way a user access token kind is paired with its
+  token identity. A federated agent or service identity, or a local user
+  with the federation kind, is refused. No exemption is added.
+- **Unlinked federated user.** Admitted too: it reads its verified
+  identity as before upstream's change, and gets the same answers with the
+  visitor experiment on and off.
+- **HEAD.** The route still lists `GET` and `HEAD` in `VisitorMethods`;
+  `HEAD` now reaches the handler's method check and answers `405`, as for
+  every caller. The visitor tests that expected `200` on `HEAD` now expect
+  `405`. `POST`, `PUT`, `PATCH` and `DELETE` are still refused for a
+  visitor in the route guard.
+- **Other routes.** Only `/api/v1/auth/me` lists `VisitorMethods`; every
+  other route, including the ones upstream moved under catalog credential
+  rules, still refuses a visitor in the route guard before its handler.
 
 ## Startup refusal tests
 
