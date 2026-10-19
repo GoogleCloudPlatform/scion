@@ -367,9 +367,18 @@ func TestWebAPI_AgentCreateNotCompressed(t *testing.T) {
 	}
 }
 
-func TestIsAgentCollectionPath(t *testing.T) {
+func TestIsCreateCollectionPath(t *testing.T) {
 	for p, want := range map[string]bool{
 		"/api/v1/agents":                      true,
+		"/api/v1/templates":                   true,
+		"/api/v1/templates/":                  true,
+		"/api/v1/users/me/templates":          true,
+		"/api/v1/harness-configs":             true,
+		"/api/v1/skills":                      true,
+		"/api/v1/templates/t1":                false,
+		"/api/v1/users/me/templates/t1":       false,
+		"/api/v1/skills/s1":                   false,
+		"/api/v1/users/templates":             false,
 		"/api/v1/agents/":                     true,
 		"/api/v1/projects/p1/agents":          true,
 		"/api/v1/projects/p1/agents/":         true,
@@ -384,8 +393,158 @@ func TestIsAgentCollectionPath(t *testing.T) {
 		"/api/v1/brokers/b1/agents":           false,
 		"/agents":                             false,
 	} {
-		assert.Equal(t, want, isAgentCollectionPath(p), p)
+		assert.Equal(t, want, isCreateCollectionPath(p), p)
 	}
+}
+
+// TestWebAPI_SignedURLResponsesNotCompressed sends a large JSON response
+// through the MountHubAPI mount for every route whose real response carries
+// signed object-store or capability URLs: each stays identity, while the
+// same body on a neighbouring route is gzipped.
+func TestWebAPI_SignedURLResponsesNotCompressed(t *testing.T) {
+	body := largeJSON()
+	ts := mockHubEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	do := func(t *testing.T, method, path string) (*http.Response, []byte) {
+		t.Helper()
+		var reqBody io.Reader
+		if method != http.MethodGet {
+			reqBody = strings.NewReader(`{}`)
+		}
+		req, err := http.NewRequest(method, ts.URL+path, reqBody)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept-Encoding", "gzip")
+		resp, err := compressClient().Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		got, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		return resp, got
+	}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/agents/a1/workspace/sync-from"},
+		{http.MethodPost, "/api/v1/agents/a1/workspace/sync-to"},
+		{http.MethodPost, "/api/v1/templates"},
+		{http.MethodPost, "/api/v1/templates/t1/upload"},
+		{http.MethodGet, "/api/v1/templates/t1/download"},
+		{http.MethodPost, "/api/v1/users/me/templates"},
+		{http.MethodPost, "/api/v1/users/me/templates/t1/upload"},
+		{http.MethodGet, "/api/v1/users/me/templates/t1/download"},
+		{http.MethodPost, "/api/v1/harness-configs"},
+		{http.MethodPost, "/api/v1/harness-configs/h1/upload"},
+		{http.MethodGet, "/api/v1/harness-configs/h1/download"},
+		{http.MethodPost, "/api/v1/skills"},
+		{http.MethodPost, "/api/v1/skills/s1/upload"},
+		{http.MethodGet, "/api/v1/skills/s1/download"},
+		{http.MethodPost, "/api/v1/skills/s1/versions"},
+		{http.MethodPost, "/api/v1/artifacts/a1/links"},
+		{http.MethodGet, "/api/v1/artifacts/a1/links"},
+		{http.MethodPost, "/api/v1/artifacts/a1/versions/3/view"},
+	} {
+		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
+			resp, got := do(t, tc.method, tc.path)
+			requireNoEncoding(t, resp)
+			assert.Equal(t, body, got, "the JSON must pass through unencoded")
+		})
+	}
+	// Controls: neighbouring routes are compressed, so the mount is wrapping.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/templates"},
+		{http.MethodGet, "/api/v1/templates/t1"},
+		{http.MethodGet, "/api/v1/harness-configs"},
+		{http.MethodGet, "/api/v1/skills"},
+		{http.MethodPost, "/api/v1/artifacts/a1/versions"},
+	} {
+		t.Run("control "+tc.method+" "+tc.path, func(t *testing.T) {
+			resp, got := do(t, tc.method, tc.path)
+			assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
+			assert.NotEqual(t, body, got)
+		})
+	}
+}
+
+// TestWebAPI_TemplateSignedURLsNotCompressed drives the real template
+// handlers with local storage through the web mount: create with files,
+// upload and download return signed URLs and stay identity even above the
+// compression threshold, while the template list is compressed.
+func TestWebAPI_TemplateSignedURLsNotCompressed(t *testing.T) {
+	srv, st := newCommitTestServer(t, newCommitTestStorage(t))
+	env := newCompressHubEnvOn(t, srv, st, nil)
+	ctx := context.Background()
+
+	files := make(map[string]string, 20)
+	var reqs []FileUploadRequest
+	for i := 0; i < 20; i++ {
+		p := fmt.Sprintf("docs/file-%02d.md", i)
+		files[p] = "content " + p
+		reqs = append(reqs, FileUploadRequest{Path: p, Size: int64(len(files[p]))})
+	}
+	send := func(t *testing.T, method, path string, payload any) (*http.Response, []byte) {
+		t.Helper()
+		var reqBody io.Reader
+		if payload != nil {
+			b, err := json.Marshal(payload)
+			require.NoError(t, err)
+			reqBody = strings.NewReader(string(b))
+		}
+		req, err := http.NewRequestWithContext(ctx, method, env.ts.URL+path, reqBody)
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept-Encoding", "gzip")
+		req.Header.Set("Authorization", env.auth["Authorization"])
+		resp, err := compressClient().Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		got, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return resp, got
+	}
+	requireSignedIdentity := func(t *testing.T, resp *http.Response, got []byte, status int) {
+		t.Helper()
+		require.Equal(t, status, resp.StatusCode, "%.300s", got)
+		requireNoEncoding(t, resp)
+		require.GreaterOrEqual(t, len(got), 1024, "the body must be large enough to be compressed if it were wrapped")
+		assert.Contains(t, string(got), "file-19.md")
+	}
+
+	t.Run("POST /api/v1/templates", func(t *testing.T) {
+		resp, got := send(t, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+			Name: "gz-signed-create", Scope: store.TemplateScopeGlobal, Files: reqs,
+		})
+		requireSignedIdentity(t, resp, got, http.StatusCreated)
+		var cr CreateTemplateResponse
+		require.NoError(t, json.Unmarshal(got, &cr))
+		assert.Len(t, cr.UploadURLs, 20)
+	})
+
+	tmpl := seedCommittedTemplate(t, srv, "gz-signed-seeded", store.TemplateScopeGlobal, "", files)
+	t.Run("POST upload", func(t *testing.T) {
+		resp, got := send(t, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/upload", UploadRequest{Files: reqs})
+		requireSignedIdentity(t, resp, got, http.StatusOK)
+		var ur UploadResponse
+		require.NoError(t, json.Unmarshal(got, &ur))
+		assert.Len(t, ur.UploadURLs, 20)
+	})
+	t.Run("GET download", func(t *testing.T) {
+		resp, got := send(t, http.MethodGet, "/api/v1/templates/"+tmpl.ID+"/download", nil)
+		requireSignedIdentity(t, resp, got, http.StatusOK)
+		var dr DownloadResponse
+		require.NoError(t, json.Unmarshal(got, &dr))
+		assert.Len(t, dr.Files, 20)
+	})
+
+	t.Run("control GET /api/v1/templates", func(t *testing.T) {
+		for i := 0; i < 10; i++ {
+			seedCommittedTemplate(t, srv, fmt.Sprintf("gz-list-%02d", i), store.TemplateScopeGlobal, "", map[string]string{"a.md": "a"})
+		}
+		resp, _ := send(t, http.MethodGet, "/api/v1/templates", nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "gzip", resp.Header.Get("Content-Encoding"))
+	})
 }
 
 func TestWebAPI_SmallPublicJSONNotCompressed(t *testing.T) {
@@ -717,6 +876,27 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		"/api/v1/test-identities/admin",
 		"/api/v1/env",
 		"/api/v1/env/KEY",
+		// Signed object-store or capability URLs.
+		"/api/v1/agents/a1/workspace/sync-from",
+		"/api/v1/agents/a1/workspace/sync-to",
+		"/api/v1/agents/a1/workspace/sync-to/finalize",
+		"/api/v1/templates/t1/upload",
+		"/api/v1/templates/t1/download",
+		"/api/v1/users/me/templates/t1/upload",
+		"/api/v1/users/me/templates/t1/download",
+		"/api/v1/harness-configs/h1/upload",
+		"/api/v1/harness-configs/h1/download",
+		"/api/v1/skills/s1/upload",
+		"/api/v1/skills/s1/download",
+		"/api/v1/skills/s1/versions",
+		"/api/v1/skills/s1/versions/v1",
+		"/api/v1/artifacts/a1/links",
+		"/api/v1/artifacts/a1/links/",
+		"/api/v1/artifacts/a1/links/l1",
+		"/api/v1/artifacts/a1/versions/3/view",
+		"/api/v1/artifacts/a1/versions/3/view/",
+		"/api/v1/artifacts/view/cap/index.html",
+		"/api/v1/artifacts/shared/tok",
 		// Agent item responses.
 		"/api/v1/agents/a1",
 		"/api/v1/agents/a1/",
@@ -743,6 +923,17 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		"/api/v1/runtime-brokers",
 		"/api/v1/brokers/b1",
 		"/api/v1/templates",
+		"/api/v1/templates/t1",
+		"/api/v1/templates/t1/files",
+		"/api/v1/users/me/templates",
+		"/api/v1/harness-configs",
+		"/api/v1/harness-configs/h1",
+		"/api/v1/skills",
+		"/api/v1/skills/s1",
+		"/api/v1/artifacts",
+		"/api/v1/artifacts/a1",
+		"/api/v1/artifacts/a1/versions",
+		"/api/v1/artifacts/a1/versions/3",
 		"/api/v1/users/me/terminal-workspace",
 		"/events",
 		"/",

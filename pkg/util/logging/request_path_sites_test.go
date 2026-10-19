@@ -141,7 +141,7 @@ var requestPathSites = []requestPathSite{
 	{"test_identity_workload_issuer.go", "isTestIdentityIssuanceRoute", "URL.RawPath", 1, "comparison: refuses an escaped path for the workload delegation route check (not logged)"},
 	{"web.go", "WebServer.handleOAuthCallback", "URL.Path", 1, "routing: extracts the OAuth provider"},
 	{"web.go", "WebServer.handleOAuthLogin", "URL.Path", 1, "routing: extracts the OAuth provider"},
-	{"web.go", "WebServer.MountHubAPI", "URL.Path", 1, "comparison: keeps non-GET agent collection requests out of the compression wrapper (not logged)"},
+	{"web.go", "WebServer.MountHubAPI", "URL.Path", 1, "comparison: keeps non-GET create-collection requests out of the compression wrapper (not logged)"},
 	{"web.go", "WebServer.prefetchPageData", "URL.Path", 2, "routing: maps an SPA page path to its API prefetch"},
 	{"web.go", "WebServer.proxyAuthMiddleware", "URL.Path", 1, "comparison: skips auth for public web paths"},
 	{"web.go", "WebServer.serveStaticAsset", "URL.Path", 3, "routing: serves the static asset at the path, and picks its Content-Type and Cache-Control from it (not logged)"},

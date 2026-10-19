@@ -35,10 +35,16 @@ and phase A2.
     exchange, broker registration, join and secret rotation, project
     registration, invites, test identities, and env and secrets routes;
   - agent item responses (`/api/v1/agents/{id}` and the project-scoped form).
-  `MountHubAPI` also sends non-GET requests to the agent collection paths
-  (`/api/v1/agents`, `/api/v1/projects/{projectId}/agents`; matched by
-  `isAgentCollectionPath`) to the hub handler without the wrapper, so agent
-  create responses stay uncompressed while the GET agent list is compressed.
+  - responses with signed object-store or capability URLs (`isSignedURLPath`):
+    agent workspace sync, template, user template, harness-config and skill
+    upload and download, skill versions, artifact links and version views,
+    and the artifact view and shared routes.
+  `MountHubAPI` also sends non-GET requests to the create collections
+  (`/api/v1/agents`, `/api/v1/projects/{projectId}/agents`, `/api/v1/templates`,
+  `/api/v1/users/me/templates`, `/api/v1/harness-configs`, `/api/v1/skills`;
+  matched by `isCreateCollectionPath`) to the hub handler without the wrapper,
+  so create responses (agent config, signed upload URLs) stay uncompressed
+  while the GET lists are compressed.
 - `/events` and the SPA shell are mounted on the web mux, outside `/api/v1/`,
   so the wrapper never sees them.
 
@@ -51,12 +57,15 @@ and phase A2.
   the rest), plus Accept-Encoding parsing, Vary, non-JSON and panic paths.
 - `pkg/hub/web_api_compress_test.go`, all in one hubshard shard (6 at this head):
   - real hub handlers through `buildHandler()`: the agent list is gzipped,
-    agent item GET/PATCH and agent create (POST, both collection forms)
-    responses are identity, small public JSON is
+    agent item GET/PATCH, agent create (POST, both collection forms) and
+    template create/upload/download (signed URLs) responses are identity,
+    small public JSON is
     identity, and the log and message streams deliver their first event
     unencoded before the handler ends;
   - PTY/tunnel upgrades, the port proxy, `/events` and the SPA shell;
   - non-2xx JSON passthrough;
+  - every signed-URL route through the mount (large JSON stays identity,
+    neighbouring routes are gzipped);
   - `TestCompressBypass_StreamRoutesFromCatalog`, which walks the authz
     catalog's SSE and websocket entry points and the agent sub-route table, and
     fails on any route the bypass does not cover.
