@@ -18,6 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -108,6 +111,10 @@ func credentialShapedStartError() error {
 var sanitizedCauseLogSites = []string{
 	"Agent create failed",
 	"runLaunch: agent start failed",
+	"Agent create failed: preflight",
+	"Agent start failed",
+	"Agent restart failed",
+	"buildStartContext failed",
 }
 
 // assertSanitizedCauseRecord checks logs hold exactly one msg record, that
@@ -124,6 +131,11 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 	}
 	if len(recs) != 1 {
 		t.Fatalf("%d %q records, want exactly 1; logs: %s", len(recs), msg, logs)
+	}
+	for _, field := range []string{"agent_id", "runtime", "profile"} {
+		if _, ok := recs[0][field].(string); !ok {
+			t.Errorf("%s = %#v, want a string field", field, recs[0][field])
+		}
 	}
 	for _, field := range []string{"cause", "error"} {
 		got, ok := recs[0][field].(string)
@@ -146,17 +158,64 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 	}
 }
 
-// TestCreateFailureCause_SanitizedAtEveryLogSite: a create whose runtime
-// start fails with credential-shaped backend text logs one record per
-// failure with that text sanitized and truncated, and the response the
-// client gets is the same fixed body a plain failure gets.
+// asyncPreflightFailure posts an async create whose Manager.Preflight
+// returns preflightErr, and returns the response and the broker's logs.
+func asyncPreflightFailure(t *testing.T, name string, preflightErr error) (int, string, string) {
+	t.Helper()
+	mgr := newAsyncManager()
+	mgr.setPreflightErr(preflightErr)
+	srv, _ := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	w := postCreate(t, srv, map[string]any{
+		"id": name, "name": name, "asyncLaunch": true, "launchId": "L-" + name,
+		"projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"launchTimeoutSeconds": 300, "config": map[string]any{"template": "claude"},
+	})
+	return w.Code, w.Body.String(), logs.String()
+}
+
+// startOpFailure posts op ("start" or "restart") for an agent whose
+// Manager.Start returns startErr, and returns the response and the logs.
+func startOpFailure(t *testing.T, op string, startErr error) (int, string, string) {
+	t.Helper()
+	srv := newTestServer(t)
+	srv.manager.(*mockManager).startErr = startErr
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/"+op+"?projectId="+startErrTextProjectID,
+		strings.NewReader(`{"runId":"`+startErrTextRunID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w.Code, w.Body.String(), logs.String()
+}
+
+// assertStartOpSanitized checks a start or restart failing with
+// credential-shaped backend text logs one sanitized msg record and answers
+// with the plain failure's body.
+func assertStartOpSanitized(t *testing.T, op, msg string) {
+	t.Helper()
+	status, body, logs := startOpFailure(t, op, credentialShapedStartError())
+	_, plainBody, _ := startOpFailure(t, op, errors.New("docker run scion-ctr-1: exit status 125"))
+	if status != http.StatusInternalServerError || body != plainBody {
+		t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
+	}
+	assertSanitizedCauseRecord(t, logs, msg)
+}
+
+// TestCreateFailureCause_SanitizedAtEveryLogSite: a create, start or
+// restart that fails with credential-shaped backend text logs one record
+// per failure, with the agent id, runtime and profile, and with that text
+// sanitized and truncated; the response the client gets is the same fixed
+// body a plain failure gets.
 func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 	cases := map[string]func(t *testing.T){
 		"Agent create failed": func(t *testing.T) {
 			const name = "agent-sync-sanitize"
 			status, body, _, logs := postSyncCreateFailure(t, name, credentialShapedStartError())
 			_, plainBody, _, _ := postSyncCreateFailure(t, name, errors.New("docker run scion-ctr-1: exit status 125"))
-			if status != 500 || body != plainBody {
+			if status != http.StatusInternalServerError || body != plainBody {
 				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
 			}
 			assertSanitizedCauseRecord(t, logs, "Agent create failed")
@@ -177,6 +236,39 @@ func TestCreateFailureCause_SanitizedAtEveryLogSite(t *testing.T) {
 				}
 			}
 			assertSanitizedCauseRecord(t, logs, "runLaunch: agent start failed")
+		},
+		"Agent create failed: preflight": func(t *testing.T) {
+			status, body, logs := asyncPreflightFailure(t, "agent-preflight-sanitize", credentialShapedStartError())
+			_, plainBody, _ := asyncPreflightFailure(t, "agent-preflight-sanitize", errors.New("runtime not ready"))
+			if status != http.StatusInternalServerError || body != plainBody {
+				t.Errorf("response = %d %s, want the plain failure's body %s", status, body, plainBody)
+			}
+			assertSanitizedCauseRecord(t, logs, "Agent create failed: preflight")
+		},
+		"Agent start failed": func(t *testing.T) {
+			assertStartOpSanitized(t, "start", "Agent start failed")
+		},
+		"Agent restart failed": func(t *testing.T) {
+			assertStartOpSanitized(t, "restart", "Agent restart failed")
+		},
+		"buildStartContext failed": func(t *testing.T) {
+			for name, err := range map[string]error{
+				"plain error":   credentialShapedStartError(),
+				"runtime error": &startContextError{Status: http.StatusInternalServerError, Message: "curated", OriginalErr: credentialShapedStartError()},
+				"hub error":     &startContextError{IsHubError: true, Message: "curated", OriginalErr: credentialShapedStartError()},
+			} {
+				t.Run(name, func(t *testing.T) {
+					srv := newTestServer(t)
+					logs := &syncBuffer{}
+					srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+					w := httptest.NewRecorder()
+					srv.writeStartContextError(w, err, "start agent", "agent_id", "agent-ctx-sanitize", "runtime", "docker", "profile", "default")
+					if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), `"Failed to start agent"`) {
+						t.Errorf("response = %d %s, want 500 with the fixed text", w.Code, w.Body.String())
+					}
+					assertSanitizedCauseRecord(t, logs.String(), "buildStartContext failed")
+				})
+			}
 		},
 	}
 	for _, site := range sanitizedCauseLogSites {

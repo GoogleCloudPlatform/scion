@@ -107,8 +107,10 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		// Fixed text, as the synchronous create gives for a Manager.Start
 		// failure (ptone/scion#3113): the raw error can carry runtime
 		// detail. The full error reaches only the broker log.
-		s.agentLifecycleLog.Error("Agent create failed: preflight",
-			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+		s.agentLifecycleLog.Error("Agent create failed: preflight", append(append([]any{
+			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
+			"runtime", runtimeName, "profile", opts.Profile},
+			failureLogAttrs(err, nil)...), runtimeFailureLogAttrs(err)...)...)
 		RuntimeError(w, runtimeOpError(opCreateAgent, err).Error())
 		return false
 	}
@@ -194,6 +196,7 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 		req:             req,
 		opts:            opts,
 		mgr:             mgr,
+		runtimeName:     runtimeName,
 		key:             key,
 		sharedWorkspace: opts.SharedWorkspace,
 		owned:           owned,
