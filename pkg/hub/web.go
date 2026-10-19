@@ -38,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/httpcompress"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -902,7 +903,21 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 	// Register the Hub API handler on the mux. Go's ServeMux uses
 	// longest-prefix matching, so /api/v1/ takes priority over /
 	// (the SPA catch-all).
-	ws.mux.Handle("/api/v1/", ws.sessionToBearerMiddleware(hubHandler))
+	// JSON responses are gzipped for clients that accept it; streams,
+	// upgrades, the paths in isCompressBypassPath and non-GET requests to
+	// the create collections (isCreateCollectionPath) are never wrapped.
+	apiHandler := ws.sessionToBearerMiddleware(hubHandler)
+	compressed := httpcompress.Wrap(apiHandler, httpcompress.Options{
+		BypassPath: isCompressBypassPath,
+		MinSize:    httpcompress.DefaultMinSize,
+	})
+	ws.mux.Handle("/api/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && isCreateCollectionPath(r.URL.Path) {
+			apiHandler.ServeHTTP(w, r)
+			return
+		}
+		compressed.ServeHTTP(w, r)
+	}))
 	// Forward OIDC discovery endpoints so they are reachable in combo mode
 	// (hub + web on the same port). Without this, the SPA catch-all "/"
 	// intercepts /.well-known/ requests and returns HTML instead of JSON.
@@ -2448,6 +2463,149 @@ func isProxyRoute(path string) bool {
 	}
 	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
 	return len(parts) >= 4 && parts[1] == "ports" && parts[3] == "proxy"
+}
+
+// isCompressBypassPath reports /api/v1/ paths whose responses are never
+// gzipped by the MountHubAPI compression wrapper (pkg/httpcompress). The
+// wrapper already passes through upgrade and event-stream requests and every
+// non-JSON response; this list adds:
+//   - streaming and connection routes: agent PTY and every port
+//     route (proxy, tunnel, list; see isProxyRoute), and any path ending in
+//     /stream or /events;
+//   - endpoints that return credentials or secret values: /api/v1/auth/,
+//     the agent-facing /api/v1/agent/ endpoints (minted tokens, secret
+//     fetch), agent token refresh, delegation exchange, broker registration,
+//     join and secret rotation, project registration, invite creation, test
+//     identities, and every env or secrets route;
+//   - responses with signed object-store or capability URLs: every agent
+//     workspace route (sync-from, sync-to; the status GET is included as a
+//     fail-safe), template, user template, harness-config and skill upload
+//     and download, skill versions and skill resolve, artifact links,
+//     version views, and the artifact view and shared routes
+//     (isSignedURLPath);
+//   - agent item responses (/api/v1/agents/{id} and
+//     /api/v1/projects/{projectId}/agents/{id}).
+//
+// Keep this list in step with new streaming or credential-returning routes;
+// TestCompressBypass_StreamRoutesFromCatalog fails for an uncovered stream
+// or websocket entry point in the authz catalog.
+func isCompressBypassPath(path string) bool {
+	const api = "/api/v1/"
+	if !strings.HasPrefix(path, api) {
+		return false
+	}
+	for _, prefix := range []string{
+		"/api/v1/auth/",
+		"/api/v1/agent/",
+		"/api/v1/test-identities",
+		"/api/v1/admin/invites",
+		"/api/v1/artifacts/view/",
+		"/api/v1/artifacts/shared/",
+	} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	trimmed := strings.TrimSuffix(path, "/")
+	switch trimmed {
+	case "/api/v1/auth", "/api/v1/agent", "/api/v1/brokers", "/api/v1/brokers/join", "/api/v1/projects/register":
+		return true
+	}
+	for _, suffix := range []string{
+		"/stream",
+		"/events",
+		"/token/refresh",
+		"/refresh-token",
+		"/exchange",
+		"/rotate-secret",
+	} {
+		if strings.HasSuffix(trimmed, suffix) {
+			return true
+		}
+	}
+	segs := strings.Split(strings.TrimPrefix(trimmed, api), "/")
+	if isSignedURLPath(segs) {
+		return true
+	}
+	for i, seg := range segs {
+		switch seg {
+		case "env", "secrets":
+			return true
+		case "agents":
+			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
+			// project-scoped form) stay uncompressed.
+			if i+2 == len(segs) {
+				return true
+			}
+			if i+2 < len(segs) {
+				switch segs[i+2] {
+				case "pty", "ports", "workspace":
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isSignedURLPath reports /api/v1/ routes (as path segments after
+// /api/v1/) whose responses carry signed object-store or capability URLs:
+// template, user template, harness-config and skill upload and download
+// routes, skill versions and skill resolve (the batch POST
+// /api/v1/skills/resolve returns signed download URLs; the per-skill resolve
+// is included as a fail-safe), and artifact links and version views. The upload, download and versions segments match at any depth
+// below the resource (for example a file path starting with download/):
+// that over-match is intentional, as it only leaves more responses
+// uncompressed.
+func isSignedURLPath(segs []string) bool {
+	if len(segs) == 0 {
+		return false
+	}
+	rest := segs[1:]
+	switch {
+	case segs[0] == "templates", segs[0] == "harness-configs", segs[0] == "skills":
+	case len(segs) >= 3 && segs[0] == "users" && segs[1] == "me" && segs[2] == "templates":
+		rest = segs[3:]
+	case segs[0] == "artifacts":
+		for _, seg := range rest {
+			if seg == "links" {
+				return true
+			}
+		}
+		return len(rest) >= 2 && rest[len(rest)-1] == "view"
+	default:
+		return false
+	}
+	for _, seg := range rest {
+		switch seg {
+		case "upload", "download":
+			return true
+		case "versions", "resolve":
+			if segs[0] == "skills" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isCreateCollectionPath reports the collection paths whose create (non-GET)
+// responses MountHubAPI keeps uncompressed, with or without a trailing slash:
+// /api/v1/agents and /api/v1/projects/{projectId}/agents (agent create), and
+// /api/v1/templates, /api/v1/users/me/templates, /api/v1/harness-configs and
+// /api/v1/skills (their create responses carry signed upload URLs). GET lists
+// on them are compressed.
+func isCreateCollectionPath(path string) bool {
+	const api = "/api/v1/"
+	if !strings.HasPrefix(path, api) {
+		return false
+	}
+	switch strings.TrimSuffix(strings.TrimPrefix(path, api), "/") {
+	case "agents", "templates", "users/me/templates", "harness-configs", "skills":
+		return true
+	}
+	segs := strings.Split(strings.TrimSuffix(strings.TrimPrefix(path, api), "/"), "/")
+	return len(segs) == 3 && segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 }
 
 // devAuthMiddleware auto-populates the session with the dev user identity
