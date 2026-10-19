@@ -27,6 +27,10 @@ const maxLoggedCauseBytes = 1024
 // redactedMarker replaces every value sanitizeFailureCause removes.
 const redactedMarker = "[REDACTED]"
 
+// causeCredentialWords matches the words that make a key credential-named
+// wherever they appear in it (case-insensitive patterns only).
+const causeCredentialWords = `(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)`
+
 // causeValuePattern matches a value after a key and its separator: a
 // quoted string, or a run up to whitespace or a delimiter.
 const causeValuePattern = `("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)`
@@ -36,16 +40,24 @@ var (
 	causePEMRe = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|$)`)
 	// The userinfo part of a URL: scheme://user:pass@host.
 	causeURLUserInfoRe = regexp.MustCompile(`\b([A-Za-z][A-Za-z0-9+.-]*://)[^\s/?#@]+@`)
-	// An HTTP authorization scheme followed by its credentials.
-	causeAuthSchemeRe = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	// A bearer authorization scheme followed by its credentials.
+	causeBearerRe = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	// A basic authorization scheme and the word after it; blankBasic
+	// decides whether that word is credentials.
+	causeBasicRe = regexp.MustCompile(`(?i)(authorization:\s*)?\b(basic)\s+([A-Za-z0-9._~+/=-]{4,})`)
 	// A JWT-shaped string: three base64url segments, the first a JSON object.
 	causeJWTRe = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
-	// An environment-style credential-named key (or any SCION_ variable)
-	// followed by ':' or '=' and its value.
-	causeEnvCredentialKeyRe = regexp.MustCompile(`\b(SCION_[A-Z0-9_]*|[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|AUTH)[A-Z0-9_]*)(\s*[:=]\s*)` + causeValuePattern)
+	// A bare credential-named key, in any case and with '_' or '-' between
+	// words (or any SCION_ variable), followed by ':' or '=' and its value.
+	// "auth" and "credential(s)" count only as a whole word of the key, so
+	// prose such as "unauthorized: authentication required" is kept.
+	causeBareCredentialKeyRe = regexp.MustCompile(`(?i)\b(SCION_[A-Z0-9_]*|[A-Z0-9_-]*` + causeCredentialWords + `[A-Z0-9_-]*|(?:[A-Z0-9]+[_-])*(?:AUTH|CREDENTIALS?)(?:[_-][A-Z0-9]+)*)(\s*[:=]\s*)` + causeValuePattern)
 	// A quoted credential-named key, as in JSON, followed by ':' and its
 	// value.
-	causeQuotedCredentialKeyRe = regexp.MustCompile(`(?i)("[A-Za-z0-9_.-]*(?:token|secret|password|passwd|credential|api_?key|private_?key|access_?key|auth)[A-Za-z0-9_.-]*")(\s*:\s*)` + causeValuePattern)
+	causeQuotedCredentialKeyRe = regexp.MustCompile(`(?i)("[A-Z0-9_.-]*(?:` + causeCredentialWords + `|AUTH|CREDENTIAL)[A-Z0-9_.-]*")(\s*:\s*)` + causeValuePattern)
+	// A "value" key, as in a Kubernetes EnvVar in JSON
+	// ({"name":"X","value":"v"}) or printed with %+v ({Name:X Value:v}).
+	causeValueKeyRe = regexp.MustCompile(`(?i)("value"|\bvalue)(\s*:\s*)` + causeValuePattern)
 	// Any KEY=VALUE pair (env entries, flags, query parameters).
 	causeKeyValueRe = regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_.-]*)(=)` + causeValuePattern)
 	// A long run of base64 or hex characters.
@@ -55,20 +67,24 @@ var (
 // sanitizeFailureCause returns text, a runtime failure's backend error text,
 // in the form a broker log record may carry. The text is untrusted: a
 // runtime's output can repeat parts of the agent's start spec. So every
-// KEY=VALUE value is blanked (the key stays), as are credential-named
-// keys' values, authorization schemes, JWT-shaped strings, URL userinfo,
-// PEM blocks and long base64 or hex runs. The result is then truncated to
-// maxLoggedCauseBytes, with a marker giving the sanitized length.
+// KEY=VALUE value is blanked (the key stays), as are the values of
+// credential-named keys and "value" keys, authorization credentials,
+// JWT-shaped strings, URL userinfo, PEM blocks and long base64 or hex runs.
+// The result is then truncated to maxLoggedCauseBytes, with a marker giving
+// the sanitized length.
 //
-// Every log site that records a create or start failure's cause calls this
-// on that field. The text never reaches a client response.
+// The terminal create failure records (synchronous create and async
+// launch) pass their cause and error fields through this. The text never
+// reaches a client response.
 func sanitizeFailureCause(text string) string {
 	s := causePEMRe.ReplaceAllString(text, redactedMarker)
 	s = causeURLUserInfoRe.ReplaceAllString(s, "${1}"+redactedMarker+"@")
-	s = causeAuthSchemeRe.ReplaceAllString(s, "${1} "+redactedMarker)
+	s = causeBearerRe.ReplaceAllString(s, "${1} "+redactedMarker)
+	s = causeBasicRe.ReplaceAllStringFunc(s, blankBasic)
 	s = causeJWTRe.ReplaceAllString(s, redactedMarker)
-	s = blankKeyValues(causeEnvCredentialKeyRe, s)
+	s = blankKeyValues(causeBareCredentialKeyRe, s)
 	s = blankKeyValues(causeQuotedCredentialKeyRe, s)
+	s = blankKeyValues(causeValueKeyRe, s)
 	s = blankKeyValues(causeKeyValueRe, s)
 	s = causeLongRunRe.ReplaceAllStringFunc(s, func(m string) string {
 		if looksEncoded(m) {
@@ -77,6 +93,18 @@ func sanitizeFailureCause(text string) string {
 		return m
 	})
 	return truncateFailureCause(s)
+}
+
+// blankBasic blanks the credentials of a causeBasicRe match: always after
+// "Authorization:", and otherwise only when the word after "basic" looks
+// like encoded credentials (it holds a digit, '=', '+', '/' or '.'), so
+// prose such as "basic validation failed" is kept.
+func blankBasic(m string) string {
+	g := causeBasicRe.FindStringSubmatch(m)
+	if g[1] == "" && !strings.ContainsAny(g[3], "0123456789=+/.") {
+		return m
+	}
+	return g[1] + g[2] + " " + redactedMarker
 }
 
 // blankKeyValues replaces the value of every match of re in s, whose
