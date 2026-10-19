@@ -7711,9 +7711,6 @@ func agentInProjectStrict(a api.AgentInfo, projectID string) bool {
 	return agent.InProjectStrict(a, projectID)
 }
 
-// agentHasNoProjectIdentity is agent.HasNoProjectIdentity.
-func agentHasNoProjectIdentity(a api.AgentInfo) bool { return agent.HasNoProjectIdentity(a) }
-
 // legacyEntryInProject is agent.LegacyEntryInProject: an entry with no
 // project identity stands for an agent of projectID only if it is a
 // container whose recorded project path identifies as projectID. Every
