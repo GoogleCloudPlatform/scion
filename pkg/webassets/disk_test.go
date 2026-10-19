@@ -108,14 +108,14 @@ func TestDiskIndex_StaleSiblingIgnored(t *testing.T) {
 	}
 }
 
-func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
+func TestDiskIndex_SymlinkOutsideRootNotServed(t *testing.T) {
 	outside := t.TempDir()
-	writeFile(t, filepath.Join(outside, "secret.js"), []byte("secret"), time.Now())
-	writeFile(t, filepath.Join(outside, "secret.js.br"), []byte("secret-br"), time.Now())
+	writeFile(t, filepath.Join(outside, "outside.js"), []byte("outside-marker"), time.Now())
+	writeFile(t, filepath.Join(outside, "outside.js.br"), []byte("outside-marker-br"), time.Now())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "assets", "main.js"), mainJS, time.Now())
 	// A symlinked file and a symlinked directory pointing outside the root.
-	if err := os.Symlink(filepath.Join(outside, "secret.js"), filepath.Join(dir, "assets", "leak.js")); err != nil {
+	if err := os.Symlink(filepath.Join(outside, "outside.js"), filepath.Join(dir, "assets", "linked.js")); err != nil {
 		t.Skipf("symlinks unsupported: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(dir, "assets", "out")); err != nil {
@@ -126,9 +126,9 @@ func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := NewDiskIndex(dir)
-	for _, p := range []string{"/assets/leak.js", "/assets/out/secret.js"} {
+	for _, p := range []string{"/assets/linked.js", "/assets/out/outside.js"} {
 		rec, found := serve(t, d, http.MethodGet, p, map[string]string{"Accept-Encoding": "br"})
-		if found || strings.Contains(rec.Body.String(), "secret") {
+		if found || strings.Contains(rec.Body.String(), "outside-marker") {
 			t.Errorf("%s: served outside the root (found=%v body=%q)", p, found, rec.Body.String())
 		}
 	}
@@ -138,7 +138,7 @@ func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
 
 	// The fallback file system refuses the same paths, and siblings.
 	fsys := DirFileSystem(dir)
-	for _, name := range []string{"/assets/leak.js", "/assets/out/secret.js", "/assets/out", "/../" + filepath.Base(outside) + "/secret.js", "/assets/main.js.br", "/assets/main.js.gz"} {
+	for _, name := range []string{"/assets/linked.js", "/assets/out/outside.js", "/assets/out", "/../" + filepath.Base(outside) + "/outside.js", "/assets/main.js.br", "/assets/main.js.gz"} {
 		if f, err := fsys.Open(name); err == nil {
 			_ = f.Close()
 			t.Errorf("DirFileSystem opened %s", name)
@@ -154,12 +154,12 @@ func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
 		}
 		_ = f.Close()
 	}
-	// Through a real file server: 404, not the secret, and listings still work.
+	// Through a real file server: 404, not the outside file, and listings still work.
 	srv := http.FileServer(fsys)
-	for _, p := range []string{"/assets/leak.js", "/assets/out/secret.js", "/assets/main.js.br"} {
+	for _, p := range []string{"/assets/linked.js", "/assets/out/outside.js", "/assets/main.js.br"} {
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
-		if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "secret") {
+		if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "outside-marker") {
 			t.Errorf("file server %s: code %d", p, rec.Code)
 		}
 	}
@@ -170,13 +170,13 @@ func TestDiskIndex_SymlinkEscapeRejected(t *testing.T) {
 	}
 }
 
-func TestDiskIndex_EncodedTraversalRejected(t *testing.T) {
+func TestDiskIndex_EncodedDotSegmentsRejected(t *testing.T) {
 	parent := t.TempDir()
-	writeFile(t, filepath.Join(parent, "secret.js"), []byte("secret"), time.Now())
+	writeFile(t, filepath.Join(parent, "outside.js"), []byte("outside-marker"), time.Now())
 	dir := filepath.Join(parent, "client")
 	writeFile(t, filepath.Join(dir, "assets", "main.js"), mainJS, time.Now())
 	d := NewDiskIndex(dir)
-	for _, target := range []string{"/assets/%2e%2e/%2e%2e/secret.js", "/assets/..%2f..%2fsecret.js", "/%2e%2e/secret.js", "/assets/..%5c..%5csecret.js"} {
+	for _, target := range []string{"/assets/%2e%2e/%2e%2e/outside.js", "/assets/..%2f..%2foutside.js", "/%2e%2e/outside.js", "/assets/..%5c..%5coutside.js"} {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		u, err := url.Parse(target)
 		if err != nil {
@@ -184,7 +184,7 @@ func TestDiskIndex_EncodedTraversalRejected(t *testing.T) {
 		}
 		req.URL = u
 		rec := httptest.NewRecorder()
-		if d.Serve(rec, req, noCache) || strings.Contains(rec.Body.String(), "secret") {
+		if d.Serve(rec, req, noCache) || strings.Contains(rec.Body.String(), "outside-marker") {
 			t.Errorf("%s (decoded %q) served", target, u.Path)
 		}
 	}

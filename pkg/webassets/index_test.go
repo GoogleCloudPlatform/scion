@@ -284,7 +284,7 @@ func TestServe_NotIndexedFallsBack(t *testing.T) {
 	}
 }
 
-func TestNewIndex_PathTraversalRejected(t *testing.T) {
+func TestNewIndex_NonCleanPathRejected(t *testing.T) {
 	ix := newTestIndex(t)
 	for _, p := range []string{
 		"/assets/../assets/main.js",
@@ -307,7 +307,7 @@ func TestNewIndex_PathTraversalRejected(t *testing.T) {
 			t.Errorf("%q served (code %d)", p, rec.Code)
 		}
 	}
-	// Percent-encoded traversal decodes to a non-clean path and is refused.
+	// Percent-encoded dot segments decode to a non-clean path and are refused.
 	for _, target := range []string{"/assets/%2e%2e/.vite/manifest.json", "/assets/%2E%2E%2F.vite%2Fmanifest.json", "/%2e%2e/assets/main.js", "/assets/main.js%00", "/assets/main.js%2ebr"} {
 		u, err := url.Parse(target)
 		if err != nil {

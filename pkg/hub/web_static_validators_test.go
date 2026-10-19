@@ -67,7 +67,7 @@ func validatorAssets(t *testing.T) fstest.MapFS {
 		},
 		"favicon.svg":         {Data: validatorFavicon},
 		"favicon.svg.br":      {Data: validatorFavBr},
-		".vite/manifest.json": {Data: []byte(`{"secret-marker": {"file": "assets/main.js", "isEntry": true}}`)},
+		".vite/manifest.json": {Data: []byte(`{"outside-marker": {"file": "assets/main.js", "isEntry": true}}`)},
 	}
 }
 
@@ -168,7 +168,7 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 		assert.Empty(t, body)
 	})
 
-	t.Run("encoded traversal does not escape", func(t *testing.T) {
+	t.Run("encoded dot segments stay inside the root", func(t *testing.T) {
 		for _, target := range []string{"/assets/%2e%2e/.vite/manifest.json", "/assets/..%2f.vite%2fmanifest.json", "/shoelace/%2e%2e/%2e%2e/.vite/manifest.json"} {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			u, err := url.Parse(target)
@@ -177,7 +177,7 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 			req.RequestURI = target
 			rec := httptest.NewRecorder()
 			ws.Handler().ServeHTTP(rec, req)
-			assert.NotContains(t, rec.Body.String(), "secret-marker", target)
+			assert.NotContains(t, rec.Body.String(), "outside-marker", target)
 			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		}
 	})
@@ -274,20 +274,20 @@ func TestStaticAsset_DirectoryFallbackUnchanged(t *testing.T) {
 
 	t.Run("disk symlink out of the root is not served", func(t *testing.T) {
 		outside := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(outside, "secret.js"), []byte("secret-marker"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(outside, "outside.js"), []byte("outside-marker"), 0o644))
 		dir := t.TempDir()
 		require.NoError(t, os.MkdirAll(filepath.Join(dir, "assets"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "assets", "main.js"), validatorMainJS, 0o644))
-		if err := os.Symlink(filepath.Join(outside, "secret.js"), filepath.Join(dir, "assets", "leak.js")); err != nil {
+		if err := os.Symlink(filepath.Join(outside, "outside.js"), filepath.Join(dir, "assets", "linked.js")); err != nil {
 			t.Skipf("symlinks unsupported: %v", err)
 		}
 		require.NoError(t, os.Symlink(outside, filepath.Join(dir, "assets", "out")))
 		disk := newTestWebServer(t, WebServerConfig{AssetsDir: dir})
-		for _, p := range []string{"/assets/leak.js", "/assets/out/secret.js", "/assets/out/"} {
+		for _, p := range []string{"/assets/linked.js", "/assets/out/outside.js", "/assets/out/"} {
 			resp := doStatic(t, disk, http.MethodGet, p, nil)
 			body := readBody(t, resp)
 			assert.Equal(t, http.StatusNotFound, resp.StatusCode, p)
-			assert.NotContains(t, string(body), "secret", p)
+			assert.NotContains(t, string(body), "outside-marker", p)
 		}
 	})
 }
