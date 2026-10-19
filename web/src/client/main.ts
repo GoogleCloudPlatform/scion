@@ -1373,21 +1373,6 @@ async function renderRoute(path: string): Promise<void> {
     data: initialData,
   };
 
-  // Block non-admin users from admin-only routes.
-  // Hub-admin users (who have admin role bindings but not super-admin role)
-  // are allowed through, alongside super-admins.
-  //
-  // Re-fetch admin status on every admin-route navigation so that role
-  // grants or revocations made mid-session take effect immediately rather
-  // than being cached for the entire SPA lifetime. The fresh result also
-  // replaces the shared value (client/admin-status.ts); a nav already on
-  // screen read that value once for this user, so only later nav renders
-  // see it.
-  //
-  // Per-route permission checks: super-admin-only routes (Diagnostics,
-  // Maintenance) require isSuperAdmin; other admin routes require at least
-  // one matching permission from ROUTE_PERMISSION_MAP.
-  //
   // Block /chat routes when the native_chat feature flag is disabled (O2).
   // Checked before the imports start, so a disabled chat is never fetched
   // here. (Chat and admin routes are disjoint.)
@@ -1404,6 +1389,20 @@ async function renderRoute(path: string): Promise<void> {
   // done and the permission check has passed.
   const loadsReady = startRouteLoads(route, shellType);
 
+  // Block non-admin users from admin-only routes.
+  // Hub-admin users (who have admin role bindings but not super-admin role)
+  // are allowed through, alongside super-admins.
+  //
+  // Re-fetch admin status on every admin-route navigation so that role
+  // grants or revocations made mid-session take effect immediately rather
+  // than being cached for the entire SPA lifetime. The fresh result also
+  // replaces the shared value (client/admin-status.ts); a nav already on
+  // screen read that value once for this user, so only later nav renders
+  // see it.
+  //
+  // Per-route permission checks: super-admin-only routes (Diagnostics,
+  // Maintenance) require isSuperAdmin; other admin routes require at least
+  // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
     // A failed import is reported by the await below; a denied user is
     // redirected first and never reaches it.

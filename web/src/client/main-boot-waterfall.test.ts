@@ -20,6 +20,10 @@
  * initial page chunk are all requested before any of them answers, and an
  * admin route imports its page while the fresh admin-status request is still
  * in flight.
+ *
+ * The requests are held as unresolved promises and released by the test, not
+ * driven by fake timers: what matters is the order of starts and resolutions,
+ * and no timer is involved in it.
  */
 
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -72,6 +76,9 @@ const BODIES: Record<string, unknown> = {
   '/api/v1/auth/admin-status': { isAdmin: true, isSuperAdmin: true, permissions: [] },
 };
 
+/** Set once main.ts has been booted in this file (it boots only once). */
+let booted = false;
+
 function releaseAll(): void {
   for (const release of [...held.values()]) release();
 }
@@ -92,6 +99,7 @@ describe('main.ts boot waterfall', () => {
       holding.add(p);
     }
     await bootMainAt('/', (p) => hold(p, BODIES[p]));
+    booted = true;
 
     // Every boot request and the page chunk start while all of them are held.
     await vi.waitFor(() => {
@@ -117,9 +125,16 @@ describe('main.ts boot waterfall', () => {
   }, 15_000);
 
   it('admin route starts chunk import before admin-status resolves', async () => {
+    // main.ts boots once per file. Reuse the boot of the test above, or boot
+    // here (nothing held) when this test runs alone.
+    if (!booted) await bootMainAt('/', (p) => hold(p, BODIES[p]));
+    await vi.waitFor(
+      () => expect(document.querySelector('scion-page-home')).not.toBeNull(),
+      BOOT_WAIT
+    );
     const main = await import('./main.js');
-    // Boot (test above) is done and its non-fresh admin-status request was
-    // answered; hold the guard's fresh one.
+    // Boot is done and its non-fresh admin-status request was answered; hold
+    // the guard's fresh one.
     holding.add('/api/v1/auth/admin-status');
     record.starts.delete('/api/v1/auth/admin-status');
 

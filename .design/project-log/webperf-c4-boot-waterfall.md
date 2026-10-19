@@ -58,6 +58,10 @@ Part of the webperf epic (#5301). Only `web/src/client/main.ts` changes
   preloaded, but neither the page nor the chat shell is ever connected, and the
   URL ends at `/`.
 - `__fixtures__/main-boot.ts` gains an optional per-path fetch override.
+- The design asked for fake fetch and timers. The tests hold requests as
+  unresolved promises that the test releases, without fake timers. The
+  property is the order of starts and resolutions, and no timer is involved.
+  The reviewer accepted this.
 
 ## Learnings
 
