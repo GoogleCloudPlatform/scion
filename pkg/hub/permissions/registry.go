@@ -72,6 +72,7 @@ const (
 	ActionDelete         = "delete"
 	ActionList           = "list"
 	ActionManage         = "manage"
+	ActionAdmin          = "admin"   // access_constraint.admin: administer access constraints
 	ActionSteward        = "steward" // artifact.steward: share and retire an agent's artifact within bounds (design D25)
 	ActionAttach         = "attach"
 	ActionPortAccess     = "port_access"
@@ -363,7 +364,7 @@ var Registry = []Permission{
 	{ID: "role_binding.delete", Resource: ResourceRoleBinding, Action: ActionDelete, CapabilityKind: CapabilityScope, UATScope: "role_binding:delete", Description: "Delete role bindings", Enforcement: []string{"pkg/hub/handlers_roles.go"}},
 
 	// Access constraint management (AC1 — Operator Access Constraint Backend)
-	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionManage, CapabilityKind: CapabilityScope, UATScope: "access_constraint:admin", Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
+	{ID: "access_constraint.admin", Resource: ResourceAccessConstraint, Action: ActionAdmin, CapabilityKind: CapabilityScope, UATScope: "access_constraint:admin", Description: "Administer access constraints (create, update, delete)", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 	{ID: "access_constraint.read", Resource: ResourceAccessConstraint, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "access_constraint:read", Description: "Read access constraints", Enforcement: []string{"pkg/hub/handlers_access_constraints.go"}},
 
 	// Scheduled event / recurring schedule permissions (project-scoped)

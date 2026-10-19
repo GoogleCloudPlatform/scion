@@ -72,6 +72,9 @@ const (
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
+	// ActionAdmin covers access constraint administration
+	// (access_constraint.admin).
+	ActionAdmin Action = "admin"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
