@@ -304,3 +304,58 @@ func TestIssueAdminToCache_ErrorPathsCarryNoToken(t *testing.T) {
 	_, statErr = os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "a2.json"))
 	assert.True(t, os.IsNotExist(statErr))
 }
+
+// X5 + X4b: every admin profile request runs the own-hub check by hub id
+// before any bearer or IAM issuer-token mint. With a target that reports
+// this agent's own hub id (under another name), admin issuance, admin
+// token re-issue and an admin web-login code are refused with ErrOwnHub:
+// no issuer ID token is minted for either issuer account, no bearer or
+// delegation reaches the target, and no cache entry is written or changed.
+func TestOwnHubByID_AdminPathsRefusedBeforeAnyMint(t *testing.T) {
+	h := newHarness(t, true)
+	p := adminProfile(h.target, TransportIAP)
+	// A cached admin identity, issued while no own hub endpoint is set.
+	cached := issueAdmin(t, h, p, "admin1", TierHubAdmin)
+	before, err := ReadEntry(h.home, "t1", "r1", "admin1")
+	require.NoError(t, err)
+
+	h.target.SetHubID("hub-own")
+	own := hubprofiletest.NewHealthHub(t, "hub-own")
+	h.env["SCION_HUB_ENDPOINT"] = own.Srv.URL
+	minted := len(h.gcp.MintedTokens())
+	recorded := len(h.target.Recorded())
+	hits := h.target.TokenHits()
+
+	// Admin issuance.
+	_, err = IssueAdminToCache(context.Background(), h.mustOpen(p, "", "r1"), AdminIssueRequest{Alias: "admin2", AdminRole: TierHubAdmin, Purpose: "admin journey"})
+	require.ErrorIs(t, err, ErrOwnHub)
+	_, statErr := os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "admin2.json"))
+	assert.True(t, os.IsNotExist(statErr), "no cache file for a refused issuance")
+
+	// Admin token re-issue of the cached identity.
+	_, err = h.mustOpen(p, "admin1", "r1").Reissue(context.Background(), 0)
+	require.ErrorIs(t, err, ErrOwnHub)
+
+	// Admin web-login code through the admin delegation.
+	c, err := h.mustOpen(p, "", "r1").AdminIssuerClient(TierHubAdmin)
+	require.NoError(t, err)
+	_, err = c.TestIdentities().WebLoginCode(context.Background(), cached.IdentityID)
+	require.ErrorIs(t, err, ErrOwnHub)
+
+	for _, tok := range h.gcp.MintedTokens()[minted:] {
+		cl, err := transportauth.DecodeIDTokenClaims(tok)
+		require.NoError(t, err)
+		assert.NotEqual(t, hubprofiletest.AdminIssuerSA, cl.Email, "no admin issuer ID token is minted")
+		assert.NotEqual(t, testIssuerSA, cl.Email, "no member issuer ID token is minted")
+	}
+	for _, r := range h.target.Recorded()[recorded:] {
+		assert.Empty(t, r.Header.Get("Authorization"), r.Path)
+		assert.Empty(t, r.Header.Get(HeaderIssuerDelegation), r.Path)
+		assert.NotEqual(t, "/api/v1/test-identities/admin", r.Path)
+	}
+	assert.Equal(t, hits, h.target.TokenHits(), "no token re-issued")
+	assert.Empty(t, h.target.WebCodes(), "no web-login code minted")
+	after, err := ReadEntry(h.home, "t1", "r1", "admin1")
+	require.NoError(t, err)
+	assert.Equal(t, before.Token, after.Token, "the cached entry is unchanged")
+}
