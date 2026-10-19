@@ -102,6 +102,12 @@ type PostgresEventPublisher struct {
 	// connection attempt. Tests only (it lets a test hold the listener
 	// down).
 	testHookBeforeConnect func()
+	// testHookInUnsubscribe, when set, runs inside an unsubscribe's once
+	// before it takes mu; testHookBeforeCloseSubs, when set, runs in Close
+	// after mu is released and before the subscriber channels are closed.
+	// Tests only (they order an unsubscribe against Close).
+	testHookInUnsubscribe   func()
+	testHookBeforeCloseSubs func()
 }
 
 // listenHook is one AddOnListen registration.
@@ -346,6 +352,9 @@ func (p *PostgresEventPublisher) Subscribe(patterns ...string) (<-chan Event, fu
 
 	unsubscribe := func() {
 		sub.once.Do(func() {
+			if h := p.testHookInUnsubscribe; h != nil {
+				h()
+			}
 			p.mu.Lock()
 			for channel := range byChannel {
 				if m := p.subs[channel]; m != nil {
@@ -380,23 +389,38 @@ func (p *PostgresEventPublisher) Close() {
 	p.closed = true
 	p.mu.Unlock()
 
-	p.cancel()
+	if p.cancel != nil {
+		p.cancel()
+	}
 	p.wg.Wait()
-	p.pool.Close()
+	if p.pool != nil {
+		p.pool.Close()
+	}
 
+	// Collect the subscribers under mu, then close them with mu released:
+	// an unsubscribe running at the same time holds its subscription's once
+	// while it waits for mu, so closing under mu would deadlock with it.
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	seen := make(map[*pgSubscription]bool)
+	var subs []*pgSubscription
 	for _, m := range p.subs {
 		for sub := range m {
 			if !seen[sub] {
-				sub.once.Do(func() { close(sub.ch) })
 				seen[sub] = true
+				subs = append(subs, sub)
 			}
 		}
 	}
 	p.subs = make(map[string]map[*pgSubscription][]string)
 	p.desired = make(map[string]int)
+	p.mu.Unlock()
+
+	if h := p.testHookBeforeCloseSubs; h != nil {
+		h()
+	}
+	for _, sub := range subs {
+		sub.once.Do(func() { close(sub.ch) })
+	}
 }
 
 // SetOnReconnect sets a callback invoked each time the listener reconnects

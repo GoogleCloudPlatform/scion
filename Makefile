@@ -231,10 +231,12 @@ test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
 	@go test -count=1 $(FIXTURE_PKGS)
 
-# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
-# concurrency tests (ptone/scion#4240, Phase 3b) run by
-# test-launch-store-postgres (pkg/hub shard Postgres (integration) jobs in CI).
-TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres
+# TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity concurrency
+# tests (ptone/scion#4240: the Phase 3b purge, and the X4 parallel admin-kind
+# mints across workload delegations) run by test-launch-store-postgres
+# (pkg/hub shard Postgres (integration) jobs in CI).
+TEST_IDENTITY_POSTGRES_TESTS := TestFixturePurge_ConcurrentCoOwner_Postgres \
+	TestWorkloadAdminDelegation_ParallelMintsHoldCaps_Postgres
 
 # MEMBERSHIP_LOSS_POSTGRES_TESTS are the pkg/hub membership loss
 # concurrency tests (ptone/scion#3433) run by test-launch-store-postgres.

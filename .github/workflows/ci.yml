@@ -198,6 +198,18 @@ jobs:
       - name: Verify Web Build
         run: ls -la web/dist
 
+      # Guards against stale chunks shipping in the hub binary (#3842).
+      # The build must not write output into public/ (Vite's publicDir copies
+      # it into the next build), and every .js in dist/client/assets must be
+      # referenced by the Vite manifest. Also runs the node:test suites of the
+      # build helper scripts.
+      - name: Check Web Build Orphans
+        working-directory: ./web
+        run: |
+          npm run test:build-scripts
+          test ! -e public/assets || { echo "public/assets must not exist after the build (#3842)"; exit 1; }
+          npm run check:orphans
+
       - name: Verify Web Types
         if: ${{ needs.changes.result != 'success' || needs.changes.outputs.web_checks != 'false' }}
         working-directory: ./web

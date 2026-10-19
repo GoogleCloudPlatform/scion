@@ -79,7 +79,6 @@ capabilities:
     auth_file: { support: "yes", reason: "Via AGY_TOKEN file secret at ~/.gemini/antigravity-cli/antigravity-oauth-token" }
     oauth_token: { support: "no", reason: "AGY uses file-based OAuth token, not raw token injection" }
     vertex_ai: { support: "yes", reason: "GCP mode via ADC (GOOGLE_APPLICATION_CREDENTIALS) + GOOGLE_CLOUD_PROJECT, requires AGY CLI >= 1.1.10" }
-  agent_plugins: { support: "no", reason: "Antigravity plugins need a generated manifest and mcp_config.json shim; not yet supported" }
 
 no_auth:
   behavior: drop-to-shell

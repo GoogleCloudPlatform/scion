@@ -24,12 +24,13 @@ import (
 
 // The artifact decision log (ptone/scion#5120). The service writes one
 // structured entry per decision to the logger set with SetLogger: each
-// lifecycle change it records in artifact_event (and the grant, link and
-// version changes it does not), each authorization refusal on a
+// lifecycle change it records in artifact_event (and the version changes
+// it does not), each authorization refusal on a
 // management or write route (WARN; a refused POST /{id}/grants from a
 // caller who may read the artifact but not administer it, which
-// putReviewGrant answers, is not logged here), and each read answered with
-// the 404 of a hidden or missing artifact (DEBUG only, to bound volume).
+// putReviewGrant answers, is logged by logReviewGrantRefusal with a review_
+// reason), and each read answered with the 404 of a hidden or missing
+// artifact (DEBUG only, to bound volume).
 //
 // An entry carries ids, enums and counts only. It never carries a share
 // link's token, its hash or its id (no segment under a link route), a
@@ -117,24 +118,26 @@ const (
 	logReasonUnauthenticated       = "unauthenticated"
 	logReasonStoreError            = "store_error"
 	logReasonCheckerError          = "principal_check_failed"
+	// logReasonStewardActionNotAllowed: a steward asked for an admin grant
+	// or a move (design D25).
+	logReasonStewardActionNotAllowed = "steward_action_not_allowed"
+	// logReasonStewardPreconditionFailed: a steward write found the
+	// artifact moved or transferred since its authority was decided
+	// (ErrStewardPrecondition), and answered 404.
+	logReasonStewardPreconditionFailed = "steward_precondition_failed"
 )
 
-// Log authorities: why the actor was allowed. The values follow the planned
-// share-authority vocabulary. owner, admin_grant and custodian_project_admin
-// are also the artifact_event authorities of the same name.
-// steward_project_owner is a review grant given as a holder of project
-// administration in the home project (its owners and admins, and
-// super-admins); steward_delegator is a review grant given as the owning
-// agent's delegating user (the clause a ReviewGrantClauser names). A review
-// grant on a host that does not name the clause is logged without an
-// authority. The maintenance pass logs the event authorities retention and
-// reconciler.
+// Log authorities: why the actor was allowed. They are the artifact_event
+// authorities of the same name: owner, admin_grant, the steward clauses
+// steward_project_owner and steward_delegator (design D25), and
+// custodian_project_admin. A review grant given on the review-grant path
+// (design D24) is logged with the authority its event records
+// (reviewGrantAuthority). The maintenance pass logs the event authorities
+// retention and reconciler.
 const (
 	logAuthorityOwner                 = AuthorityOwner
 	logAuthorityAdminGrant            = AuthorityAdminGrant
 	logAuthorityCustodianProjectAdmin = AuthorityCustodianProjectAdmin
-	logAuthorityStewardProjectOwner   = "steward_project_owner"
-	logAuthorityStewardDelegator      = "steward_delegator"
 )
 
 // SetLogger sets the function that yields the artifact decision logger.
@@ -330,12 +333,18 @@ func (s *Service) adminRefusalReason(ctx context.Context, a *Artifact) string {
 	return logReasonNotAdministrator
 }
 
-// logGrantPut writes a principal or scope grant created (created) or
-// changed by the caller of r, which acted by authority.
-func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, created bool, authority string) {
-	action := logActionGrantChanged
-	if created {
+// logGrantPut writes a principal or scope grant created or changed (put) by
+// the caller of r, which acted by authority. A put that changed nothing is
+// not logged, as it records no event.
+func (s *Service) logGrantPut(r *http.Request, a *Artifact, g *Grant, put GrantPut, authority string) {
+	var action string
+	switch put {
+	case GrantPutCreated:
 		action = logActionGrantCreated
+	case GrantPutChanged:
+		action = logActionGrantChanged
+	default:
+		return
 	}
 	s.logAllowed(r, logEntry{action: action, artifact: a, authority: authority,
 		subjectKind: g.SubjectKind, subjectRef: g.SubjectRef, permission: g.Permission})
@@ -506,15 +515,41 @@ type reviewClauseNote struct{}
 // review grant through ReviewGrantAuthority alone, which does not name it.
 const reviewClauseUnnamed = "unnamed"
 
-// reviewGrantLogAuthority is the log authority of a review grant allowed by
-// clause: steward_project_owner or steward_delegator as the host named it,
-// and none ("", the field is left out) when the host did not name it.
-func reviewGrantLogAuthority(clause string) string {
+// reviewGrantProjectAdminAuthority is the authority recorded for a review
+// grant given on the review-grant path (design D24) by an admin of the
+// artifact's home project. Since stewards (design D25), an owner of the
+// home project gives grants as a steward, so this path serves the admins
+// who are not owners. The path is removed with the grant ladder; until
+// then this one constant names their authority.
+const reviewGrantProjectAdminAuthority = AuthorityCustodianProjectAdmin
+
+// reviewGrantDelegatorAuthority is the authority recorded for a review grant
+// given on the review-grant path (design D24) by the owning agent's
+// delegating user. That path serves only callers who are not stewards (a
+// steward is served by the manager path first), so a delegating user here
+// failed the steward check (for example, it holds no role in the
+// artifact's current home project) and is not recorded as one. The path is
+// removed with the grant ladder; until then this one constant names it.
+const reviewGrantDelegatorAuthority = "review_grant"
+
+// reviewGrantUnnamedAuthority is the authority recorded for a review grant
+// allowed by a host that implements ReviewGrantAuthority but not
+// ReviewGrantClauser, which does not name the clause. The hub names it.
+const reviewGrantUnnamedAuthority = "review_grant"
+
+// reviewGrantAuthority is the authority of a review grant allowed by
+// clause, recorded on its event and logged: reviewGrantDelegatorAuthority
+// for the owning agent's delegating user, reviewGrantProjectAdminAuthority
+// for an admin of the home project, and reviewGrantUnnamedAuthority when
+// the host did not name the clause. None is a steward authority, so the
+// write carries no steward precondition (callerActor); PutReviewGrant
+// re-checks the home and owner kind under the artifact's lock itself.
+func reviewGrantAuthority(clause string) string {
 	switch clause {
 	case ReviewClauseProjectAdmin:
-		return logAuthorityStewardProjectOwner
+		return reviewGrantProjectAdminAuthority
 	case ReviewClauseDelegatingUser:
-		return logAuthorityStewardDelegator
+		return reviewGrantDelegatorAuthority
 	}
-	return ""
+	return reviewGrantUnnamedAuthority
 }

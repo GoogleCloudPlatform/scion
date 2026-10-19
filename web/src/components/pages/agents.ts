@@ -23,6 +23,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 
 import type {
   PageData,
@@ -1793,7 +1794,13 @@ export class ScionPageAgents extends LitElement {
 
   private renderGrid(items: Agent[]): TemplateResult {
     return html`
-      <div class="resource-grid">${items.map((agent) => this.renderAgentCard(agent))}</div>
+      <div class="resource-grid">
+        ${repeat(
+          items,
+          (agent) => agent.id,
+          (agent) => this.renderAgentCard(agent)
+        )}
+      </div>
     `;
   }
 
@@ -2105,7 +2112,11 @@ export class ScionPageAgents extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${items.map((agent) => this.renderAgentRow(agent))}
+            ${repeat(
+              items,
+              (agent) => agent.id,
+              (agent) => this.renderAgentRow(agent)
+            )}
           </tbody>
         </table>
       </div>

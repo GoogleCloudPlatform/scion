@@ -280,18 +280,18 @@ func TestStoreAttachmentRefusals(t *testing.T) {
 		} {
 			principalGrant := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 				SubjectRef: "user:user-2", Permission: GrantRead, CreatedAt: now}
-			if _, err := st.PutGrant(ctx, principalGrant, 10, true); !errors.Is(err, ErrAttachmentNotShareable) {
+			if _, err := st.PutGrant(ctx, principalGrant, 10, true, testActor); !errors.Is(err, ErrAttachmentNotShareable) {
 				t.Errorf("%s: PutGrant = %v, want ErrAttachmentNotShareable", a.ScopeKind, err)
 			}
 			review := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectPrincipal,
 				SubjectRef: "user:user-2", Permission: GrantReview, CreatedAt: now}
-			if _, err := st.PutReviewGrant(ctx, review, 10, a.ScopeRef); !errors.Is(err, ErrAttachmentNotShareable) {
+			if _, err := st.PutReviewGrant(ctx, review, 10, a.ScopeRef, testActor); !errors.Is(err, ErrAttachmentNotShareable) {
 				t.Errorf("%s: PutReviewGrant = %v, want ErrAttachmentNotShareable", a.ScopeKind, err)
 			}
 			exp := now.Add(time.Hour)
 			link := &Grant{ID: uuid.NewString(), ArtifactID: a.ID, SubjectKind: SubjectLink, SubjectRef: "hash-" + a.ID,
 				Permission: GrantRead, ExpiresAt: &exp, CreatedAt: now}
-			if err := st.CreateLink(ctx, link, 10, now); !errors.Is(err, ErrAttachmentNotShareable) {
+			if err := st.CreateLink(ctx, link, 10, now, testActor); !errors.Is(err, ErrAttachmentNotShareable) {
 				t.Errorf("%s: CreateLink = %v, want ErrAttachmentNotShareable", a.ScopeKind, err)
 			}
 			v := &Version{ID: uuid.NewString(), ArtifactID: a.ID, Kind: VersionKindPublish, EntryPath: "x.md",

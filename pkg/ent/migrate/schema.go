@@ -1982,6 +1982,7 @@ var (
 		{Name: "exchange_agent_credential_id", Type: field.TypeString, Nullable: true},
 		{Name: "actor_kind", Type: field.TypeString, Nullable: true},
 		{Name: "agent_delegation_code", Type: field.TypeString, Nullable: true},
+		{Name: "provenance_basis", Type: field.TypeString, Nullable: true},
 	}
 	// MutationAuditsTable holds the schema information for the "mutation_audits" table.
 	MutationAuditsTable = &schema.Table{
@@ -2290,6 +2291,56 @@ var (
 			},
 		},
 	}
+	// ProjectVisitorExclusionsColumns holds the columns for the "project_visitor_exclusions" table.
+	ProjectVisitorExclusionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "rule_id", Type: field.TypeUUID},
+		{Name: "user_id", Type: field.TypeString},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ProjectVisitorExclusionsTable holds the schema information for the "project_visitor_exclusions" table.
+	ProjectVisitorExclusionsTable = &schema.Table{
+		Name:       "project_visitor_exclusions",
+		Columns:    ProjectVisitorExclusionsColumns,
+		PrimaryKey: []*schema.Column{ProjectVisitorExclusionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "projectvisitorexclusion_rule_id_user_id",
+				Unique:  true,
+				Columns: []*schema.Column{ProjectVisitorExclusionsColumns[1], ProjectVisitorExclusionsColumns[2]},
+			},
+		},
+	}
+	// ProjectVisitorRulesColumns holds the columns for the "project_visitor_rules" table.
+	ProjectVisitorRulesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "issuer", Type: field.TypeString},
+		{Name: "domain", Type: field.TypeString},
+		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// ProjectVisitorRulesTable holds the schema information for the "project_visitor_rules" table.
+	ProjectVisitorRulesTable = &schema.Table{
+		Name:       "project_visitor_rules",
+		Columns:    ProjectVisitorRulesColumns,
+		PrimaryKey: []*schema.Column{ProjectVisitorRulesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "projectvisitorrule_project_id_issuer_domain",
+				Unique:  true,
+				Columns: []*schema.Column{ProjectVisitorRulesColumns[1], ProjectVisitorRulesColumns[2], ProjectVisitorRulesColumns[3]},
+			},
+			{
+				Name:    "projectvisitorrule_issuer_domain",
+				Unique:  false,
+				Columns: []*schema.Column{ProjectVisitorRulesColumns[2], ProjectVisitorRulesColumns[3]},
+			},
+		},
+	}
 	// RelayInstancesColumns holds the columns for the "relay_instances" table.
 	RelayInstancesColumns = []*schema.Column{
 		{Name: "instance_id", Type: field.TypeString},
@@ -2318,6 +2369,7 @@ var (
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "membership_kind", Type: field.TypeString, Nullable: true},
+		{Name: "source_rule_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "role_definition_id", Type: field.TypeUUID, Nullable: true},
 	}
@@ -2329,7 +2381,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "role_bindings_role_definitions_role_bindings",
-				Columns:    []*schema.Column{RoleBindingsColumns[11]},
+				Columns:    []*schema.Column{RoleBindingsColumns[12]},
 				RefColumns: []*schema.Column{RoleDefinitionsColumns[0]},
 				OnDelete:   schema.SetNull,
 			},
@@ -2338,7 +2390,7 @@ var (
 			{
 				Name:    "rolebinding_issuance_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[10]},
+				Columns: []*schema.Column{RoleBindingsColumns[11]},
 			},
 			{
 				Name:    "rolebinding_principal_type_principal_id",
@@ -2348,7 +2400,7 @@ var (
 			{
 				Name:    "rolebinding_role_definition_id",
 				Unique:  false,
-				Columns: []*schema.Column{RoleBindingsColumns[11]},
+				Columns: []*schema.Column{RoleBindingsColumns[12]},
 			},
 			{
 				Name:    "rolebinding_scope_type_scope_id",
@@ -2356,9 +2408,14 @@ var (
 				Columns: []*schema.Column{RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 			{
+				Name:    "rolebinding_source_rule_id",
+				Unique:  false,
+				Columns: []*schema.Column{RoleBindingsColumns[10]},
+			},
+			{
 				Name:    "rolebinding_role_definition_id_principal_type_principal_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{RoleBindingsColumns[11], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
+				Columns: []*schema.Column{RoleBindingsColumns[12], RoleBindingsColumns[1], RoleBindingsColumns[2], RoleBindingsColumns[3], RoleBindingsColumns[4]},
 			},
 		},
 	}
@@ -3201,6 +3258,8 @@ var (
 		ProjectContributorsTable,
 		ProjectPreStartHooksTable,
 		ProjectSyncStateTable,
+		ProjectVisitorExclusionsTable,
+		ProjectVisitorRulesTable,
 		RelayInstancesTable,
 		RoleBindingsTable,
 		RoleDefinitionsTable,

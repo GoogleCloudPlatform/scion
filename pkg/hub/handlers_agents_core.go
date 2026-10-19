@@ -4474,7 +4474,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
+				dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
 		}
 
 		if cfg.Image != "" {
@@ -4506,7 +4506,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			}
 			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
 		}
-		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher()))
+		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
 		// Start from the live InlineConfig and overlay only the keys the
 		// request names (ptone/scion#3901). The configure page does not
 		// render volumes, skills, MCP servers, services, command args or
@@ -5481,6 +5481,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
+		if writeBrokerOutcomeUnknown(w, err) {
 			return
 		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())

@@ -198,7 +198,7 @@ func legacyCeiling(scopes ...string) permissions.FrozenPermissionCeiling {
 // TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings pins
 // stage 3b: a permission is usable only on a boundary kind its
 // allowed boundaries list. A project-boundary legacy ceiling that carries
-// group, hub or scheduled-event authoring permissions is denied on a project target
+// group, hub or project delete permissions is denied on a project target
 // for each, with a stable reason, while a permission eligible for the
 // project boundary passes the stage.
 func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *testing.T) {
@@ -209,6 +209,7 @@ func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *test
 		"group:read", "group:update", "group:delete", "group:addMember", "group:removeMember", "group:create", "group:list",
 		"hub:manage",
 		"scheduled_event:read", "scheduled_event:list", "scheduled_event:create", "scheduled_event:update", "scheduled_event:delete",
+		"project:delete",
 		"agent:read",
 	}
 	ceiling := legacyCeiling(scopes...)
@@ -228,9 +229,8 @@ func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *test
 		{"group.create", projectGroup},
 		{"group.list", projectGroup},
 		{"hub.audit.read", projectTarget},
-		// scheduled_event.create has no allowed boundary; the read, list,
-		// update and delete permissions are eligible on a project boundary.
-		{"scheduled_event.create", projectEvent},
+		// project.delete has no allowed boundary.
+		{"project.delete", projectTarget},
 	}
 	for _, tc := range cases {
 		t.Run(tc.permissionID, func(t *testing.T) {
@@ -261,12 +261,19 @@ func TestBearerGate_PermissionBoundaryEligibilityAppliesToLegacyCeilings(t *test
 	eligible := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), projectBoundary(f.projectA), ceiling, "agent.read", agentTarget, BearerOptions{})
 	assert.True(t, eligible.Decision.Allowed, "stage %q reason %q", eligible.Stage, eligible.Decision.Reason)
 
+	// Every scheduled_event permission, authoring included, is eligible
+	// for the project boundary.
+	for _, permissionID := range []string{"scheduled_event.read", "scheduled_event.list", "scheduled_event.create", "scheduled_event.update", "scheduled_event.delete"} {
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), projectBoundary(f.projectA), ceiling, permissionID, projectEvent, BearerOptions{})
+		assert.NotEqual(t, BearerStageBoundaryEligibility, eval.Stage, "%s: reason %q", permissionID, eval.Decision.Reason)
+	}
+
 	// A hub-only permission is eligible on a hub boundary.
 	hub := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), hubBoundary(), ceiling, "group.read", projectGroup, BearerOptions{})
 	assert.NotEqual(t, BearerStageBoundaryEligibility, hub.Stage, "reason %q", hub.Decision.Reason)
 
 	// A permission with no boundary entry is eligible on no boundary.
-	unlisted := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), hubBoundary(), ceiling, "scheduled_event.create", projectEvent, BearerOptions{})
+	unlisted := f.srv.authzService.EvaluateBearerCeiling(ctx, principalContextForIdentity(owner), hubBoundary(), ceiling, "project.delete", projectTarget, BearerOptions{})
 	assert.Equal(t, BearerStageBoundaryEligibility, unlisted.Stage)
 }
 

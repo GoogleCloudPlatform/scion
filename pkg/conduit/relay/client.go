@@ -304,7 +304,24 @@ func statusErr(resp *http.Response) error {
 // StreamClose. Cancelling ctx or reaching open_timeout_ms while opening
 // sends StreamClose{4499} and drops the WS, so the owner cancels its leg
 // (4499 to the target) — both legs see 4499.
+//
+// An owner that reports no target-side ids in its accept still opens the
+// stream (TargetOf then reports them unknown); OpenBridge refuses it. This
+// leniency is the compatibility path for in-process relays of mixed
+// versions only: separate relays and the hub-held leaves of a hub in
+// external relay mode use OpenBridge. It goes when the hub's record
+// fallback for unknown target-side ids (conduitTargetOf) is removed.
 func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (conduit.Stream, error) {
+	hop, err := s.openHop(ctx, open)
+	if err != nil {
+		return nil, err
+	}
+	return hop, nil
+}
+
+// openHop opens one internal stream hop to the owner relay (see
+// OpenStream).
+func (s *RemoteSession) openHop(ctx context.Context, open *conduitv1.StreamOpen) (*wsStream, error) {
 	kind, err := conduit.StreamKindFromProto(open.GetKind())
 	if err != nil {
 		return nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
@@ -442,6 +459,7 @@ func (s *RemoteSession) Info() conduit.SessionInfo {
 			Rpc:                 append([]string(nil), c.RPC...),
 			EndpointIncarnation: c.EndpointIncarnation,
 			ExecScope:           c.ExecScope,
+			Features:            append([]string(nil), c.Features...),
 			TransportLimits: &conduitv1.TransportLimits{
 				MaxFrame:     uint32(c.TransportLimits.MaxFrame),
 				IdleTimeoutS: uint32(c.TransportLimits.IdleTimeoutS),
@@ -455,3 +473,6 @@ func (s *RemoteSession) Close() error { return nil }
 
 // Record returns the registry record the handle was resolved from.
 func (s *RemoteSession) Record() registry.SessionRecord { return s.rec }
+
+// Endpoint returns the internal endpoint of the relay holding the session.
+func (s *RemoteSession) Endpoint() string { return s.endpoint }

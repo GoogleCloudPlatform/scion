@@ -17,7 +17,7 @@ The routes are described in the [API reference](/scion/reference/api/) under `/a
 
 Browser sessions for test identities are available only on a test hub that has both of these:
 
-- **Test identities enabled at the member level**: the hub starts with `--test-mode=member:<hub-id>` or above (`admin:<hub-id>`, `super-admin:<hub-id>`), which itself requires `server.hub.class: test` and the marker below (see "Test mode (operators)" in the [API reference](/scion/reference/api/)).
+- **Test identities enabled at the member level**: the hub starts with `--test-mode=member:<hub-id>` or above (`admin:<hub-id>`, `super-admin:<hub-id>`), which itself requires an explicitly configured `server.hub.hub_id` (or `SCION_SERVER_HUB_HUBID`, set to the hub's current id), `server.hub.class: test` and the marker below (see "Test mode (operators)" in the [API reference](/scion/reference/api/)).
 - **The test infrastructure marker** in its database, written with `scion server test-infra mark --hub-id <hub-id>` before the hub starts. Marking generates a hub-local key that only these sessions use. Unmarking or marking again replaces the key, which ends every test identity browser session.
 
 There is no separate switch for web sessions. When either requirement is missing, minting a code answers `404` with `details.reason: test_identity_web_sessions_unavailable`, and the member tier keeps working without web sessions. Hubs behind proxy auth (for example IAP) also need at least one driver principal; see [IAP-fronted hubs](#iap-fronted-hubs).
@@ -143,6 +143,8 @@ await installIapDriver(context, { baseURL: hubURL, token: driverToken });
 const page = await context.newPage();
 await page.goto('/', { waitUntil: 'domcontentloaded' });
 ```
+
+On a Scion runner, get `driverToken` from the runner's metadata emulator at run time, never from a file: see [IAP Driver Tokens for Browser Journeys](/scion/contributing/test-identity-iap-driver/), which also describes the operator-run IAP browser journey (`web/e2e/iap-journey/`).
 
 ## Session lifetime and teardown
 

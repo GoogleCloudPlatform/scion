@@ -67,8 +67,8 @@ func TestSystemRegistry_DBBackedWritesEndpointsSection(t *testing.T) {
 	if got := ops.Snapshot().ImageRegistry; got != "new.example.com" {
 		t.Errorf("snapshot image_registry = %q, want new.example.com", got)
 	}
-	if got := srv.config.MaintenanceConfig.ImageRegistry; got != "new.example.com" {
-		t.Errorf("applied image_registry = %q, want new.example.com", got)
+	if got := srv.resolveImageRegistry(); got != "new.example.com" {
+		t.Errorf("resolved image_registry = %q, want new.example.com", got)
 	}
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
