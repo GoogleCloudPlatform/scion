@@ -60,7 +60,8 @@ func TestRelayNotifyGrantKeysChanged(t *testing.T) {
 	// while the session is still pending; NotifyGrantKeysChanged only sees
 	// registered sessions. Wait for every dialled session to register so
 	// the count, and the absence of hints on the others, are both
-	// meaningful (ptone/scion#5338).
+	// meaningful (ptone/scion#5338). The relay clock is fake, so ctx is
+	// the only bound.
 	for name, wel := range map[string]*conduitv1.Welcome{"v2": v2Welcome, "plain": plainWelcome, "user": userWelcome} {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		_, _, ok := a.Relay.Local(ctx, wel.GetSessionId())
