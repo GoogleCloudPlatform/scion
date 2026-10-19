@@ -445,12 +445,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 }
 
 // authorizeProjectClone checks, before any source content is read or
-// copied, that the caller can read the source project and create projects at hub scope.
-// The create check is projectCreateDecision, the same admission project
-// create and project register apply. A user access token must also carry the
-// project:clone selector, eligible for its boundary; a session needs no
-// project.clone binding. It writes the HTTP error response on failure and
-// returns a non-nil error; on success it returns nil.
+// copied, that the caller can read the source project and create projects
+// at hub scope. The create check is projectCreateDecision, the same
+// admission project create and project register apply. A user access token
+// must also carry the project:clone selector, eligible for its boundary; a
+// session needs no project.clone binding. It writes the HTTP error response
+// on failure and returns a non-nil error; on success it returns nil.
 func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWriter, src *store.Project) error {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
