@@ -182,7 +182,15 @@ func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 // the script again gives the same result. The temporary file has a fixed
 // name, so a run that was cut off is cleaned up by the next one; anything
 // already at that name is removed first, never written through. A failed
-// step removes the temporary file. The script stops at the first failure
+// step removes the temporary file.
+//
+// The fixed name relies on placements into one directory never running
+// concurrently. That holds because: the script places its files one after
+// another; copy mode is used only for pods whose home lives in the pod
+// itself (NFS homes use link mode), so no other pod writes it; Run starts
+// one placement per pod start; and execInPodDialRetry repeats the exec
+// only after a dial error, when the previous attempt never started, and
+// never after a context error that could leave an attempt running. The script stops at the first failure
 // and writes the target path and the reason (never file contents) to stderr.
 func k8sFilePlacementScript(home string, placements []k8sFilePlacement) string {
 	var b strings.Builder
