@@ -942,7 +942,8 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 
 	registry := s.resolveImageRegistry()
 	resolvedImage := config.RewriteImageRegistry(image, registry)
-	slog.Info("checking image status", "id", hc.ID, "image", image, "resolved", resolvedImage, "registry", registry)
+	slog.Info("checking image status", "id", hc.ID, "image", image,
+		"resolved", config.RedactImageRegistry(resolvedImage), "registry", config.RedactImageRegistry(registry))
 
 	if imagecheck.IsBareImageName(image) {
 		status := store.HarnessConfigImageStatusUnknown

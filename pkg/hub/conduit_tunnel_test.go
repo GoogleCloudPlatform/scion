@@ -60,12 +60,19 @@ const tunnelSweep = 30 * time.Second
 
 func newTunnelFixture(t *testing.T, mods ...func(*ConduitRelayOptions)) *tunnelFixture {
 	t.Helper()
+	return newTunnelFixtureServer(t, nil, mods...)
+}
+
+// newTunnelFixtureServer is newTunnelFixture with srvMod applied to the
+// server before it starts serving (newRelayFixtureServer).
+func newTunnelFixtureServer(t *testing.T, srvMod func(*Server), mods ...func(*ConduitRelayOptions)) *tunnelFixture {
+	t.Helper()
 	tf := &tunnelFixture{relayClock: clock.NewFake(time.Now()), dials: make(chan net.Conn, 16)}
 	all := append([]func(*ConduitRelayOptions){func(o *ConduitRelayOptions) {
 		o.Clock = tf.relayClock
 		o.AuthzRecheckInterval = tunnelSweep
 	}}, mods...)
-	tf.ptyConduitFixture = newPTYConduitFixture(t, all...)
+	tf.ptyConduitFixture = newPTYConduitFixtureServer(t, srvMod, all...)
 	tf.launched = tf.exposePort(t, tf.launched, 3000)
 	return tf
 }
@@ -941,23 +948,24 @@ func TestConduitTunnel_RecheckPortDecisionUnchanged(t *testing.T) {
 // design §3.8 rule 7, and 404 goes only with agent_not_found.
 func TestConduitTunnel_ErrorTable(t *testing.T) {
 	want := map[conduitTunnelFailure][3]any{
-		tunnelInvalidRequest:          {http.StatusBadRequest, "invalid_request", ""},
-		tunnelUnauthorized:            {http.StatusUnauthorized, "unauthorized", ""},
-		tunnelForbidden:               {http.StatusForbidden, "forbidden", ""},
-		tunnelPrincipalInactive:       {http.StatusForbidden, "forbidden", ""},
-		tunnelAgentNotFound:           {http.StatusNotFound, "agent_not_found", ""},
-		tunnelAgentNotRunning:         {http.StatusConflict, "agent_not_running", ""},
-		tunnelRateLimited:             {http.StatusTooManyRequests, "rate_limited", ""},
-		tunnelBrokerUnavailable:       {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
-		tunnelSessionUnavailable:      {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
-		tunnelStreamAuthzUnavailable:  {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
-		tunnelRegistryUnavailable:     {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
-		tunnelGrantKeysUnavailable:    {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
-		tunnelConduitNotServing:       {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
-		tunnelInternal:                {http.StatusInternalServerError, "internal_error", ""},
-		tunnelPlacementPinStale:       {http.StatusConflict, "runtime_target_pin_stale", ""},
-		tunnelPlacementBrokerMissing:  {http.StatusConflict, "runtime_broker_missing", ""},
-		tunnelPlacementTargetMismatch: {http.StatusConflict, "runtime_target_mismatch", ""},
+		tunnelInvalidRequest:           {http.StatusBadRequest, "invalid_request", ""},
+		tunnelUnauthorized:             {http.StatusUnauthorized, "unauthorized", ""},
+		tunnelForbidden:                {http.StatusForbidden, "forbidden", ""},
+		tunnelPrincipalInactive:        {http.StatusForbidden, "forbidden", ""},
+		tunnelAgentNotFound:            {http.StatusNotFound, "agent_not_found", ""},
+		tunnelAgentNotRunning:          {http.StatusConflict, "agent_not_running", ""},
+		tunnelRateLimited:              {http.StatusTooManyRequests, "rate_limited", ""},
+		tunnelBrokerUnavailable:        {http.StatusServiceUnavailable, "runtime_broker_unavailable", ""},
+		tunnelSessionUnavailable:       {http.StatusServiceUnavailable, "agent_session_unavailable", ""},
+		tunnelStreamAuthzUnavailable:   {http.StatusServiceUnavailable, "unavailable", "stream_authz_unavailable"},
+		tunnelRegistryUnavailable:      {http.StatusServiceUnavailable, "unavailable", "registry_unavailable"},
+		tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, "unavailable", "grant_keys_unavailable"},
+		tunnelConduitNotServing:        {http.StatusServiceUnavailable, "unavailable", "conduit_not_serving"},
+		tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, "unavailable", "stream_renewal_unavailable"},
+		tunnelInternal:                 {http.StatusInternalServerError, "internal_error", ""},
+		tunnelPlacementPinStale:        {http.StatusConflict, "runtime_target_pin_stale", ""},
+		tunnelPlacementBrokerMissing:   {http.StatusConflict, "runtime_broker_missing", ""},
+		tunnelPlacementTargetMismatch:  {http.StatusConflict, "runtime_target_mismatch", ""},
 	}
 	require.Len(t, conduitTunnelFailures, len(want))
 	for f, m := range conduitTunnelFailures {

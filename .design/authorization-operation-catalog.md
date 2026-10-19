@@ -184,36 +184,37 @@
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
 - [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
-- [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
-- [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
-- [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
-- [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
-- [role.binding.delete](#rolebindingdelete) — Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
-- [group.member.add](#groupmemberadd) — Add a member to a group
+- [role.definition.create](#roledefinitioncreate) — Create a custom role definition
+- [role.definition.update](#roledefinitionupdate) — Update a custom role definition
+- [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition
+- [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal)
+- [role.binding.delete](#rolebindingdelete) — Delete a role binding (revoke authority from a principal)
+- [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
 - [group.member.remove](#groupmemberremove) — Remove a member from a group
 - [group.delete](#groupdelete) — Delete a group
-- [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
-- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
-- [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
-- [access.constraint.preview](#accessconstraintpreview) — Generate an access constraint preview and read a preview job and its result. A token needs access_constraint:admin on a hub boundary and the holder's live access_constraint.admin authority
+- [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary)
+- [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary)
+- [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary)
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
 - [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
-- [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
+- [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
-- [group.read](#groupread) — Read group details or list groups
-- [group.create](#groupcreate) — Create a new group
-- [group.update](#groupupdate) — Update group metadata
+- [group.read](#groupread) — Read group details
+- [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
+- [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
+- [group.update](#groupupdate) — Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist
 - [user.read](#userread) — Read a user profile
 - [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
-- [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
-- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
+- [user.update](#userupdate) — Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update
+- [user.self.update](#userselfupdate) — Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
+- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 - [role.binding.read](#rolebindingread) — Read role binding assignments
-- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
 - [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
@@ -6915,7 +6916,7 @@
 
 **Domain:** role
 
-**Description:** Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
+**Description:** Create a custom role definition
 
 ### Entry Points
 
@@ -6927,9 +6928,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.create`
 
@@ -6949,12 +6948,10 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestCustomRoleCreateToken_ProjectScopeJudgedOnHubAuthority`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ### Exemptions
 
-- **authentication_only:** audit obligation waived; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
+- **authentication_only:** Role CRUD currently requires hub-admin via route guard; full operation contract deferred to AH1 (scope: AF1 catalog only) — waives: `audit_obligation`
 
 ---
 
@@ -6962,7 +6959,7 @@
 
 **Domain:** role
 
-**Description:** Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
+**Description:** Update a custom role definition
 
 ### Entry Points
 
@@ -6972,9 +6969,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.update`
 
@@ -6987,7 +6982,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -6995,7 +6989,7 @@
 
 **Domain:** role
 
-**Description:** Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
+**Description:** Delete a custom role definition
 
 ### Entry Points
 
@@ -7005,9 +6999,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.delete`
 
@@ -7027,7 +7019,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleDefinitionWriteToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7035,7 +7026,7 @@
 
 **Domain:** role.binding
 
-**Description:** Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
+**Description:** Create a role binding (grant authority to a principal)
 
 ### Entry Points
 
@@ -7045,9 +7036,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.create`
 
@@ -7072,8 +7061,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleBindingCreateToken_SystemScopeAlwaysDenied`
-- `pkg/hub:TestCustomRoleBindingToken_NeedsCreateSelectorAndProjectAccess`
 
 ---
 
@@ -7081,7 +7068,7 @@
 
 **Domain:** role.binding
 
-**Description:** Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
+**Description:** Delete a role binding (revoke authority from a principal)
 
 ### Entry Points
 
@@ -7091,9 +7078,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.delete`
 
@@ -7120,8 +7105,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleBindingDeleteToken_SuperAdminBindingDenied`
-- `pkg/hub:TestRoleBindingDeleteToken_SystemBindingNeedsDeleteSelector`
 
 ---
 
@@ -7129,7 +7112,7 @@
 
 **Domain:** group
 
-**Description:** Add a member to a group
+**Description:** Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
 
 ### Entry Points
 
@@ -7139,7 +7122,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.addMember`
 
@@ -7150,7 +7135,7 @@
 ### Delegation
 
 - **Kind:** `non_amplification`
-- Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions
+- Adding a member to a role-bearing group effectively grants authority; actor must hold the group's role permissions. A user access token is refused when the closure carries a system-scoped binding, and must hold, in each project the closure binds, every permission those bindings carry
 
 ### Audit
 
@@ -7164,6 +7149,9 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupMemberAddToken_ProjectBindingsOnClosureRequireCallerAuthority`
+- `pkg/hub:TestGroupMemberAddToken_SystemBindingsOnClosureDenied`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7181,7 +7169,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.removeMember`
 
@@ -7206,6 +7196,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7223,7 +7214,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.delete`
 
@@ -7243,6 +7236,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
 
 ---
 
@@ -7250,7 +7244,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
+**Description:** Create an access constraint (tighten boundary)
 
 ### Entry Points
 
@@ -7260,9 +7254,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7290,8 +7282,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
-- `pkg/hub:TestConstraintCommit_AppliesTokenSelectors`
 
 ---
 
@@ -7299,7 +7289,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
+**Description:** Update an access constraint (may relax or tighten boundary)
 
 ### Entry Points
 
@@ -7309,9 +7299,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7339,9 +7327,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
-- `pkg/hub:TestConstraintRelaxToken_SessionOnly`
-- `pkg/hub:TestConstraintCommit_AppliesTokenSelectors`
 
 ---
 
@@ -7349,7 +7334,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
+**Description:** Delete an access constraint (relax boundary)
 
 ### Entry Points
 
@@ -7360,8 +7345,6 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `access_constraint.admin`
 
@@ -7389,42 +7372,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintRelaxToken_SessionOnly`
-
----
-
-## access.constraint.preview
-
-**Domain:** access.constraint
-
-**Description:** Generate an access constraint preview and read a preview job and its result. A token needs access_constraint:admin on a hub boundary and the holder's live access_constraint.admin authority
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/admin/access-constraint-previews` |
-| http_route | GET | `/api/v1/admin/access-constraint-previews/{jobId}` |
-| http_route | GET | `/api/v1/admin/access-constraint-previews/{jobId}/result` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `access_constraint.admin`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintAdminToken_RequiresConstraintAdminSelector`
 
 ---
 
@@ -7622,7 +7569,7 @@
 
 **Domain:** user.admin
 
-**Description:** Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
+**Description:** Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 
 ### Entry Points
 
@@ -7632,7 +7579,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`; pinned by `TestUserPatchToken_StatusRequiresSuspendSelector`)
 
 **Base Permission:** `user.suspend`
 
@@ -7653,6 +7602,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserPatchToken_StatusRequiresSuspendSelector`
+- `pkg/hub:TestUserPatchToken_SelfStatusGuardStillApplies`
 
 ---
 
@@ -7844,13 +7795,12 @@
 
 **Domain:** group
 
-**Description:** Read group details or list groups
+**Description:** Read group details
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/groups` |
 | http_route | GET | `/api/v1/groups/{id}` |
 
 **Principals:** `user`
@@ -7871,11 +7821,44 @@
 
 ---
 
+## group.list
+
+**Domain:** group
+
+**Description:** List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/groups` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
+
+**Base Permission:** `group.read`
+
+**Resource Resolver:** group-per-row
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestExplicitGroupToken_ResolvesHubTarget`
+
+---
+
 ## group.create
 
 **Domain:** group
 
-**Description:** Create a new group
+**Description:** Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
 
 ### Entry Points
 
@@ -7886,6 +7869,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `group.create`
 
@@ -7898,6 +7883,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupCreateToken_RequiresCreateSelectorOnHubBoundary`
 
 ---
 
@@ -7905,7 +7891,7 @@
 
 **Domain:** group
 
-**Description:** Update group metadata
+**Description:** Update group metadata. A user access token that changes the owner needs group:update and live update access on the group, and for the new owner it must pass the delegation check of a member add on the group's role bindings; group:addMember and the group role hierarchy do not apply. A refused owner change returns one fixed 403, including for a group that does not exist
 
 ### Entry Points
 
@@ -7916,6 +7902,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `group_record`; boundaries `hub`)
 
 **Base Permission:** `group.update`
 
@@ -7928,6 +7916,8 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestGroupOwnerChangeToken_RequiresDelegationForNewOwner`
 
 ---
 
@@ -7997,7 +7987,7 @@
 
 **Domain:** user
 
-**Description:** Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
+**Description:** Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update
 
 ### Entry Points
 
@@ -8007,7 +7997,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.update`
 
@@ -8020,6 +8012,43 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserPatchToken_CrossUserProfileRequiresUpdateSelector`
+- `pkg/hub:TestUserPatchToken_MixedFieldsAllOrNothing`
+
+---
+
+## user.self.update
+
+**Domain:** user
+
+**Description:** Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/users/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserPatchToken_SelfProfileSessionOnly`
+
+### Exemptions
+
+- **authentication_only:** The path names the caller's own record, so no resource permission applies to the caller's own profile (scope: caller's own profile fields) — waives: `base_permission`
 
 ---
 
@@ -8027,7 +8056,7 @@
 
 **Domain:** role
 
-**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
+**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -8059,7 +8088,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
-- `pkg/hub:TestRoleRoutesToken_WriteMethodsNeedWriteSelectors`
+- `pkg/hub:TestRoleRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -8101,7 +8130,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes also need access_constraint:admin
+**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
 
 ### Entry Points
 
@@ -8129,7 +8158,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestConstraintReadToken_DoesNotAdmitConstraintAdmin`
-- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsNeedAdminSelector`
+- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsStillDenied`
 
 ---
 

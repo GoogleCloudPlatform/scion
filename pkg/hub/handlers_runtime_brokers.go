@@ -142,7 +142,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			eb := RuntimeBrokerWithProvider{
-				RuntimeBroker: broker,
+				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
 			}
 			if caps != nil && i < len(caps) {
@@ -176,7 +176,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
-		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: broker}
+		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(broker)}
 		if caps != nil && i < len(caps) {
 			resp.Cap = caps[i]
 			// Without a project, the project-independent dispatch rule.
@@ -393,7 +393,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: *broker}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplay(*broker)}
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
@@ -494,7 +494,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, broker)
+	writeJSON(w, http.StatusOK, brokerForDisplay(*broker))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {

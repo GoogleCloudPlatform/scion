@@ -1009,7 +1009,7 @@ func brokerScionHome(globalDir string) string {
 // server.broker.state_dir cannot be resolved, the paths hold the default
 // state directory as a guess and err says why (cleanupAfterDeregister then
 // refuses the purge and only lists the guess).
-func brokerLocalStatePathsFor(globalDir, brokerID string) (paths []string, err error) {
+func brokerLocalStatePathsFor(globalDir, brokerID string) (entries []brokerLocalStateEntry, err error) {
 	home := brokerScionHome(globalDir)
 	root, err := configuredBrokerStateRoot(home)
 	return brokerLocalStatePaths(globalDir, home, root, brokerID), err

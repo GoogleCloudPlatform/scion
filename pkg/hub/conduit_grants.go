@@ -766,6 +766,10 @@ func (s *Server) RotateConduitGrantKey(ctx context.Context) (ConduitGrantKeyRota
 // conduitGrantKeysResponse is the body of GET /api/v1/conduit/grant-keys.
 type conduitGrantKeysResponse struct {
 	Keys []grant.WireKey `json:"keys"`
+	// TargetStreamDeadlines is the enforcement mode of target-side stream
+	// deadlines, "off" or "enforce" (design §3.5 Gating). Targets take it
+	// only from this hub-direct response.
+	TargetStreamDeadlines string `json:"target_stream_deadlines"`
 }
 
 // handleConduitGrantKeys serves GET /api/v1/conduit/grant-keys: the public
@@ -791,7 +795,7 @@ func (s *Server) handleConduitGrantKeys(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant keys unavailable", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, conduitGrantKeysResponse{Keys: grant.ToWire(keys)})
+	writeJSON(w, http.StatusOK, conduitGrantKeysResponse{Keys: grant.ToWire(keys), TargetStreamDeadlines: s.conduitTargetStreamDeadlines()})
 }
 
 // handleAdminConduitGrantKeyRotate serves POST

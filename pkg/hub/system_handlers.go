@@ -521,7 +521,8 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	// ImageRegistry: the hub-scope value and its layer, plus the value the
 	// wizard may save (never a node env).
 	resolved := s.hubScopeImageRegistry()
-	status.ImageRegistry = resolved.Value
+	// Shown, never saved from here: redacted (config.RedactImageRegistry).
+	status.ImageRegistry = config.RedactImageRegistry(resolved.Value)
 	status.ImageRegistrySource = string(resolved.Source)
 	if ops := s.GetOperationalSettings(); ops != nil {
 		status.ImageRegistrySaveable = shownImageRegistry(ops)

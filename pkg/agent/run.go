@@ -850,14 +850,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			} else {
 				rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
 				if rewritten != resolvedImage {
-					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+					util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 					resolvedImage = rewritten
 				}
 			}
 		} else if imageRegistry != "" {
 			rewritten := config.RewriteImageRegistry(resolvedImage, imageRegistry)
 			if rewritten != resolvedImage {
-				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, rewritten)
+				util.Debugf("image resolution: image_registry rewrite %s -> %s", resolvedImage, config.RedactImageRegistry(rewritten))
 				resolvedImage = rewritten
 			}
 		}
