@@ -863,7 +863,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	// NFS-home pods: home-prepare chose how this start fills the home.
 	homeMode := ""
 	if nfsHomeStart {
-		out, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeModeCommand)
+		out, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeModeCommand, config.Name, "home-prepare")
 		if err != nil {
 			return createdPod.Name, fmt.Errorf("failed to read %s: %w", k8sHomeModeFile, err)
 		}
@@ -873,7 +873,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		runtimeLog().Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
 		if config.HomeDir != "" {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername))); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername)), config.Name, "home-prepare"); err != nil {
 				return createdPod.Name, fmt.Errorf("agent home check failed: %w", err)
 			}
 		}
@@ -930,7 +930,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if nfsHomeStart && config.HomeDir != "" {
 		secretsSrc := filepath.Join(config.HomeDir, harnessBundleSecretsRel)
 		if st, err := os.Lstat(secretsSrc); err == nil && st.IsDir() {
-			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand); err != nil {
+			if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand, config.Name, "harness-secrets"); err != nil {
 				return createdPod.Name, fmt.Errorf("failed to create the in-memory harness secrets directory: %w", err)
 			}
 			err = r.syncWithRetry(ctx, func() error {
@@ -1011,7 +1011,7 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog().Info("Signaling startup gate", "agent", config.Name, "phase", "startup-gate")
 	hooks.progress(api.LaunchStepStartupGate)
 	gateStart := time.Now()
-	if _, err := r.execInPod(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, createdPod.Name, []string{"touch", "/tmp/.scion-home-ready"}, config.Name, "startup-gate"); err != nil {
 		return createdPod.Name, fmt.Errorf("failed to signal startup gate: %w", err)
 	}
 	runtimeLog().Info("Startup gate signaled", "agent", config.Name, "phase", "startup-gate",

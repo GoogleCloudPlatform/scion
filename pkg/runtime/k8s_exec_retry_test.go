@@ -21,11 +21,16 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilexec "k8s.io/client-go/util/exec"
 )
 
 // dialErr is the live #5370 error as execInPod returns it.
@@ -60,6 +65,8 @@ func TestIsExecDialTransientError(t *testing.T) {
 		{"error dialing backend only", errors.New("error dialing backend: dial tcp 10.0.0.1:10250: i/o timeout"), true},
 		{"no agent available only", errors.New("No agent available"), true},
 		{"internal status error with dial text", k8serrors.NewInternalError(errors.New("error dialing backend: No agent available")), true},
+		{"command exit with dial text in stderr", fmt.Errorf("exec failed: %w (stderr: no agent available)",
+			utilexec.CodeExitError{Err: errors.New("command terminated with non-zero exit code"), Code: 1}), false},
 		{"401 with dial text", statusDialErr("401"), false},
 		{"403 with dial text", statusDialErr("403"), false},
 		{"404 with dial text", statusDialErr("404"), false},
@@ -114,14 +121,37 @@ func TestExecInPodDialRetry(t *testing.T) {
 		{name: "404 not retried", exec: always(statusDialErr("404")), wantErr: true, wantCalls: 1},
 		{name: "EOF not retried", exec: always(fmt.Errorf("exec failed: %w", io.EOF)), wantErr: true, wantIs: io.EOF, wantCalls: 1},
 		{
-			// Sleeps 1s and 2s (now +3s); the next 4s backoff would reach the
-			// deadline at +5s, so it stops after the third attempt.
+			// Sleeps 1s and 2s (now +3s); the next 4s backoff plus the 5s
+			// attempt margin would reach the deadline at +10s, so it stops
+			// after the third attempt.
 			name:      "deadline expiring",
-			deadline:  5 * time.Second,
+			deadline:  10 * time.Second,
 			exec:      always(dialErr),
 			wantErr:   true,
 			wantCalls: 3,
 			wantSlept: []time.Duration{time.Second, 2 * time.Second},
+		},
+		{
+			// 1s backoff plus the 5s attempt margin reaches the deadline at
+			// +5s, so there is no retry at all.
+			name:      "deadline leaves no room for an attempt",
+			deadline:  5 * time.Second,
+			exec:      always(dialErr),
+			wantErr:   true,
+			wantCalls: 1,
+		},
+		{
+			// At +55s the 8s backoff is first shortened to the 5s left of the
+			// cap: 55+5+5 = 65 is before the +66s deadline, so the last retry
+			// is made (8s unshortened would give 68 and stop one early).
+			name:      "backoff shortened to the cap before the deadline check",
+			deadline:  66 * time.Second,
+			exec:      always(dialErr),
+			wantErr:   true,
+			wantCalls: 11,
+			wantSlept: []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second,
+				8 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second, 8 * time.Second,
+				5 * time.Second},
 		},
 		{
 			// 1+2+4+8*6 = 55s, then 5s to reach the 60s cap, then give up.
@@ -201,6 +231,9 @@ func TestExecInPodDialRetry_CancelStopsWait(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+	if !strings.Contains(err.Error(), "No agent available") {
+		t.Errorf("err = %v, want the last dial error named", err)
+	}
 	if calls != 1 {
 		t.Errorf("calls = %d, want 1 (no attempt after cancel)", calls)
 	}
@@ -260,6 +293,111 @@ func TestPlaceK8sHomeFiles_RetriesDialError(t *testing.T) {
 			}
 			if len(clock.slept) != 0 {
 				t.Errorf("slept = %v, want none", clock.slept)
+			}
+		})
+	}
+}
+
+func TestCheckK8sHomeFileTargets_RejectsTempName(t *testing.T) {
+	err := checkK8sHomeFileTargets([]k8sFilePlacement{
+		{Source: "/run/scion/auth-files/a", Target: "/home/scion/.config/" + k8sPlacementTempName, Mode: 0o600},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reserved name") {
+		t.Errorf("err = %v, want the reserved temporary name rejected", err)
+	}
+	if err := checkK8sHomeFileTargets([]k8sFilePlacement{
+		{Source: "/run/scion/auth-files/a", Target: "/home/scion/.config/" + k8sPlacementTempName + ".json", Mode: 0o600},
+	}); err != nil {
+		t.Errorf("a similar but different name was rejected: %v", err)
+	}
+}
+
+// TestRun_StartupGateRetriesDialError checks that Run retries the startup
+// gate touch after a transient dial error and starts the agent, and that a
+// 403 on the gate touch fails the start without a retry.
+func TestRun_StartupGateRetriesDialError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		gateErr   error
+		wantErr   bool
+		wantGates int
+	}{
+		{name: "transient then success", gateErr: dialErr, wantGates: 2},
+		{name: "403 not retried", gateErr: statusDialErr("403"), wantErr: true, wantGates: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeExecReadyClock(t)
+			rt := newExecReadyTestRuntime(clock)
+			clientset := rt.Client.Clientset
+			rt.podReadyPollInterval = 5 * time.Millisecond
+			rt.execProbe = func(context.Context, string, string) error { return nil }
+			var mu sync.Mutex
+			gates := 0
+			rt.podExec = func(_ context.Context, _, _ string, cmd []string) (string, error) {
+				if !strings.Contains(strings.Join(cmd, " "), ".scion-home-ready") {
+					return "", nil
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				gates++
+				if gates > execRetryCallLimit {
+					return "", errors.New("call limit reached")
+				}
+				if gates == 1 {
+					return "", tc.gateErr
+				}
+				return "", nil
+			}
+			rt.homeSync = func(context.Context, string, string, string, string, []string) error { return nil }
+
+			config := homeFileConfig()
+			config.Name = "gate-agent"
+			config.Harness = &MockHarness{}
+			config.ResolvedAuth.Files = nil
+			config.HomeDir = t.TempDir()
+
+			errChan := make(chan error, 1)
+			go func() {
+				_, err := rt.Run(context.Background(), config)
+				errChan <- err
+			}()
+			var pod *corev1.Pod
+			for i := 0; i < 100; i++ {
+				p, err := clientset.CoreV1().Pods("default").Get(context.Background(), "gate-agent", metav1.GetOptions{})
+				if err == nil {
+					pod = p
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if pod == nil {
+				t.Fatal("pod was not created")
+			}
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name: agentContainerName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}
+			if _, err := clientset.CoreV1().Pods("default").Update(context.Background(), pod, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			var runErr error
+			select {
+			case runErr = <-errChan:
+			case <-time.After(15 * time.Second):
+				t.Fatal("Run did not return")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.wantErr != (runErr != nil) {
+				t.Fatalf("Run err = %v, wantErr %v", runErr, tc.wantErr)
+			}
+			if tc.wantErr && !k8serrors.IsForbidden(runErr) {
+				t.Errorf("Run err = %v, want the 403", runErr)
+			}
+			if gates != tc.wantGates {
+				t.Errorf("startup gate touches = %d, want %d", gates, tc.wantGates)
 			}
 		})
 	}

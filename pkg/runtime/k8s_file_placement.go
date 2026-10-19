@@ -152,12 +152,21 @@ func (r *KubernetesRuntime) k8sHomeFilePlacements(config RunConfig) []k8sFilePla
 	return out
 }
 
+// k8sPlacementTempName is the temporary file name the placement script
+// uses in each target's directory (see k8sFilePlacementScript).
+const k8sPlacementTempName = ".scion-place.tmp"
+
 // checkK8sHomeFileTargets rejects two placements with the same home target.
 // With direct mounts these were two volume mounts at one path, which the API
-// server refuses; with placement the later copy would silently win.
+// server refuses; with placement the later copy would silently win. It also
+// rejects a target named like the placement script's temporary file, which
+// the script would remove after copying.
 func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 	seen := make(map[string]bool, len(placements))
 	for _, p := range placements {
+		if path.Base(p.Target) == k8sPlacementTempName {
+			return fmt.Errorf("secret or auth file target %s uses the reserved name %s", p.Target, k8sPlacementTempName)
+		}
 		if seen[p.Target] {
 			return fmt.Errorf("more than one secret or auth file targets %s", p.Target)
 		}
@@ -229,7 +238,7 @@ place() {
 		fail "target exists and is not a regular file"
 		return 1
 	fi
-	tmp=$dir/.scion-place.tmp
+	tmp=$dir/` + k8sPlacementTempName + `
 	rm -f "$tmp" || { fail "cannot remove stale temporary file"; return 1; }
 	(umask 077 && cp "$src" "$tmp") || { rm -f "$tmp"; fail "cannot copy file"; return 1; }
 	chmod "$mode" "$tmp" || { rm -f "$tmp"; fail "cannot set mode"; return 1; }
