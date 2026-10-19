@@ -44,6 +44,10 @@ const utcTimestampSnapshotLabel = "pre-" + entadapter.UTCTimestampNormalizeKey
 // tests can make it fail.
 var snapshotSQLite = entadapter.SnapshotSQLite
 
+// normalizeUTCTimestamps runs the rewrite. A variable so tests can make it
+// fail or panic after the snapshot.
+var normalizeUTCTimestamps = entadapter.NormalizeUTCTimestamps
+
 // timestampRepairDB is the part of the store the boot-time repair uses: the
 // raw SQL handle and its ent dialect.
 type timestampRepairDB interface {
@@ -58,6 +62,15 @@ type utcTimestampRepairResult struct {
 	Completed bool
 	// Unparseable is the number of values the normalizer left unchanged.
 	Unparseable int
+	// SnapshotPath is the snapshot written or reused on this boot, set as
+	// soon as the snapshot succeeds, whatever happens after it. Start-up
+	// never prunes it on this boot.
+	SnapshotPath string
+	// ProbeFailed is true when the probe failed or the repair panicked
+	// (the panic recovery keeps SnapshotPath and sets this), so whether a
+	// snapshot is still needed is unknown. Start-up then leaves
+	// the timestamp-repair snapshots in place on this boot.
+	ProbeFailed bool
 }
 
 // repairUnreadableTimestamps rewrites, at hub start, the SQLite tables that
@@ -87,7 +100,10 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error(label+": recovered from panic; repair did not complete, will retry next boot", "panic", r)
-			res = utcTimestampRepairResult{}
+			// Keep the snapshot taken before the panic, and mark the state
+			// as unknown so start-up leaves the timestamp-repair snapshots
+			// in place on this boot.
+			res = utcTimestampRepairResult{SnapshotPath: res.SnapshotPath, ProbeFailed: true}
 		}
 	}()
 	db, dbDialect := s.DB(), s.Dialect()
@@ -100,6 +116,7 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	tables, err := entadapter.UnreadableTimestampTables(ctx, db, dbDialect)
 	if err != nil {
 		slog.Error(label+": probe failed; nothing was written", "error", err)
+		res.ProbeFailed = true
 		return res
 	}
 	if len(tables) == 0 {
@@ -121,13 +138,14 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 	case snap.Reused:
 		slog.Warn(label+": reusing the database snapshot from an earlier attempt; no new snapshot written", "path", snap.Path)
 	default:
-		slog.Warn(label+": database snapshot written before the repair; it is a full copy of the database, "+
-			"delete it once the repair is verified", "path", snap.Path)
+		slog.Warn(label+": database snapshot written before the repair; it is a full copy of the database. "+
+			"Start-up removes it automatically no earlier than 7 days after its last use", "path", snap.Path)
 	}
 	path := snap.Path
+	res.SnapshotPath = path
 
 	logs := &boundedRepairLog{}
-	rep, err := entadapter.NormalizeUTCTimestamps(ctx, db, dbDialect, logs,
+	rep, err := normalizeUTCTimestamps(ctx, db, dbDialect, logs,
 		entadapter.TimestampNormalizeOptions{Tables: tables})
 	logs.flush(label)
 	if err != nil {
@@ -153,7 +171,8 @@ func repairUnreadableTimestamps(ctx context.Context, s timestampRepairDB) (res u
 		return res
 	}
 	slog.Info(label+": repair complete", "rewritten", rep.Rewritten, "unparseable", rep.Unparseable, "snapshot", path)
-	return utcTimestampRepairResult{Completed: true, Unparseable: rep.Unparseable}
+	res.Completed, res.Unparseable = true, rep.Unparseable
+	return res
 }
 
 // markUTCTimestampRepairComplete writes the completion marker after a repair
