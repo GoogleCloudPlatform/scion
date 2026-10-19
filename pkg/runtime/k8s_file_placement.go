@@ -176,8 +176,14 @@ func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 // mode (0777 masked by the umask). Existing directories are left as they
 // are. The holding directory must be writable. An existing regular file at
 // the target is replaced; anything else at the target stops placement. The
-// script stops at the first failure and writes the target path and the
-// reason (never file contents) to stderr.
+// file is copied to a temporary file in the target's directory, given its
+// mode there, and renamed over the target, so the target is always either
+// the previous file or the complete new one with its final mode, and running
+// the script again gives the same result. The temporary file has a fixed
+// name, so a run that was cut off is cleaned up by the next one; anything
+// already at that name is removed first, never written through. A failed
+// step removes the temporary file. The script stops at the first failure
+// and writes the target path and the reason (never file contents) to stderr.
 func k8sFilePlacementScript(home string, placements []k8sFilePlacement) string {
 	var b strings.Builder
 	b.WriteString(`fail() {
@@ -215,9 +221,11 @@ place() {
 		fail "target exists and is not a regular file"
 		return 1
 	fi
-	rm -f "$dst" || { fail "cannot remove existing file"; return 1; }
-	(umask 077 && cp "$src" "$dst") || { fail "cannot copy file"; return 1; }
-	chmod "$mode" "$dst" || { fail "cannot set mode"; return 1; }
+	tmp=$dir/.scion-place.tmp
+	rm -f "$tmp" || { fail "cannot remove stale temporary file"; return 1; }
+	(umask 077 && cp "$src" "$tmp") || { rm -f "$tmp"; fail "cannot copy file"; return 1; }
+	chmod "$mode" "$tmp" || { rm -f "$tmp"; fail "cannot set mode"; return 1; }
+	mv -f "$tmp" "$dst" || { rm -f "$tmp"; fail "cannot replace file"; return 1; }
 }
 `)
 	for _, p := range placements {
@@ -247,7 +255,7 @@ func (r *KubernetesRuntime) placeK8sHomeFiles(ctx context.Context, namespace, po
 	}
 	runtimeLog().Info("Placing files in agent home", "agent", config.Name, "phase", "home-files", "targets", targets)
 	script := k8sFilePlacementScript(util.GetHomeDir(config.UnixUsername), placements)
-	if _, err := r.execInPod(ctx, namespace, podName, []string{"sh", "-c", script}); err != nil {
+	if _, err := r.execInPodDialRetry(ctx, namespace, podName, []string{"sh", "-c", script}, config.Name, "home-files"); err != nil {
 		return fmt.Errorf("failed to place files in agent home: %w", err)
 	}
 	return nil
