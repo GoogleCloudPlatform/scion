@@ -2148,7 +2148,11 @@ type TestIdentityDelegationStore interface {
 	// grantor, a workload subject, exactly one scope, a positive member cap
 	// and an expiry after the creation time, and returns ErrInvalidInput
 	// otherwise. RevokedAt and RevokedBy must be unset. An empty ID is
-	// generated; Created defaults to now.
+	// generated; Created defaults to now. It creates human-grantor
+	// delegations only: any GrantorKind other than empty or
+	// DelegationGrantorHuman, or a set HubID or MarkerCreatedAt, returns
+	// ErrInvalidInput (an offline delegation is written only by the offline
+	// host command `scion server test-infra delegate`).
 	CreateTestIdentityDelegation(ctx context.Context, d *TestIdentityDelegation) error
 
 	// GetTestIdentityDelegation returns a delegation by ID, or ErrNotFound
@@ -2180,6 +2184,14 @@ type TestIdentityDelegationStore interface {
 	// through delegationID, newest first, with ListTestFixtureUsers'
 	// liveAt and limit semantics.
 	ListTestFixtureUsersByDelegation(ctx context.Context, delegationID string, liveAt time.Time, limit int) ([]User, error)
+
+	// GetTestInfraBinding reads the test infrastructure marker's hub
+	// id, class and creation time, live, for the offline delegation redeem
+	// gate (ptone/scion#4240, phase DL). It returns ErrNotFound when there
+	// is no marker. It is read-only and never loads the marker's web
+	// session key or attested facts; only the offline host commands write
+	// the marker.
+	GetTestInfraBinding(ctx context.Context) (*TestInfraBinding, error)
 }
 
 // UserFilter defines criteria for filtering users.

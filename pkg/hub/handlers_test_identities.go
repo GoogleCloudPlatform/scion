@@ -448,6 +448,27 @@ func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, p
 			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 			return nil, nil, false
 		}
+		// The grantor kind, explicitly (phase DL): a human delegation
+		// carries no offline state; an offline one is admitted only with
+		// the gate-passed state its arm set for this request.
+		switch st.delegation.EffectiveGrantorKind() {
+		case store.DelegationGrantorHuman:
+			if st.offlineGatePassed || st.offline != nil {
+				logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "workload delegation state inconsistent with its grantor kind")
+				writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+				return nil, nil, false
+			}
+		case store.DelegationGrantorTestInfraOffline:
+			if !st.offlineGatePassed || st.offline == nil {
+				logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "offline delegation without a passed offline gate")
+				writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+				return nil, nil, false
+			}
+		default:
+			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "workload delegation grantor kind not accepted")
+			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+			return nil, nil, false
+		}
 	default:
 		// Fail closed: broker on-behalf-of, agent, federation and any
 		// unknown credential cannot issue test identities.
@@ -545,6 +566,13 @@ type testIdentityWorkloadAudit struct {
 	WorkloadSub  string `json:"workload_sub"`
 	TokenIAT     string `json:"token_iat,omitempty"`
 	RunLabel     string `json:"run_label,omitempty"`
+	// The offline delegation facts (phase DL), set only for a delegation
+	// whose grantor kind is offline; a human-grantor delegation's summary
+	// is unchanged.
+	GrantorKind     string `json:"grantor_kind,omitempty"`
+	HubID           string `json:"hub_id,omitempty"`
+	MarkerCreatedAt string `json:"marker_created_at,omitempty"`
+	TestMode        string `json:"test_mode,omitempty"`
 }
 
 // testIdentityWorkloadAuditOf returns the workload audit part of a request,
@@ -562,6 +590,12 @@ func testIdentityWorkloadAuditOf(ctx context.Context) *testIdentityWorkloadAudit
 	}
 	if !st.tokenIAT.IsZero() {
 		a.TokenIAT = st.tokenIAT.UTC().Format(time.RFC3339)
+	}
+	if st.offline != nil {
+		a.GrantorKind = store.DelegationGrantorTestInfraOffline
+		a.HubID = st.offline.hubID
+		a.MarkerCreatedAt = st.offline.markerCreatedAt.UTC().Format(time.RFC3339Nano)
+		a.TestMode = string(st.offline.level)
 	}
 	return a
 }
@@ -841,7 +875,8 @@ func (s *Server) canManageTestIdentity(ctx context.Context, caller UserIdentity,
 // mint itself). "Live" is the auth arm's own definition
 // (checkDelegationLive: not revoked, before its expiry and its hard maximum
 // age, the accepted scope, a subject the allowlist covers), plus the same
-// grantor and subject the request authenticated with.
+// grantor, grantor kind and subject the request authenticated with; for an
+// offline delegation (phase DL) the offline gate runs again on tx.
 func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, st *workloadDelegationState, now time.Time) error {
 	d, err := tx.GetTestIdentityDelegation(ctx, st.delegation.ID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -850,10 +885,21 @@ func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, 
 	if err != nil {
 		return err
 	}
-	if d.GrantorID != st.delegation.GrantorID || d.WorkloadSub != st.sub {
+	if d.GrantorID != st.delegation.GrantorID || d.WorkloadSub != st.sub || d.EffectiveGrantorKind() != st.delegation.EffectiveGrantorKind() {
 		return errTestIdentityDelegationNotLive
 	}
 	if s.workloadIssuer == nil || s.workloadIssuer.checkDelegationLive(d, now) != nil {
+		return errTestIdentityDelegationNotLive
+	}
+	switch d.EffectiveGrantorKind() {
+	case store.DelegationGrantorHuman:
+	case store.DelegationGrantorTestInfraOffline:
+		// The offline gate again, on the transaction store, at the mint
+		// (phase DL): marker, hub id binding, test-mode, revocation.
+		if _, refusal := s.workloadIssuer.offlineGrantorGate(ctx, tx, d); refusal != nil {
+			return errTestIdentityDelegationNotLive
+		}
+	default:
 		return errTestIdentityDelegationNotLive
 	}
 	return nil

@@ -64,6 +64,54 @@ The command prints the delegation id, which is not a secret. Use `delegate list`
 `delegate revoke <id>` to manage delegations. These commands take a human sign-in only, and
 are not available in agent mode.
 
+### Alternative: an offline delegation (operator, on the target host)
+
+On a test-designated target hub, an operator with shell access to the hub host can create a
+member-tier delegation without a human sign-in. This lets the hub be bootstrapped for test
+runners with no action from a human issuer. The command runs offline against the hub's
+configured database, like `scion server test-infra mark`, and is not available in agent mode:
+
+```bash
+scion server test-infra delegate --hub-id <hub id> \
+  --workload-sub 123456789012345678901 --ttl 8h --member-cap 5 --label "bootstrap"
+```
+
+It refuses, writing nothing, unless all of these hold:
+
+- the hub id is pinned (`server.hub.hub_id` or `SCION_SERVER_HUB_HUBID`) and `--hub-id` equals
+  it, as for `test-infra mark`;
+- `server.hub.class` is `test`;
+- the test infrastructure marker is present and names `--hub-id`;
+- `--workload-sub` is on `server.hub.test_identities.workload_issuers` (with `max_tier`
+  `member` or `admin`);
+- `--ttl` is between 1 minute and 24 hours (default 8 hours), `--member-cap` is between 1 and 5
+  (default 5), and the hub holds fewer than 4 live offline delegations.
+
+The delegation covers **member and viewer identities only**. There is no option for an admin
+tier: admin-tier delegations still need a live human super-admin (see
+[Admin-tier delegations](#admin-tier-delegations-systemd-test-hubs)). The command writes a
+`test_identity_delegation_create_offline` audit record (operator, host, time) and prints the
+delegation id, which is not a secret. It never prints a token. Use the id in the profile as in
+step 2.
+
+The running hub honours an offline delegation only while all of these hold. It checks them
+again on every request, with no cache:
+
+- the marker is present, names the hub's own pinned hub id, and is the same marker the
+  delegation was created against;
+- the hub runs with `--test-mode` at `member` or above;
+- the delegation is neither revoked nor expired, and its subject is still allow-listed.
+
+So any of these ends it at the next request: `scion server test-infra unmark` (and a later
+`mark` does not revive it), restarting the hub with `--test-mode` off, revoking it, letting it
+expire, or removing the subject from `workload_issuers` (at a restart). Revoke it offline with
+`scion server test-infra delegate revoke --hub-id <hub id> --id <delegation id>`, or as an
+unscoped platform admin through `DELETE /api/v1/test-identity-delegations/<id>`. Every request
+the hub admits through an offline delegation writes a `test_identity_delegation_redeem_offline`
+audit record (grantor kind, hub id, marker, test-mode level, delegation, subject, route, time).
+Identities it issued are ordinary member-tier test identities: they expire on their own and can
+be torn down as in step 8.
+
 ## 2. Add the profile (runner)
 
 ```bash

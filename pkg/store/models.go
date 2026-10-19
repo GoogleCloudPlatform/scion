@@ -1800,6 +1800,97 @@ type TestIdentityDelegation struct {
 	ExpiresAt time.Time
 	RevokedAt *time.Time
 	RevokedBy *string
+	// GrantorKind is DelegationGrantorHuman (the API path) or
+	// DelegationGrantorTestInfraOffline (phase DL: written only by the
+	// offline host command, member scope only). An empty value reads as
+	// human (the column default).
+	GrantorKind string
+	// HubID is the hub id an offline delegation is bound to; empty for a
+	// human grantor.
+	HubID string
+	// MarkerCreatedAt is the created_at of the test infrastructure marker
+	// an offline delegation is bound to; nil for a human grantor.
+	MarkerCreatedAt *time.Time
+}
+
+// Delegation grantor kinds (TestIdentityDelegation.GrantorKind). Every site
+// that reads a grantor switches on these explicitly and denies any other
+// value.
+const (
+	// DelegationGrantorHuman is a live human issuer who created the
+	// delegation through the hub API.
+	DelegationGrantorHuman = "human"
+	// DelegationGrantorTestInfraOffline is the offline host command
+	// `scion server test-infra delegate` (ptone/scion#4240, phase DL). It
+	// is not a principal: the delegation's GrantorID is
+	// TestInfraOfflineGrantorID(HubID), a reserved id that names no user.
+	DelegationGrantorTestInfraOffline = "test_infra_offline"
+)
+
+// Bounds of an offline (DelegationGrantorTestInfraOffline) delegation
+// (phase DL). The offline writer (`scion server test-infra delegate`) and the redeem gate
+// (pkg/hub) both enforce them.
+const (
+	// TestInfraOfflineDelegationScope is the only scope an offline
+	// delegation can hold: member and viewer test identity issuance.
+	TestInfraOfflineDelegationScope = "test_identity:issue"
+	// TestInfraOfflineDelegationMaxTTL is the longest lifetime of an
+	// offline delegation (a human member delegation allows 7 days; with no
+	// human grantor whose deactivation would end it, an offline one is
+	// capped at three default 8 h test identity lifetimes).
+	TestInfraOfflineDelegationMaxTTL = 24 * time.Hour
+	// TestInfraOfflineDelegationDefaultTTL is the default lifetime.
+	TestInfraOfflineDelegationDefaultTTL = 8 * time.Hour
+	// TestInfraOfflineDelegationMinTTL is the shortest lifetime.
+	TestInfraOfflineDelegationMinTTL = time.Minute
+	// TestInfraOfflineDelegationMaxMemberCap is the largest per-delegation
+	// identity cap (the member per-issuer cap; the hub-wide cap applies on
+	// top).
+	TestInfraOfflineDelegationMaxMemberCap = 5
+	// TestInfraOfflineMaxLiveDelegations is the most live offline
+	// delegations one hub may hold at once (4 x 5 = the hub-wide cap of 20).
+	TestInfraOfflineMaxLiveDelegations = 4
+)
+
+// testInfraOfflineGrantorNamespace is the UUID namespace of the reserved
+// grantor id of an offline delegation (a fixed, random v4 UUID).
+var testInfraOfflineGrantorNamespace = uuid.MustParse("6a0c55e2-3d5f-4c1b-9a47-0e8f2b7d91c4")
+
+// TestInfraOfflineGrantorID returns the reserved grantor id of an offline
+// delegation bound to hubID: a name-based (version 5) UUID of the hub id,
+// or "" for an empty hub id. It is a UUID so the generic principal paths
+// (group closure, binding lookup, kind read) treat it as an ordinary user id
+// that names no row: user ids are server-generated random (version 4)
+// UUIDs, so no user row can have it, and the offline redeem gate refuses a
+// delegation whose reserved id ever resolves to a user row.
+func TestInfraOfflineGrantorID(hubID string) string {
+	if hubID == "" {
+		return ""
+	}
+	return uuid.NewSHA1(testInfraOfflineGrantorNamespace, []byte("test-infra-offline:"+hubID)).String()
+}
+
+// EffectiveGrantorKind returns d's grantor kind, reading an empty value as
+// DelegationGrantorHuman (the column default). Any other value is returned
+// unchanged, so callers that switch on it deny an unknown kind.
+func (d *TestIdentityDelegation) EffectiveGrantorKind() string {
+	if d == nil {
+		return ""
+	}
+	if d.GrantorKind == "" {
+		return DelegationGrantorHuman
+	}
+	return d.GrantorKind
+}
+
+// TestInfraBinding is the read-only view of the test infrastructure
+// marker that the offline delegation redeem gate reads live (phase DL): the
+// hub id, class and creation time only. It never carries the marker's web
+// session key or attested facts.
+type TestInfraBinding struct {
+	HubID     string
+	Class     string
+	CreatedAt time.Time
 }
 
 // LiveAt reports whether d is neither revoked nor expired at now.

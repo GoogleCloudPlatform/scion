@@ -520,6 +520,12 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 		if testIdentityDelegationScopes[st.delegation.Scope].adminKind != spec.kind {
 			return deny(user, "workload delegation scope does not cover this admin kind", "")
 		}
+		// Admin-tier delegations need a live human grantor (X4); an
+		// offline delegation (phase DL) or any other grantor kind never
+		// issues an admin kind.
+		if st.delegation.EffectiveGrantorKind() != store.DelegationGrantorHuman || st.offlineGatePassed || st.offline != nil {
+			return deny(user, "admin-tier workload delegations require a human grantor", "")
+		}
 		workload = st
 	default:
 		return deny(user, "credential kind not admitted for test admin issuance", "")
