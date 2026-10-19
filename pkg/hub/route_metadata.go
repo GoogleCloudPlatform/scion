@@ -199,7 +199,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteAuthenticated,
 		// handleAuthMe reads the caller's own profile. The pattern has no
 		// method, so the mux serves every method, HEAD included; a
-		// visitor is admitted on the reads only.
+		// visitor is admitted on the reads only. The handler serves GET
+		// and answers 405 to HEAD, as for any caller.
 		VisitorMethods: []string{http.MethodGet, http.MethodHead},
 	},
 	"/api/v1/experiments": {

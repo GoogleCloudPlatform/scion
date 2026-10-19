@@ -217,6 +217,11 @@ const (
 	// delegation a human issuer created (ptone/scion#4240). It acts for the
 	// delegation's grantor, within the delegation's single scope.
 	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
+	// CredentialFederatedUser is a trusted issuer's credential for one of
+	// its users, presented as the federation credential: a federated user
+	// identity, linked to a local federated account (a visitor) or not.
+	// It names no federated agent or service identity.
+	CredentialFederatedUser CredentialKind = "federated_user"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
@@ -230,6 +235,7 @@ var validCredentialKinds = map[CredentialKind]bool{
 	CredentialIdentityToken:      true,
 	CredentialDelegatedAgent:     true,
 	CredentialWorkloadDelegation: true,
+	CredentialFederatedUser:      true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an

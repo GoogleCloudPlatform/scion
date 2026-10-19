@@ -688,9 +688,10 @@ func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 // TestSelfReadCredential_FollowsCatalogCredentials pins that the self-read
 // credential rule admits exactly the request credential kinds the catalog
 // operation declares: a session JWT names an interactive session and a
-// dev credential, a scoped token names a user access token, and an agent
-// JWT is declared only on the caller's own profile and explain. An explain
-// for another principal admits no agent JWT.
+// dev credential, a scoped token names a user access token, an agent JWT
+// is declared only on the caller's own profile and explain, and a
+// federated user credential (the federation kind) only on the caller's own
+// profile. An explain for another principal admits no agent JWT.
 func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 	kinds := []CredentialKind{
 		CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT,
@@ -701,7 +702,7 @@ func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 		"user.self.adminstatus": {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 		"user.self.groups":      {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 		"user.self.explain":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT},
-		"user.self.profile":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT},
+		"user.self.profile":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT, CredentialKindFederation},
 		"user.self.scopes":      {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 		"hub.audit.explain":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
 	}
@@ -717,6 +718,49 @@ func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
 		}
 	}
 	assert.False(t, operationAdmitsRequestKind("no.such.operation", CredentialKindInteractive))
+}
+
+// TestSelfReadCredential_FederatedUserIdentitiesOnly pins that the
+// federation kind is admitted on the caller's own profile only with a
+// federated user identity (a visitor or an unlinked federated user), and
+// a federated user identity only with the federation kind. A federated
+// agent or service identity, and a local user, with the federation kind
+// are refused, and no self read other than the profile admits a federated
+// user.
+func TestSelfReadCredential_FederatedUserIdentitiesOnly(t *testing.T) {
+	visitor := NewVisitorIdentity("acct-1", "https://issuer.example", "sub-1", "v@example.com", "V")
+	unlinked := NewFederatedUserIdentity("https://issuer.example", "sub-2", "u@example.com", "U", "member", nil)
+	cases := []struct {
+		name     string
+		identity Identity
+		kind     CredentialKind
+		want     bool
+	}{
+		{"visitor", visitor, CredentialKindFederation, true},
+		{"unlinked federated user", unlinked, CredentialKindFederation, true},
+		{"visitor with a session kind", visitor, CredentialKindInteractive, false},
+		{"unlinked federated user with a dev kind", unlinked, CredentialKindDev, false},
+		{"visitor with no kind recorded", visitor, CredentialKind(""), true},
+		{"typed-nil visitor", (*VisitorIdentity)(nil), CredentialKindFederation, false},
+		{"federated agent", NewFederatedAgentIdentity("https://issuer.example", "agent-1", "proj-1", "a", "root", nil, nil), CredentialKindFederation, false},
+		{"federated service", NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@example.com", nil), CredentialKindFederation, false},
+		{"local user", NewAuthenticatedUser("u-1", "u1@example.com", "U1", "member", "api"), CredentialKindFederation, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: c.kind})
+			token, ok := selfReadCredential(ctx, c.identity, "user.self.profile")
+			assert.Equal(t, c.want, ok)
+			assert.Nil(t, token)
+		})
+	}
+	for _, op := range []authzop.OperationID{"user.self.adminstatus", "user.self.groups", "user.self.explain", "user.self.scopes", "hub.audit.explain"} {
+		for _, identity := range []Identity{visitor, unlinked} {
+			ctx := contextWithCredentialContext(context.Background(), CredentialContext{Kind: CredentialKindFederation})
+			_, ok := selfReadCredential(ctx, identity, op)
+			assert.False(t, ok, "%s refuses %T", op, identity)
+		}
+	}
 }
 
 // TestGovernanceReadsToken_ProjectBoundaryRefused pins at request level

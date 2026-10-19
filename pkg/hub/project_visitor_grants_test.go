@@ -892,18 +892,19 @@ func TestVisitorRoute_UnlinkedFederatedUserUnchanged(t *testing.T) {
 	assert.Equal(t, grantTestOtherIssuer+":sub-cyd", me.ID, "the verified identity, not a local account")
 }
 
-// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only;
-// POST, PUT, PATCH and DELETE answer the uniform refusal before the
-// handler runs.
+// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only:
+// GET reads its profile, and HEAD reaches the handler, which answers 405
+// as it does for every caller. POST, PUT, PATCH and DELETE answer the
+// uniform refusal before the handler runs.
 func TestVisitorRoute_AuthMeAdmitsReadMethodsOnly(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	f.grantOK(t, grantTestIssuer, "dee@corp.example")
 	token := f.token(t, grantTestIssuer, "sub-dee", "dee@corp.example", boolPtr(true))
 
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
-		assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", method, rec.Body.String())
-	}
+	rec := f.federatedRequest(t, http.MethodGet, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.federatedRequest(t, http.MethodHead, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
 		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", method, rec.Body.String())
