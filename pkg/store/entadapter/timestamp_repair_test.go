@@ -121,6 +121,10 @@ func TestSnapshotSQLite(t *testing.T) {
 		again, err := SnapshotSQLite(ctx, db, "pre-test", at)
 		require.NoError(t, err)
 		assert.Equal(t, SQLiteSnapshot{Path: snap.Path, Reused: true}, again)
+		// Reuse is a use: the retention period counts from it.
+		info, err := os.Stat(snap.Path)
+		require.NoError(t, err)
+		assert.True(t, info.ModTime().Equal(at), "reuse must set the last use to %v, got %v", at, info.ModTime())
 	}
 	matches, err := filepath.Glob(path + ".pre-test-*")
 	require.NoError(t, err)

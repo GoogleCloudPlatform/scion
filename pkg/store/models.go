@@ -4506,6 +4506,12 @@ type MutationAuditRecord struct {
 	ExchangeAgentCredentialID string
 	ActorKind                 string
 	AgentDelegationCode       string
+
+	// ProvenanceBasis is the JSON provenance basis of a delete made by the
+	// test identity purge (3b), the purge of admin kinds (A3) or the
+	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
+	// delete relied on and its run. Empty for every other record.
+	ProvenanceBasis string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.

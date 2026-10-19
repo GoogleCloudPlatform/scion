@@ -561,9 +561,10 @@ func TestFederationPeerUserToken_VisitorRuleRefusedWithoutAcceptUserTokens(t *te
 
 // A user access credential minted by the peer, whose account a visitor
 // rule created on first contact, gets the same admission on
-// /api/v1/auth/me through the full handler as any other visitor: GET and
-// HEAD answer 200 with the federated account's own profile; POST on the
-// route, and a route with no VisitorMethods, answer the uniform refusal.
+// /api/v1/auth/me through the full handler as any other visitor: GET
+// answers 200 with the federated account's own profile, and HEAD the
+// handler's 405; POST on the route, and a route with no VisitorMethods,
+// answer the uniform refusal.
 func TestFederationPeerUserToken_RuleVisitorAuthMeAdmitsReadMethodsOnly(t *testing.T) {
 	f := newPeerTokFixture(t, func(c *config.TrustedIssuerConfig) { c.AllowVisitorGrants = true })
 	ctx := context.Background()
@@ -603,7 +604,7 @@ func TestFederationPeerUserToken_RuleVisitorAuthMeAdmitsReadMethodsOnly(t *testi
 	assert.Equal(t, "viewer", me.Role)
 
 	rec = request(http.MethodHead, "/api/v1/auth/me")
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
 
 	for _, c := range []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/auth/me"},

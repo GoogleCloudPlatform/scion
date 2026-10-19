@@ -730,3 +730,56 @@ func expandScopes(scopes []string) []string {
 func IsUAT(token string) bool {
 	return strings.HasPrefix(token, store.UATPrefix)
 }
+
+// requestCredentialIsUAT reports whether the credential of the request in
+// ctx is a user access token: the credential recorded on the request, or,
+// when none is recorded, the credential of the request's identity.
+func requestCredentialIsUAT(ctx context.Context) bool {
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(GetIdentityFromContext(ctx))
+	}
+	return credential.Kind == CredentialKindUAT
+}
+
+// bearerStillValid reports whether the credential of the request in ctx
+// still validates. A request whose credential is not a user access token
+// (requestCredentialIsUAT) passes. For a user access token the stored token
+// must exist, must not be revoked or expired, must have a valid boundary and
+// must belong to the request's user, and that user must exist and must not
+// be suspended. A token credential without a token ID, a request without a
+// user identity and any lookup error fail the check.
+func (s *Server) bearerStillValid(ctx context.Context) bool {
+	if !requestCredentialIsUAT(ctx) {
+		return true
+	}
+	if s.store == nil {
+		return false
+	}
+	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
+	if !ok || isNilIdentity(user) {
+		return false
+	}
+	credential := GetCredentialContextFromContext(ctx)
+	if credential.Kind == "" {
+		credential = credentialContextForIdentity(user)
+	}
+	if credential.ID == "" {
+		return false
+	}
+	token, err := s.store.GetUserAccessToken(ctx, credential.ID)
+	if err != nil || token == nil || token.Revoked || token.UserID != user.ID() {
+		return false
+	}
+	if token.ExpiresAt != nil && time.Until(*token.ExpiresAt) <= 0 {
+		return false
+	}
+	if token.ValidateBoundary() != nil {
+		return false
+	}
+	owner, err := s.store.GetUser(ctx, token.UserID)
+	if err != nil || owner == nil || owner.Status == store.UserStatusSuspended {
+		return false
+	}
+	return true
+}

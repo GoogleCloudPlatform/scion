@@ -108,7 +108,9 @@ var expectedSelectorRegistry = map[string][]string{
 	"project:manage":                  {"project.manage"},
 	"project:read":                    {"project.read"},
 	"project:update":                  {"project.update"},
+	"project:list":                    {"project.list"},
 	"skill:create":                    {"skill.create"},
+	"skill:create_global":             {"skill.create_global"},
 	"skill:delete":                    {"skill.delete"},
 	"skill:list":                      {"skill.list"},
 	"skill:manage":                    {"skill.create", "skill.delete", "skill.list", "skill.read", "skill.register", "skill.update"},
@@ -135,6 +137,12 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
 	"scheduled_event:create": {"scheduled_event.create"},
+
+	// Identity governance reads and hub audit (hub boundary only).
+	"role:read":              {"role.read"},
+	"role_binding:read":      {"role_binding.read"},
+	"access_constraint:read": {"access_constraint.read"},
+	"hub_audit:read":         {"hub.audit.read"},
 
 	// agent selectors outside the agent:manage alias.
 	"agent:set_message_mode": {"agent.set_message_mode"},
@@ -575,7 +583,7 @@ func TestReservedIDs_MatchesReservedRows(t *testing.T) {
 	}
 	for _, id := range []string{
 		"artifact.update", "artifact.delete",
-		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update", "user.list",
+		"hub.federation.read", "hub.federation.update", "hub.teams_manifest.update",
 		"agent.log_append",
 	} {
 		if !slices.Contains(got, id) {

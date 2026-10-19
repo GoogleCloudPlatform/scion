@@ -868,6 +868,10 @@ func TestVisitorRoute_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
 // An unlinked federated user (no grant, so no federated account) is not a
 // visitor: it gets the same responses with the visitor experiment on as
 // with it off, on /api/v1/auth/me and on a route with no VisitorMethods.
+// On /api/v1/auth/me that is the profile read's credential refusal (403,
+// not the visitor refusal), as on a hub without visitors: the
+// user.self.profile credentials name only a visitor's federation
+// credential.
 func TestVisitorRoute_UnlinkedFederatedUserUnchanged(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	token := f.token(t, grantTestOtherIssuer, "sub-cyd", "cyd@other.example", boolPtr(true))
@@ -885,25 +889,26 @@ func TestVisitorRoute_UnlinkedFederatedUserUnchanged(t *testing.T) {
 		assert.NotContains(t, on.Body.String(), visitorRouteRefusalMessage, "%s", path)
 	}
 
-	rec := f.federatedGet(t, "/api/v1/auth/me", token)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var me UserResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
-	assert.Equal(t, grantTestOtherIssuer+":sub-cyd", me.ID, "the verified identity, not a local account")
+	for _, on := range []bool{true, false} {
+		visitorSetExperiment(t, f.srv, on)
+		rec := f.federatedGet(t, "/api/v1/auth/me", token)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "experiment on=%v: %s", on, rec.Body.String())
+	}
 }
 
-// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only;
-// POST, PUT, PATCH and DELETE answer the uniform refusal before the
-// handler runs.
+// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only:
+// GET reads its profile, and HEAD reaches the handler, which answers 405
+// as it does for every caller. POST, PUT, PATCH and DELETE answer the
+// uniform refusal before the handler runs.
 func TestVisitorRoute_AuthMeAdmitsReadMethodsOnly(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	f.grantOK(t, grantTestIssuer, "dee@corp.example")
 	token := f.token(t, grantTestIssuer, "sub-dee", "dee@corp.example", boolPtr(true))
 
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
-		assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", method, rec.Body.String())
-	}
+	rec := f.federatedRequest(t, http.MethodGet, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.federatedRequest(t, http.MethodHead, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "HEAD: the handler's method check")
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
 		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", method, rec.Body.String())
