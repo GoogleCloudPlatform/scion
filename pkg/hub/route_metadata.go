@@ -450,8 +450,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
 		Classification: RouteAuthenticated,
 	},
-	// The agent's conduit session (WebSocket), behind hub.conduit. Agent
-	// tokens with agent:port:forward only; the handler reads the agent row.
+	// Conduit sessions (WebSocket), behind hub.conduit. Agent principals
+	// authenticate with an agent token carrying agent:port:forward (the
+	// handler reads the agent row); runtime broker principals authenticate
+	// with broker HMAC through the shared /runtime-brokers/connect verifier,
+	// and their sessions carry the hub's transient broker RPCs.
 	"/api/v1/conduit": {
 		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
 		Classification: RouteAgentToken,
@@ -510,11 +513,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------
@@ -753,21 +758,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/users/invite/bulk", RouteID: "admin.users.invite.bulk",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/users/invite": {
 		Pattern: "/api/v1/admin/users/invite", RouteID: "admin.users.invite",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites": {
 		Pattern: "/api/v1/admin/invites", RouteID: "admin.invites",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/invites/": {
 		Pattern: "/api/v1/admin/invites/", RouteID: "admin.invites.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "user.invite", Resource: "user", Action: "invite",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/admin/server-config/schema": {
 		Pattern: "/api/v1/admin/server-config/schema", RouteID: "admin.serverConfig.schema",
@@ -811,6 +820,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// timestamps only.
 	"/api/v1/admin/conduit/grant-keys/rotate": {
 		Pattern: "/api/v1/admin/conduit/grant-keys/rotate", RouteID: "admin.conduit.grantKeys.rotate",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	// Conduit grant key revocation, behind hub.conduit. Removes a key at
+	// once; returns the kid only.
+	"/api/v1/admin/conduit/grant-keys/revoke": {
+		Pattern: "/api/v1/admin/conduit/grant-keys/revoke", RouteID: "admin.conduit.grantKeys.revoke",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
@@ -982,8 +999,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		// RouteAuthenticated: authorization is method-aware and handled
 		// inline, matching the collection endpoint's pattern.
 		// GET /user/{userID} checks role_binding.read inline.
-		// DELETE /{id} checks role_binding.delete inline via
-		// requireWritePermissionForRoleBinding.
+		// DELETE /{id} of a project-scoped binding checks project.manage on
+		// the binding's project first and defers to the membership
+		// service; otherwise it checks role_binding.delete at hub scope
+		// (authorizeRoleBindingDelete).
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/admin/permissions": {
@@ -1136,6 +1155,25 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// and user.delete (canDeleteTestIdentity).
 	"DELETE /api/v1/test-identities/{id}": {
 		Pattern: "DELETE /api/v1/test-identities/{id}", RouteID: "testIdentities.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Issuer-scoped orphan cleanup (Phase 3c). The handler selects the
+	// targets from the provenance stamps of expired or deleted test
+	// identities of the caller's issuer scope (its own identities, its own
+	// workload delegation's, or every issuer's for an unscoped platform
+	// admin session); the request names none.
+	"POST /api/v1/test-identities/cleanup": {
+		Pattern: "POST /api/v1/test-identities/cleanup", RouteID: "testIdentities.cleanup",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		BearerTarget: "hub_collection",
+	},
+	// Provenance explain (Phase 3c): proven or unproven for one resource;
+	// no owner or creator data for an unproven one.
+	"GET /api/v1/test-identities/provenance": {
+		Pattern: "GET /api/v1/test-identities/provenance", RouteID: "testIdentities.provenance",
 		Classification: RouteHubAdmin,
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",

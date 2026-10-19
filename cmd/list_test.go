@@ -486,7 +486,7 @@ func TestHaltedPhaseDecisions(t *testing.T) {
 	assert.True(t, hubCreateReusesExistingAgent("halted", true, false))
 	assert.False(t, hubCreateReusesExistingAgent("halted", false, false))
 	assert.Equal(t, "Restarting", hubStartActionWord("halted", true, false))
-	done, err := launchOutcome("a", &hubclient.Agent{Phase: "halted"})
+	done, err := launchOutcome("a", &hubclient.Agent{Phase: "halted"}, "")
 	assert.True(t, done)
 	assert.Error(t, err, "a launch that ends halted failed")
 }

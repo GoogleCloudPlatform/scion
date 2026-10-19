@@ -797,8 +797,9 @@ func runTemplateSync(cmd *cobra.Command, args []string) error {
 		return newUsageError("requires a template name argument or --all flag")
 	}
 
-	// Check Hub availability first (we need it for sync anyway)
-	hubCtx, err := requireHub(projectPath)
+	// Check Hub availability first (we need it for sync anyway). A
+	// --global sync does not link the project (see requireHubForUpload).
+	hubCtx, err := requireHubForUpload(projectPath)
 	if err != nil {
 		return err
 	}
