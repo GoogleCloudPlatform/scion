@@ -227,10 +227,9 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	if _, ok := ps["defaultAgentRole"]; ok {
 		dispatched["agentRole"] = resp.Agent.AppliedConfig.AgentRole
 	}
-	// The row's config.messageMode is recorded too, so a case can assert
-	// that it no longer contributes (ptone/scion#4222).
-	if (src.Template.Config != nil && src.Template.Config.MessageMode != "") ||
-		(src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "") {
+	// The template's message mode comes only from its snapshot
+	// (ptone/scion#4222); the row has no config (ptone/scion#4224).
+	if src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "" {
 		dispatched["messageMode"] = resp.Agent.MessageMode
 	}
 	return dispatched
