@@ -26,7 +26,6 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 
 import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
-import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
 import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
@@ -960,9 +959,6 @@ async function init(): Promise<void> {
   // import overlaps the boot requests below instead of following them. It
   // only fetches; renderRoute still gates the render (flags, permissions).
   preloadInitialRoute(stripBasePath(window.location.pathname));
-
-  // Attach debug logger to state manager to capture all SSE events
-  debugLog.attach(stateManager);
 
   // Start the feature-flag and onboarding-status fetches now so they overlap
   // the auth and component work below; both are awaited, together with the
