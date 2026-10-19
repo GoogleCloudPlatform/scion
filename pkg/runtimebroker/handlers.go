@@ -4278,9 +4278,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			}
 		case 1:
 			c := containers[0]
-			// Paired through runtimeOfManager, so the record is zero; a
-			// pin taken from this match starts with no build record.
-			if m, err := agentMatchFrom(strings.ToLower(id), []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{}); err == nil {
+			if m, err := s.otherRuntimeMatch(strings.ToLower(id), c); err == nil {
 				match, matchErr = m, nil
 			}
 		default:
@@ -6616,6 +6614,15 @@ func pinnedRuntimeOf(mgr agent.Manager, rt scionrt.Runtime, rec config.RuntimeBu
 		return pinnedRuntime{}
 	}
 	return pinnedRuntime{mgr: mgr, rt: rt, name: rt.Name(), record: rec}
+}
+
+// otherRuntimeMatch is the agent match a restart builds for the one
+// container its walk of the other runtimes found. The runtime is paired
+// with the candidate's manager through runtimeOfManager, so the record is
+// the zero value: a record is never paired through runtimeOfManager, and a
+// pin taken from this match carries no build record.
+func (s *Server) otherRuntimeMatch(slug string, c agentCandidate) (agentMatch, error) {
+	return agentMatchFrom(slug, []api.AgentInfo{c.entry}, c.mgr, s.runtimeOfManager(c.mgr), config.RuntimeBuildRecord{})
 }
 
 // restartPin is the pin a restart takes for the agent match it stops: the
