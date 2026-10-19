@@ -101,8 +101,8 @@
   `CredentialKindFederation` in `catalogCredentialRequestKinds`.
 - **Pairing.** `selfReadCredential` admits the federation kind only with a
   `VisitorIdentity` (a federated account linked by a grant or a rule, with
-  the visitor experiment on), the way a user access token kind is paired
-  with its token identity. Any other federated identity (an unlinked
+  the visitor experiment on), the way a user access credential kind is
+  paired with its token identity. Any other federated identity (an unlinked
   `FederatedUserIdentity`, a federated agent or service identity) is
   refused whatever the recorded kind, and so is a local user with the
   federation kind. No exemption is added.
