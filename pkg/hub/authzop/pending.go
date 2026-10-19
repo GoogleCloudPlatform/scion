@@ -158,9 +158,7 @@ var PendingBearerOperations = []OperationID{
 	"role.definition.update",
 	"secret.read",
 	"secret.write",
-	"user.admin.suspend",
 	"user.read",
-	"user.update",
 }
 
 var pendingBearerOperationSet = func() map[OperationID]bool {

@@ -482,12 +482,12 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.suspend",
 		Domain:      "user.admin",
-		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)",
+		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:status-field"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.suspend",
 		Effects:          []SecurityEffect{EffectChangePrincipalStatus},
@@ -501,7 +501,12 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_StatusRequiresSuspendSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfStatusGuardStillApplies"},
+		},
+		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubInstance, Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestUserPatchToken_StatusRequiresSuspendSelector"},
 	},
 
 	// =====================================================================
@@ -776,19 +781,50 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.update",
 		Domain:      "user",
-		Description: "Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)",
+		Description: "Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "cross_user"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
 		ResourceResolver: "user-from-url",
 		BasePermission:   "user.update",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_CrossUserProfileRequiresUpdateSelector"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_MixedFieldsAllOrNothing"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.self.update",
+		Domain:      "user",
+		Description: "Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}", Method: "PATCH", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfProfileSessionOnly"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "The path names the caller's own record, so no resource permission applies to the caller's own profile",
+			Scope:  "caller's own profile fields",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 
 	// =====================================================================
