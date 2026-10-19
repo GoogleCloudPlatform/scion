@@ -85,6 +85,18 @@ func pctRequireMintRefused(t *testing.T, err error, label string) {
 	assert.True(t, errors.Is(err, ErrUATProjectForbidden) || errors.Is(err, ErrUATScopeViolation), "%s: %v", label, err)
 }
 
+// pctCreateDenialReason resolves the token key to its identity and returns
+// the reason projectCreateDecision refuses it with.
+func pctCreateDenialReason(t *testing.T, srv *Server, key string) string {
+	t.Helper()
+	ctx := context.Background()
+	identity, err := srv.uatService.ValidateToken(ctx, key)
+	require.NoError(t, err)
+	decision := srv.projectCreateDecision(ctx, identity)
+	require.False(t, decision.Allowed, "project.create admission for the token")
+	return decision.Reason
+}
+
 // pctSession sends a request as userID over an interactive session through
 // the full server handler.
 func pctSession(t *testing.T, srv *Server, s store.Store, userID, method, path string, body interface{}) *httptest.ResponseRecorder {
@@ -182,13 +194,16 @@ func TestProjectCreateToken_RequiresCreateSelectorAndHubBoundary(t *testing.T) {
 	})
 
 	t.Run("refused on a project boundary", func(t *testing.T) {
+		// A minted project token cannot carry project:create, so this
+		// first request is a selector control.
 		key := projectOpsMint(t, f.srv, f.holder, projectBoundary(f.home), "project:read", "agent:read")
 		pctAssertRefused(t, f.s, create(key, "pct create ptok"), api.Slugify("pct create ptok"), "project token")
 		// A stored project-boundary row carrying project:create is refused
-		// at request time: project.create is not eligible for a project
-		// boundary.
+		// at request time by its boundary: project creation is a hub-level
+		// request.
 		stored := uatpInsertLegacyToken(t, f.s, f.holder, f.home, []string{"project:create", "project:read", "agent:read"})
 		pctAssertRefused(t, f.s, create(stored, "pct create stored"), api.Slugify("pct create stored"), "stored project-boundary row")
+		assert.Equal(t, bearerReasonHubLevelResource, pctCreateDenialReason(t, f.srv, stored))
 	})
 
 	t.Run("refused when the token does not cover the owner role", func(t *testing.T) {
@@ -335,10 +350,15 @@ func TestProjectRegisterToken_EnforcesProjectCreate(t *testing.T) {
 	})
 
 	t.Run("refused on a project boundary", func(t *testing.T) {
+		// A minted project token cannot carry project:create, so this
+		// first request is a selector control.
 		key := projectOpsMint(t, f.srv, f.holder, projectBoundary(f.home), "project:read", "agent:read")
 		pctAssertRefused(t, f.s, register(key, RegisterProjectRequest{Name: "pct reg ptok"}), api.Slugify("pct reg ptok"), "project token")
+		// A stored project-boundary row carrying project:create is refused
+		// by its boundary: registration is a hub-level request.
 		stored := uatpInsertLegacyToken(t, f.s, f.holder, f.home, []string{"project:create", "project:read", "agent:read"})
 		pctAssertRefused(t, f.s, register(stored, RegisterProjectRequest{Name: "pct reg stored"}), api.Slugify("pct reg stored"), "stored project-boundary row")
+		assert.Equal(t, bearerReasonHubLevelResource, pctCreateDenialReason(t, f.srv, stored))
 	})
 
 	t.Run("an existing project named by id needs project:update", func(t *testing.T) {
@@ -483,17 +503,23 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	})
 
 	t.Run("each selector is required", func(t *testing.T) {
+		// The checks run in order: source read, the clone selector, then
+		// project creation. Each case is refused by the check for its
+		// missing selector, named in the response.
 		for _, tc := range []struct {
 			missing string
 			scopes  []string
+			refusal string
 		}{
-			{"project:read", []string{"project:clone", "project:create", "agent:read"}},
-			{"project:clone", []string{"project:read", "project:create", "agent:read"}},
-			{"project:create", []string{"project:read", "project:clone", "agent:read"}},
+			{"project:read", []string{"project:clone", "project:create", "agent:read"}, "read source project"},
+			{"project:clone", []string{"project:read", "project:create", "agent:read"}, "clone projects"},
+			{"project:create", []string{"project:read", "project:clone", "agent:read"}, "create projects"},
 		} {
 			key := projectOpsMint(t, f.srv, super, hubBoundary(), tc.scopes...)
 			name := "pct clone no " + tc.missing
-			pctAssertRefused(t, f.s, clone(key, name), api.Slugify(name), "token without "+tc.missing)
+			rec := clone(key, name)
+			pctAssertRefused(t, f.s, rec, api.Slugify(name), "token without "+tc.missing)
+			assert.Contains(t, rec.Body.String(), tc.refusal, "token without %s", tc.missing)
 		}
 	})
 
@@ -515,10 +541,19 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	})
 
 	t.Run("refused on a project boundary", func(t *testing.T) {
+		// A minted project token cannot carry project:create, so this
+		// first request is a selector control.
 		key := projectOpsMint(t, f.srv, super, projectBoundary(src), "project:read", "agent:read")
 		pctAssertRefused(t, f.s, clone(key, "pct clone ptok"), api.Slugify("pct clone ptok"), "project token")
+		// A stored project-boundary row on the source carrying all three
+		// selectors reads the source and carries project:clone, and is
+		// refused by its boundary at the project creation check, a
+		// hub-level request.
 		stored := uatpInsertLegacyToken(t, f.s, super, src, []string{"project:read", "project:clone", "project:create", "agent:read"})
-		pctAssertRefused(t, f.s, clone(stored, "pct clone stored"), api.Slugify("pct clone stored"), "stored project-boundary row")
+		rec := clone(stored, "pct clone stored")
+		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone stored"), "stored project-boundary row")
+		assert.Contains(t, rec.Body.String(), "create projects")
+		assert.Equal(t, bearerReasonHubLevelResource, pctCreateDenialReason(t, f.srv, stored))
 	})
 
 	t.Run("refused when the token does not cover the owner role", func(t *testing.T) {
