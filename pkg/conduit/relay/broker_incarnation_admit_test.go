@@ -62,29 +62,40 @@ func (ev *brokerIncarnationEvents) snapshot() (map[string]int, []string) {
 	return out, append([]string(nil), ev.flaps...)
 }
 
-// admissions returns a channel that receives the session id of every
-// broker session whose admission step on n has finished. Install it
-// before n serves sessions.
-func admissions(n *relaytest.Node) <-chan string {
-	ch := make(chan string, 64)
-	n.Relay.SetAfterBrokerAdmissionHookForTest(func(sessionID string) { ch <- sessionID })
-	return ch
+// admissionLog records the admission steps of one relay for one test: ch
+// receives the session id of every broker session whose admission step has
+// finished, and seen keeps every id read from ch, so an id read while
+// waiting for others is still there for a later wait.
+type admissionLog struct {
+	ch   chan string
+	seen map[string]bool
+}
+
+// admissions returns the admission log of n. Install it before n serves
+// sessions.
+func admissions(n *relaytest.Node) *admissionLog {
+	l := &admissionLog{ch: make(chan string, 64), seen: map[string]bool{}}
+	n.Relay.SetAfterBrokerAdmissionHookForTest(func(sessionID string) { l.ch <- sessionID })
+	return l
 }
 
 // waitAdmission waits until the admission step of every session in
-// sessionIDs has finished, in any order, within 10s overall. Ids not in
-// sessionIDs are drained and ignored. The hook fires when a session has
-// completed admission (is registered).
-func waitAdmission(t *testing.T, ch <-chan string, sessionIDs ...string) {
+// sessionIDs has finished, in any order, within 10s overall. Ids read along
+// the way are kept in the log, so a later call still sees them. The hook
+// fires when a session has completed admission (is registered).
+func waitAdmission(t *testing.T, l *admissionLog, sessionIDs ...string) {
 	t.Helper()
 	want := make(map[string]bool, len(sessionIDs))
 	for _, id := range sessionIDs {
-		want[id] = true
+		if !l.seen[id] {
+			want[id] = true
+		}
 	}
 	deadline := time.After(10 * time.Second)
 	for len(want) > 0 {
 		select {
-		case id := <-ch:
+		case id := <-l.ch:
+			l.seen[id] = true
 			delete(want, id)
 		case <-deadline:
 			missing := make([]string, 0, len(want))
