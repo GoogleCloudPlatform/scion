@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
@@ -142,7 +143,7 @@ func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *rrManager, 
 	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
-	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr))
+	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr), config.RuntimeBuildRecord{})
 
 	var auxMgr *rrManager
 	if withK8s {

@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -71,7 +72,7 @@ func TestResetAuth_SignalFailureStillReturns200(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -101,7 +102,7 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -160,7 +161,7 @@ func TestResetAuth_TokenDeliveredViaStdinNotArgv(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, token)
 
@@ -191,7 +192,7 @@ func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -235,7 +236,7 @@ func TestResetAuth_NotFoundReturns404(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -290,7 +291,7 @@ func TestResetAuth_AmbiguousMatchReturns500(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -320,7 +321,7 @@ func TestResetAuth_MissingTokenIsValidationError(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(DefaultServerConfig(), mgr, rt)
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "")
 

@@ -199,9 +199,9 @@ func writeBrokerRuntimeSettings(t *testing.T, projectSettings string) string {
 
 // getRuntimeFor returns a getRuntime function for resolveBrokerDefaultRuntime
 // that resolves the default runtime against projectDir's settings.
-func getRuntimeFor(projectDir string) func(string, string) scionruntime.Runtime {
-	return func(string, string) scionruntime.Runtime {
-		return scionruntime.GetRuntime(projectDir, "")
+func getRuntimeFor(projectDir string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord(projectDir, "")
 	}
 }
 
@@ -229,7 +229,7 @@ func TestResolveBrokerDefaultRuntime_InvalidSubstrateProfileRefusesStart(t *test
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	rt, _, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
 	if err == nil {
 		t.Fatalf("expected startup to be refused, got runtime %q", rt.Name())
 	}
@@ -258,7 +258,7 @@ func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *t
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
+	rt, _, err := resolveBrokerDefaultRuntime(getRuntimeFor(projectDir), logf)
 	if err != nil {
 		t.Fatalf("a non-substrate runtime failure must not refuse startup, got: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestResolveBrokerDefaultRuntime_NonSubstrateErrorRuntimeStartsDegraded(t *t
 // an empty working directory so no project settings are picked up. The
 // returned getRuntime resolves the default runtime from operator settings
 // alone, the way a deployed broker does.
-func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) scionruntime.Runtime {
+func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -287,8 +287,8 @@ func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
-	return func(string, string) scionruntime.Runtime {
-		return scionruntime.GetRuntime("", "")
+	return func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return scionruntime.GetRuntimeWithRecord("", "")
 	}
 }
 
@@ -367,7 +367,7 @@ func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStar
 			var logged []string
 			logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-			rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+			rt, _, err := resolveBrokerDefaultRuntime(getRuntime, logf)
 			if err == nil {
 				t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
 			}
@@ -401,7 +401,7 @@ func TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded(t *test
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+	rt, _, err := resolveBrokerDefaultRuntime(getRuntime, logf)
 	if err != nil {
 		t.Fatalf("a substrate construct-time dependency failure must not refuse startup, got: %v", err)
 	}
@@ -422,7 +422,9 @@ func TestResolveBrokerDefaultRuntime_HealthyRuntimeStartsNormally(t *testing.T) 
 	var logged []string
 	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-	rt, err := resolveBrokerDefaultRuntime(func(string, string) scionruntime.Runtime { return healthy }, logf)
+	rt, _, err := resolveBrokerDefaultRuntime(func(string, string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
+		return healthy, config.RuntimeBuildRecord{}
+	}, logf)
 	assert.NoError(t, err)
 	assert.Same(t, healthy, rt)
 	assert.Equal(t, []string{"Runtime broker using runtime: " + healthy.Name()}, logged)
