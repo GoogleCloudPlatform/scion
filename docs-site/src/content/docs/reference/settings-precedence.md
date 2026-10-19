@@ -393,8 +393,7 @@ then used only to fill keys the config left unset.
 runtime_broker  <  hub  <  project  <  user  <  request / --config env
 ```
 
-So request env **outranks all four storage scopes, `user` included.** It also outranks a harness
-config's `env:` block, including on a local start that is not dispatched by a Hub.
+So request env **outranks all four storage scopes, `user` included.**
 
 #### The top rung is not a plain inequality, and a ranked list cannot express it
 

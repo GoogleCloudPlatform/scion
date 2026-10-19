@@ -37,14 +37,16 @@ func unreachableHubURL(t *testing.T) string {
 }
 
 // TestResolveCLIHub_ValueAndSourceAgree: in every combination of the hub
-// sources (--hub as a URL or a nickname, SCION_HUB_ENDPOINT or
-// SCION_HUB_URL, a directory link, a current hub), the endpoint and the
+// sources (--hub as a URL or a nickname, SCION_HUB_ENDPOINT,
+// SCION_HUB_URL or both, a directory link, a current hub), the endpoint and the
 // source come from one resolver, so hub status never prints the endpoint of
 // one source with the label of another. A directory project's settings
 // hub.endpoint is present in every row and is never a source.
 func TestResolveCLIHub_ValueAndSourceAgree(t *testing.T) {
 	type envCase struct{ name, varName string }
-	envCases := []envCase{{"no env", ""}, {"SCION_HUB_ENDPOINT", "SCION_HUB_ENDPOINT"}, {"SCION_HUB_URL", "SCION_HUB_URL"}}
+	// "both" sets SCION_HUB_ENDPOINT and SCION_HUB_URL to different
+	// values: SCION_HUB_ENDPOINT wins, value and label.
+	envCases := []envCase{{"no env", ""}, {"SCION_HUB_ENDPOINT", "SCION_HUB_ENDPOINT"}, {"SCION_HUB_URL", "SCION_HUB_URL"}, {"both", "SCION_HUB_ENDPOINT"}}
 	flagCases := []string{"no flag", "--hub URL", "--hub nickname"}
 
 	for _, flag := range flagCases {
@@ -67,6 +69,9 @@ func TestResolveCLIHub_ValueAndSourceAgree(t *testing.T) {
 						t.Setenv("SCION_HUB_URL", "")
 						if env.varName != "" {
 							t.Setenv(env.varName, envURL)
+						}
+						if env.name == "both" {
+							t.Setenv("SCION_HUB_URL", unreachableHubURL(t))
 						}
 						if current {
 							saveTestContext(t, currentURL, "")

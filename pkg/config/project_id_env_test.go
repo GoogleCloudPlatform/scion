@@ -165,6 +165,36 @@ func TestProjectIDEnvPrecedence(t *testing.T) {
 	}
 }
 
+// TestProjectIDEnvPrecedence_LegacyCamelHubProjectID: in the legacy
+// loader, a settings hub.projectId that differs from hub.project_id is its
+// own overridden source: one warning names it, and GetHubProjectID returns
+// the env value.
+func TestProjectIDEnvPrecedence_LegacyCamelHubProjectID(t *testing.T) {
+	const camelID = "camel-hub-project-id"
+	projectDir, logs := setupProjectIDEnvTest(t, envIDTestSettings, "")
+	settings := filepath.Join(projectDir, "settings.yaml")
+	data, err := os.ReadFile(settings)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(settings, append(data, []byte("  projectId: \""+camelID+"\"\n")...), 0o644))
+	t.Setenv(projectkeys.EnvHubProjectID, envIDTestEnvHub)
+
+	s, err := LoadSettingsKoanf(projectDir)
+	require.NoError(t, err)
+	assert.Equal(t, envIDTestEnvHub, s.ProjectID)
+	assert.Equal(t, envIDTestEnvHub, s.GetHubProjectID())
+
+	var camel []string
+	for _, w := range overrideWarnings(logs) {
+		if strings.Contains(w, "overridden="+projectkeys.ConfigHubProjectIDJSON) {
+			camel = append(camel, w)
+		}
+	}
+	require.Len(t, camel, 1, logs.String())
+	assert.Contains(t, camel[0], "source="+projectkeys.EnvHubProjectID)
+	assert.NotContains(t, logs.String(), camelID, "the warning names sources, never project ID values")
+	assertNoProjectIDValues(t, logs)
+}
+
 // TestProjectIDEnvPrecedence_PlainVarUnchanged: SCION_PROJECT_ID keeps its
 // rank. In the legacy loader it loses to hub.project_id and to the
 // project-id file; in the v1 loader it sets only the top-level project_id
@@ -208,8 +238,9 @@ func TestProjectIDEnvPrecedence_PlainVarUnchanged(t *testing.T) {
 }
 
 // TestProjectIDEnvPrecedence_HubVarBeatsPlainVar: in the legacy loader,
-// where both variables map to project_id, SCION_HUB_PROJECT_ID wins
-// whatever their order in the environment, with a warning naming both.
+// SCION_HUB_PROJECT_ID is applied after the env provider (which maps only
+// SCION_PROJECT_ID), so it wins over SCION_PROJECT_ID; repeated loads warn
+// once, naming both variables.
 func TestProjectIDEnvPrecedence_HubVarBeatsPlainVar(t *testing.T) {
 	projectDir, logs := setupProjectIDEnvTest(t, "", "")
 	t.Setenv(projectkeys.EnvProjectID, envIDTestEnvPlain)
