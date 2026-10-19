@@ -393,6 +393,35 @@ func TestBuildRecord_BR3_PinnedRestartResolution(t *testing.T) {
 	})
 }
 
+// BR4 (discovery half): discovery stores each auxiliary holder with the
+// record its resolver returned, together with that build's runtime and a
+// manager over it.
+func TestBuildRecord_BR4_DiscoveryStoresRecord(t *testing.T) {
+	f := newBRFixture(t)
+	// Every profile in the project is resolved; "local" and "alias" resolve
+	// to the default's identity and "broken" to an error runtime, so only
+	// "k8s-a" is registered.
+	f.builds["local"] = brBuild{rt: &scionrt.MockRuntime{NameFunc: func() string { return "docker" }}, rec: brDefaultRecord}
+	auxRT := f.builds["k8s-a"].rt
+
+	f.srv.discoverAuxiliaryRuntimesForProjects([]string{f.projectDir})
+
+	if keys := auxKeys(f.srv); len(keys) != 1 || keys[0] != auxiliaryRuntimeIdentity(auxRT) {
+		t.Fatalf("registered auxiliary runtimes = %v, want only %q", keys, auxiliaryRuntimeIdentity(auxRT))
+	}
+	stored := f.storedAux(t, auxRT)
+	if stored.Record != brAuxRecord {
+		t.Errorf("stored record = %+v, want %+v", stored.Record, brAuxRecord)
+	}
+	if stored.Runtime != auxRT {
+		t.Errorf("stored runtime = %v, want the discovered build %v", stored.Runtime, auxRT)
+	}
+	am, ok := stored.Manager.(*agent.AgentManager)
+	if !ok || am.Runtime != auxRT {
+		t.Errorf("stored manager = %#v, want a manager over the discovered build", stored.Manager)
+	}
+}
+
 // BR5: a holder built without a record has the zero value.
 func TestBuildRecord_BR5_HolderWithoutRecordIsZero(t *testing.T) {
 	f := newBRFixture(t)
