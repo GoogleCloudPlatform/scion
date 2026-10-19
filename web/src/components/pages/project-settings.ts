@@ -3027,8 +3027,9 @@ export class ScionPageProjectSettings extends LitElement {
       const data = (await response.json()) as { brokers: RuntimeBrokerWithProvider[] };
       this.brokers = data.brokers || [];
 
-      // Start relative time refresh if we have brokers
-      if (this.brokers.length > 0 && !this.stopBrokerRelativeTimeTick) {
+      // Start relative time refresh if we have brokers. The fetch can resolve
+      // after the page was disconnected; do not start a timer nobody stops.
+      if (this.isConnected && this.brokers.length > 0 && !this.stopBrokerRelativeTimeTick) {
         this.stopBrokerRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
       }
     } catch (err) {

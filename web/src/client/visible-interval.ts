@@ -78,8 +78,6 @@ export function visibleInterval(
     if (timer !== null) return;
     if (catchUpOnVisible && Date.now() - lastTickAt >= ms) {
       tick();
-    } else if (!catchUpOnVisible) {
-      lastTickAt = Date.now();
     }
     // tick() may have called the returned stop function.
     if (!stopped) startTimer();

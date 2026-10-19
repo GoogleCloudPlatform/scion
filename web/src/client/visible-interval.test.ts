@@ -88,6 +88,31 @@ describe('visibleInterval', () => {
     stop();
   });
 
+  it('no catch-up tick when a tick ran less than an interval before showing', () => {
+    const fn = vi.fn();
+    const stop = visibleInterval(fn, 1000);
+    vi.advanceTimersByTime(1000);
+    expect(fn).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(500);
+    setHidden(true);
+    vi.advanceTimersByTime(400);
+    // 900 ms since the last tick at t=1000, 1900 ms since start.
+    setHidden(false);
+    expect(fn).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('one catch-up tick when the hidden period spans the next due tick', () => {
+    const fn = vi.fn();
+    const stop = visibleInterval(fn, 1000);
+    vi.advanceTimersByTime(900);
+    setHidden(true);
+    vi.advanceTimersByTime(200);
+    setHidden(false);
+    expect(fn).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
   it('no catch-up tick when catchUpOnVisible is false', () => {
     const fn = vi.fn();
     const stop = visibleInterval(fn, 1000, { catchUpOnVisible: false });
