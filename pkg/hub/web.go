@@ -1336,15 +1336,28 @@ func cleanStaticPath(p string) string {
 	return np
 }
 
+// Cache-Control values of static assets (see staticCacheControl).
+const (
+	cacheControlImmutable = "public, max-age=31536000, immutable"
+	cacheControlOneDay    = "public, max-age=86400"
+	cacheControlNoCache   = "no-cache"
+)
+
 // staticCacheControl is the Cache-Control of a static asset. Files Vite
-// fingerprinted (listed in its build manifest) and other hex-hashed names
-// get long-lived caching; the unhashed entry (assets/main.js) and every
-// other file get revalidation.
+// fingerprinted (listed in its build manifest) are named by their content,
+// so they are cached for a year and never revalidated. A hex-hashed name
+// that the manifest does not list only looks content-addressed, so it is
+// cached for a day. The unhashed entry (assets/main.js) and every other
+// file are revalidated on each use (cheap: they carry an ETag).
 func (ws *WebServer) staticCacheControl(requestPath string) string {
-	if ws.fingerprintedAssets[requestPath] || isHashedAsset(requestPath) {
-		return "public, max-age=86400"
+	switch {
+	case ws.fingerprintedAssets[requestPath]:
+		return cacheControlImmutable
+	case isHashedAsset(requestPath):
+		return cacheControlOneDay
+	default:
+		return cacheControlNoCache
 	}
-	return "no-cache"
 }
 
 // staticContentTypes maps file extensions missing from Go's built-in MIME
