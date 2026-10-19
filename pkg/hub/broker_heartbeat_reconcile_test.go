@@ -818,3 +818,42 @@ func TestHeartbeat_StartingPhase(t *testing.T) {
 	send()
 	check("second heartbeat")
 }
+
+// TestHeartbeat_PendingPodKeepsLaunchActive (ptone/scion#5365): during an
+// async create on Kubernetes the broker heartbeat reports an agent whose pod
+// is still Pending (waiting for a node) as phase starting, container status
+// "Pending". The hub moves the row to starting and leaves the active launch
+// open, so the broker's own succeeded or failed report (for example a
+// capacity timeout) still decides how the launch ends, and the CLI keeps
+// waiting. A heartbeat reporting running for a Running pod still ends the
+// launch as running_observed, which shows the heartbeat reached the store.
+func TestHeartbeat_PendingPodKeepsLaunchActive(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	pending := f.addAgent("pending-pod", string(state.PhaseProvisioning), "")
+	running := f.addAgent("running-pod", string(state.PhaseProvisioning), "")
+	for _, a := range []*store.Agent{pending, running} {
+		_, err := f.s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 10*time.Minute)
+		require.NoError(t, err, "begin launch for %s", a.Slug)
+		require.Equal(t, store.LaunchStateActive, f.get(a.ID).LaunchState, "launch of %s is active before the heartbeat", a.Slug)
+	}
+
+	f.send(brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: pending.Slug, Phase: string(state.PhaseStarting), ContainerStatus: "Pending", RuntimeTarget: "docker"},
+			{Slug: running.Slug, Phase: string(state.PhaseRunning), ContainerStatus: "Running", RuntimeTarget: "docker"},
+		}}},
+	})
+
+	gotPending := f.get(pending.ID)
+	assert.Equal(t, string(state.PhaseStarting), gotPending.Phase, "a Pending pod's agent moves to starting, not running")
+	assert.Equal(t, "Pending", gotPending.ContainerStatus)
+	assert.Equal(t, store.LaunchStateActive, gotPending.LaunchState, "a Pending pod's heartbeat must not end the launch")
+	assert.Empty(t, gotPending.LaunchEndReason, "a Pending pod's heartbeat must not record a launch end reason")
+
+	gotRunning := f.get(running.ID)
+	assert.Equal(t, string(state.PhaseRunning), gotRunning.Phase)
+	assert.Equal(t, store.LaunchStateEnded, gotRunning.LaunchState, "a running heartbeat ends the launch")
+	assert.Equal(t, store.LaunchEndReasonRunningObserved, gotRunning.LaunchEndReason)
+}
