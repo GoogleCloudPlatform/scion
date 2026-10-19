@@ -84,7 +84,10 @@ func projectRoleBindingGrant(projectID string, perms ...string) GrantDescriptor 
 // project-boundary UAT delegates only into its own project, that a project
 // grant naming no project is denied for every UAT boundary kind, and that an
 // agent delegation naming two different projects is denied for every UAT
-// boundary kind.
+// boundary kind. A project-scoped custom role definition names no project
+// because it can be bound in every project: a project-boundary UAT is
+// denied it at the boundary, and a hub-boundary UAT is judged on the
+// holder's system-scope authority within its ceiling.
 func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 	f := newDelegationFixture(t, "proj-match")
 	ctx := context.Background()
@@ -110,13 +113,20 @@ func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 		for _, grant := range []GrantDescriptor{
 			{Type: GrantTypeAgentDelegation, AgentRole: string(AgentRoleBaseline), ScopeType: store.RoleScopeProject},
 			{Type: GrantTypeRoleBinding, RolePermissions: []string{"agent.read"}, ScopeType: store.RoleScopeProject},
-			{Type: GrantTypeCustomRole, CustomRolePermissions: []string{"agent.read"}, ScopeType: store.RoleScopeProject},
 		} {
 			d := f.authz.CanDelegate(ctx, actor, grant)
 			assert.False(t, d.Allowed, "%s: a %s project grant naming no project is denied", name, grant.Type)
 			assert.Contains(t, d.Reason, "names no project", "%s: %s", name, grant.Type)
 		}
 	}
+
+	customRole := GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{"agent.read"}, ScopeType: store.RoleScopeProject}
+	d = f.authz.CanDelegate(ctx, projectToken, customRole)
+	assert.False(t, d.Allowed, "project boundary: a project-scoped custom role is denied")
+	assert.Contains(t, d.Reason, "names no project")
+	d = f.authz.CanDelegate(ctx, hubToken, customRole)
+	assert.False(t, d.Allowed, "hub boundary: agent.read is outside the token ceiling")
+	assert.Contains(t, d.Reason, "actor lacks permission for delegation: agent.read")
 }
 
 // TestCanDelegate_HubBoundaryProjectGrantRequiresCurrentAccess pins that a
