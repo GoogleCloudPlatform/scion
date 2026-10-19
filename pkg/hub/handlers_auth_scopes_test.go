@@ -240,11 +240,12 @@ func TestUATScopes_NoPolicyScopesExist(t *testing.T) {
 
 // TestUATScopes_NoAuthorityEscalationScopes verifies no UAT scopes for
 // authority-escalation operations.
+//
+// user.update and user.suspend have hub-only selectors, pinned by
+// TestUATScopes_UserUpdateAndSuspendAreHubOnly; user.promote has none.
 func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 	forbidden := map[string]bool{
-		"user.suspend":            true,
 		"user.promote":            true,
-		"user.update":             true,
 		"hub.maintenance.execute": true,
 		"hub.admin_mode.update":   true,
 		"hub.auth_reset.execute":  true,
@@ -253,6 +254,23 @@ func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 		if forbidden[perm.ID] && perm.UATScope != "" {
 			t.Errorf("authority-escalation permission %q has UAT scope %q — should not have UAT scope", perm.ID, perm.UATScope)
 		}
+	}
+}
+
+// TestUATScopes_UserUpdateAndSuspendAreHubOnly pins the selectors of
+// user.update and user.suspend: user:update and user:suspend, each allowed
+// only on a hub boundary and only on the hub-level user record.
+func TestUATScopes_UserUpdateAndSuspendAreHubOnly(t *testing.T) {
+	for id, selector := range map[string]string{"user.update": "user:update", "user.suspend": "user:suspend"} {
+		var scope string
+		for _, perm := range permissions.Registry {
+			if perm.ID == id {
+				scope = perm.UATScope
+			}
+		}
+		assert.Equal(t, selector, scope, "%s selector", id)
+		assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, permissions.PermissionAllowedBoundaries[id], "%s boundaries", id)
+		assert.Equal(t, []permissions.TargetClassKind{permissions.TargetClassKindHubResource}, permissions.SupportedTargetClasses[id], "%s target classes", id)
 	}
 }
 
