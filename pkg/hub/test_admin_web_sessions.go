@@ -220,18 +220,23 @@ func testAdminKindSpecFor(kind string) (testAdminKindSpec, bool) {
 	return testAdminKindSpec{}, false
 }
 
-// testAdminWebCodeIssuer runs, for a web-login code for the admin-kind
-// identity u, the issuer checks of u's kind on top of the shared caller
-// checks (testIdentityCallerFor) and canManageTestIdentity: the request
-// holds the kind's capability (from the handler-level decision in allowed,
-// or decided here when that decision stopped at another permission),
-// the caller is a live super-admin through its own current bindings
-// holding that capability (canIssueTestAdmin), and an access-token caller
-// presents a hub-boundary token with exactly the kind's scope, at most
-// testAdminIssuerPATMaxAge old (verifyTestAdminIssuerPAT). A code is a
-// credential for an admin-kind identity, so it takes what issuing one
-// takes. It writes 403 and returns false on refusal.
-func (s *Server) testAdminWebCodeIssuer(w http.ResponseWriter, r *http.Request, caller UserIdentity, u *store.User, allowed map[string]bool) bool {
+// testAdminCredentialIssuer runs, for a web-login code for the admin-kind
+// identity u (WS4) or a re-issued token for it (phase X4b), the issuer
+// checks of u's kind on top of the shared caller checks
+// (testIdentityCallerAdmitting) and the handler's ownership check: the
+// request holds the kind's capability (from the handler-level decision in
+// allowed, or decided here when that decision stopped at another
+// permission), the caller is a live super-admin through its own current
+// bindings holding that capability (canIssueTestAdmin), an access-token
+// caller presents a hub-boundary token with exactly the kind's scope, at
+// most testAdminIssuerPATMaxAge old (verifyTestAdminIssuerPAT), and a
+// workload delegation caller holds the scope of u's kind and issued u
+// itself (testAdminDelegationManages); its grantor is the caller checked
+// by canIssueTestAdmin, and the mint transaction re-checks the delegation
+// and the grantor. A code or token is a credential for an admin-kind
+// identity, so it takes what issuing one takes. It writes 403 and returns
+// false on refusal.
+func (s *Server) testAdminCredentialIssuer(w http.ResponseWriter, r *http.Request, caller UserIdentity, u *store.User, allowed map[string]bool) bool {
 	ctx := r.Context()
 	spec, ok := testAdminKindSpecFor(u.Kind)
 	if !ok {
@@ -279,8 +284,13 @@ func (s *Server) testAdminWebCodeIssuer(w http.ResponseWriter, r *http.Request, 
 		if err := s.verifyTestAdminIssuerPAT(ctx, caller.ID(), credentialID, uatScopeForPermission(spec.permission)); err != nil {
 			return deny(err.Error(), testAdminReasonIssuerPAT)
 		}
+	case CredentialKindWorkloadDelegation:
+		st := workloadDelegationCaller(ctx)
+		if st == nil || testIdentityDelegationScopes[st.delegation.Scope].adminKind != spec.kind || !testAdminDelegationManages(st, u) {
+			return deny("workload delegation does not cover this admin-kind identity", "")
+		}
 	default:
-		return deny("credential kind not admitted for an admin-kind web-login code", "")
+		return deny("credential kind not admitted for an admin-kind credential", "")
 	}
 	return true
 }

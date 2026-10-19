@@ -268,6 +268,27 @@ func TestHalted_SelfReportedStopThenRuntimeReasonHalts(t *testing.T) {
 	assert.Equal(t, "halted", f.get(t).Phase)
 }
 
+func TestHalted_SignaledStopThenCleanRuntimeReasonHalts(t *testing.T) {
+	// The agent reports it stopped after a termination signal; the agent
+	// runtime then reports a disruption of the same run with exit code 0
+	// (ptone/scion#5278).
+	for _, tc := range []struct{ phase, reason string }{
+		{"stopped", "preempted"},
+		{"error", "evicted"},
+	} {
+		t.Run(tc.phase+"/"+tc.reason, func(t *testing.T) {
+			f := newHaltFixture(t)
+			require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitReason": "signaled"}))
+			require.Equal(t, "stopped", f.get(t).Phase)
+			code := 0
+			f.heartbeat(t, brokerAgentHeartbeat{Phase: tc.phase, ExitReason: tc.reason, ExitCode: &code, RunID: "run-1"})
+			got := f.get(t)
+			assert.Equal(t, "halted", got.Phase)
+			assert.Equal(t, tc.reason, got.ExitReason)
+		})
+	}
+}
+
 func TestHalted_HubInternalWritesNeverHalt(t *testing.T) {
 	ctx := context.Background()
 

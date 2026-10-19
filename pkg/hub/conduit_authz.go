@@ -536,16 +536,27 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		return nil, err
 	}
 	keys := s.conduitGrantKeySet()
-	recheck, err := keys.recheckKeys(ctx)
+	recheck, gen, err := keys.recheckKeysGen(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("%w: grant keys: %v", errConduitAuthzUnavailable, err)
 	}
 	now := keys.now()
-	c, err := grant.VerifyRecheck(req.LatestGrant, recheck, grant.RecheckExpectation{
-		Issuer: conduitGrantIssuer, Target: target, OpenJTI: req.OpenJTI, StreamID: req.TargetStreamID,
-	}, now)
+	expect := grant.RecheckExpectation{Issuer: conduitGrantIssuer, Target: target, OpenJTI: req.OpenJTI, StreamID: req.TargetStreamID}
+	c, err := grant.VerifyRecheck(req.LatestGrant, recheck, expect, now)
+	if errors.Is(err, grant.ErrUnknownKey) {
+		// Design v2.21.36 §3.5: an unknown kid gets one ring reload before
+		// it is a deny, so a node whose cached ring lags a rotation does not
+		// refuse a valid grant. A failed reload is unavailable, never a deny.
+		// Renewals that met the same kid share one reload (reloadRecheckKeys).
+		if recheck, err = keys.reloadRecheckKeys(ctx, gen); err != nil {
+			return nil, fmt.Errorf("%w: grant keys reload: %v", errConduitAuthzUnavailable, err)
+		}
+		now = keys.now()
+		c, err = grant.VerifyRecheck(req.LatestGrant, recheck, expect, now)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errConduitRenewalUnavailable, err)
+		// %w for both, so ClassifyConduitRenewal sees the verification result.
+		return nil, fmt.Errorf("%w: %w", errConduitRenewalUnavailable, err)
 	}
 	userID, ok := strings.CutPrefix(c.Subject, grant.SubjectUserPrefix)
 	if !ok || userID == "" {

@@ -35,6 +35,7 @@ import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 @customElement('scion-page-skill-detail')
 export class ScionPageSkillDetail extends LitElement {
@@ -322,7 +323,7 @@ export class ScionPageSkillDetail extends LitElement {
     }
   `;
 
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -331,15 +332,13 @@ export class ScionPageSkillDetail extends LitElement {
       if (match) this.skillId = match[1];
     }
     void this.loadData();
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private async loadData(): Promise<void> {

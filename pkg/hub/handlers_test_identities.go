@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -406,8 +407,22 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 // The handler then requires the permission the request actually needs (the
 // web-login code route: test_identity.issue for a member-tier identity,
 // the admin kind's capability for an admin-kind identity, decided by
-// testAdminWebCodeIssuer when the map does not already hold it).
+// testAdminCredentialIssuer when the map does not already hold it). An
+// admin-scope workload delegation is refused.
 func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, perms ...string) (UserIdentity, map[string]bool, bool) {
+	return s.testIdentityCallerAdmitting(w, r, false, perms...)
+}
+
+// testIdentityCallerAdmitting is testIdentityCallerFor that, when
+// admitAdminDelegation is set, also admits an admin-scope workload
+// delegation (phase X4b). Only the token re-issue and web-login code
+// handlers set it; each then limits such a delegation to the admin-kind
+// identities that same delegation issued, of its scope's kind, with that
+// kind's issuer checks (testAdminCredentialIssuer) and, inside the mint
+// transaction, the delegation and grantor re-checks. For such a delegation
+// only its scope's permission is decided, and only when it is in perms;
+// the handler-level check refuses it otherwise.
+func (s *Server) testIdentityCallerAdmitting(w http.ResponseWriter, r *http.Request, admitAdminDelegation bool, perms ...string) (UserIdentity, map[string]bool, bool) {
 	ctx := r.Context()
 	if !s.testIdentities.enabled {
 		NotFound(w, "endpoint")
@@ -439,14 +454,21 @@ func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, p
 			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 			return nil, nil, false
 		}
-		// Admin-scope delegations (phase X4) are issue-only: they reach
-		// POST /api/v1/test-identities/admin and nothing here (member
-		// issuance, list, token re-issue, delete, purge, web-login code),
+		// Admin-scope delegations (phases X4, X4b) reach
+		// POST /api/v1/test-identities/admin, and, through the handlers
+		// that opt in (admitAdminDelegation), token re-issue and the
+		// web-login code for the identities they issued. Everything else
+		// here (member issuance, list, delete, purge) refuses them,
 		// whatever the route guard decided.
 		if st.delegation.Scope != testIdentityDelegationScope {
-			logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "admin-scope workload delegations are issue-only")
-			writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
-			return nil, nil, false
+			spec, known := testIdentityDelegationScopes[st.delegation.Scope]
+			if !admitAdminDelegation || !known || !spec.isAdmin() || !slices.Contains(perms, spec.permission) {
+				logAuthzDenial(r, user, Resource{Type: permissions.ResourceTestIdentity}, ActionIssue, "admin-scope workload delegation not admitted on this route")
+				writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
+				return nil, nil, false
+			}
+			// Decide only the delegation's own permission.
+			perms = []string{spec.permission}
 		}
 	default:
 		// Fail closed: broker on-behalf-of, agent, federation and any
@@ -459,7 +481,7 @@ func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, p
 	// permissions are decided in order and the first allowed one ends the
 	// loop, so a caller allowed the first never has the others decided
 	// (each decision writes a decision audit record); a handler that needs
-	// a later permission decides it itself (testAdminWebCodeIssuer).
+	// a later permission decides it itself (testAdminCredentialIssuer).
 	allowed := make(map[string]bool, len(perms))
 	reason := ""
 	for _, p := range perms {
@@ -860,10 +882,23 @@ func (s *Server) recheckWorkloadDelegation(ctx context.Context, tx store.Store, 
 }
 
 // handleIssueTestIdentityToken handles POST /api/v1/test-identities/{id}/token.
+//
+// test_identity.issue admits re-issue for a member-tier identity. The admin
+// kinds' capabilities reach the handler too (the route's AlsoPermits), only
+// so that an admin-scope workload delegation can re-issue the token of an
+// admin-kind identity it issued itself (phase X4b,
+// handleIssueTestAdminTokenThroughDelegation). Any other caller gets no
+// admin-kind token here (409), and a member-tier identity still needs
+// test_identity.issue.
 func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, ok := s.testIdentityCaller(w, r)
+	caller, allowed, ok := s.testIdentityCallerAdmitting(w, r, true, permissionTestIdentityIssue,
+		permissionTestIdentityIssueAdmin, permissionTestIdentityIssueSuperAdmin)
 	if !ok {
+		return
+	}
+	if st := workloadDelegationCaller(ctx); st != nil && testIdentityDelegationScopes[st.delegation.Scope].isAdmin() {
+		s.handleIssueTestAdminTokenThroughDelegation(w, r, caller, st, allowed)
 		return
 	}
 	var req IssueTestIdentityTokenRequest
@@ -875,7 +910,9 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	id := r.PathValue("id")
 	u, err := s.store.GetUser(ctx, id)
 	// An admin-kind identity gets exactly one token, at issuance: no
-	// re-issue (409), for its issuer or an unscoped platform admin.
+	// re-issue (409), for its issuer or an unscoped platform admin. Only an
+	// admin-scope workload delegation re-issues, for the identities it
+	// issued (handled above).
 	if err == nil && u.IsTestAdmin() && s.canManageTestIdentity(ctx, caller, u) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
 			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
@@ -883,7 +920,9 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canManageTestIdentity(ctx, caller, u))) {
+	// A member-tier identity needs test_identity.issue (the caller may have
+	// been admitted by an admin kind's capability only).
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !allowed[permissionTestIdentityIssue] || !s.canManageTestIdentity(ctx, caller, u))) {
 		NotFound(w, "test identity")
 		return
 	}

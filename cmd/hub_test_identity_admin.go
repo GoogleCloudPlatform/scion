@@ -163,7 +163,11 @@ func refuseTestAdminContext(what string) error {
 		return fmt.Errorf("%s is not available in agent mode: test identities with admin roles are managed by a human operator", what)
 	}
 	if hubProfileSelected() {
-		return fmt.Errorf("%s is not available with a hub profile: it uses your own hub sign-in on the hub itself", what)
+		hint := ""
+		if what == "issue --admin-role" {
+			hint = " (a runner acting through an admin issuer delegation uses 'issue-admin')"
+		}
+		return fmt.Errorf("%s is not available with a hub profile: it uses your own hub sign-in on the hub itself%s", what, hint)
 	}
 	return nil
 }

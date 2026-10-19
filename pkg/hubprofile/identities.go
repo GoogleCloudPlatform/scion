@@ -19,13 +19,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
-// KindTestFixture is the kind of every identity issued through a profile.
-const KindTestFixture = "test_fixture"
+// Kinds of the identities issued through a profile: member and viewer
+// identities (the member delegation) and the admin kinds (an admin
+// delegation, ptone/scion#4240 X4b).
+const (
+	KindTestFixture    = "test_fixture"
+	KindTestHubAdmin   = "test_hub_admin"
+	KindTestSuperAdmin = "test_super_admin"
+)
+
+// adminKindOfTier maps an admin delegation tier to the kind it issues.
+var adminKindOfTier = map[string]string{TierHubAdmin: KindTestHubAdmin, TierSuperAdmin: KindTestSuperAdmin}
 
 // runPurposePrefix marks an identity's purpose with its run and alias, so
 // teardown can find an identity whose cache file was never written.
@@ -76,8 +86,8 @@ func IssueToCache(ctx context.Context, s *Session, req IssueRequest) (*CacheEntr
 	if role == "" {
 		role = "member"
 	}
-	if adminTiers[role] || role == "hub-admin" {
-		return nil, fmt.Errorf("role %q is not supported through a hub profile: profiles issue member and viewer identities only", role)
+	if IsAdminTier(role) || role == "admin" {
+		return nil, fmt.Errorf("role %q is not issued here: issue admin-kind identities with 'scion hub test-identity issue-admin'", role)
 	}
 	if role != "member" && role != "viewer" {
 		return nil, fmt.Errorf(`invalid --role %q: must be "member" or "viewer"`, req.Role)
@@ -115,11 +125,81 @@ func IssueToCache(ctx context.Context, s *Session, req IssueRequest) (*CacheEntr
 	return e, nil
 }
 
+// fillAdminEntry writes an issued admin identity into its reserved cache
+// file. A test replaces it to exercise the path where the identity was
+// issued but could not be cached.
+var fillAdminEntry = (*Reservation).Fill
+
+// AdminIssueRequest are the inputs of IssueAdminToCache.
+type AdminIssueRequest struct {
+	Alias string
+	// AdminRole is TierHubAdmin or TierSuperAdmin; it selects both the
+	// identity's kind and the profile delegation it is issued through.
+	AdminRole string
+	Purpose   string
+	Lifetime  int64
+	TokenTTL  int64
+}
+
+// IssueAdminToCache issues a test hub-admin or test super-admin through
+// the profile's admin issuer delegation of req.AdminRole
+// (POST /api/v1/test-identities/admin) and stores it in the run cache as
+// req.Alias. The cache file is reserved exclusively first, so a taken
+// alias or a refused path costs no identity. A delegation cannot delete an
+// admin-kind identity, so one that was issued but could not be cached is
+// reported with its expiry. The returned entry holds the token; callers
+// must not print it.
+func IssueAdminToCache(ctx context.Context, s *Session, req AdminIssueRequest) (*CacheEntry, error) {
+	if s.opts.Run == "" {
+		return nil, errors.New("--run <label> is required: issued identities are cached per run")
+	}
+	if err := ValidateName("alias", req.Alias); err != nil {
+		return nil, err
+	}
+	wantKind, ok := adminKindOfTier[req.AdminRole]
+	if !ok {
+		return nil, fmt.Errorf("invalid admin role %q: must be %q or %q", req.AdminRole, TierHubAdmin, TierSuperAdmin)
+	}
+	client, err := s.AdminIssuerClient(req.AdminRole)
+	if err != nil {
+		return nil, err
+	}
+	delegationID := s.opts.Profile.Delegation(req.AdminRole)
+	res, err := ReserveEntry(s.opts.Home, s.opts.Profile.Name, s.opts.Run, req.Alias)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.TestIdentities().IssueAdmin(ctx, &hubclient.IssueTestAdminIdentityRequest{
+		AdminRole: req.AdminRole, Purpose: RunPurpose(s.opts.Run, req.Alias, req.Purpose),
+		LifetimeSeconds: req.Lifetime, TokenTTLSeconds: req.TokenTTL,
+	})
+	if err != nil {
+		res.Abandon()
+		return nil, fmt.Errorf("failed to issue admin test identity: %w", err)
+	}
+	expires := resp.Identity.ExpiresAt.UTC().Format(time.RFC3339)
+	if resp.Identity.Kind != wantKind {
+		res.Abandon()
+		return nil, fmt.Errorf("the hub issued test identity %s of kind %q, not %q; it was not cached and expires at %s (a delegation cannot delete it; a human super-admin can revoke it)", resp.Identity.ID, resp.Identity.Kind, wantKind, expires)
+	}
+	e := &CacheEntry{
+		Alias: req.Alias, Run: s.opts.Run, Profile: s.opts.Profile.Name, Endpoint: s.Endpoint(),
+		IdentityID: resp.Identity.ID, Email: resp.Identity.Email, Kind: resp.Identity.Kind, Role: resp.Identity.Role,
+		DelegationID: delegationID,
+		ExpiresAt:    resp.Identity.ExpiresAt, TokenExpiresAt: resp.TokenExpiresAt, Token: resp.AccessToken,
+	}
+	if err := fillAdminEntry(res, e); err != nil {
+		_ = RemoveEntry(s.opts.Home, s.opts.Profile.Name, s.opts.Run, req.Alias)
+		return nil, fmt.Errorf("admin test identity %s was issued but could not be cached (%v); it expires at %s (a delegation cannot delete it; a human super-admin can revoke it)", resp.Identity.ID, err, expires)
+	}
+	return e, nil
+}
+
 // TeardownItem is the outcome for one identity.
 type TeardownItem struct {
 	Alias      string `json:"alias,omitempty"`
 	IdentityID string `json:"identityId"`
-	Outcome    string `json:"outcome"` // deleted, purged, already-gone, failed
+	Outcome    string `json:"outcome"` // deleted, purged, already-gone, left-to-expire, failed
 	Detail     string `json:"detail,omitempty"`
 }
 
@@ -133,25 +213,52 @@ type TeardownReport struct {
 }
 
 // Teardown deletes every identity of the session's run through the
-// profile's issuer delegation: each cached alias, and any identity the
-// hub lists for the delegation whose purpose names this run (one whose
+// profile's member issuer delegation: each cached alias, and any identity
+// the hub lists for the delegation whose purpose names this run (one whose
 // cache file was never written). Each alias leaves the cache once its
 // identity is gone; the run directory is removed when all are gone.
+//
+// A delegation never deletes an admin-kind identity (X4b): a cached
+// admin-kind alias is reported left-to-expire with its expiry and removed
+// from the cache (its token with it); the identity ends at its expiry, at
+// most the kind's maximum lifetime, or earlier through a human
+// super-admin's revoke-all. A profile with only admin delegations tears
+// down its admin aliases this way and refuses a cached member alias.
 func Teardown(ctx context.Context, s *Session, purge bool) (*TeardownReport, error) {
 	if s.opts.Run == "" {
 		return nil, errors.New("--run <label> is required")
 	}
 	home, profile, run := s.opts.Home, s.opts.Profile.Name, s.opts.Run
-	client, err := s.IssuerClient()
-	if err != nil {
-		return nil, err
+	var svc hubclient.TestIdentityService
+	memberErr := error(nil)
+	if client, err := s.IssuerClient(); err == nil {
+		svc = client.TestIdentities()
+	} else {
+		memberErr = err
 	}
 	rep := &TeardownReport{Profile: profile, Run: run, Complete: true}
-	svc := client.TestIdentities()
 	done := map[string]bool{}
+
+	leaveAdmin := func(alias string, e *CacheEntry) {
+		item := TeardownItem{Alias: alias, IdentityID: e.IdentityID, Outcome: "left-to-expire",
+			Detail: "an admin-kind identity is not deleted through a delegation; it expires at " + e.ExpiresAt.UTC().Format(time.RFC3339) + " (a human super-admin can revoke it earlier)"}
+		if err := RemoveEntry(home, profile, run, alias); err != nil {
+			item.Outcome = "failed"
+			item.Detail = "removing its cache file: " + err.Error()
+			rep.Complete = false
+		}
+		rep.Items = append(rep.Items, item)
+	}
 
 	remove := func(alias, id string) {
 		item := TeardownItem{Alias: alias, IdentityID: id}
+		if svc == nil {
+			item.Outcome = "failed"
+			item.Detail = memberErr.Error()
+			rep.Complete = false
+			rep.Items = append(rep.Items, item)
+			return
+		}
 		var err error
 		if purge {
 			var report *hubclient.TestIdentityPurgeReport
@@ -196,12 +303,19 @@ func Teardown(ctx context.Context, s *Session, purge bool) (*TeardownReport, err
 			rep.Complete = false
 			continue
 		}
+		if e.AdminTier() != "" {
+			leaveAdmin(a, e)
+			continue
+		}
 		remove(a, e.IdentityID)
 	}
 
 	// Expired identities stay on the hub until the reaper removes them, so
 	// list them too: an expired identity of the run is deleted like a live
-	// one.
+	// one. Without a member delegation there is nothing to list.
+	if svc == nil {
+		return finishTeardown(home, profile, run, rep), nil
+	}
 	list, err := svc.List(ctx, &hubclient.ListTestIdentitiesOptions{Limit: 100, IncludeExpired: true})
 	if err != nil {
 		rep.Complete = false
@@ -224,6 +338,12 @@ func Teardown(ctx context.Context, s *Session, purge bool) (*TeardownReport, err
 		}
 	}
 
+	return finishTeardown(home, profile, run, rep), nil
+}
+
+// finishTeardown removes the run's cache directory when the teardown
+// completed.
+func finishTeardown(home, profile, run string, rep *TeardownReport) *TeardownReport {
 	if rep.Complete {
 		if err := RemoveRunDir(home, profile, run); err != nil {
 			rep.Complete = false
@@ -232,5 +352,5 @@ func Teardown(ctx context.Context, s *Session, purge bool) (*TeardownReport, err
 			rep.CacheRemoved = true
 		}
 	}
-	return rep, nil
+	return rep
 }

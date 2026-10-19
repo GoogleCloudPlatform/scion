@@ -252,7 +252,7 @@ are subject to strict encoding rules.
 | `TASK_SUMMARY` | Agent task summary  |
 | `AGENT_STATUS` | Agent phase string  |
 | `ERROR_MSG`    | Agent error message (not set for `halted`) |
-| `EXIT_REASON`  | Agent exit reason, one of a fixed set (for example `preempted`, `oom_killed`) |
+| `EXIT_REASON`  | Agent exit reason, one of a fixed set (for example `preempted`, `oom_killed`); not set for the agent-reported `signaled` |
 
 Security rules for untrusted variables:
 

@@ -16,12 +16,15 @@ package conduit
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -266,4 +269,44 @@ func TestAgentStaleKeysRefuseOpenGrants(t *testing.T) {
 	failing.Store(false)
 	fa.clk.Advance(UnknownKidFetchInterval + time.Second) // past the fetch budget the refusal used
 	mustOpen(t, s, open("open-refreshed"), "open after a successful refresh")
+}
+
+// TestAgentStaleKeysRenewalReportedAsKeysStale (66b2-T1): in enforce mode,
+// a renewal refused because the key set was not refreshed within
+// KeyStaleAfter (every kid then reads as unknown) is reported as
+// errKeysStale, log reason keys_stale, never as grant.ErrUnknownKey. With
+// a fresh key set, or in off mode, an unknown kid is still ErrUnknownKey.
+func TestAgentStaleKeysRenewalReportedAsKeysStale(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	var got []error
+	a, err := New(Options{HubURL: "http://127.0.0.1:1", AgentID: testAgentID, ProjectID: testProjectID, Token: func() string { return "t" }, Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.opts.onRenewal = func(_ uint32, err error) { got = append(got, err) }
+	unknown := fmt.Errorf("verify renewal: %w", grant.ErrUnknownKey)
+
+	a.enforceDeadlines.Store(true)
+	a.lastKeyRefresh.Store(clk.Now().UnixNano())
+	clk.Advance(KeyStaleAfter + time.Second)
+	a.renewalDone(7, unknown)
+
+	a.lastKeyRefresh.Store(clk.Now().UnixNano())
+	a.renewalDone(8, unknown)
+
+	a.enforceDeadlines.Store(false)
+	clk.Advance(2 * KeyStaleAfter)
+	a.renewalDone(9, unknown)
+
+	if len(got) != 3 {
+		t.Fatalf("renewal outcomes %v, want 3", got)
+	}
+	if !errors.Is(got[0], errKeysStale) || errors.Is(got[0], grant.ErrUnknownKey) {
+		t.Fatalf("stale key set: %v, want errKeysStale and not ErrUnknownKey", got[0])
+	}
+	for i, err := range got[1:] {
+		if !errors.Is(err, grant.ErrUnknownKey) || errors.Is(err, errKeysStale) {
+			t.Fatalf("case %d: %v, want ErrUnknownKey", i+1, err)
+		}
+	}
 }
