@@ -136,15 +136,17 @@ func TestBrokerLocalStatePathsFor_ConfiguredStateDir(t *testing.T) {
 
 	t.Run("configured", func(t *testing.T) {
 		setConfig(t, "/srv/broker-state", nil)
-		paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+		entries, err := brokerLocalStatePathsFor(globalDir, "b-1")
 		require.NoError(t, err)
+		paths := entryPaths(entries)
 		assert.Contains(t, paths, "/srv/broker-state/b-1", "purge-local ignores the configured state_dir")
 		assert.NotContains(t, paths, defaultState)
 	})
 	t.Run("unset", func(t *testing.T) {
 		setConfig(t, "", nil)
-		paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+		entries, err := brokerLocalStatePathsFor(globalDir, "b-1")
 		require.NoError(t, err)
+		paths := entryPaths(entries)
 		assert.Contains(t, paths, defaultState, "purge-local did not use the default state dir")
 	})
 	for name, tc := range map[string]struct {
@@ -157,8 +159,9 @@ func TestBrokerLocalStatePathsFor_ConfiguredStateDir(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			setConfig(t, tc.dir, tc.err)
-			paths, err := brokerLocalStatePathsFor(globalDir, "b-1")
+			entries, err := brokerLocalStatePathsFor(globalDir, "b-1")
 			require.Error(t, err, "unresolved state_dir fell back silently")
+			paths := entryPaths(entries)
 			assert.Contains(t, err.Error(), tc.errText)
 			assert.Contains(t, paths, defaultState, "the default state dir is not listed as the guess")
 		})
