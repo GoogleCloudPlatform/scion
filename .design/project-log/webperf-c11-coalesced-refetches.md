@@ -46,6 +46,21 @@ new agent) were reset by every event, so a steady stream starved them.
   A leading refresh on resume can also start before the feed reconnects and
   miss events published in that gap.
 
+- **S6a:** the members refetch coalescer is `leading: false` (1000/4000).
+  The design snippet omits `leading`, and the helper defaults it to true.
+  Trailing keeps the old 1 s debounce behaviour and the design's "one
+  members fetch" test.
+- **S3 keyless other-project filter (new):** a space thread ignores a
+  keyless message event whose `projectId` names another project. DM
+  threads are exempt: a DM's `projectId` is inherited from the view it was
+  opened from (`inheritedProjectId()`), while its messages carry the sender
+  agent's project or none.
+- **S5 in-flight and stale responses:** list requests are numbered. A
+  response keeps rows that an event upserted after that request was sent,
+  along with their seen state. A response to an older request that lands
+  after a newer one was applied (`appliedSeq`) is ignored. Without these,
+  an upserted row could be dropped and then popped a second time.
+
 ## Learnings
 
 - Leading-edge throttles change test timing for existing tests that fire
