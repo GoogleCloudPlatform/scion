@@ -45,6 +45,16 @@ func TestSanitizeFailureCause(t *testing.T) {
 		{"PEM block", "key -----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBg\n-----END PRIVATE KEY----- end", "key [REDACTED] end"},
 		{"unterminated PEM block", "key -----BEGIN CERTIFICATE-----\nMIIBVQIBADANBg", "key [REDACTED]"},
 		{"long hex run", "container 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef exited", "container [REDACTED] exited"},
+		{"lower-case colon key", "spec password: hunter2-value end", "spec password: [REDACTED] end"},
+		{"hyphenated header key", "header x-api-key: abc123 sent", "header x-api-key: [REDACTED] sent"},
+		{"capitalized key, no space", "Password:hunter2", "Password:[REDACTED]"},
+		{"auth as a whole key word", "auth-header: abc123 and X_AUTH=xyz", "auth-header: [REDACTED] and X_AUTH=[REDACTED]"},
+		{"registry refusal kept", "unauthorized: authentication required", "unauthorized: authentication required"},
+		{"EnvVar JSON value", `env [{"name":"GITHUB_PAT","value":"hunter2"}]`, `env [{"name":"GITHUB_PAT","value":[REDACTED]}]`},
+		{"EnvVar %+v value", "env {Name:GITHUB_PAT Value:hunter2 ValueFrom:nil}", "env {Name:GITHUB_PAT Value:[REDACTED] ValueFrom:nil}"},
+		{"basic credentials after Authorization", "Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"},
+		{"basic encoded credentials", "sent basic dXNlcjpwYXNzd29yZA== upstream", "sent basic [REDACTED] upstream"},
+		{"basic prose kept", "basic validation failed", "basic validation failed"},
 		{"long base64 run", "blob QWxhZGRpbjpvcGVuIHNlc2FtZQ0123456789AbCdEf end", "blob [REDACTED] end"},
 	}
 	for _, tt := range tests {
@@ -84,6 +94,7 @@ var credentialShapedValues = []string{
 	"abcdefghijklmnop0123",
 	"MIIBVQIBADANBgkqhkiG9w0BAQEFAASC",
 	"eyJhbGciOiJIUzI1NiJ9",
+	"envvar-value-4242",
 }
 
 // credentialShapedStartError is a Manager.Start failure whose backend text
@@ -95,16 +106,17 @@ func credentialShapedStartError() error {
 		`spec {"DB_PASSWORD": "hunter2-value"} ` +
 		"pull https://deploy:pw-value-123@registry.example.com/img " +
 		"Authorization: Bearer abcdefghijklmnop0123 " +
+		`env [{"name":"GITHUB_PAT","value":"envvar-value-4242"}] ` +
 		"-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY----- " +
 		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl " +
 		strings.Repeat("container output line\n", 100)
 	return fmt.Errorf("failed to launch container: %w", errors.New(backend))
 }
 
-// sanitizedCauseLogSites lists every log record that carries a create or
-// start failure's cause; each must pass that cause through
-// sanitizeFailureCause. A new site gets a case in
-// TestCreateFailureCause_SanitizedAtEveryLogSite.
+// sanitizedCauseLogSites lists the log records pinned to pass a failure's
+// cause and error text through sanitizeFailureCause: the terminal create
+// failure records (synchronous create and async launch). Each listed site
+// needs a case in TestCreateFailureCause_SanitizedAtEveryLogSite.
 var sanitizedCauseLogSites = []string{
 	"Agent create failed",
 	"runLaunch: agent start failed",
@@ -130,7 +142,7 @@ func assertSanitizedCauseRecord(t *testing.T, logs, msg string) {
 		if !ok {
 			t.Fatalf("%s = %#v, want a string", field, recs[0][field])
 		}
-		for _, want := range []string{"FOO_API_KEY=[REDACTED]", `"DB_PASSWORD": [REDACTED]`, "https://[REDACTED]@registry.example.com", "Bearer [REDACTED]", "...[truncated, "} {
+		for _, want := range []string{"FOO_API_KEY=[REDACTED]", `"DB_PASSWORD": [REDACTED]`, "https://[REDACTED]@registry.example.com", "Bearer [REDACTED]", `"value":[REDACTED]`, "...[truncated, "} {
 			if !strings.Contains(got, want) {
 				t.Errorf("%s lacks %q: %q", field, want, got)
 			}
