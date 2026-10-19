@@ -49,7 +49,7 @@ var identityOperations = []OperationSpec{
 		},
 		Exemptions: []Exemption{{
 			Kind:   ExemptionAuthenticationOnly,
-			Reason: "Role CRUD currently requires hub-admin via route guard; full operation contract deferred to AH1",
+			Reason: "audit obligation waived; full operation contract deferred to AH1",
 			Scope:  "AF1 catalog only",
 			Waives: []WaivedObligation{WaiveAuditObligation},
 		}},

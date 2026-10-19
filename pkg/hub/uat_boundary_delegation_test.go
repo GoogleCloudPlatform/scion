@@ -125,7 +125,7 @@ func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 	assert.False(t, d.Allowed, "project boundary: a project-scoped custom role is denied")
 	assert.Contains(t, d.Reason, "names no project")
 	d = f.authz.CanDelegate(ctx, hubToken, customRole)
-	assert.False(t, d.Allowed, "hub boundary: agent.read is outside the token ceiling")
+	assert.False(t, d.Allowed, "hub boundary: judged on system-scope authority within the ceiling")
 	assert.Contains(t, d.Reason, "actor lacks permission for delegation: agent.read")
 }
 

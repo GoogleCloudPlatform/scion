@@ -245,8 +245,9 @@ The same per-request checks apply, with these limits:
   owner.
 - **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
   importing or duplicating a custom role needs `role:create`, updating one `role:update`, and
-  deleting one `role:delete`, each together with `role:read`. Your user must hold every
-  permission of the role at hub level, and the token must carry a scope for each of them; a
+  deleting one `role:delete`, each together with `role:read`. Creating or updating a role needs
+  your user to hold every permission of the role at hub level, and the token must carry a scope
+  for each of them; a
   project-scoped custom role can be bound in every project, so a project role does not count.
   A token cannot create a system-scoped custom role. Binding a custom project role needs
   `role_binding:create`, current project management access to that project, and every
