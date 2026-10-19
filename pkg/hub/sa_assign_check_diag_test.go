@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/protoadapt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -155,15 +157,140 @@ func TestSACheckDiag_HubIdentityRefused_ShownToAdminAndAssignmentDenied(t *testi
 	})
 }
 
-func TestSACheckDiag_EndUserTextUnchanged(t *testing.T) {
-	pt := &fakePTClient{err: status.Error(codes.PermissionDenied, "caller lacks access")}
-	srv, sa, projectID := saCheckDiagServer(t, pt)
+// saCheckIAMReadDeniedMsg is the end-user text when the hub's identity was
+// refused reading IAM policy in gcpProject. Spelled out here, not taken
+// from the gate, so a change to the gate's text fails these tests.
+func saCheckIAMReadDeniedMsg(gcpProject string) string {
+	const hub = "hub@test.iam.gserviceaccount.com"
+	return "Could not verify your permission to use this GCP service account: " +
+		"the Hub's service account (" + hub + ") cannot read IAM policy in " +
+		"the account's GCP project " + gcpProject + ". It needs the " +
+		"roles/iam.securityReviewer role on that project. A GCP project admin can " +
+		"grant it with: gcloud projects add-iam-policy-binding " + gcpProject +
+		" --member=serviceAccount:" + hub + " --role=roles/iam.securityReviewer"
+}
 
-	rec := createWithSA(t, srv, projectID, "diag-text", sa)
-	require.Equal(t, http.StatusForbidden, rec.Code)
-	assert.Equal(t, saCheckEndUserMsg, saCheckErrorMessage(t, rec))
-	assert.NotContains(t, rec.Body.String(), saAssignCheckDiagCause)
-	assert.NotContains(t, rec.Body.String(), "hub's identity")
+func saCheckStatusErr(t *testing.T, code codes.Code, msg string, details ...protoadapt.MessageV1) error {
+	t.Helper()
+	st, err := status.New(code, msg).WithDetails(details...)
+	require.NoError(t, err)
+	return st.Err()
+}
+
+func TestSACheckDiag_EndUserTextByErrorClass(t *testing.T) {
+	const upstream = "upstream-detail-7f3a"
+	cases := []struct {
+		name     string
+		err      error
+		detailed bool
+	}{
+		{"permission denied", status.Error(codes.PermissionDenied, upstream), true},
+		{"permission denied with IAM reason", saCheckStatusErr(t, codes.PermissionDenied, upstream,
+			&errdetails.ErrorInfo{Reason: "IAM_PERMISSION_DENIED", Domain: "iam.googleapis.com"}), true},
+		{"api disabled", saCheckStatusErr(t, codes.PermissionDenied, upstream,
+			&errdetails.ErrorInfo{Reason: "SERVICE_DISABLED", Domain: "googleapis.com"}), false},
+		{"vpc service controls precondition", saCheckStatusErr(t, codes.PermissionDenied, upstream,
+			&errdetails.PreconditionFailure{Violations: []*errdetails.PreconditionFailure_Violation{
+				{Type: "VPC_SERVICE_CONTROLS"}}}), false},
+		{"vpc service controls reason", saCheckStatusErr(t, codes.PermissionDenied, upstream,
+			&errdetails.ErrorInfo{Reason: "SECURITY_POLICY_VIOLATED", Domain: "googleapis.com"}), false},
+		{"vpc service controls message", status.Error(codes.PermissionDenied,
+			"Request is prohibited by organization's policy. vpcServiceControlsUniqueIdentifier: x"), false},
+		{"other error info reason", saCheckStatusErr(t, codes.PermissionDenied, upstream,
+			&errdetails.ErrorInfo{Reason: "SOMETHING_ELSE", Domain: "googleapis.com"}), false},
+		{"unavailable", status.Error(codes.Unavailable, upstream), false},
+		{"not found", status.Error(codes.NotFound, upstream), false},
+		{"unauthenticated", status.Error(codes.Unauthenticated, upstream), false},
+		{"internal", status.Error(codes.Internal, upstream), false},
+		{"non-grpc error", errors.New(upstream), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, sa, projectID := saCheckDiagServer(t, &fakePTClient{err: tc.err})
+			rec := createWithSA(t, srv, projectID, "diag-text", sa)
+			require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+			want := saCheckEndUserMsg
+			if tc.detailed {
+				want = saCheckIAMReadDeniedMsg(sa.ProjectID)
+			}
+			assert.Equal(t, want, saCheckErrorMessage(t, rec))
+			body := rec.Body.String()
+			assert.NotContains(t, body, upstream, "upstream error text must not reach the caller")
+			assert.NotContains(t, body, saAssignCheckDiagCause)
+			assert.NotContains(t, body, sa.Email)
+		})
+	}
+}
+
+// existencePTClient stands in for Policy Troubleshooter when the hub's
+// identity has no IAM read access: every call is refused with
+// PermissionDenied, with upstream wording that differs by whether the
+// target account exists.
+type existencePTClient struct {
+	existing map[string]bool
+}
+
+func (c *existencePTClient) TroubleshootIamPolicy(
+	_ context.Context,
+	req *policytroubleshooterpb.TroubleshootIamPolicyRequest,
+	_ ...gax.CallOption,
+) (*policytroubleshooterpb.TroubleshootIamPolicyResponse, error) {
+	if c.existing[req.GetAccessTuple().GetFullResourceName()] {
+		return nil, status.Error(codes.PermissionDenied, "permission denied on existing resource")
+	}
+	return nil, status.Error(codes.PermissionDenied, "permission denied (or the resource may not exist)")
+}
+
+func TestSACheckDiag_EndUserTextSameWhetherTargetExists(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	pt := &existencePTClient{existing: map[string]bool{}}
+	enforceSAAssign(srv, NewPolicyTroubleshooterChecker(pt, "hub@test.iam.gserviceaccount.com", false))
+
+	newSA := func(email, gcpProject string, exists bool) *store.GCPServiceAccount {
+		sa := wiringSA(t, s, store.ScopeProject, project.ID, email)
+		sa.ProjectID = gcpProject
+		require.NoError(t, s.UpdateGCPServiceAccount(context.Background(), sa))
+		if exists {
+			pt.existing["//iam.googleapis.com/projects/"+gcpProject+"/serviceAccounts/"+email] = true
+		}
+		return sa
+	}
+	message := func(name string, sa *store.GCPServiceAccount) string {
+		rec := createWithSA(t, srv, project.ID, name, sa)
+		require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+		return saCheckErrorMessage(t, rec)
+	}
+
+	existing := newSA("exists@other-proj.iam.gserviceaccount.com", "other-proj", true)
+	missing := newSA("missing@other-proj.iam.gserviceaccount.com", "other-proj", false)
+	gotExisting := message("diag-exists", existing)
+	gotMissing := message("diag-missing", missing)
+	assert.Equal(t, saCheckIAMReadDeniedMsg("other-proj"), gotExisting)
+	assert.Equal(t, gotExisting, gotMissing, "same text for an existing and a missing account")
+
+	// A target in a GCP project that does not exist differs only by the
+	// project ID the caller already registered.
+	noProject := newSA("any@no-such-proj.iam.gserviceaccount.com", "no-such-proj", false)
+	gotNoProject := message("diag-no-project", noProject)
+	assert.Equal(t, gotExisting, strings.ReplaceAll(gotNoProject, "no-such-proj", "other-proj"))
+}
+
+func TestSAAssignIAMReadDeniedMessage_RefusesUnusableInputs(t *testing.T) {
+	assert.Equal(t, saCheckIAMReadDeniedMsg("p-1"),
+		saAssignIAMReadDeniedMessage("p-1", "hub@test.iam.gserviceaccount.com"))
+	for _, in := range [][2]string{
+		{"", "hub@test.iam.gserviceaccount.com"},
+		{"p-1", ""},
+		{"p 1", "hub@test.iam.gserviceaccount.com"},
+		{"p-1;x", "hub@test.iam.gserviceaccount.com"},
+		{"P-1", "hub@test.iam.gserviceaccount.com"},
+		{"p@1", "hub@test.iam.gserviceaccount.com"},
+		{"p-1", "hub@test.iam.gserviceaccount.com --role=x"},
+		{"p-1", "hub$(x)@test.iam.gserviceaccount.com"},
+	} {
+		assert.Empty(t, saAssignIAMReadDeniedMessage(in[0], in[1]), "inputs %q", in)
+	}
 }
 
 func TestSACheckDiag_ClearsOnceCheckRuns(t *testing.T) {

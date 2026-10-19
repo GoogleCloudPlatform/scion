@@ -16,6 +16,7 @@ package hub
 
 import (
 	"sort"
+	"strings"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -143,4 +144,77 @@ func healthSummarySACheck(list *HealthSummaryHubInstances) *HealthSummarySACheck
 		DocsURL:   saAssignCheckDiagDocsURL,
 		Instances: labels,
 	}
+}
+
+// saAssignIAMReadRole is the role the hub's identity needs in a service
+// account's GCP project to run the assignment check for that account.
+const saAssignIAMReadRole = "roles/iam.securityReviewer"
+
+// hubIdentityRefusedIAMRead reports whether err, from a failed assignment
+// check, is a plain permission-denied refusal of the hub's own identity.
+// Only that case gets the detailed end-user text: a disabled API, a VPC
+// Service Controls refusal, any other ErrorInfo reason, any precondition
+// detail and every other error code return false and keep the generic
+// text. err is only classified; none of its text is shown to the caller.
+func hubIdentityRefusedIAMRead(err error) bool {
+	if err == nil || status.Code(err) != codes.PermissionDenied {
+		return false
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	if strings.Contains(st.Message(), "vpcServiceControlsUniqueIdentifier") {
+		return false
+	}
+	for _, d := range st.Details() {
+		switch v := d.(type) {
+		case *errdetails.ErrorInfo:
+			if v.GetReason() != "IAM_PERMISSION_DENIED" {
+				return false
+			}
+		case *errdetails.PreconditionFailure:
+			return false
+		}
+	}
+	return true
+}
+
+// saAssignIAMReadDeniedMessage is the end-user text when the assignment
+// check failed because the hub's identity may not read IAM policy in the
+// service account's GCP project. Its only inputs are that project ID and
+// the hub's service account email; it returns "" when either is empty or
+// holds characters a GCP project ID or account email does not, so the
+// caller falls back to the generic text. It never names the target
+// account, so it reads the same whether or not that account exists.
+func saAssignIAMReadDeniedMessage(gcpProjectID, hubSAEmail string) string {
+	if !saAssignSafeIdent(gcpProjectID, false) || !saAssignSafeIdent(hubSAEmail, true) {
+		return ""
+	}
+	return "Could not verify your permission to use this GCP service account: " +
+		"the Hub's service account (" + hubSAEmail + ") cannot read IAM policy in " +
+		"the account's GCP project " + gcpProjectID + ". It needs the " +
+		saAssignIAMReadRole + " role on that project. A GCP project admin can " +
+		"grant it with: gcloud projects add-iam-policy-binding " + gcpProjectID +
+		" --member=serviceAccount:" + hubSAEmail + " --role=" + saAssignIAMReadRole
+}
+
+// saAssignSafeIdent reports whether s is non-empty and uses only lowercase
+// letters, digits, '-', '.', ':' (domain-scoped project IDs) and, when
+// email is set, '@' and '_'. It keeps stored values that could not be a
+// real project ID or account email out of the suggested command.
+func saAssignSafeIdent(s string, email bool) bool {
+	if s == "" || len(s) > 254 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '.', c == ':':
+		case email && (c == '@' || c == '_'):
+		default:
+			return false
+		}
+	}
+	return true
 }
