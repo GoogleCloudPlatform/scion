@@ -18,10 +18,12 @@
  * Chat page: the 60-second fallback poll (unread DM state, human membership)
  * pauses while the tab is hidden and catches up with one poll when the tab
  * is shown again (C5b). The poll's loaders are stubbed so each poll counts
- * as one call of loadUnreadDMPeers, which every poll makes first.
+ * as one call of loadUnreadDMPeers, which every poll makes first; the last
+ * tests keep the DM loader real and count /chat/dms requests instead.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { apiFetch } from '../../client/api.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
 
@@ -57,15 +59,20 @@ describe('chat page — fallback poll in a hidden tab', () => {
     document.dispatchEvent(new Event('visibilitychange'));
   }
 
+  function dmListRequests(): number {
+    return vi.mocked(apiFetch).mock.calls.filter(([path]) => path === '/api/v1/chat/dms').length;
+  }
+
   /**
    * A connected page whose startup has settled, with the poll's loaders
-   * stubbed afterwards, so only polls are counted. It never renders: these
-   * tests are about the poll, not the view.
+   * stubbed afterwards (all of them, or all but the DM loader), so only
+   * polls are counted. It never renders: these tests are about the poll,
+   * not the view.
    */
-  async function startedPage(): Promise<any> {
+  async function startedPage({ realDMLoader = false } = {}): Promise<any> {
     const el = document.createElement('scion-page-chat') as any;
     el.pageData = { user: { id: 'user-me' } };
-    el.shouldUpdate = () => false;
+    el.shouldUpdate = (): boolean => false;
     const startups: Promise<void>[] = [];
     const initV2 = el.initV2;
     if (typeof initV2 !== 'function') {
@@ -83,9 +90,11 @@ describe('chat page — fallback poll in a hidden tab', () => {
     await Promise.all(startups);
     expect(startups).toHaveLength(1);
     for (const name of POLL_LOADERS) {
+      if (realDMLoader && name === 'loadUnreadDMPeers') continue;
       // Deliberately shadows the private method on this instance only.
       el[name] = vi.fn(() => Promise.resolve(true));
     }
+    vi.mocked(apiFetch).mockClear();
     return el;
   }
 
@@ -105,11 +114,14 @@ describe('chat page — fallback poll in a hidden tab', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     chatDMsLoad.invalidate();
     chatSpacesLoad.invalidate();
-    // Only the interval and the clock: startup awaits imports and requests.
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    // Only the interval and the clocks: startup awaits imports and requests.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date', 'performance'] });
     hidden = false;
     pages = [];
     vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() =>
+      hidden ? 'hidden' : 'visible'
+    );
   });
 
   afterEach(() => {
@@ -160,5 +172,42 @@ describe('chat page — fallback poll in a hidden tab', () => {
     setHidden(false);
     vi.advanceTimersByTime(TEN_MINUTES);
     expect(polls(el)).toBe(0);
+  });
+
+  it('a regular tick fetches the DM list fresh', async () => {
+    const el = await startedPage({ realDMLoader: true });
+    vi.advanceTimersByTime(POLL_MS);
+    vi.advanceTimersByTime(POLL_MS);
+    expect(dmListRequests()).toBe(2);
+    el.remove();
+  });
+
+  it('a return after more than 60 s hidden sends one /chat/dms request', async () => {
+    const el = await startedPage({ realDMLoader: true });
+    // The rail is not rendered here: stand in for it. Its refresh dispatches
+    // rail-refresh (synchronously), which the page answers with a fresh DM load.
+    const railRefreshes = vi.fn();
+    el.addEventListener('rail-refresh', railRefreshes);
+    el.refreshRail = vi.fn(() =>
+      el.dispatchEvent(
+        new CustomEvent('rail-refresh', {
+          detail: { waitUntil: (): void => {} },
+          bubbles: true,
+          composed: true,
+        })
+      )
+    );
+    const dmLoads = vi.spyOn(el, 'loadUnreadDMPeers');
+
+    setHidden(true);
+    vi.advanceTimersByTime(POLL_MS + 1_000);
+    expect(dmListRequests()).toBe(0);
+    setHidden(false);
+
+    // Both the resume rail refresh and the poll catch-up asked for the list...
+    expect(railRefreshes).toHaveBeenCalledTimes(1);
+    expect(dmLoads).toHaveBeenCalledTimes(2);
+    // ...and shared one request.
+    expect(dmListRequests()).toBe(1);
   });
 });

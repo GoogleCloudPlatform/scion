@@ -2955,6 +2955,9 @@ describe('chat page — startup after the page is removed', () => {
       // first initV2 started nothing its disconnect could no longer clear.
       expect(el._stopFallbackPoll).not.toBeNull();
       expect(intervals.live()).toHaveLength(1);
+      // ...and that interval is the poll: stopping the poll clears it.
+      el._stopFallbackPoll();
+      expect(intervals.live()).toEqual([]);
 
       el.remove();
       expect(intervals.live()).toEqual([]);

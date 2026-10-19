@@ -200,6 +200,13 @@ function recentFileToPreviewTarget(file: RecentFile): PreviewTarget {
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
 
 /**
+ * A fallback poll accepts a DM-list request in flight or started at most
+ * this long ago, so it shares the one a resume rail refresh starts on return
+ * from the background instead of fetching the same list twice.
+ */
+const FALLBACK_POLL_DM_REUSE_MS = 5_000;
+
+/**
  * Normalise a Hub timestamp: Go marshals a zero time as year 0001 rather than
  * omitting it, and rendering that as a date would be worse than showing
  * nothing. Returns '' for absent or zero timestamps.
@@ -2056,7 +2063,10 @@ export class ScionPageChat extends LitElement {
     // is additionally refreshed on every inbound chat message.
     // It pauses while the tab is hidden and catches up once on return.
     this._stopFallbackPoll = visibleInterval(() => {
-      void this.loadUnreadDMPeers();
+      // On return from the background the resume rail refresh has just
+      // started a fresh DM load (its listener runs first); join it rather
+      // than send a second request. A tick otherwise finds nothing that recent.
+      void this.loadUnreadDMPeers({ maxAgeMs: FALLBACK_POLL_DM_REUSE_MS });
       // A DM has no membership of its own, so re-syncing here would silently
       // swap the member list the user was just looking at. Leave the sidebar on
       // whatever the previous view loaded.
