@@ -243,6 +243,14 @@ The same per-request checks apply, with these limits:
   Removing an allow-list entry deletes the invited user together with that user's role bindings
   and group memberships, and is refused with `409` while the invited user is a project's last
   owner.
+- **Creating, registering and cloning projects.** Creating or registering a project admits only
+  a hub token carrying `project:create`, and your user must hold `project.create`. You become the
+  owner of the new project, so the token must also carry a selector for every permission of the
+  project owner role; with the built-in owner role, which includes permissions that have no
+  selector (such as `project.delete`), a token is refused and you create projects with an
+  interactive sign-in. Naming an existing project by id also needs `project:update` on it.
+  Cloning a project also needs `project:read` on the source project and `project:clone`; only a
+  super-admin can select `project:clone`.
 - **Your own user scope.** Templates, skills and harness configurations in your own user scope
   admit only a hub token carrying the selector of the action. Your templates need
   `template:read` to list, read or download, `template:create` to create or to clone into your

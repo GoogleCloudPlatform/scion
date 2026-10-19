@@ -65,7 +65,6 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/groups", Method: "GET", Area: AreaAgents},
 	// --- projects ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/shared/{token}", Method: "GET", Area: AreaProjects},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/mint", Method: "POST", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "DELETE", Area: AreaProjects},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/gcp-service-accounts/{saId}", Method: "GET", Area: AreaProjects},
@@ -154,8 +153,6 @@ var PendingBearerOperations = []OperationID{
 	"hub.adminmode.read",
 	"hub.adminmode.update",
 	"hub.maintenance.execute",
-	"project.lifecycle.create",
-	"project.register",
 	"role.binding.create",
 	"role.binding.delete",
 	"role.definition.create",

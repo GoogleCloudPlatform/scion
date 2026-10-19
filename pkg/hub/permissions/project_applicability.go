@@ -225,6 +225,10 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
+	// project.create provisions a project at the hub; a project boundary
+	// never covers a project that does not exist yet.
+	"project.create": {BoundaryKindHub},
+
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
@@ -391,6 +395,9 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},
+	// project.create is a hub-level collection action: no project exists
+	// yet, so hub-boundary mint needs a system grant.
+	"project.create": {TargetClassKindHubResource},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},

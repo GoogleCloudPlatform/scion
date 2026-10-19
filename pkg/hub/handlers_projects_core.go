@@ -287,8 +287,10 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// SECURITY-GATE: CheckAccess — verify project.create permission.
-	// The resource is hub-scoped because the project does not exist yet.
-	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+	// The project does not exist yet, so the request is a collection-level
+	// create at the hub scope (hubCollectionEvidence). A token needs the
+	// project:create selector on a hub boundary.
+	if !s.authorizeProjectCreate(w, r) {
 		return
 	}
 
@@ -793,6 +795,35 @@ func (s *Server) createProjectOwnerRoleBindingTx(ctx context.Context, tx store.S
 		return fmt.Errorf("audit project-owner role binding: %w", err)
 	}
 	return nil
+}
+
+// projectCreateDecision is the project.create admission shared by project
+// create, project register and project clone. The new project does not
+// exist yet, so the request is a collection-level create at the hub scope
+// (hubCollectionEvidence): a token needs the project:create selector on a
+// hub boundary and its holder needs live project.create authority. Session
+// decisions do not depend on the evidence.
+func (s *Server) projectCreateDecision(ctx context.Context, identity Identity) Decision {
+	return s.authzService.CheckAccessWithEvidence(ctx, identity, Resource{Type: "project"}, ActionCreate, hubCollectionEvidence("project.create"))
+}
+
+// authorizeProjectCreate applies projectCreateDecision for the request
+// identity and writes the same 401 and 403 responses as authorize.
+func (s *Server) authorizeProjectCreate(w http.ResponseWriter, r *http.Request) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	resource := Resource{Type: "project"}
+	decision := s.projectCreateDecision(ctx, identity)
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionCreate, decision.Reason)
+		writeForbiddenStructuredDenialCause(w, "", resource.Type, ActionCreate, decision.DeniedBy, decision.adoptionDetailsCause())
+		return false
+	}
+	return true
 }
 
 // projectOwnerGrantDenial returns a reason when the request credential may
@@ -1514,8 +1545,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 	// SECURITY-GATE: CheckAccess — verify project.create permission.
 	// Register may find an existing project or create a new one; either way
-	// the caller must be allowed to provision projects at hub scope.
-	if !s.authorize(w, r, Resource{Type: "project"}, ActionCreate) {
+	// the caller must be allowed to provision projects at hub scope, as a
+	// collection-level create (hubCollectionEvidence). Register checks
+	// project.create; project.register is not checked.
+	if !s.authorizeProjectCreate(w, r) {
 		return
 	}
 
