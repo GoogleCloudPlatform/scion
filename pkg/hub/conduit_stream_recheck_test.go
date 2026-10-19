@@ -233,6 +233,9 @@ func TestRelayStreamRecheck_ExternalModeRenewsAndDenies(t *testing.T) {
 	f := newRelayRenewalFixture(t)
 	tok, open := f.openGrant(t, grant.ViaPTY, renewalPTYHeader(), nil)
 
+	// A renewal only extends the deadline: on the open grant's own clock its
+	// authz_until would equal the open grant's, which the target refuses.
+	f.clock.Advance(time.Hour)
 	res := f.relayRecheck(t, f.item(tok, open, 7))
 	require.True(t, res.Renew, "%+v", res)
 	assert.False(t, res.Close)
@@ -456,11 +459,18 @@ func TestConduitConfirmAgentPresent(t *testing.T) {
 // inactive principal.
 func TestConduitRenewStream_DevUser(t *testing.T) {
 	f := newRenewalFixture(t)
-	_, err := f.store.GetUser(context.Background(), DevUserID)
-	require.ErrorIs(t, err, store.ErrNotFound, "precondition: no row for the development user")
 	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) {
 		c.Subject, c.JTI = grant.SubjectUserPrefix+DevUserID, "open-dev"
 	})
+	// The test server may seed a row for the development user; the store
+	// reports it missing here, so the dev-auth-off case takes the path of a
+	// development user id with no row.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *devUserMissingStore {
+		return &devUserMissingStore{Store: inner, fault: sw}
+	})
+	fault.Arm()
+	_, err := f.srv.store.GetUser(context.Background(), DevUserID)
+	require.ErrorIs(t, err, store.ErrNotFound, "precondition: the development user has no row")
 
 	prevEnabled, prevCfg := f.srv.authConfig.DevAuthEnabled, f.srv.authConfig.DevUserCfg
 	t.Cleanup(func() { f.srv.authConfig.DevAuthEnabled, f.srv.authConfig.DevUserCfg = prevEnabled, prevCfg })
@@ -485,6 +495,37 @@ func TestConduitRenewStream_DevUser(t *testing.T) {
 	for _, ident := range seen {
 		assert.IsType(t, &DevUser{}, ident, "evaluated as the development user")
 	}
+
+	// A second fixture runs in its own subtest (the registry test database is
+	// named after the test).
+	t.Run("dev auth off with a row for the development user", func(t *testing.T) {
+		g := newRenewalFixture(t)
+		ctx := context.Background()
+		if _, err := g.store.GetUser(ctx, DevUserID); errors.Is(err, store.ErrNotFound) {
+			createTestUserWithProjectRole(t, g.store, DevUserID, "dev@conduit.test", g.agent.ProjectID, store.ProjectRoleMember)
+		}
+		row, err := g.store.GetUser(ctx, DevUserID)
+		require.NoError(t, err, "precondition: the development user has a row")
+		require.NotNil(t, row)
+		tok, open := g.openGrant(t, grant.ViaProxy, tcpHeader("3000"), func(c *grant.Claims) {
+			c.Subject, c.JTI = grant.SubjectUserPrefix+DevUserID, "open-dev-row"
+		})
+		prev := g.srv.authConfig.DevAuthEnabled
+		t.Cleanup(func() { g.srv.authConfig.DevAuthEnabled = prev })
+		g.srv.authConfig.DevAuthEnabled = false
+		var seen []Identity
+		g.srv.conduitAuthorizeActionTestHook = func(_ context.Context, ident Identity, _ *store.Agent, _ Action) error {
+			seen = append(seen, ident)
+			return nil
+		}
+		r, err := g.renew(tok, open, 7)
+		require.NoError(t, err, "dev auth off with a row: the normal path renews")
+		require.NotNil(t, r)
+		require.NotEmpty(t, seen)
+		for _, ident := range seen {
+			assert.IsType(t, &AuthenticatedUser{}, ident, "evaluated as the stored user, not the development user")
+		}
+	})
 }
 
 // TestStartConduitExternal_RenewalPath (D3, S1): with target_stream_deadlines
@@ -715,4 +756,18 @@ func TestRelayStreamRecheck_BadLatestGrantDenies(t *testing.T) {
 			assert.Equal(t, conduit.CloseUnauthenticated, res.CloseCode)
 		})
 	}
+}
+
+// devUserMissingStore reports the development user as missing (ErrNotFound)
+// while its switch is armed, whatever rows the test server seeded.
+type devUserMissingStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *devUserMissingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == DevUserID && s.fault.Active() {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetUser(ctx, id)
 }
