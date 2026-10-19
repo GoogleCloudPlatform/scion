@@ -292,7 +292,7 @@ func TestPersistBrokerName_ServerStartReadsIt(t *testing.T) {
 
 			cfg, err := config.LoadGlobalConfig("")
 			require.NoError(t, err)
-			settings, _ := loadServerSettings(globalDir)
+			settings, _ := loadServerSettings()
 			var vsBroker *config.V1BrokerConfig
 			if vs, _, err := config.LoadEffectiveSettings(""); err == nil && vs != nil && vs.Server != nil {
 				vsBroker = vs.Server.Broker

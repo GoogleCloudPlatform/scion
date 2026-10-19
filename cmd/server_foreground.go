@@ -401,8 +401,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load settings early so both Hub and Broker can use project-level hub.endpoint.
-	brokerSettings, brokerDefaultProfile := loadServerSettings("")
+	// Load the global settings early so both Hub and Broker can use the
+	// legacy hub.endpoint fallback.
+	brokerSettings, brokerDefaultProfile := loadServerSettings()
 	if brokerSettings.Hub == nil {
 		brokerSettings.Hub = &config.HubClientConfig{}
 	}
@@ -2032,13 +2033,19 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// loadServerSettings loads the settings the server's hub and broker use,
-// falling back to empty settings (with a warning) when they fail to load. It
-// also returns the default profile the broker reports on every heartbeat:
-// the settings' active profile, or nil when they failed to load, so the
+// loadServerSettings loads the settings the server's hub and broker use
+// from the global settings directory only: the server never merges the
+// settings of a project its working directory happens to be in. It falls
+// back to empty settings (with a warning) when they fail to load. It also
+// returns the default profile the broker reports on every heartbeat: the
+// settings' active profile, or nil when they failed to load, so the
 // heartbeat omits it and the hub keeps its value.
-func loadServerSettings(path string) (*config.Settings, *string) {
-	settings, err := config.LoadSettings(path)
+func loadServerSettings() (*config.Settings, *string) {
+	var settings *config.Settings
+	globalDir, err := config.GetGlobalDir()
+	if err == nil {
+		settings, err = config.LoadSettings(globalDir)
+	}
 	loaded := err == nil
 	if err != nil {
 		log.Printf("Warning: failed to load settings: %v", err)
@@ -2101,16 +2108,17 @@ func (e operatorHubEndpoint) sourceLabel() string {
 const hubEndpointEnvVar = "SCION_SERVER_HUB_ENDPOINT"
 
 // hubEndpointPin returns the operator setting that pins the hub's public
-// endpoint, or "" when none is set. Any of SCION_SERVER_HUB_ENDPOINT,
-// --base-url and SCION_SERVER_BASE_URL pins it: the hub then uses its
-// operator endpoint and ignores a server.hub.public_url saved in the
-// settings database (ptone/scion#3905).
+// endpoint, or "" when none is set. Any of --base-url,
+// SCION_SERVER_HUB_ENDPOINT and SCION_SERVER_BASE_URL pins it: the hub then
+// uses its operator endpoint and ignores a server.hub.public_url saved in
+// the settings database (ptone/scion#3905). With several set, it names the
+// one resolveHubEndpointFrom takes the endpoint from (ptone/scion#5362).
 func hubEndpointPin() string {
 	switch {
-	case os.Getenv(hubEndpointEnvVar) != "":
-		return hubEndpointEnvVar
 	case webBaseURL != "":
 		return "--base-url"
+	case os.Getenv(hubEndpointEnvVar) != "":
+		return hubEndpointEnvVar
 	case os.Getenv("SCION_SERVER_BASE_URL") != "":
 		return "SCION_SERVER_BASE_URL"
 	}
@@ -2209,18 +2217,26 @@ func (m serverEndpointMode) hubListenPort(cfg *config.GlobalConfig) int {
 // mode. legacyEndpoint is the settings hub.endpoint (which koanf also fills
 // from SCION_HUB_ENDPOINT); passing "" resolves as if that fallback were
 // gone. logf receives the resolution log lines; nil discards them.
+//
+// With the hub enabled the order is flag, then environment, then file
+// (ptone/scion#5362): --base-url, SCION_SERVER_HUB_ENDPOINT,
+// SCION_SERVER_BASE_URL, server.hub.public_url from settings.yaml, then the
+// fallbacks. cfg.Hub.Endpoint holds SCION_SERVER_HUB_ENDPOINT when it is set
+// (applied over the file value when the config loads), so the environment
+// check reads the variable and takes the value from cfg. A server that runs
+// only the Runtime Broker takes cfg.Hub.Endpoint, then legacyEndpoint.
 func resolveHubEndpointFrom(cfg *config.GlobalConfig, m serverEndpointMode, legacyEndpoint string, logf func(string, ...any)) (string, hubEndpointSource) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	if cfg.Hub.Endpoint != "" {
-		return cfg.Hub.Endpoint, hubEndpointSourceConfig
-	}
 
 	if !m.hubEnabled {
+		if cfg.Hub.Endpoint != "" {
+			return cfg.Hub.Endpoint, hubEndpointSourceConfig
+		}
 		hubEndpoint := legacyEndpoint
 		if hubEndpoint != "" && m.debug {
-			logf("Hub endpoint resolved from project settings: %s", hubEndpoint)
+			logf("Hub endpoint resolved from settings: %s", hubEndpoint)
 		}
 		if hubEndpoint == "" {
 			return "", hubEndpointSourceNone
@@ -2236,12 +2252,20 @@ func resolveHubEndpointFrom(cfg *config.GlobalConfig, m serverEndpointMode, lega
 		return hubEndpoint, hubEndpointSourceBaseURLFlag
 	}
 
+	if os.Getenv(hubEndpointEnvVar) != "" && cfg.Hub.Endpoint != "" {
+		return cfg.Hub.Endpoint, hubEndpointSourceConfig
+	}
+
 	if baseURL := os.Getenv("SCION_SERVER_BASE_URL"); baseURL != "" {
 		hubEndpoint := strings.TrimRight(baseURL, "/")
 		if m.debug {
 			logf("Hub endpoint resolved from SCION_SERVER_BASE_URL: %s", hubEndpoint)
 		}
 		return hubEndpoint, hubEndpointSourceBaseURLEnv
+	}
+
+	if cfg.Hub.Endpoint != "" {
+		return cfg.Hub.Endpoint, hubEndpointSourceConfig
 	}
 
 	// Check settings (e.g. SCION_HUB_ENDPOINT env var) before falling back
