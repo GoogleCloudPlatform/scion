@@ -100,17 +100,20 @@
   `user.self.profile` declares it; it maps to the request kind
   `CredentialKindFederation` in `catalogCredentialRequestKinds`.
 - **Pairing.** `selfReadCredential` admits the federation kind only with a
-  federated user identity (`isFederatedUserIdentity`: a `VisitorIdentity`
-  or an unlinked `FederatedUserIdentity`), and such an identity only with
-  the federation kind, the way a user access token kind is paired with its
-  token identity. A federated agent or service identity, or a local user
-  with the federation kind, is refused. No exemption is added.
-- **Unlinked federated user.** Admitted too: it reads its verified
-  identity as before upstream's change, and gets the same answers with the
-  visitor experiment on and off.
+  `VisitorIdentity` (a federated account linked by a grant or a rule, with
+  the visitor experiment on), the way a user access token kind is paired
+  with its token identity. Any other federated identity (an unlinked
+  `FederatedUserIdentity`, a federated agent or service identity) is
+  refused whatever the recorded kind, and so is a local user with the
+  federation kind. No exemption is added.
+- **Unlinked federated user.** Refused with `403` on `/api/v1/auth/me`,
+  with the visitor experiment on and off, as on the upstream base since
+  GoogleCloudPlatform/scion#3577 (the design keeps unlinked federated users
+  as they are until a separate follow-up decides it).
 - **HEAD.** The route still lists `GET` and `HEAD` in `VisitorMethods`;
   `HEAD` now reaches the handler's method check and answers `405`, as for
-  every caller. The visitor tests that expected `200` on `HEAD` now expect
+  every caller, while a visitor's write methods stay `403` in the route
+  guard. The visitor tests that expected `200` on `HEAD` now expect
   `405`. `POST`, `PUT`, `PATCH` and `DELETE` are still refused for a
   visitor in the route guard.
 - **Other routes.** Only `/api/v1/auth/me` lists `VisitorMethods`; every

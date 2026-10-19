@@ -45,8 +45,8 @@ func requestCredentialKind(ctx context.Context, identity Identity) CredentialKin
 // catalogCredentialRequestKinds maps a catalog credential kind to the
 // request credential kinds it names: a session JWT is an interactive
 // session or a dev credential, and a federated user credential is the
-// federation kind (selfReadCredential also requires a federated user
-// identity for it).
+// federation kind (selfReadCredential also requires a visitor identity
+// for it).
 var catalogCredentialRequestKinds = map[authzop.CredentialKind][]CredentialKind{
 	authzop.CredentialSessionJWT:    {CredentialKindInteractive, CredentialKindDev},
 	authzop.CredentialScopedUAT:     {CredentialKindUAT},
@@ -77,9 +77,10 @@ func operationAdmitsRequestKind(op authzop.OperationID, kind CredentialKind) boo
 // the operation does not declare (an empty or unknown kind included), for
 // a user access token kind without a token identity, and for a token
 // identity with any other kind. Likewise the federation kind is admitted
-// only with a federated user identity (isFederatedUserIdentity), and a
-// federated user identity only with the federation kind: a federated agent
-// or service identity is refused. token is the caller's token identity
+// only with a visitor identity (a federated account linked by a grant or
+// a rule), and a federated identity only when it is a visitor with the
+// federation kind: an unlinked federated user, and a federated agent or
+// service identity, are refused whatever the recorded kind. token is the caller's token identity
 // when the request carries a user access token, and nil otherwise; a
 // token reads its holder's records limited to its ceiling and boundary.
 func selfReadCredential(ctx context.Context, identity Identity, op authzop.OperationID) (token *ScopedUserIdentity, ok bool) {
@@ -94,24 +95,10 @@ func selfReadCredential(ctx context.Context, identity Identity, op authzop.Opera
 		}
 		return scoped, true
 	}
-	federatedUser := isFederatedUserIdentity(identity)
-	if federatedUser || kind == CredentialKindFederation {
-		return nil, federatedUser && kind == CredentialKindFederation && operationAdmitsRequestKind(op, kind)
+	if _, federated := identity.(FederatedIdentity); federated || kind == CredentialKindFederation {
+		return nil, isVisitorIdentity(identity) && kind == CredentialKindFederation && operationAdmitsRequestKind(op, kind)
 	}
 	return nil, operationAdmitsRequestKind(op, kind)
-}
-
-// isFederatedUserIdentity reports whether identity is a trusted issuer's
-// user: a non-nil *VisitorIdentity (linked to a local federated account)
-// or *FederatedUserIdentity (not linked).
-func isFederatedUserIdentity(identity Identity) bool {
-	switch v := identity.(type) {
-	case *VisitorIdentity:
-		return v != nil
-	case *FederatedUserIdentity:
-		return v != nil
-	}
-	return false
 }
 
 // refuseSelfReadCredential logs and writes the 403 for a self read whose

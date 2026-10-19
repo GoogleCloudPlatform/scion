@@ -218,9 +218,9 @@ const (
 	// delegation's grantor, within the delegation's single scope.
 	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
 	// CredentialFederatedUser is a trusted issuer's credential for one of
-	// its users, presented as the federation credential: a federated user
-	// identity, linked to a local federated account (a visitor) or not.
-	// It names no federated agent or service identity.
+	// its users, presented as the federation credential, whose identity is
+	// linked to a local federated account (a visitor). It names no
+	// unlinked federated user and no federated agent or service identity.
 	CredentialFederatedUser CredentialKind = "federated_user"
 )
 

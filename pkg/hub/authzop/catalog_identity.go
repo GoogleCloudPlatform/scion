@@ -1158,7 +1158,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.self.profile",
 		Domain:      "user",
-		Description: "Read the caller's own profile and preferences. Any token reads its holder's own profile. A federated user reads its own: a visitor its federated account, an unlinked federated user its verified identity",
+		Description: "Read the caller's own profile and preferences. Any token reads its holder's own profile. A visitor reads its own federated account; an unlinked federated user is refused",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/auth/me", Method: "GET"},
 		},
@@ -1171,7 +1171,7 @@ var identityOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestSelfIdentityReadsToken_AnyTokenReads"},
-			{Package: "pkg/hub", Function: "TestSelfReadCredential_FederatedUserIdentitiesOnly"},
+			{Package: "pkg/hub", Function: "TestSelfReadCredential_VisitorIdentityOnly"},
 			{Package: "pkg/hub", Function: "TestVisitorRoute_AuthMeReturnsVisitorOwnProfile"},
 			{Package: "pkg/hub", Function: "TestVisitorRoute_UnlinkedFederatedUserUnchanged"},
 		},
