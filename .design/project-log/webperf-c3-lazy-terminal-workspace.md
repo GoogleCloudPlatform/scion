@@ -16,9 +16,13 @@ vertical slice; C4 and C8 build on it.
   `navigationId` guard (and account teardown) before creating or mounting
   anything, so a navigation away during the load wins. The route outlet is
   hidden before the load starts, as it was before the chunk became lazy; a
-  newer navigation un-hides it. A failed load logs, shows a toast, and shows
-  the previous page again (the same as a failed page chunk). The loader does
-  not cache a rejection, so the next visit retries.
+  newer navigation un-hides it. Because the outlet holds the whole app shell
+  (sidebar, header, page), the first load shows "Loading terminals…" (a
+  `role=status` placeholder with a spinner) after 150 ms, removed on mount,
+  failure, a newer navigation or account teardown. A failed load logs, shows a
+  toast, and shows the previous page again with focus restored (the same as a
+  failed page chunk). The loader does not cache a rejection, so the next visit
+  retries.
 - `main.ts` imports terminal modules as types only. `terminal-move.ts`,
   `terminal-palette-open.ts` and `terminal-palette-data.ts` already used
   type-only imports for the heavy modules; they did not need changes.

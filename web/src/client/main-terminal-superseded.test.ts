@@ -70,8 +70,15 @@ describe('main.ts terminal route', () => {
     // While the chunk loads, the previous page is hidden: the URL already
     // says /terminals, so the old page must not stay interactive under it.
     expect(outlet.hidden).toBe(true);
+    // The loading placeholder appears after its delay ...
+    await vi.waitFor(
+      () => expect(document.getElementById('terminal-workspace-loading')).not.toBeNull(),
+      BOOT_WAIT
+    );
 
     main.navigateTo('/admin/groups');
+    // ... and the newer navigation removes it at once, before the load settles.
+    expect(document.getElementById('terminal-workspace-loading')).toBeNull();
     await vi.waitFor(
       () => expect(document.querySelector('scion-page-admin-groups')).not.toBeNull(),
       BOOT_WAIT
@@ -83,6 +90,7 @@ describe('main.ts terminal route', () => {
     expect(fakeTerminalRecord.workspaces).toHaveLength(0);
     expect(fakeTerminalRecord.coordinators).toHaveLength(0);
     expect(document.querySelector('[data-fake-terminal-workspace]')).toBeNull();
+    expect(document.getElementById('terminal-workspace-loading')).toBeNull();
     // The newer navigation un-hid the outlet; the superseded load left it alone.
     expect(outlet.hidden).toBe(false);
   }, 15_000);

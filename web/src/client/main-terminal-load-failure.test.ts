@@ -93,6 +93,10 @@ describe('main.ts terminal route', () => {
     // not, so do it here.
     focused.blur();
     expect(document.activeElement).toBe(document.body);
+    await vi.waitFor(
+      () => expect(document.getElementById('terminal-workspace-loading')).not.toBeNull(),
+      BOOT_WAIT
+    );
     rejectLoad!(new Error('Failed to fetch dynamically imported module'));
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledTimes(1), BOOT_WAIT);
     expect(showToast).toHaveBeenCalledWith(
@@ -108,6 +112,7 @@ describe('main.ts terminal route', () => {
     expect(fakeTerminalRecord.coordinators).toHaveLength(0);
     expect(outlet.hidden).toBe(false);
     expect(document.querySelector('scion-page-admin-users')).not.toBeNull();
+    expect(document.getElementById('terminal-workspace-loading')).toBeNull();
     // Focus goes back to where it was before the outlet was hidden.
     expect(deepActiveElement()).toBe(focused);
 
