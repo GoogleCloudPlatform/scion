@@ -22,6 +22,7 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 
 import type { PageData, Project, Capabilities } from '../../shared/types.js';
 import { can, projectWorkspaceModeIcon } from '../../shared/types.js';
@@ -208,20 +209,42 @@ export class ScionPageProjects extends LitElement {
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
   }
 
+  /**
+   * The state store's object each held project was last merged from. The
+   * store replaces a project's object only when an event for it arrives, so
+   * an entry still `===` its source here has not changed since and keeps
+   * its merged row object (and its keyed DOM row) untouched.
+   */
+  private mergedFrom = new Map<string, Project>();
+
+  /**
+   * Merge the store's projects into the list in place: only projects whose
+   * store object changed are re-merged, deleted ones are dropped, and the
+   * array keeps its identity when nothing changed, so an event for one
+   * project neither respreads nor re-renders every other row.
+   */
   private onProjectsUpdated(): void {
     const updatedProjects = stateManager.getProjects();
     const deletedIds = stateManager.getDeletedProjectIds();
 
     const projectMap = new Map(this.projects.map((p) => [p.id, p]));
+    let changed = false;
 
     // Remove deleted projects
     for (const id of deletedIds) {
-      projectMap.delete(id);
+      if (projectMap.delete(id)) {
+        this.mergedFrom.delete(id);
+        changed = true;
+      }
     }
 
     // Merge updated/created projects
     for (const project of updatedProjects) {
       const existing = projectMap.get(project.id);
+      // Unchanged since the last merge (or the very object already held).
+      if (existing && (existing === project || this.mergedFrom.get(project.id) === project)) {
+        continue;
+      }
       // When a scope filter is active, only update projects already in the
       // filtered list — don't add new projects that weren't in the REST response.
       // The server-side filter is the source of truth for ownership/membership.
@@ -234,9 +257,13 @@ export class ScionPageProjects extends LitElement {
         merged._capabilities = existing._capabilities;
       }
       projectMap.set(project.id, merged);
+      this.mergedFrom.set(project.id, project);
+      changed = true;
     }
 
-    this.projects = Array.from(projectMap.values());
+    if (changed) {
+      this.projects = Array.from(projectMap.values());
+    }
   }
 
   private async loadProjects(): Promise<void> {
@@ -266,6 +293,9 @@ export class ScionPageProjects extends LitElement {
         this.projects = data.projects || [];
         this.scopeCapabilities = data._capabilities;
       }
+
+      // The rows are the REST objects now (seeded into the store below).
+      this.mergedFrom.clear();
 
       // Seed stateManager so SSE delta merging has full baseline data
       // and so other pages sharing the same scope can reuse capabilities.
@@ -437,7 +467,13 @@ export class ScionPageProjects extends LitElement {
 
   private renderGrid(projects: Project[]) {
     return html`
-      <div class="resource-grid">${projects.map((project) => this.renderProjectCard(project))}</div>
+      <div class="resource-grid">
+        ${repeat(
+          projects,
+          (project) => project.id,
+          (project) => this.renderProjectCard(project)
+        )}
+      </div>
     `;
   }
 
@@ -504,7 +540,11 @@ export class ScionPageProjects extends LitElement {
             </tr>
           </thead>
           <tbody>
-            ${projects.map((project) => this.renderProjectRow(project))}
+            ${repeat(
+              projects,
+              (project) => project.id,
+              (project) => this.renderProjectRow(project)
+            )}
           </tbody>
         </table>
       </div>
