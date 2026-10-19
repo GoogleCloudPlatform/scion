@@ -2681,7 +2681,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// level at every redeem (srv.testMode is set below, before the hub
 		// serves), and the per-redeem audit goes through the test
 		// identity audit hook.
-		srv.workloadIssuer.testMode = srv.TestModeLevel
+		srv.workloadIssuer.testModeLevel = srv.TestModeLevel
 		srv.workloadIssuer.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
 			return srv.testIdentities.hooks.writeAudit(ctx, st, record)
 		}

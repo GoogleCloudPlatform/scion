@@ -72,7 +72,7 @@ func newDLEnv(t *testing.T) *dlEnv {
 	e.srv.testMode = testModeState{level: TestModeMember}
 	wi := e.srv.workloadIssuer
 	wi.hubID = x2HubID
-	wi.testMode = e.srv.TestModeLevel
+	wi.testModeLevel = e.srv.TestModeLevel
 	srv := e.srv
 	wi.writeAudit = func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error {
 		return srv.testIdentities.hooks.writeAudit(ctx, st, record)
@@ -409,11 +409,11 @@ func TestOfflineDelegation_UnknownGrantorKindDenied(t *testing.T) {
 // tests: member allowlist, hub x2HubID, the given level.
 func dlGateAuthenticator(level TestMode) *workloadIssuerAuthenticator {
 	return &workloadIssuerAuthenticator{
-		audience:  testIssuerAudience(x2HubID),
-		allowlist: map[string]string{x2Sub: config.WorkloadIssuerTierMember},
-		now:       time.Now,
-		hubID:     x2HubID,
-		testMode:  func() TestMode { return level },
+		audience:      testIssuerAudience(x2HubID),
+		allowlist:     map[string]string{x2Sub: config.WorkloadIssuerTierMember},
+		now:           time.Now,
+		hubID:         x2HubID,
+		testModeLevel: func() TestMode { return level },
 	}
 }
 
@@ -503,7 +503,7 @@ func TestOfflineGrantorGate_Unit(t *testing.T) {
 		"test-mode unknown": {a: func() *workloadIssuerAuthenticator { return dlGateAuthenticator(TestMode("")) }, st: st},
 		"no test-mode reader": {a: func() *workloadIssuerAuthenticator {
 			a := dlGateAuthenticator(TestModeMember)
-			a.testMode = nil
+			a.testModeLevel = nil
 			return a
 		}, st: st},
 		"reserved id names a user": {st: dlUserExistsStore{dlNoUserStore{binding: good}}},

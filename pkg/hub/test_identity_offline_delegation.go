@@ -116,10 +116,10 @@ func (a *workloadIssuerAuthenticator) offlineGrantorGate(ctx context.Context, st
 	if refusal := a.checkDelegationLive(d, now); refusal != nil {
 		return nil, refusal
 	}
-	if a.testMode == nil {
+	if a.testModeLevel == nil {
 		return nil, refuse403("offline gate: test-mode level unavailable")
 	}
-	level := a.testMode()
+	level := a.testModeLevel()
 	if !level.Capabilities().TestIdentities {
 		return nil, refuse403("offline gate: the hub does not run --test-mode at member or above")
 	}

@@ -256,10 +256,10 @@ type workloadIssuerAuthenticator struct {
 	// hubID is the hub's resolved (pinned) hub id, fixed at New. The
 	// offline delegation gate binds every offline delegation to it.
 	hubID string
-	// testMode returns the running hub's --test-mode level
+	// testModeLevel returns the running hub's --test-mode level
 	// (Server.TestModeLevel), read at every offline redeem. Nil denies
 	// every offline delegation.
-	testMode func() TestMode
+	testModeLevel func() TestMode
 	// writeAudit writes the per-redeem audit row of an offline delegation
 	// (the test identity audit hook). Nil denies every offline delegation.
 	writeAudit func(ctx context.Context, st store.Store, record *store.MutationAuditRecord) error
