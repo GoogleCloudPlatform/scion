@@ -381,7 +381,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/projects/register", RouteID: "projects.register",
 		Classification: RoutePolicy,
 		// Register checks project.create (handleProjectRegister). Its
-		// embedded-broker form is session-only for a user access token.
+		// embedded-broker form is session-only.
 		Permission: "project.create", Resource: "project", Action: "create",
 	},
 	"/api/v1/projects/": {
