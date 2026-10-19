@@ -80,6 +80,10 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	}
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		renews, canRenew := conduitTargetRenews(res), conduitRouteCanRenew(res)
+		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
+			return errConduitStreamRenewalUnavailable
+		}
 		tok, _, err := s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: identity,
 			Agent:    agent,
@@ -91,6 +95,9 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 				SessionID:           res.Record.SessionID,
 				ConnectionEpoch:     res.Record.ConnectionEpoch,
 			},
+			Via:          grant.ViaProxy,
+			TargetRenews: renews,
+			CanRenew:     canRenew,
 		})
 		if err != nil {
 			return err
@@ -463,6 +470,13 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 		writeError(w, placement.Refusal.Status, placement.Refusal.Code, placement.Refusal.Message, placement.Refusal.Details)
 	case errors.Is(err, errConduitForbidden):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, conduitStreamRenewalUnavailableMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnavailable})
+	case errors.Is(err, errConduitGrantInternal):
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
+	case errors.Is(err, errConduitInvalid):
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid port proxy request", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit routing is unavailable", nil)
 	case errors.Is(err, errConduitLeafNotRelayHeld):

@@ -123,6 +123,10 @@ const (
 	tunnelRegistryUnavailable
 	tunnelGrantKeysUnavailable
 	tunnelConduitNotServing
+	// tunnelStreamRenewalUnavailable: target-side deadlines are enforced
+	// and this node cannot deliver renewals on the route (contracts,
+	// Renewal path unavailable).
+	tunnelStreamRenewalUnavailable
 	tunnelInternal
 	// Placement refusals (409): the grant was refused for a pinned agent
 	// whose saved placement is inconsistent (mintConduitGrant), one entry
@@ -140,23 +144,24 @@ var conduitTunnelFailures = map[conduitTunnelFailure]struct {
 	code   string
 	reason string // error.details.reason ("" = none)
 }{
-	tunnelInvalidRequest:          {http.StatusBadRequest, ErrCodeInvalidRequest, ""},
-	tunnelUnauthorized:            {http.StatusUnauthorized, ErrCodeUnauthorized, ""},
-	tunnelForbidden:               {http.StatusForbidden, ErrCodeForbidden, ""},
-	tunnelPrincipalInactive:       {http.StatusForbidden, ErrCodeForbidden, ""},
-	tunnelAgentNotFound:           {http.StatusNotFound, ErrCodeAgentNotFound, ""},
-	tunnelAgentNotRunning:         {http.StatusConflict, ErrCodeAgentNotRunning, ""},
-	tunnelRateLimited:             {http.StatusTooManyRequests, ErrCodeRateLimited, ""},
-	tunnelBrokerUnavailable:       {http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail, ""},
-	tunnelSessionUnavailable:      {http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable, ""},
-	tunnelStreamAuthzUnavailable:  {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonStreamAuthzDown},
-	tunnelRegistryUnavailable:     {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonRegistryUnavailable},
-	tunnelGrantKeysUnavailable:    {http.StatusServiceUnavailable, ErrCodeUnavailable, relay.ReasonGrantKeysUnavailable},
-	tunnelConduitNotServing:       {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonConduitNotServing},
-	tunnelInternal:                {http.StatusInternalServerError, ErrCodeInternalError, ""},
-	tunnelPlacementPinStale:       {http.StatusConflict, ErrCodeRuntimeTargetPinStale, ""},
-	tunnelPlacementBrokerMissing:  {http.StatusConflict, ErrCodeRuntimeBrokerMissing, ""},
-	tunnelPlacementTargetMismatch: {http.StatusConflict, ErrCodeRuntimeTargetMismatch, ""},
+	tunnelInvalidRequest:           {http.StatusBadRequest, ErrCodeInvalidRequest, ""},
+	tunnelUnauthorized:             {http.StatusUnauthorized, ErrCodeUnauthorized, ""},
+	tunnelForbidden:                {http.StatusForbidden, ErrCodeForbidden, ""},
+	tunnelPrincipalInactive:        {http.StatusForbidden, ErrCodeForbidden, ""},
+	tunnelAgentNotFound:            {http.StatusNotFound, ErrCodeAgentNotFound, ""},
+	tunnelAgentNotRunning:          {http.StatusConflict, ErrCodeAgentNotRunning, ""},
+	tunnelRateLimited:              {http.StatusTooManyRequests, ErrCodeRateLimited, ""},
+	tunnelBrokerUnavailable:        {http.StatusServiceUnavailable, ErrCodeRuntimeBrokerUnavail, ""},
+	tunnelSessionUnavailable:       {http.StatusServiceUnavailable, ErrCodeAgentSessionUnavailable, ""},
+	tunnelStreamAuthzUnavailable:   {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonStreamAuthzDown},
+	tunnelRegistryUnavailable:      {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonRegistryUnavailable},
+	tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, ErrCodeUnavailable, relay.ReasonGrantKeysUnavailable},
+	tunnelConduitNotServing:        {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonConduitNotServing},
+	tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, ErrCodeUnavailable, conduitReasonStreamRenewalUnavailable},
+	tunnelInternal:                 {http.StatusInternalServerError, ErrCodeInternalError, ""},
+	tunnelPlacementPinStale:        {http.StatusConflict, ErrCodeRuntimeTargetPinStale, ""},
+	tunnelPlacementBrokerMissing:   {http.StatusConflict, ErrCodeRuntimeBrokerMissing, ""},
+	tunnelPlacementTargetMismatch:  {http.StatusConflict, ErrCodeRuntimeTargetMismatch, ""},
 }
 
 // tunnelPlacementFailures maps a placement refusal's code to its tunnel
@@ -654,6 +659,10 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 		Agent: agentIncarnationFacts(agent),
 	}
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		renews, canRenew := conduitTargetRenews(res), conduitRouteCanRenew(res)
+		if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteTunnel, agent.ID) {
+			return errConduitStreamRenewalUnavailable
+		}
 		tok, _, err := ts.s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: ts.identity,
 			Agent:    agent,
@@ -665,7 +674,9 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 				SessionID:           res.Record.SessionID,
 				ConnectionEpoch:     res.Record.ConnectionEpoch,
 			},
-			ViaTunnel: true,
+			Via:          grant.ViaTunnel,
+			TargetRenews: renews,
+			CanRenew:     canRenew,
 		})
 		if err != nil {
 			if conduitTunnelMintErrPassesThrough(err) {
@@ -699,7 +710,8 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 func conduitTunnelMintErrPassesThrough(err error) bool {
 	var placement *PlacementConflictError
 	return errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) ||
-		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable)
+		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable) ||
+		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitGrantInternal)
 }
 
 // errConduitTunnelGrantKeys marks a grant that could not be signed.
@@ -752,6 +764,10 @@ func conduitTunnelOpenError(err error) error {
 		return tunnelRefusal(tunnelConduitNotServing, "conduit is not serving on this hub node")
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		return tunnelRefusal(tunnelRegistryUnavailable, "conduit routing is temporarily unavailable")
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		return tunnelRefusal(tunnelStreamRenewalUnavailable, "%s", conduitStreamRenewalUnavailableMessage)
+	case errors.Is(err, errConduitGrantInternal):
+		return tunnelRefusal(tunnelInternal, "internal error")
 	case errors.Is(err, errConduitTunnelGrantKeys):
 		return tunnelRefusal(tunnelGrantKeysUnavailable, "stream grants are temporarily unavailable")
 	case errors.As(err, &ce) && conduitTunnelTargetRefusal(ce.Code) != nil:
