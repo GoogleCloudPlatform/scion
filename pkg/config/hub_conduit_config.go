@@ -85,6 +85,17 @@ const (
 	ConduitRelayModeExternal = "external"
 )
 
+// Target-side stream deadline modes of the hub
+// (server.hub.conduit.target_stream_deadlines; design §3.5 Gating).
+const (
+	// ConduitTargetStreamDeadlinesOff: targets do not enforce stream
+	// authorization deadlines (the default).
+	ConduitTargetStreamDeadlinesOff = "off"
+	// ConduitTargetStreamDeadlinesEnforce: targets close a user stream
+	// at its authorization deadline unless a renewal grant moves it.
+	ConduitTargetStreamDeadlinesEnforce = "enforce"
+)
+
 // ConduitPeerSecretMinBytes is the shortest accepted
 // server.hub.conduit.peer_secret, in octets after NormalizePeerSecret
 // (design §3.9), and ConduitPeerSecretMinDistinct the fewest distinct
@@ -163,6 +174,14 @@ type HubConduitConfig struct {
 	// external mode the hub runs no relay and separate relay processes
 	// hold the conduit sessions (design §3.9).
 	RelayMode string `json:"relayMode,omitempty" yaml:"relayMode,omitempty" koanf:"relayMode"`
+	// TargetStreamDeadlines is "off" (or "", the default) or "enforce":
+	// whether targets enforce user streams' authorization deadlines
+	// locally (design §3.5, Target-side deadlines). The value is published
+	// to targets with the grant keys (GET /api/v1/conduit/grant-keys).
+	// Enforce requires the hub's renewal driver, which lands in a
+	// follow-up change; until then, enforce refuses user streams to
+	// renewal-capable targets (503 unavailable, stream_renewal_unavailable).
+	TargetStreamDeadlines string `json:"targetStreamDeadlines,omitempty" yaml:"targetStreamDeadlines,omitempty" koanf:"targetStreamDeadlines"`
 	// PeerSecret is the dedicated relay-peer secret (design §3.9): the
 	// HMAC key of every relay-peer call is derived from it wherever a
 	// separate relay runs. It is required in external mode and on
@@ -204,7 +223,7 @@ func (c HubConduitConfig) IsZero() bool {
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
 		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero() &&
-		c.RelayMode == "" && c.PeerSecret == ""
+		c.RelayMode == "" && c.TargetStreamDeadlines == "" && c.PeerSecret == ""
 }
 
 // RelayModeValue returns the relay mode with the default applied.
@@ -213,6 +232,15 @@ func (c HubConduitConfig) RelayModeValue() string {
 		return ConduitRelayModeInProcess
 	}
 	return c.RelayMode
+}
+
+// TargetStreamDeadlinesValue returns the target-side stream deadline mode
+// with the default applied.
+func (c HubConduitConfig) TargetStreamDeadlinesValue() string {
+	if c.TargetStreamDeadlines == "" {
+		return ConduitTargetStreamDeadlinesOff
+	}
+	return c.TargetStreamDeadlines
 }
 
 // ExternalRelay reports whether the hub is in external-relay mode.
@@ -476,6 +504,11 @@ func (c HubConduitConfig) Validate() error {
 	case ConduitRelayModeInProcess, ConduitRelayModeExternal:
 	default:
 		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.relay_mode %q: want in_process or external", c.RelayMode))
+	}
+	switch c.TargetStreamDeadlinesValue() {
+	case ConduitTargetStreamDeadlinesOff, ConduitTargetStreamDeadlinesEnforce:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.target_stream_deadlines %q: want off or enforce", c.TargetStreamDeadlines))
 	}
 	if err := ValidatePeerSecret(c.PeerSecret); err != nil {
 		errs = append(errs, err)

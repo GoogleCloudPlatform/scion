@@ -952,7 +952,8 @@ digest), the registry rewrite, the pull policy or the profile override:
   request's inline config doesn't set the field.
 - `profile`: the settings profile the agent was provisioned with. Only this profile is used to look
   up the profile `harness_overrides` image and pull policy (and the settings-tier values that
-  lookup folds in) and the profile-level `image_registry` rewrite, on every start and restart.
+  lookup folds in) and the profile layers of the `image_registry` rewrite (see
+  [Image registry order](#image-registry-order) for the full order), on every start and restart.
   The profile a restart passes, or the one saved in `agent-info.json`, does not
   change it. Empty means no profile was set or active at provision; the profile active at start
   then applies, as for any settings lookup without a profile. Broker start/restart also classify
@@ -1135,6 +1136,51 @@ value is the template's own, recorded in broker-side agent state (`image-provena
 merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
 `image` is now ignored, so new agents record no template value; values recorded for older agents
 are still replayed.
+
+### Image registry order
+
+Introduced by ptone/scion#3916. A bare image name (one without a registry host, such as `scion-claude:latest`) is rewritten to
+`<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
+decides first, and within a source the more specific scope wins.
+
+| Rank | Layer | Where it comes from |
+| :--- | :--- | :--- |
+| 1 | Node env | `SCION_IMAGE_REGISTRY` of the process that runs the agent (a Runtime Broker), or of the Hub for Hub-wide reads |
+| 2 | Hub profile | `profiles.<name>.image_registry` saved in the Hub's settings |
+| 3 | Hub top level | `image_registry` saved in the Hub's settings (for example through the setup wizard or the admin settings page) |
+| 4 | File profile or instance | `profiles.<name>.image_registry` in the settings file, or a flat instance's `agent_defaults.image_registry` |
+| 5 | File top level | `image_registry` in the settings file |
+| 6 | Default | none: images are not rewritten |
+
+What this means in practice:
+
+- `SCION_IMAGE_REGISTRY` on a Runtime Broker overrides every settings value for the agents that
+  broker runs. It is not a settings value: `scion config get image_registry` and `scion init` do
+  not show or save it.
+- A saved Hub top-level value beats a settings-file profile or instance value. Only a saved Hub
+  profile value beats it. To keep a per-profile registry, save it in the Hub profile.
+- Only values an admin saved count as Hub values. The values the Hub seeds from its settings file
+  at startup are file values.
+- On the Hub, the file tier is the Hub's startup merge: coded defaults, then
+  `SCION_SEED_IMAGEREGISTRY`, then `settings.yaml`, then `SCION_SERVER_IMAGEREGISTRY` (each later
+  one wins). A saved Hub value beats all of them.
+- Hub-wide reads (setup status, image pull, harness image status, maintenance builds) use the Hub
+  process's own `SCION_IMAGE_REGISTRY` as the node env and do not use profile values. Under HA,
+  each replica uses its own environment for these reads.
+- When the Hub rewrites an agent's explicit image for a dispatch, it uses only the target Runtime
+  Broker's reported `SCION_IMAGE_REGISTRY`, never the Hub's own. For a remote Runtime Broker, the
+  file tiers are the Hub's own settings file; images taken from a template are resolved by the
+  Runtime Broker with its own settings file. For a flat Runtime Broker the Hub does not rewrite the
+  image, and the Runtime Broker resolves it with its instance value.
+- `SCION_MAINTENANCE_IMAGE_REGISTRY` applies only to maintenance image builds. It is not an agent
+  image registry, and a Runtime Broker does not start with it as the only registry. The Hub logs a
+  warning at startup when it is set and differs from the resolved value.
+
+A Hub value is saved only when an admin changes it. Saving an unrelated setting, or saving a page
+that echoes the value it shows, stores nothing. At the top level, the field shows the saved value,
+or else this Hub replica's settings-file value, and never an environment value. Saving the value
+shown does not pin it; change it once to pin it. A profile's field shows only a saved value, so
+typing any value into it saves that value.
 
 ---
 

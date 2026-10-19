@@ -29,7 +29,8 @@
  *   over by reference (`===`) into the result, never copied or rebuilt;
  * - the returned array is `held` itself, by reference, when nothing in
  *   `change` actually altered membership or content — never a fresh array
- *   just because a flush happened.
+ *   just because a flush happened. An upsert whose object is shallow-equal
+ *   to the held one counts as no change, and the held object is kept.
  */
 
 import type { Agent, Capabilities } from '../shared/types.js';
@@ -72,6 +73,18 @@ export interface MergeChangedOptions {
 function withInheritedCapabilities(agent: Agent, scopeCapabilities?: Capabilities): Agent {
   if (agent._capabilities || !scopeCapabilities) return agent;
   return { ...agent, _capabilities: scopeCapabilities };
+}
+
+/** Own enumerable keys and their values are identical (`Object.is`) in both objects. */
+function shallowEqual<T extends object>(a: T, b: T): boolean {
+  const aKeys = Object.keys(a) as Array<keyof T>;
+  if (aKeys.length !== Object.keys(b).length) return false;
+  for (const key of aKeys) {
+    if (!Object.prototype.hasOwnProperty.call(b, key) || !Object.is(a[key], b[key])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -123,6 +136,13 @@ export function mergeChanged(
         !agent._capabilities && existing._capabilities
           ? ({ ...agent, _capabilities: existing._capabilities } as Agent)
           : agent;
+      // The store drops deltas that change nothing against *its* copy, but
+      // the held copy can differ from it (an optimistic patch, carried
+      // capabilities), so an upsert can still match the held object field
+      // for field. Keep the held one then, so the array identity, and every
+      // memo keyed on it, survives a flush that changed nothing here. One
+      // pass over top-level keys; nested objects compare by reference.
+      if (shallowEqual(existing, next)) continue;
       byId.set(id, next);
       changed = true;
       continue;

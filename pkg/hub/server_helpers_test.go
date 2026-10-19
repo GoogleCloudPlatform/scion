@@ -209,14 +209,13 @@ func doRequestRaw(t *testing.T, srv *Server, method, path string, body []byte, c
 	return rec
 }
 
-// grantDevUserRuntimeBrokerAccess creates a custom role with runtime_broker.*
-// permissions and binds it to the dev user. This is needed because the
-// inline authz checks in handleBrokerHeartbeat and handleBrokerSecretByKey
-// use Resource{Type: "runtime_broker"} which does not match the canonical
-// "broker.*" permissions in the registry (getRuntimeBroker and
-// getBrokerProjects have already been aligned to the canonical type; these
-// two remain to be aligned separately). The dev user's super-admin role only
-// includes registry permissions.
+// grantDevUserRuntimeBrokerAccess binds a custom role carrying the
+// runtime_broker.* permission IDs to the dev user. No production check
+// evaluates those IDs: broker records, broker env/secret material and the
+// heartbeat user path are all checked on the registry's broker.*
+// permissions, which the dev user's super-admin role already holds. The
+// grant therefore changes no decision; callers keep it only until it is
+// removed in a separate cleanup.
 func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
 	t.Helper()
 	ctx := context.Background()

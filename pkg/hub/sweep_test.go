@@ -17,7 +17,10 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -157,4 +160,96 @@ func TestBrokerMessageSweepHandler_ExpiresStuckPendingWithSharedReason(t *testin
 	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
 	require.NotNil(t, got.DispatchFailureReason)
 	assert.Equal(t, store.MessageExpiredStuckPendingReason, *got.DispatchFailureReason)
+}
+
+// TestBrokerMessageSweepHandler_LogsExpiredMessageFields checks that the
+// TTL-expiry line names the expired row by ID, recipient and pending
+// duration, and never carries the message body (ptone/scion#5211).
+func TestBrokerMessageSweepHandler_LogsExpiredMessageFields(t *testing.T) {
+	srv, cs := newSweepTestServer(t)
+	var logs bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(&logs, nil))
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	const body = "expired-body-sentinel-5211"
+	stuck := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:ttl-target", Msg: body,
+		CreatedAt: time.Now().Add(-25 * time.Hour),
+	}
+	require.NoError(t, cs.CreateMessage(ctx, stuck))
+
+	srv.brokerMessageSweepHandler()(ctx)
+
+	assert.NotContains(t, logs.String(), body, "no log line carries the message body")
+
+	var lines []map[string]any
+	for _, raw := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal(raw, &rec))
+		if rec["msg"] == "sweep: expired stuck pending messages" {
+			lines = append(lines, rec)
+		}
+	}
+	require.Len(t, lines, 1, "one expiry line per sweep")
+	rec := lines[0]
+	assert.Equal(t, "INFO", rec["level"])
+	assert.Equal(t, float64(1), rec["expired"])
+	assert.Equal(t, []any{stuck.ID}, rec["message_ids"])
+	assert.Equal(t, []any{"agent:ttl-target"}, rec["recipients"])
+	assert.Equal(t, false, rec["message_ids_truncated"])
+	durations, ok := rec["pending_durations"].([]any)
+	require.True(t, ok)
+	require.Len(t, durations, 1)
+	d, err := time.ParseDuration(durations[0].(string))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, d, 25*time.Hour)
+	assert.Less(t, d, 26*time.Hour)
+}
+
+// expiryFailingStore fails the TTL expiry and delegates everything else.
+type expiryFailingStore struct {
+	store.Store
+}
+
+func (expiryFailingStore) ExpireAndListStuckPendingMessages(context.Context, time.Time, string) ([]store.ExpiredPendingMessage, error) {
+	return nil, errors.New("expiry failed")
+}
+
+// TestBrokerMessageSweepHandler_ExpiryErrorStillFailsMissingRecipient checks
+// that a failed TTL expiry does not stop the sweep: pending messages whose
+// recipient is gone are still failed (ptone/scion#5211).
+func TestBrokerMessageSweepHandler_ExpiryErrorStillFailsMissingRecipient(t *testing.T) {
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	var logs bytes.Buffer
+	srv := &Server{
+		store:             expiryFailingStore{Store: cs},
+		agentLifecycleLog: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+	ctx := context.Background()
+
+	proj := &store.Project{
+		ID: uuid.NewString(), Name: "p", Slug: "p-" + uuid.NewString()[:8],
+		OwnerID: uuid.NewString(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	orphan := &store.Message{
+		ID: uuid.NewString(), ProjectID: proj.ID,
+		Sender: "user:x", Recipient: "agent:gone", RecipientID: uuid.NewString(), Msg: "hi",
+	}
+	require.NoError(t, cs.CreateMessage(ctx, orphan))
+
+	srv.brokerMessageSweepHandler()(ctx)
+
+	assert.Contains(t, logs.String(), "sweep: expire stuck pending messages failed", "the expiry error is logged")
+	got, err := cs.GetMessage(ctx, orphan.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, got.DispatchState, "the missing-recipient step still runs after a failed expiry")
 }

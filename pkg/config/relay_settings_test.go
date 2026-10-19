@@ -29,7 +29,7 @@ import (
 // testPeerSecret is a syntactically valid relay-peer secret for tests.
 const testPeerSecret = "0123456789abcdefghijklmnopqrstuvwxyzABCD"
 
-// relaySettingCase is one serverEnvPathAliases key with a valid value and
+// relaySettingCase is one conduit relay setting with a valid value and
 // accessors for the value each struct consumer loaded.
 type relaySettingCase struct {
 	path  string
@@ -59,6 +59,9 @@ var relaySettingCases = []relaySettingCase{
 	{"server.hub.conduit.relay_mode", ConduitRelayModeExternal,
 		func(gc *GlobalConfig) string { return gc.Hub.Conduit.RelayMode },
 		func(vs *VersionedSettings) string { return vsConduit(vs).RelayMode }},
+	{"server.hub.conduit.target_stream_deadlines", ConduitTargetStreamDeadlinesEnforce,
+		func(gc *GlobalConfig) string { return gc.Hub.Conduit.TargetStreamDeadlines },
+		func(vs *VersionedSettings) string { return vsConduit(vs).TargetStreamDeadlines }},
 	{"server.relay.hub_internal_url", "http://hub-internal.scion.svc:9811",
 		func(gc *GlobalConfig) string { return gc.Relay.HubInternalURL },
 		func(vs *VersionedSettings) string { return vsRelay(vs).HubInternalURL }},
@@ -67,42 +70,34 @@ var relaySettingCases = []relaySettingCase{
 		func(vs *VersionedSettings) string { return vsRelay(vs).PublicURL }},
 }
 
-// TestRelaySettingCasesCoverAliases keeps relaySettingCases and
-// serverEnvPathAliases in step.
-func TestRelaySettingCasesCoverAliases(t *testing.T) {
-	var cases, aliases []string
-	for _, c := range relaySettingCases {
-		cases = append(cases, c.path)
+// relayEnvSpellings returns the canonical and the underscored env name of a
+// relay setting, both from the env mapping table.
+func relayEnvSpellings(t *testing.T, path string) (entry ServerEnvEntry, names []string) {
+	t.Helper()
+	for _, e := range ServerEnvEntries() {
+		if e.Path == path {
+			entry = e
+		}
 	}
-	for _, a := range serverEnvPathAliases {
-		aliases = append(aliases, a.Path)
-	}
-	assert.ElementsMatch(t, aliases, cases)
+	require.Equal(t, path, entry.Path, "no env table entry")
+	underscored := "SCION_SERVER_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(path, "server."), ".", "_"))
+	require.Contains(t, entry.Aliases, underscored)
+	return entry, []string{entry.Canonical, underscored}
 }
 
-// envRestOf returns a settings path's env name after SCION_SERVER_, in the
-// underscored spelling lookupServerEnvPathAlias accepts (the path without
-// "server.", dots as underscores).
-func envRestOf(path string) string {
-	return strings.ReplaceAll(strings.TrimPrefix(path, "server."), ".", "_")
-}
-
-// TestServerEnvPathAliasesBindBothSpellings: the canonical and the
-// underscored env spelling of each aliased key reach the same field in the
-// opsettings env layer, GlobalConfig and VersionedSettings. The seed
-// mapper is out of scope: it seeds Layer-1 keys only, and these keys are
-// Layer 0.
-func TestServerEnvPathAliasesBindBothSpellings(t *testing.T) {
+// TestRelaySettingsBindBothSpellings: the canonical and the underscored env
+// spelling of each relay setting reach the same field in the opsettings env
+// layer, GlobalConfig and VersionedSettings. The seed mapper is out of
+// scope: it seeds Layer-1 keys only, and these keys are Layer 0.
+func TestRelaySettingsBindBothSpellings(t *testing.T) {
 	for _, c := range relaySettingCases {
-		a, ok := lookupServerEnvPathAlias(envRestOf(c.path))
-		require.True(t, ok, c.path)
-		canonical, underscored := a.envSpellings()
-		for _, spelling := range []string{canonical, underscored} {
-			env := "SCION_SERVER_" + strings.ToUpper(spelling)
+		entry, names := relayEnvSpellings(t, c.path)
+		for _, env := range names {
+			rest := strings.TrimPrefix(env, "SCION_SERVER_")
 			t.Run(env, func(t *testing.T) {
 				assert.Equal(t, c.path, versionedEnvKeyMapper(env))
-				assert.Equal(t, c.path, serverEnvToOpsettingsKey(strings.ToUpper(spelling)))
-				assert.Equal(t, a.GlobalConfig, envKeyToConfigKey(strings.ToUpper(spelling)))
+				assert.Equal(t, c.path, serverEnvToOpsettingsKey(rest))
+				assert.Equal(t, entry.GlobalConfig, envKeyToConfigKey(rest))
 
 				home := t.TempDir()
 				t.Setenv("HOME", home)
@@ -123,16 +118,13 @@ func TestServerEnvPathAliasesBindBothSpellings(t *testing.T) {
 	}
 }
 
-// TestServerEnvPathAliasesEmptyIsUnset: an exported but empty variable
-// leaves each aliased key unset (so an empty peer_secret fails the checks
-// that require it).
-func TestServerEnvPathAliasesEmptyIsUnset(t *testing.T) {
+// TestRelaySettingsEmptyIsUnset: an exported but empty variable leaves each
+// relay setting unset (so an empty peer_secret fails the checks that
+// require it).
+func TestRelaySettingsEmptyIsUnset(t *testing.T) {
 	for _, c := range relaySettingCases {
-		a, ok := lookupServerEnvPathAlias(envRestOf(c.path))
-		require.True(t, ok, c.path)
-		canonical, underscored := a.envSpellings()
-		for _, spelling := range []string{canonical, underscored} {
-			env := "SCION_SERVER_" + strings.ToUpper(spelling)
+		_, names := relayEnvSpellings(t, c.path)
+		for _, env := range names {
 			t.Run(env, func(t *testing.T) {
 				home := t.TempDir()
 				t.Setenv("HOME", home)
@@ -176,37 +168,39 @@ func koanfTagPathExists(t reflect.Type, path string) bool {
 	return true
 }
 
-// TestServerEnvPathAliasesPointAtSchemaFields: every alias names a field of
-// VersionedSettings and of GlobalConfig, and a schema property whose
-// x-env-var is the canonical spelling, so renaming a field breaks this
-// test instead of silently orphaning the alias.
-func TestServerEnvPathAliasesPointAtSchemaFields(t *testing.T) {
+// TestRelaySettingsPointAtSchemaFields: each relay setting's table entry
+// names a field of VersionedSettings and of GlobalConfig, and a schema
+// property whose x-env-var is the canonical name, so renaming a field
+// breaks this test instead of silently orphaning the env name.
+func TestRelaySettingsPointAtSchemaFields(t *testing.T) {
 	data, err := schemasFS.ReadFile(settingsSchemaFiles["1"])
 	require.NoError(t, err)
 	var root map[string]interface{}
 	require.NoError(t, json.Unmarshal(data, &root))
-	for _, a := range serverEnvPathAliases {
-		assert.True(t, koanfTagPathExists(reflect.TypeOf(VersionedSettings{}), a.Path), "VersionedSettings has no field at %s", a.Path)
-		assert.True(t, koanfTagPathExists(reflect.TypeOf(GlobalConfig{}), a.GlobalConfig), "GlobalConfig has no field at %s", a.GlobalConfig)
-		prop := findSchemaProperty(t, root, strings.Split(a.Path, ".")...)
-		canonical, _ := a.envSpellings()
-		assert.Equal(t, "SCION_SERVER_"+strings.ToUpper(canonical), prop["x-env-var"], "schema x-env-var of %s", a.Path)
+	for _, c := range relaySettingCases {
+		entry, _ := relayEnvSpellings(t, c.path)
+		assert.True(t, koanfTagPathExists(reflect.TypeOf(VersionedSettings{}), entry.Path), "VersionedSettings has no field at %s", entry.Path)
+		assert.True(t, koanfTagPathExists(reflect.TypeOf(GlobalConfig{}), entry.GlobalConfig), "GlobalConfig has no field at %q", entry.GlobalConfig)
+		prop := findSchemaProperty(t, root, strings.Split(entry.Path, ".")...)
+		assert.Equal(t, entry.Canonical, prop["x-env-var"], "schema x-env-var of %s", entry.Path)
 	}
 }
 
-// TestServerEnvPathAliasesExactPathOnly: an alias matches its whole path,
-// never a field of the same name elsewhere.
-func TestServerEnvPathAliasesExactPathOnly(t *testing.T) {
-	for _, env := range []string{
-		"SCION_SERVER_HUB_PUBLICURL",          // server.hub.public_url, not server.relay.public_url
-		"SCION_SERVER_HUB_PUBLIC_URL",         // the same, underscored
-		"SCION_SERVER_BROKER_PEERSECRET",      // no such key under broker
-		"SCION_SERVER_HUB_CONDUIT_RELAYMODEX", // a longer name
+// TestRelaySettingsExactPathOnly: an env name matches a setting by its whole
+// path, never a field of the same name elsewhere.
+func TestRelaySettingsExactPathOnly(t *testing.T) {
+	for env, want := range map[string]string{
+		"SCION_SERVER_HUB_PUBLICURL":          "", // inert: server.hub.public_url is HUB_ENDPOINT, never server.relay.public_url
+		"SCION_SERVER_HUB_PUBLIC_URL":         "", // the same, underscored
+		"SCION_SERVER_BROKER_PEERSECRET":      "", // no such key under broker
+		"SCION_SERVER_HUB_CONDUIT_RELAYMODEX": "", // a longer name
+		"SCION_SERVER_RELAY_PUBLICURL":        "server.relay.public_url",
 	} {
-		_, ok := lookupServerEnvPathAlias(strings.TrimPrefix(env, "SCION_SERVER_"))
-		assert.False(t, ok, env)
+		path, _, ok := KeyForServerEnv(env)
+		assert.Equal(t, want, path, env)
+		assert.Equal(t, want != "", ok, env)
 	}
-	assert.Equal(t, "server.hub.public_url", versionedEnvKeyMapper("SCION_SERVER_HUB_PUBLIC_URL"))
+	assert.Equal(t, "", versionedEnvKeyMapper("SCION_SERVER_HUB_PUBLIC_URL"), "inert in every consumer")
 }
 
 func TestHubConduitRelayModeAndPeerSecret(t *testing.T) {
@@ -382,4 +376,30 @@ func TestPeerSecretOnlyNewlineIsUnset(t *testing.T) {
 			assertUnset(t)
 		})
 	}
+}
+
+// TestHubConduitTargetStreamDeadlines: server.hub.conduit.target_stream_deadlines
+// is off by default, accepts off and enforce, refuses anything else at
+// validation (startup and the settings PUT both validate), and survives
+// both settings conversions.
+func TestHubConduitTargetStreamDeadlines(t *testing.T) {
+	assert.Equal(t, ConduitTargetStreamDeadlinesOff, HubConduitConfig{}.TargetStreamDeadlinesValue())
+	assert.True(t, HubConduitConfig{}.IsZero())
+	assert.False(t, HubConduitConfig{TargetStreamDeadlines: "off"}.IsZero())
+	for _, v := range []string{"", "off", "enforce"} {
+		assert.NoError(t, HubConduitConfig{TargetStreamDeadlines: v}.Validate(), v)
+	}
+	for _, v := range []string{"on", "Enforce", "observe"} {
+		err := HubConduitConfig{TargetStreamDeadlines: v}.Validate()
+		require.Error(t, err, v)
+		assert.Contains(t, err.Error(), "server.hub.conduit.target_stream_deadlines")
+	}
+
+	v1 := &V1ServerConfig{Hub: &V1ServerHubConfig{Conduit: &V1ServerHubConduitConfig{TargetStreamDeadlines: "enforce"}}}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, ConduitTargetStreamDeadlinesEnforce, gc.Hub.Conduit.TargetStreamDeadlinesValue())
+	back := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, back.Hub)
+	require.NotNil(t, back.Hub.Conduit)
+	assert.Equal(t, "enforce", back.Hub.Conduit.TargetStreamDeadlines)
 }

@@ -20,8 +20,10 @@ package authzop
 // and admits a hub-boundary user access token carrying test_identity:issue,
 // and a workload-bound issuer delegation (phase X2), which acts for its
 // human grantor within its single scope and manages only the identities
-// issued through it. The delegation operations themselves (create, list,
-// revoke) admit an interactive session only.
+// issued through it. Admin-kind issuance also admits a workload delegation
+// of the kind's admin scope (phase X4; issue-only). The delegation
+// operations themselves (create, list, revoke) admit an interactive
+// session only.
 var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.create",
@@ -173,6 +175,69 @@ var testIdentityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
 	{
+		ID:          "testidentity.cleanup",
+		Domain:      "testidentity",
+		Description: "Remove the agents, schedules, groups and projects stamped as created under the caller's expired or deleted test identities (and the expired identities themselves), with the purge engine; the hub selects the targets from the provenance stamps, the request names none (no body; ?dryRun=true lists the targets and writes nothing). An issuer reaches its own identities, a workload delegation only the identities issued through it, an unscoped platform admin session every issuer's; a live identity is never touched",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/cleanup", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Bounded by the stamp's fixture_issuer_id: the caller's own identities, its own delegation's, or every issuer's for an unscoped platform admin session; each identity is admitted by the purge route's rules; test identities of every kind are refused as callers",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "test_identity_cleanup",
+			ContextFields: []string{"actor_id", "credential_id", "credential_kind", "correlation_id"},
+			BeforeFields:  []string{"provenance_basis"},
+			AfterFields:   []string{"identities", "deleted", "not_done", "unproven"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_IssuerIsolation"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_DelegationIsolation"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_LimitCountsOnlyAdmittedNonLive"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_AdminKindTargets"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_DelegationCannotReachAdminKind"},
+			{Package: "pkg/hub", Function: "TestFixtureCleanup_AdminScopeDelegationRefused"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "testidentity.provenance",
+		Domain:      "testidentity",
+		Description: "Explain whether the hub recorded one agent, project, schedule or group as created under a test identity of the caller's issuer scope (its own, its own delegation's, or every issuer's for an unscoped platform admin session): proven with the stamp and the identity's state, proven deleted by an in-scope deletion record for a resource that is gone, or unproven with only the reason (a missing resource and another issuer's stamp get the same answer, and no owner or creator data is returned)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/provenance", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "test_identity.issue",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		Governance: &GovernancePolicy{
+			Kind:        GovernanceIssuerCredential,
+			Description: "Only stamps and deletion records in the caller's issuer scope are proven; unproven, missing and out-of-scope resources are indistinguishable and carry no owner or creator fields; test identities of every kind are refused as callers",
+		},
+		AuthorityEval: AuthorityEvalNone,
+		DenialCodes:   []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestFixtureProvenance_Route"},
+			{Package: "pkg/hub", Function: "TestFixtureProvenance_ScopeAndDeletionRecords"},
+		},
+		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
 		ID:          "testidentity.admin.create",
 		Domain:      "testidentity",
 		Description: "Issue a short-lived test identity holding an expiring hub-admin role (on a hub started with --test-mode=admin or above) or super-admin role (--test-mode=super-admin), and one access token for it (no refresh token, no cookie)",
@@ -180,27 +245,28 @@ var testIdentityOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identities/admin", Method: "POST"},
 		},
 		Principals:            []PrincipalKind{PrincipalUser},
-		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:           []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialWorkloadDelegation},
 		ResourceResolver:      "hub-scoped",
 		BasePermission:        "test_identity.issue_admin",
 		Effects:               []SecurityEffect{EffectCreateResource, EffectGrantAuthority, EffectMintCredential},
 		DelegationKind:        DelegationNonAmplification,
-		DelegationDescription: "The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. The binding expires with the identity",
+		DelegationDescription: "The issued hub-admin or super-admin authority never exceeds the issuer's: the issuer must be a live super-admin through its own current bindings (canIssueTestAdmin), and an access token issuer's frozen ceiling must carry the requested kind's capability. A workload issuer delegation (phase X4) acts for its human grantor within its one admin scope (test_identity:issue_admin or test_identity:issue_super_admin), which must be the requested kind's; inside the issuance transaction the delegation is re-read and the grantor is re-checked as a live human super-admin holding the capability (recheckTestAdminDelegationGrantor). The binding expires with the identity",
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. One live admin-kind identity per issuer, two per hub of which at most one test super-admin; issuance is rate limited per issuer (6/h hub-admin, 2/h super-admin)",
+			Description: "The issuer is a human, live super-admin through its own current bindings; an access token issuer presents a hub-boundary token with exactly the requested kind's scope (test_identity:issue_admin or test_identity:issue_super_admin), at most 8 h old, loaded and checked on every issuance. A workload delegation issuer is admitted only with its delegation's admin scope available at the hub's --test-mode level, and is issue-only. One live admin-kind identity per issuer, or per workload delegation its admin cap (at most 2 test hub-admins or 1 test super-admin); four per hub of which at most one test super-admin, counted across every issuer, access token and delegation under the issuance lock; issuance is rate limited per issuer or delegation (6/h hub-admin, 2/h super-admin)",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "test_admin_issue",
 			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
-			AfterFields:   []string{"user_id", "kind", "role", "issued_by", "issuer_credential_id", "issuance_id", "purpose", "expires_at", "token_ttl_seconds"},
+			AfterFields:   []string{"user_id", "kind", "role", "issued_by", "issuer_credential_id", "issuance_id", "purpose", "expires_at", "token_ttl_seconds", "workload_delegation"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestAdmin_IssuanceMatrix"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminDelegation_IssuanceSinkLineAndAudit"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
@@ -265,7 +331,7 @@ var testIdentityOperations = []OperationSpec{
 	{
 		ID:          "testidentity.delegation.create",
 		Domain:      "testidentity",
-		Description: "Delegate member-tier test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope, a member cap and a lifetime of at most 7 days",
+		Description: "Delegate test identity issuance to one pinned workload identity (a subject in the server.hub.test_identities.workload_issuers allowlist) with one scope: test_identity:issue (member and viewer; member cap, lifetime at most 7 days), or on a hub running the admin tier test_identity:issue_admin (admin cap 1-2, at most 8 h) or test_identity:issue_super_admin (admin cap 1, at most 2 h)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/test-identity-delegations", Method: "POST"},
 		},
@@ -277,19 +343,20 @@ var testIdentityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernanceIssuerCredential,
-			Description: "Only a live human user's interactive session may delegate; the scope is exactly test_identity:issue, the subject must be allow-listed for its tier, and every mint re-checks the grantor's live bindings, the delegation and the allowlist",
+			Description: "Only a live human user's interactive session may delegate; the subject must be allow-listed for the scope's tier (max_tier admin for an admin scope). An admin scope is accepted only at its --test-mode level with A2 in place, and only from a live human super-admin's interactive session holding the scope's capability (canIssueTestAdmin). Every mint re-checks the grantor's live bindings, the delegation (including its scope's maximum age from creation) and the allowlist; an admin mint re-checks the grantor inside the issuance transaction",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
 			EventType:     "test_identity_delegation_create",
 			ContextFields: []string{"actor_id", "credential_id", "credential_kind"},
-			AfterFields:   []string{"delegation_id", "grantor", "workload_sub", "scope", "member_cap", "label", "expires_at"},
+			AfterFields:   []string{"delegation_id", "grantor", "workload_sub", "scope", "member_cap", "admin_cap", "label", "expires_at"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, "validation_error"},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentityDelegation_CreateAuthorization"},
+			{Package: "pkg/hub", Function: "TestWorkloadAdminDelegation_SuperAdminCreateOnlyFromLiveHumanSuperAdminSession"},
 		},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},

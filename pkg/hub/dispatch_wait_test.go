@@ -84,6 +84,9 @@ func (f *fakeDispatchStore) FailPendingMessagesWithMissingRecipient(_ context.Co
 func (f *fakeDispatchStore) BackfillNonAgentDispatchState(_ context.Context, _ string) (int, error) {
 	return 0, nil
 }
+func (f *fakeDispatchStore) ExpireAndListStuckPendingMessages(_ context.Context, _ time.Time, _ string) ([]store.ExpiredPendingMessage, error) {
+	return nil, nil
+}
 
 // sendStatus pushes a fake AgentStatusEvent onto the channel.
 func sendStatus(ch chan<- Event, phase, activity string, detail *AgentDetail) {
