@@ -101,8 +101,7 @@ func TestExecInPodDialRetry(t *testing.T) {
 		exec      step
 		wantErr   bool
 		wantIs    error // the returned error must wrap this
-		wantCalls int   // exact call count; 0 means check maxCalls instead
-		maxCalls  int
+		wantCalls int   // exact call count
 		wantSlept []time.Duration
 	}{
 		{
