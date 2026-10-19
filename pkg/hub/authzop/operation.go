@@ -176,15 +176,18 @@ var httpLikeEntryPoints = map[EntryPointKind]bool{
 }
 
 // ResponseSensitivity classifies a response body that must not share a
-// compression context with other content (pkg/hub isCompressBypassPath).
-// The hub keeps every entry point with a non-empty value out of response
-// compression; TestCompressBypass_SensitiveResponsesFromCatalog enforces it.
+// compression context with other content. Every catalog entry point,
+// exemption and pending entry with a non-empty value must be covered by the
+// hub compression bypass (pkg/hub isCompressBypassPath);
+// TestCompressBypass_SensitiveResponsesFromCatalog enforces it.
 type ResponseSensitivity string
 
 const (
 	// ResponseCredential marks a response that can carry a credential:
-	// an access, refresh or identity token, a secret or environment value,
-	// a join or invite code, or a capability URL.
+	// an access, refresh or identity token, a device code, a secret or
+	// environment value, or a join, invite or one-time login code. Agent
+	// create is tagged because its response carries the new agent's
+	// environment values.
 	ResponseCredential ResponseSensitivity = "credential"
 
 	// ResponseCallerSpecific marks a response that carries caller-specific

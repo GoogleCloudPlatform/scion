@@ -16,6 +16,7 @@ package hub
 
 import (
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -25,13 +26,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
 
+// compressPlaceholderRE matches catalog path parameters such as {id}. It is
+// declared here, not shared with web_api_compress_test.go, because that file
+// is excluded from no_sqlite builds and this one is not.
+var compressPlaceholderRE = regexp.MustCompile(`\{[^}]+\}`)
+
 // compressCatalogRoute is one /api/v1/ HTTP route from the authz catalog
-// (an operation entry point or an entry point exemption), reduced to what
-// the MountHubAPI compression decision sees.
+// (an operation entry point, an entry point exemption or a pending bearer
+// entry), reduced to what the MountHubAPI compression decision sees.
 type compressCatalogRoute struct {
 	// key names the route in failures and in compressBypassedUntagged:
-	// "METHOD pattern" for an operation entry point, "exemption pattern"
-	// (the exemption's own pattern, which may carry a method) otherwise.
+	// "METHOD pattern" for an operation entry point, "pending METHOD
+	// pattern" for a pending bearer entry, and "exemption pattern" (the
+	// exemption's own pattern, which may carry a method) for an exemption.
 	key      string
 	owner    string
 	method   string
@@ -93,6 +100,8 @@ var compressBypassedUntagged = map[string]string{
 	"GET /api/v1/secrets/{key}":                         "env/secrets segment",
 	"PUT /api/v1/secrets/{key}":                         "env/secrets segment",
 	"DELETE /api/v1/secrets/{key}":                      "env/secrets segment",
+	"pending DELETE /api/v1/env/{key}":                  "env/secrets segment",
+	"pending PATCH /api/v1/secrets/{key}":               "env/secrets segment",
 
 	// Auth routes: /api/v1/auth/ is bypassed as a whole. Token list and get
 	// return the token prefix only.
@@ -142,8 +151,8 @@ func compressRequestBypassed(method, path string) bool {
 	return method != "" && method != http.MethodGet && isAgentCollectionPath(path)
 }
 
-// compressCatalogRoutes returns every /api/v1/ HTTP route entry point and
-// exemption in the authz catalog. SSE and websocket entry points are
+// compressCatalogRoutes returns every /api/v1/ HTTP route entry point,
+// pending bearer entry and exemption in the authz catalog. SSE and websocket entry points are
 // checked by TestCompressBypass_StreamRoutesFromCatalog.
 func compressCatalogRoutes() []compressCatalogRoute {
 	var routes []compressCatalogRoute
@@ -160,10 +169,26 @@ func compressCatalogRoutes() []compressCatalogRoute {
 				key:      key,
 				owner:    "operation " + string(spec.ID),
 				method:   ep.Method,
-				paths:    []string{placeholderRE.ReplaceAllString(ep.Pattern, "x1")},
+				paths:    []string{compressPlaceholderRE.ReplaceAllString(ep.Pattern, "x1")},
 				response: ep.Response,
 			})
 		}
+	}
+	for _, pe := range authzop.PendingBearerDispositions {
+		if pe.Kind != authzop.EntryPointHTTPRoute || !strings.HasPrefix(pe.Pattern, "/api/v1/") {
+			continue
+		}
+		key := "pending " + pe.Method + " " + pe.Pattern
+		if pe.Variant != "" {
+			key += " #" + pe.Variant
+		}
+		routes = append(routes, compressCatalogRoute{
+			key:      key,
+			owner:    "pending entry",
+			method:   pe.Method,
+			paths:    []string{compressPlaceholderRE.ReplaceAllString(pe.Pattern, "x1")},
+			response: pe.Response,
+		})
 	}
 	for _, ex := range authzop.EntryPointExemptions {
 		method, pattern := "", ex.Pattern
@@ -175,7 +200,7 @@ func compressCatalogRoutes() []compressCatalogRoute {
 		}
 		paths := compressExemptionSamplePaths[ex.Pattern]
 		if paths == nil {
-			sample := placeholderRE.ReplaceAllString(pattern, "x1")
+			sample := compressPlaceholderRE.ReplaceAllString(pattern, "x1")
 			paths = []string{sample}
 			if strings.HasSuffix(sample, "/") {
 				paths = append(paths, sample+"x1")
@@ -263,6 +288,7 @@ func TestCompressBypass_SensitiveResponsesFromCatalog(t *testing.T) {
 		"exemption /api/v1/auth/token",
 		"exemption POST /api/v1/agent/secrets",
 		"exemption /api/v1/brokers/",
+		"pending PUT /api/v1/env/{key}",
 	} {
 		assert.True(t, tagged[want], "expected tagged catalog route %s is missing or untagged", want)
 	}

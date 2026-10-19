@@ -51,6 +51,9 @@ type PendingEntry struct {
 	Method  string
 	Variant string
 	Area    Area
+	// Response classifies what the response body can carry (see
+	// ResponseSensitivity). HTTP-like entry points only.
+	Response ResponseSensitivity
 }
 
 // PendingBearerDispositions lists every live entry point whose catalog
@@ -120,10 +123,10 @@ var PendingBearerDispositions = []PendingEntry{
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/harness-configs/{id}/pull-image", Method: "POST", Area: AreaCatalogResources},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/resolve", Method: "POST", Variant: "ref=registry", Area: AreaCatalogResources},
 	// --- brokers ---
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/rotate-secret", Method: "POST", Area: AreaBrokers},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/brokers/{id}/rotate-secret", Method: "POST", Area: AreaBrokers, Response: ResponseCredential},
 	// --- material ---
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "DELETE", Area: AreaMaterial},
-	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "PUT", Area: AreaMaterial},
+	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/env/{key}", Method: "PUT", Area: AreaMaterial, Response: ResponseCredential},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/gcp-service-accounts/mint", Method: "POST", Area: AreaMaterial},
 	{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/secrets/{key}", Method: "PATCH", Area: AreaMaterial},
 }
