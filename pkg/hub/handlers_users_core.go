@@ -878,11 +878,15 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// This response applies the same per-viewer preferences visibility rule
 	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
-	capTarget := userResource(user)
+	// A token's capabilities are computed on the hub-scoped user record;
+	// other callers' on the user record.
+	var cap *Capabilities
 	if token != nil {
-		capTarget = hubScopedResource("user", user.ID)
+		cap = s.authzService.ComputeCapabilities(ctx, actor,
+			Resource{Type: "user", ID: user.ID, ParentType: "system"})
+	} else {
+		cap = s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
 	}
-	cap := s.authzService.ComputeCapabilities(ctx, actor, capTarget)
 	stripPreferencesForViewer(ctx, user, cap)
 
 	writeJSON(w, http.StatusOK, user)
