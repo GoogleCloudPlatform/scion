@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -24,4 +25,10 @@ import (
 // (project settings override global settings).
 func ResolveRuntime(projectPath, agentName, profileFlag string) runtime.Runtime {
 	return runtime.GetRuntime(projectPath, profileFlag)
+}
+
+// ResolveRuntimeWithRecord is ResolveRuntime that also returns the runtime's
+// build record (runtime.GetRuntimeWithRecord).
+func ResolveRuntimeWithRecord(projectPath, agentName, profileFlag string) (runtime.Runtime, config.RuntimeBuildRecord) {
+	return runtime.GetRuntimeWithRecord(projectPath, profileFlag)
 }
