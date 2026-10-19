@@ -107,3 +107,21 @@ var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Po
 
 // ServingForTest reports whether the relay is still serving.
 func (r *Relay) ServingForTest() bool { return r.serving() }
+
+// SetBeforeIncarnationCloseHookForTest installs the close-once seam: h runs
+// in CloseOlderIncarnationSessions after the sessions were marked and
+// counted, before any is closed. Set it before the relay serves sessions.
+func (r *Relay) SetBeforeIncarnationCloseHookForTest(h func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.testHookBeforeIncarnationClose = h
+}
+
+// SetAfterBrokerAdmissionHookForTest installs h, which runs with the
+// session id when a broker session's admission step has finished. Set it
+// before the relay serves sessions.
+func (r *Relay) SetAfterBrokerAdmissionHookForTest(h func(sessionID string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.testHookAfterBrokerAdmission = h
+}

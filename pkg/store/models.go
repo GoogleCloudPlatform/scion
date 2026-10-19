@@ -1177,6 +1177,12 @@ type BrokerCapabilities struct {
 	// does the hub stop writing those values into InlineConfig
 	// (ptone/scion#4222). Refreshed by every heartbeat.
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY: the node env
+	// layer the hub resolves this broker's dispatches with
+	// (ptone/scion#3916). It is a node configuration value, not a feature
+	// flag. Sent at registration and in every heartbeat with capabilities;
+	// empty (an old broker, or none set) means no node env.
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -2097,6 +2103,16 @@ const (
 // pkg/store/models_test.go — if this literal ever needs to change, that
 // change must ship together with a data migration for existing rows.
 const MessageExpiredStuckPendingReason = "expired: stuck in pending state beyond TTL"
+
+// ExpiredPendingMessage names one message that
+// ExpireAndListStuckPendingMessages moved from "pending" to "failed" at the
+// stuck-pending TTL. It holds only identifiers and the routing target, never
+// the body, so the sweep can log what it expired (ptone/scion#5211).
+type ExpiredPendingMessage struct {
+	ID        string    // message UUID
+	Recipient string    // target, e.g. "agent:<slug>"
+	CreatedAt time.Time // when the row was written; pending since then
+}
 
 // =============================================================================
 // Notifications (Agent Status Notification System)
@@ -4496,6 +4512,12 @@ type MutationAuditRecord struct {
 	ExchangeAgentCredentialID string
 	ActorKind                 string
 	AgentDelegationCode       string
+
+	// ProvenanceBasis is the JSON provenance basis of a delete made by the
+	// test identity purge (3b), the purge of admin kinds (A3) or the
+	// issuer cleanup (3c, ptone/scion#4240): the creation-time stamp the
+	// delete relied on and its run. Empty for every other record.
+	ProvenanceBasis string
 }
 
 // MutationAuditFilter defines query parameters for listing mutation audit records.

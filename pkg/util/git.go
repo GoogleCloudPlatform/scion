@@ -15,6 +15,7 @@
 package util
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -316,19 +317,24 @@ func CreateWorktree(path, branch string) error {
 	root := filepath.Dir(commonDir)
 
 	// git worktree add --relative-paths -b <branch> <path>
-	// We run from root to ensure --relative-paths are calculated from root
+	// We run from root to ensure --relative-paths are calculated from root.
+	// LC_ALL=C keeps git's messages in English, so the matches below hold.
+	gitEnv := append(os.Environ(), "LC_ALL=C")
 	cmd := exec.Command("git", "worktree", "add", "--relative-paths", "-b", branch, path)
 	cmd.Dir = root
+	cmd.Env = gitEnv
 	if output, err := cmd.CombinedOutput(); err != nil {
 		outputStr := string(output)
 		// If branch already exists, try to just add it
 		if strings.Contains(outputStr, "already exists") {
 			cmd = exec.Command("git", "worktree", "add", "--relative-paths", path, branch)
 			cmd.Dir = root
+			cmd.Env = gitEnv
 			if output, err := cmd.CombinedOutput(); err != nil {
 				outputStr = string(output)
-				if strings.Contains(outputStr, "already checked out") {
-					return fmt.Errorf("branch '%s' is already checked out in another worktree", branch)
+				if strings.Contains(outputStr, "already checked out") || strings.Contains(outputStr, "already used by worktree") {
+					holder, _ := FindWorktreeByBranchIn(root, branch)
+					return WorktreeBranchHeldError(branch, holder)
 				}
 				return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 			}
@@ -337,6 +343,18 @@ func CreateWorktree(path, branch string) error {
 		return fmt.Errorf("failed to create worktree: %s", strings.TrimSpace(outputStr))
 	}
 	return nil
+}
+
+// WorktreeBranchHeldError reports that branch cannot be checked out because
+// another worktree, at holder, still holds it. holder may be empty when the
+// holding worktree is not known. Only the entry at an agent's own worktree
+// path is ever removed automatically, so when the holding worktree is
+// really gone its entry has to be removed by hand, which the message says.
+func WorktreeBranchHeldError(branch, holder string) error {
+	if holder == "" {
+		return fmt.Errorf("branch '%s' is already checked out in another worktree", branch)
+	}
+	return fmt.Errorf("branch '%s' is already checked out in another worktree at %s; if that worktree no longer exists, run git worktree remove %q in the repository and try again", branch, holder, holder)
 }
 
 // ErrPathNotContained is returned by RemoveWorktree when path's resolved
@@ -525,8 +543,8 @@ func PruneWorktreesIn(repoRoot string) error {
 
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
 // from the repository at repoRoot, using "git worktree remove" (without
-// --force). Unlike PruneWorktreesIn, it never touches the entries of other
-// worktrees.
+// --force). Unlike a repository-wide "git worktree prune", it never touches
+// the entries of other worktrees.
 //
 // It only acts once the worktree directory is gone: when path still exists
 // it does nothing. Without --force, git refuses to delete a checkout that
@@ -535,8 +553,16 @@ func PruneWorktreesIn(repoRoot string) error {
 // re-create at the same path) is still deleted by git, so callers rely on
 // their own ordering: call this only after the worktree at path has been
 // removed. It does nothing when git has no entry for path
-// (already removed or never registered), and inside agent containers (see
-// PruneWorktrees). path must be absolute, so the existence check and git see
+// (already removed or never registered), and inside agent containers
+// (SCION_HOST_UID set), where a host path can look missing while the
+// worktree is in use. path must be absolute, so the existence check and git
+// see the same location.
+//
+// git matches a path with more than one missing trailing component only by
+// its literal text against the recorded entry, and whether that recorded
+// path is symlink-resolved depends on the layout when the worktree was
+// created. So the path is tried as given first and, only if git does not
+// know it, again with its existing ancestor's symlinks resolved; both name
 // the same location. Any other failure (for example a locked entry) is
 // returned; callers must not fall back to a repository-wide prune.
 func RemoveWorktreeEntryIn(repoRoot, path string) error {
@@ -544,6 +570,28 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 		return nil
 	}
 	if repoRoot == "" || path == "" {
+		return nil
+	}
+	return RemoveWorktreeEntry(context.Background(), path, func(ctx context.Context, args ...string) (*exec.Cmd, error) {
+		return exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...), nil
+	})
+}
+
+// RemoveWorktreeEntry is the contract of RemoveWorktreeEntryIn without its
+// agent-container guard, for callers that run git their own way (for
+// example with extra -c settings or environment for a shared checkout).
+// newCmd builds the git command for the given arguments, already pointed
+// at the repository; RemoveWorktreeEntry never adds -C itself. It appends
+// LC_ALL=C to the command's environment so git's messages can be matched.
+//
+// It acts only when path is absent (Lstat reports it does not exist), runs
+// "git worktree remove <path>" without --force, first with path as given
+// and, only if git does not know it, again with its existing ancestor's
+// symlinks resolved. "is not a working tree" after the last attempt means
+// git has no entry for path and is not an error. Any other failure is
+// returned; callers must not fall back to a repository-wide prune.
+func RemoveWorktreeEntry(ctx context.Context, path string, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error)) error {
+	if path == "" {
 		return nil
 	}
 	if !filepath.IsAbs(path) {
@@ -554,16 +602,69 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", path)
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	known, err := removeWorktreeEntryAt(ctx, newCmd, path)
+	if err != nil || known {
+		return err
+	}
+	resolved, ok, err := resolveMissingPath(path)
+	if err != nil {
+		return fmt.Errorf("worktree entry %s: %w", path, err)
+	}
+	if !ok || resolved == path {
+		return nil
+	}
+	_, err = removeWorktreeEntryAt(ctx, newCmd, resolved)
+	return err
+}
+
+// removeWorktreeEntryAt runs "git worktree remove target" through newCmd.
+// It reports known=false, with no error, when git has no worktree at
+// target.
+func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context, args ...string) (*exec.Cmd, error), target string) (known bool, err error) {
+	cmd, err := newCmd(ctx, "worktree", "remove", target)
+	if err != nil {
+		return true, fmt.Errorf("git worktree remove %s: %w", target, err)
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "is not a working tree") {
-			return nil
+			return false, nil
 		}
-		return fmt.Errorf("git worktree remove %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+		return true, fmt.Errorf("git worktree remove %s: %w: %s", target, err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return true, nil
+}
+
+// resolveMissingPath returns path with the symlinks of its deepest existing
+// ancestor resolved and the missing tail rejoined. ok is false when that
+// ancestor cannot be resolved (for example a dangling link); the caller
+// then skips the resolved form rather than guess. An Lstat error other than
+// "does not exist" on the way up is returned.
+func resolveMissingPath(path string) (resolved string, ok bool, err error) {
+	dir := filepath.Clean(path)
+	var tail []string
+	for {
+		if _, err := os.Lstat(dir); err == nil {
+			break
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", false, err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false, nil
+		}
+		tail = append([]string{filepath.Base(dir)}, tail...)
+		dir = parent
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false, nil
+	}
+	return filepath.Join(append([]string{resolvedDir}, tail...)...), true, nil
 }
 
 // DeleteBranchIn deletes a git branch from the specified repository root.

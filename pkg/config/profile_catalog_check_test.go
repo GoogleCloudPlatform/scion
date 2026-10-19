@@ -343,7 +343,7 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	globalDir := catalogHome(t, "local", "gke", "local-nfs")
 	running := NewSettingsOverlay()
-	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
+	running.Update(nil, storedProfiles([]string{"gke"}), nil)
 	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
 
 	oneStored := catalogView(t, globalDir, []string{"gke"})

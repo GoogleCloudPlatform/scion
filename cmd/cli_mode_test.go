@@ -441,6 +441,8 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.profile.show", "hub.profile.remove", "hub.test-identity",
 		"hub.test-identity.issue", "hub.test-identity.token", "hub.test-identity.list",
 		"hub.test-identity.delete", "hub.test-identity.teardown",
+		"hub.test-identity.web-code", "hub.test-identity.issue-admin",
+		"hub.test-identity.cleanup", "hub.test-identity.provenance",
 		"notifications",
 		"schedule", "schedule.list", "schedule.get", "schedule.cancel", "schedule.history",
 		"schedule.create", "schedule.create-recurring", "schedule.pause", "schedule.resume", "schedule.delete",

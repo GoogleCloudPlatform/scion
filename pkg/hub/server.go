@@ -82,6 +82,13 @@ const (
 type ServerConfig struct {
 	// Port is the HTTP port to listen on.
 	Port int
+	// NodeImageRegistry is this hub process's SCION_IMAGE_REGISTRY
+	// (config.ImageRegistryFromEnv, read once at startup): the node env
+	// layer of hub-scope image_registry reads (setup status, image pull,
+	// harness image status, maintenance builds). It never applies to a
+	// dispatch, which uses the target broker's reported value
+	// (ptone/scion#3916).
+	NodeImageRegistry string
 	// Host is the address to bind to (e.g., "0.0.0.0" or "127.0.0.1").
 	Host string
 	// ReadTimeout is the maximum duration for reading the entire request.
@@ -149,6 +156,12 @@ type ServerConfig struct {
 	// admitted through trusted-proxy authentication may open new tunnels
 	// (conduit.proxy_session_max_age; 0 = 1h).
 	ConduitProxySessionMaxAge time.Duration
+	// ConduitTargetStreamDeadlines is server.hub.conduit.target_stream_deadlines
+	// ("off", "enforce"; "" = off): published to targets with the grant
+	// keys, and with "enforce" a user stream to a renewal-capable target is
+	// opened only on a route this node can renew (design §3.5). Only used
+	// behind the hub.conduit experiment.
+	ConduitTargetStreamDeadlines string
 	// PortProxyResponseHeaderTimeout bounds the wait for an agent port's
 	// response headers on the conduit port proxy, the WebSocket handshake
 	// included (server.hub.port_proxy.response_header_timeout; 0 = 60s).
@@ -310,6 +323,12 @@ type ServerConfig struct {
 	// HubID is the unique hub instance ID used for secret namespacing.
 	// If empty, secrets are looked up/stored with an empty scope ID.
 	HubID string
+	// HubIDPinned is true when HubID was configured explicitly
+	// (server.hub.hub_id or SCION_SERVER_HUB_HUBID) rather than derived from
+	// the hostname, the persisted ~/.scion/hub-id file or K_SERVICE. Every
+	// replica of one logical hub must share one pinned id. Every --test-mode
+	// level but off requires it (ValidateTestModeConfig).
+	HubIDPinned bool
 	// HubName is the human-readable hub display name for HA deployments.
 	HubName string
 	// MonitoringDashboardURL is the optional external monitoring dashboard
@@ -500,8 +519,11 @@ type ServerConfig struct {
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
 type MaintenanceConfig struct {
-	// ImageRegistry is the container image registry prefix (e.g., "ghcr.io/myorg").
-	ImageRegistry string
+	// ImageRegistryOverride is SCION_MAINTENANCE_IMAGE_REGISTRY: the
+	// registry of maintenance image builds when set. It applies to those
+	// builds only; otherwise they use the hub-scope image_registry,
+	// resolved at build time (maintenanceImageRegistry, ptone/scion#3916).
+	ImageRegistryOverride string
 	// ImageTag is the default image tag to pull (default: "latest").
 	ImageTag string
 	// Harnesses is the list of harness names whose images should be pulled (e.g., ["claude", "antigravity", "opencode", "codex"]).
@@ -1690,6 +1712,12 @@ type Server struct {
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]
 	conduitAuthzMetrics atomic.Pointer[conduitStreamAuthzMetrics]
+	// conduitOpenRefusedMetrics counts user stream opens refused before
+	// any grant is minted (scion.hub.conduit.stream_open_refused).
+	conduitOpenRefusedMetrics atomic.Pointer[conduitOpenRefusedMetrics]
+	// conduitScopeOfTest, when set (tests only, never in production),
+	// replaces conduitScopeFor in the open mint (conduitScopeOf).
+	conduitScopeOfTest  conduitScopeFunc
 	conduitBrokerRevoke atomic.Pointer[conduitBrokerRevoker] // broker session re-check (conduit_broker_revoke.go)
 	// portProxyMetrics counts agent port proxy upstream header timeouts
 	// (port_proxy_metrics.go); nil until SetPortProxyMetrics.
@@ -1697,10 +1725,23 @@ type Server struct {
 	// conduitRefreshMetrics counts agent AuthRefresh outcomes
 	// (conduit_agent_refresh.go); nil until SetConduitAgentRefreshMetrics.
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
+	// conduitBrokerRPCMetrics counts routed broker requests that fell back
+	// because of a hub-side fault (conduit_broker_routed_metrics.go); nil
+	// until SetConduitBrokerRPCMetrics.
+	conduitBrokerRPCMetrics atomic.Pointer[OTelConduitBrokerRPCMetrics]
+	// conduitBrokerIncarnationMetrics counts broker sessions closed with
+	// 4409 superseded_incarnation and broker incarnation flaps
+	// (conduit_broker_incarnation.go); nil until
+	// SetConduitBrokerIncarnationMetrics.
+	conduitBrokerIncarnationMetrics atomic.Pointer[OTelConduitBrokerIncarnationMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
-	conduitAuthzBindMu     sync.Mutex
-	conduitAuthzUnbind     func()
+	conduitAuthzBindMu sync.Mutex
+	conduitAuthzUnbind func()
+	// conduitGrantKeysBindMu guards conduitGrantKeysUnbind, which releases
+	// the grant key change subscription (conduit_grant_notify.go).
+	conduitGrantKeysBindMu sync.Mutex
+	conduitGrantKeysUnbind func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -2215,6 +2256,10 @@ type Server struct {
 	// sweeper (ptone/scion#4424) so CleanupResources can join it.
 	threadGroupMigration threadGroupMigrationRuntime
 
+	// timestampAutoRun tracks the background stored-timestamp check and its
+	// run of utc-timestamp-normalize at start (see startStoredTimestampCheck).
+	timestampAutoRun timestampAutoRunner
+
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
@@ -2255,6 +2300,11 @@ type Server struct {
 	// directly. Per-Server rather than a package var so a test can shorten
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
+
+	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
+	// authorizeConduitUserStream instead of authorizeConduitAction. Only
+	// tests set it, on their own Server; production code never does.
+	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2300,6 +2350,9 @@ func cloudLogQueryProjectID(cfg ServerConfig) string {
 // New creates a new Hub API server.
 func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
+	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
 	// The test-identity expiry and feature checks run in the auth
@@ -3057,6 +3110,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// Federated visitors: a verified user token linked to an active
 		// federated account; off while federation.project_visitors is off.
 		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
+		// User access credentials from peer hub issuers: refused while
+		// federation.project_visitors is off.
+		FederationHubUserTokensEnabled: srv.federationHubUserTokensEnabled,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
 
@@ -4538,6 +4594,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
+	s.bindConduitGrantKeyEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
@@ -4698,6 +4755,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.controlChannel != nil {
 		hbc := NewHybridBrokerClient(s.controlChannel, httpClient, &hmacBrokerSigner{store: s.store}, s.config.Debug)
 		hbc.SetAffinityLookup(StoreAffinityLookup(s.store, 0))
+		// Transient broker operations go through the conduit Router when
+		// hub.conduit is on and the broker's session lists them.
+		hbc.SetConduitRouting(s.newRoutedBrokerTunnel())
 		if statelessBrokerID := s.GetStatelessEmbeddedBrokerID(); statelessBrokerID != "" {
 			hbc.SetStatelessLocalBrokers([]string{statelessBrokerID})
 		}
@@ -4818,7 +4878,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// Set image registry so bare image names are rewritten before dispatch.
 	// It is read per dispatch, so a saved image_registry applies to the
 	// next agent (ptone/scion#3904).
-	dispatcher.SetImageRegistryProvider(s.resolveImageRegistry)
+	dispatcher.SetImageRegistryProvider(s.dispatchImageRegistryFor)
 
 	return dispatcher
 }
@@ -6366,7 +6426,8 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
 
-	// Report non-canonical stored timestamps (SQLite). It runs in the
+	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
+	// run utc-timestamp-normalize once, after a snapshot. It runs in the
 	// background: on a large store the check is a full scan per time column,
 	// and nothing at start depends on its result.
 	s.startStoredTimestampCheck(ctx)
@@ -6612,6 +6673,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.
 		s.stopThreadGroupMigrationSweeper()
+
+		// Stop the stored-timestamp check and its run at start, and wait for
+		// it (bounded by its own grace) so that a snapshot being copied is
+		// interrupted and its temporary file removed before the process exits.
+		s.stopStoredTimestampCheck()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
@@ -7001,6 +7067,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/experiments", s.guarded("/api/v1/admin/experiments", s.handleAdminExperiments))
 	s.mux.HandleFunc("/api/v1/admin/profiling", s.guarded("/api/v1/admin/profiling", s.handleAdminProfiling))
 	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/rotate", s.guarded("/api/v1/admin/conduit/grant-keys/rotate", s.handleAdminConduitGrantKeyRotate))
+	s.mux.HandleFunc("/api/v1/admin/conduit/grant-keys/revoke", s.guarded("/api/v1/admin/conduit/grant-keys/revoke", s.handleAdminConduitGrantKeyRevoke))
 	s.mux.HandleFunc("/api/v1/admin/agents/reset-auth-all", s.guarded("/api/v1/admin/agents/reset-auth-all", s.handleAdminResetAuthAll))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption", s.guarded("/api/v1/admin/delegation-adoption", s.handleDelegationAdoption))
 	s.mux.HandleFunc("/api/v1/admin/delegation-adoption/previews", s.guarded("/api/v1/admin/delegation-adoption/previews", s.handleDelegationAdoptionPreviews))
@@ -7137,6 +7204,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/test-identities/admin/revoke-all", s.testAdminGate404(s.guarded("POST /api/v1/test-identities/admin/revoke-all", s.handleRevokeAllTestAdminIdentities)))
 	s.mux.HandleFunc("GET /api/v1/test-identities/admin/{id}/residue", s.testAdminGate404(s.guarded("GET /api/v1/test-identities/admin/{id}/residue", s.handleTestAdminResidue)))
 	s.mux.HandleFunc("DELETE /api/v1/test-identities/{id}", s.testIdentitiesGate(s.guarded("DELETE /api/v1/test-identities/{id}", s.handleDeleteTestIdentity)))
+	// Issuer-scoped orphan cleanup and the provenance explain endpoint
+	// (Phase 3c), behind the same flag.
+	s.mux.HandleFunc("POST /api/v1/test-identities/cleanup", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities/cleanup", s.handleTestIdentityCleanup)))
+	s.mux.HandleFunc("GET /api/v1/test-identities/provenance", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identities/provenance", s.handleTestIdentityProvenance)))
 	// Workload-bound issuer delegations (phase X2), behind the same flag.
 	s.mux.HandleFunc("POST /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identity-delegations", s.handleCreateTestIdentityDelegation)))
 	s.mux.HandleFunc("GET /api/v1/test-identity-delegations", s.testIdentitiesGate(s.guarded("GET /api/v1/test-identity-delegations", s.handleListTestIdentityDelegations)))

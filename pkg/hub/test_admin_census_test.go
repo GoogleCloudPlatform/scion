@@ -214,7 +214,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                  "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
 	"handlers_groups.go:removeGroupMember:GetGroupMembership":                          "group governance: the caller's group role for a removal",
 	"handlers_groups.go:removeGroupMember:CountGroupMembersByRole":                     "guard: last group owner on removal",
-	"handlers_groups.go:groupClosureHasRoleBinding:GetParentGroups":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:GetParentGroups":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":             "routing: chat recipients of a project; grants nothing",
 	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                "routing: chat recipients of a project; grants nothing",
 
@@ -249,6 +249,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_governance.go:ReplaceRoleBinding:GetRoleBinding":                              "mutation: the binding being replaced",
 	"handlers_auth.go:deleteSuperAdminRoleBinding:ListRoleBindingsForPrincipal":                      "mutation: bindings being deleted",
 	"handlers_roles.go:deleteRoleBinding:GetRoleBinding":                                             "mutation: the binding being deleted",
+	"handlers_roles.go:authorizeRoleBindingDelete:GetRoleBinding":                                    "routing: the binding's scope selects the project check; the authorization service decides",
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",
@@ -262,7 +263,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
-	"handlers_groups.go:groupClosureHasRoleBinding:ListRoleBindingsForPrincipals":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:ListRoleBindingsForPrincipals":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 
 	// Sign-in (every sign-in path refuses test identities).
 	"handlers_auth.go:hasUIPromotedBinding:ListRoleBindingsForPrincipal": "sign-in: admin_emails demotion protection; test identities never sign in",

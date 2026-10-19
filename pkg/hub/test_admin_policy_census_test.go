@@ -269,6 +269,12 @@ func TestTestAdminPolicy_RoleGateCensus(t *testing.T) {
 				refusals[fn.Name.Name][key] = true
 				_, classified := testAdminRoleGatePolicy[key]
 				assert.True(t, classified, "%s:%s refuses unclassified gate %q", file, fn.Name.Name, key)
+				// A function that refuses under its own "file:function"
+				// key is a gate in its own right, whether or not it also
+				// compares a role.
+				if key == file+":"+fn.Name.Name {
+					found[key] = true
+				}
 			}
 			return true
 		})
