@@ -905,6 +905,29 @@ window.addEventListener('error', (event) => {
     error: event.error as unknown,
   });
 });
+
+/**
+ * First-run redirect: if the system has not completed onboarding, replace the
+ * URL with /onboarding before the first render. Started at the top of init()
+ * and awaited with the other boot requests (ptone/scion#5307).
+ */
+async function redirectIfOnboardingIncomplete(): Promise<void> {
+  const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
+  if (skipRedirectPaths.includes(stripBasePath(window.location.pathname))) return;
+  try {
+    const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
+    if (statusRes.ok) {
+      const status = (await statusRes.json()) as { complete?: boolean };
+      if (!status.complete) {
+        sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
+        window.history.replaceState({}, '', '/onboarding');
+      }
+    }
+  } catch {
+    // System status endpoint unavailable (non-workstation mode) — skip redirect
+  }
+}
+
 window.addEventListener('unhandledrejection', (event) => {
   console.error('[Scion] Unhandled promise rejection:', event.reason);
 });
@@ -933,12 +956,19 @@ async function init(): Promise<void> {
     setInitialPageData(initialData);
   }
 
+  // Start the page chunk for the initial path now (ptone/scion#5307): the
+  // import overlaps the boot requests below instead of following them. It
+  // only fetches; renderRoute still gates the render (flags, permissions).
+  preloadInitialRoute(stripBasePath(window.location.pathname));
+
   // Attach debug logger to state manager to capture all SSE events
   debugLog.attach(stateManager);
 
-  // Start the feature-flag fetch now so it overlaps the auth and component
-  // work below; it is awaited before the first render, which needs the flags.
+  // Start the feature-flag and onboarding-status fetches now so they overlap
+  // the auth and component work below; both are awaited, together with the
+  // timezone refresh, before the first render.
   const featureFlagsReady = applyServerFeatureFlags();
+  const onboardingChecked = redirectIfOnboardingIncomplete();
 
   // Fetch current user from session if not provided by SSR
   let tzReady: Promise<void> = Promise.resolve();
@@ -1002,31 +1032,14 @@ async function init(): Promise<void> {
 
   console.info('[Scion] Components defined, setting up router...');
 
-  // First-run redirect: if the system hasn't completed onboarding, navigate to /onboarding
-  const skipRedirectPaths = ['/onboarding', '/login', '/invite'];
-  if (!skipRedirectPaths.includes(stripBasePath(window.location.pathname))) {
-    try {
-      const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
-      if (statusRes.ok) {
-        const status = (await statusRes.json()) as { complete?: boolean };
-        if (!status.complete) {
-          sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
-          window.history.replaceState({}, '', '/onboarding');
-        }
-      }
-    } catch {
-      // System status endpoint unavailable (non-workstation mode) — skip redirect
-    }
-  }
-
   // Render the initial page based on current URL (strip proxy prefix for route
   // matching). Feature flags must be settled first — renderRoute gates /chat on
   // them, and rendering early would flash a page the server has disabled.
-  // tzReady is awaited alongside it (review R2-1), bounded to
-  // TZ_LOAD_BUDGET_MS (review R3-1); both fetches started above and
-  // overlap, so this adds no latency beyond the slower of
-  // featureFlagsReady and min(the /auth/me refresh, the budget).
-  await Promise.all([featureFlagsReady, tzReady]);
+  // The onboarding check must be settled too: it may replace the URL with
+  // /onboarding. tzReady is awaited alongside them (review R2-1), bounded to
+  // TZ_LOAD_BUDGET_MS (review R3-1); all three started above and overlap,
+  // so this adds no latency beyond the slowest of them.
+  await Promise.all([featureFlagsReady, onboardingChecked, tzReady]);
   ensureRoots();
 
   // The unread conversation count (the header's chat badge and the tab-title
@@ -1142,6 +1155,44 @@ function getShellType(tag: string): ShellType {
   if (PROFILE_ROUTES.has(tag)) return 'profile';
   if (CHAT_ROUTES.has(tag)) return 'chat';
   return 'app';
+}
+
+/**
+ * Starts the imports a route renders with: the page module, plus the profile
+ * or chat shell when that shell is not defined yet. Each import registers its
+ * custom element as a side effect; repeated calls reuse the module.
+ */
+function startRouteLoads(route: RouteConfig, shellType: ShellType): Promise<unknown> {
+  const loads: Promise<unknown>[] = [route.load()];
+  if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
+    loads.push(
+      import('../components/profile/profile-shell.js'),
+      import('../components/profile/profile-nav.js')
+    );
+  }
+  if (shellType === 'chat' && !customElements.get('scion-chat-shell')) {
+    loads.push(import('../components/chat/chat-shell.js'));
+  }
+  return Promise.all(loads);
+}
+
+/**
+ * Fetches the initial path's page chunk while the boot requests are in
+ * flight (ptone/scion#5307). Nothing is rendered: renderRoute starts the same
+ * imports (the module loader dedupes them) and still applies the flag and
+ * permission checks first. The terminal routes are left to their own lazy
+ * loader. A failure here is ignored; renderRoute's own load reports it.
+ */
+function preloadInitialRoute(pathname: string): void {
+  if (
+    pathname === '/terminals' ||
+    terminalAgentRoute.test(pathname) ||
+    legacyTerminalRoute.test(pathname)
+  ) {
+    return;
+  }
+  const route = resolveRoute(pathname);
+  startRouteLoads(route, getShellType(route.tag)).catch(() => undefined);
 }
 
 /** Cached shell element and its type, reused across navigations */
@@ -1336,7 +1387,27 @@ async function renderRoute(path: string): Promise<void> {
   // Per-route permission checks: super-admin-only routes (Diagnostics,
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
+  //
+  // Block /chat routes when the native_chat feature flag is disabled (O2).
+  // Checked before the imports start, so a disabled chat is never fetched
+  // here. (Chat and admin routes are disjoint.)
+  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
+    navigateTo('/');
+    return;
+  }
+
+  const shellType = getShellType(tag);
+
+  // Lazy-load the page component module (and profile/chat shell if needed).
+  // Started before the admin-status request below so the chunk downloads
+  // while it is in flight (ptone/scion#5307); nothing renders until both are
+  // done and the permission check has passed.
+  const loadsReady = startRouteLoads(route, shellType);
+
   if (ADMIN_ROUTES.has(tag)) {
+    // A failed import is reported by the await below; a denied user is
+    // redirected first and never reaches it.
+    loadsReady.catch(() => undefined);
     cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
@@ -1353,27 +1424,7 @@ async function renderRoute(path: string): Promise<void> {
     }
   }
 
-  // Block /chat routes when the native_chat feature flag is disabled (O2).
-  if (CHAT_ROUTES.has(tag) && !isFeatureEnabled('web.native_chat')) {
-    navigateTo('/');
-    return;
-  }
-
-  const shellType = getShellType(tag);
-
-  // Lazy-load the page component module (and profile/chat shell if needed).
-  // The import registers the custom element as a side effect.
-  const loads: Promise<unknown>[] = [route.load()];
-  if (shellType === 'profile' && !customElements.get('scion-profile-shell')) {
-    loads.push(
-      import('../components/profile/profile-shell.js'),
-      import('../components/profile/profile-nav.js')
-    );
-  }
-  if (shellType === 'chat' && !customElements.get('scion-chat-shell')) {
-    loads.push(import('../components/chat/chat-shell.js'));
-  }
-  await Promise.all(loads);
+  await loadsReady;
 
   // If another navigation started while we were loading, abort this render
   if (thisNav !== navigationId) return;
