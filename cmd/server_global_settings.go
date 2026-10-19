@@ -54,5 +54,8 @@ func loadServerEffectiveSettings() (*config.VersionedSettings, []string, error) 
 // runtime.GetRuntime for the co-located broker's default runtime, at
 // startup and when the settings reload swaps the runtime: the global
 // project, so the default runtime never comes from a project found from the
-// working directory.
+// working directory. It is the "global" alias rather than the resolved
+// global directory because runtime.GetRuntime takes a project path and
+// resolves it itself (config.ResolveProjectPath maps "global" to the
+// global directory); the settings loaders above take the directory.
 const serverRuntimeProjectPath = "global"

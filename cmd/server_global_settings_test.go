@@ -119,53 +119,85 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 }
 
 // TestServerStartup_NoWorkingDirectorySettingsLoads guards the server's
-// startup code against a new settings load that resolves the project from
-// the working directory: no config settings loader is called with an empty
-// path, the default runtime is not resolved for an empty project path, and
-// the working-directory image registry check is not used.
+// startup code, and the hub's system runtime handlers, against a new
+// settings load that resolves the project from the working directory. It is
+// a literal-only tripwire: it flags a call whose project-path argument is
+// the literal "" (a variable holding "" is not caught):
+//   - config.LoadSettings, LoadSettingsKoanf, LoadSettingsIgnoringEnvProjectID,
+//     LoadVersionedSettings, LoadEffectiveSettings, LoadEffectiveSettingsFor
+//     and GetResolvedProjectDir
+//   - runtime.GetRuntime
+//   - requireImageRegistryForBrokerAt and imageRegistryConfiguredEnvOrFile
+//
+// and any call of requireImageRegistryForBroker (the standalone broker's
+// working-directory check).
 func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
-	loaders := map[string]bool{
-		"LoadSettings": true, "LoadSettingsKoanf": true, "LoadVersionedSettings": true,
-		"LoadEffectiveSettings": true, "LoadEffectiveSettingsFor": true,
+	configFns := map[string]bool{
+		"LoadSettings": true, "LoadSettingsKoanf": true, "LoadSettingsIgnoringEnvProjectID": true,
+		"LoadVersionedSettings": true, "LoadEffectiveSettings": true, "LoadEffectiveSettingsFor": true,
+		"GetResolvedProjectDir": true,
 	}
-	for _, file := range []string{"server_foreground.go", "server_flat_host.go", "server_global_settings.go", "image_registry_presence.go"} {
+	localFns := map[string]bool{"requireImageRegistryForBrokerAt": true, "imageRegistryConfiguredEnvOrFile": true}
+	// The argument that names the project path, by function.
+	pathArg := func(pkg, fn string) int {
+		if pkg == "config" && fn == "LoadEffectiveSettingsFor" {
+			return 1 // (ctx, projectPath)
+		}
+		return 0
+	}
+	files := []string{
+		"server_foreground.go", "server_flat_host.go", "server_global_settings.go", "image_registry_presence.go",
+		filepath.Join("..", "pkg", "hub", "system_handlers.go"),
+	}
+	for _, file := range files {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, file, nil, 0)
 		require.NoError(t, err)
 		ast.Inspect(f, func(n ast.Node) bool {
-			if fn, ok := n.(*ast.FuncDecl); ok && file == "image_registry_presence.go" && fn.Name.Name != "colocatedActiveProfile" {
-				// Only colocatedActiveProfile in this file runs at server
-				// startup; the rest serves the standalone broker too.
-				return false
-			}
-			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "requireImageRegistryForBroker" {
-				// The standalone broker's working-directory check.
-				return false
+			if fn, ok := n.(*ast.FuncDecl); ok {
+				switch {
+				case file == "image_registry_presence.go" && fn.Name.Name != "colocatedActiveProfile":
+					// Only colocatedActiveProfile in this file runs at server
+					// startup; the rest serves the standalone broker too.
+					return false
+				case fn.Name.Name == "requireImageRegistryForBroker":
+					// The standalone broker's working-directory check.
+					return false
+				}
 			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "requireImageRegistryForBroker" {
-				t.Errorf("%s: requireImageRegistryForBroker resolves the project from the working directory; use the global directory", fset.Position(call.Pos()))
+			isEmptyLit := func(i int) bool {
+				if i >= len(call.Args) {
+					return false
+				}
+				lit, ok := call.Args[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return false
+				}
+				v, err := strconv.Unquote(lit.Value)
+				return err == nil && v == ""
 			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok {
-				return true
-			}
-			pkg, ok := sel.X.(*ast.Ident)
-			if !ok || len(call.Args) == 0 {
-				return true
-			}
-			lit, ok := call.Args[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			if v, err := strconv.Unquote(lit.Value); err != nil || v != "" {
-				return true
-			}
-			if (pkg.Name == "config" && loaders[sel.Sel.Name]) || (pkg.Name == "runtime" && sel.Sel.Name == "GetRuntime") {
-				t.Errorf("%s: %s.%s(\"\") resolves the project from the working directory; use the global directory", fset.Position(call.Pos()), pkg.Name, sel.Sel.Name)
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				if fun.Name == "requireImageRegistryForBroker" {
+					t.Errorf("%s: requireImageRegistryForBroker resolves the project from the working directory; use the global directory", fset.Position(call.Pos()))
+				}
+				if localFns[fun.Name] && isEmptyLit(0) {
+					t.Errorf("%s: %s(\"\") resolves the project from the working directory; use the global directory", fset.Position(call.Pos()), fun.Name)
+				}
+			case *ast.SelectorExpr:
+				pkg, ok := fun.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if (pkg.Name == "config" && configFns[fun.Sel.Name]) || (pkg.Name == "runtime" && fun.Sel.Name == "GetRuntime") {
+					if isEmptyLit(pathArg(pkg.Name, fun.Sel.Name)) {
+						t.Errorf("%s: %s.%s(\"\") resolves the project from the working directory; use the global directory", fset.Position(call.Pos()), pkg.Name, fun.Sel.Name)
+					}
+				}
 			}
 			return true
 		})

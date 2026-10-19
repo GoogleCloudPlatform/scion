@@ -294,7 +294,7 @@ func TestPersistBrokerName_ServerStartReadsIt(t *testing.T) {
 			require.NoError(t, err)
 			settings, _ := loadServerSettings()
 			var vsBroker *config.V1BrokerConfig
-			if vs, _, err := config.LoadEffectiveSettings(""); err == nil && vs != nil && vs.Server != nil {
+			if vs, _, err := loadServerEffectiveSettings(); err == nil && vs != nil && vs.Server != nil {
 				vsBroker = vs.Server.Broker
 			}
 			assert.Equal(t, "rig-c", resolveBrokerName(cfg, settings, vsBroker))

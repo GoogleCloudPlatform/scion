@@ -253,7 +253,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			parentDir := filepath.Dir(projectDir)
 			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("\n%s%s WARNING: Server is running from a project directory context (%s)%s\n",
 				util.Bold, util.Yellow, parentDir, util.Reset)))
-			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          The runtime broker will use this project's templates and settings.%s\n",
+			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          Startup settings come from ~/.scion, but templates and some settings read while the server runs may still come from this project.%s\n",
 				util.Bold, util.Yellow, util.Reset)))
 			fmt.Fprint(os.Stderr, util.ColorFor(os.Stderr, fmt.Sprintf("%s%s          For machine-wide operation, run the server from outside any project directory.%s\n\n",
 				util.Bold, util.Yellow, util.Reset)))
