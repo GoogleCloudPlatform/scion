@@ -35,8 +35,11 @@ import (
 //   R2-1: Concurrent system-authority revoke vs project create/delete/update
 //         proves the mutation cannot commit after authority is removed.
 //   R2-2: Direct service calls for each exported mutation reject broker,
-//         agent JWT, UAT, federation, missing credential context, and
-//         actor-ID mismatch; interactive/dev positives pass.
+//         agent JWT, federation, a user access token credential without a
+//         token identity, missing credential context, and actor-ID
+//         mismatch; interactive/dev positives pass. A user access token
+//         with a token identity is admitted only under project.manage on
+//         the project (project_membership_token_test.go).
 //   R2-3: System caller context bypasses credential check.
 //   Existing RS5 tests remain green (verified by test runner).
 // =============================================================================
@@ -91,7 +94,9 @@ func TestR2_CredentialKind_AddMember_Rejections(t *testing.T) {
 	}{
 		{"broker", CredentialKindBroker},
 		{"agent_jwt", CredentialKindAgentJWT},
-		{"uat", CredentialKindUAT},
+		// A user access token credential whose identity is not a token
+		// identity carries no selectors or boundary to check.
+		{"uat_without_token_identity", CredentialKindUAT},
 		{"federation", CredentialKindFederation},
 	}
 
@@ -226,6 +231,8 @@ func TestR2_CredentialKind_RemoveMember_Rejections(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The user access token kind runs with an identity that is not a
+	// token identity, which is refused.
 	rejectedKinds := []CredentialKind{
 		CredentialKindBroker,
 		CredentialKindAgentJWT,
@@ -296,6 +303,8 @@ func TestR2_CredentialKind_UpdateMemberRole_Rejections(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// The user access token kind runs with an identity that is not a
+	// token identity, which is refused.
 	rejectedKinds := []CredentialKind{
 		CredentialKindBroker,
 		CredentialKindAgentJWT,
@@ -351,6 +360,8 @@ func TestR2_CredentialKind_TransferOwnership_Rejections(t *testing.T) {
 	}))
 	ensureHubMembership(ctx, s, newOwnerID)
 
+	// The user access token kind runs with an identity that is not a
+	// token identity, which is refused.
 	rejectedKinds := []CredentialKind{
 		CredentialKindBroker,
 		CredentialKindAgentJWT,
