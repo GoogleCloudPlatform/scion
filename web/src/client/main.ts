@@ -920,7 +920,7 @@ async function redirectIfOnboardingIncomplete(): Promise<void> {
       const status = (await statusRes.json()) as { complete?: boolean };
       if (!status.complete) {
         sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
-        window.history.replaceState({}, '', '/onboarding');
+        window.history.replaceState({}, '', browserPath('/onboarding'));
       }
     }
   } catch {

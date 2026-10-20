@@ -75,3 +75,14 @@ Part of the webperf epic (#5301). Only `web/src/client/main.ts` changes
   the root tsconfig excludes `*.test.ts` and `__fixtures__`. Only vitest's
   esbuild transform sees them. Adding them to a test tsconfig would be a small,
   separate follow-up.
+
+## Follow-up: onboarding redirect under a base path (upstream review on #3868)
+
+- The onboarding redirect wrote a hardcoded `'/onboarding'` with
+  `replaceState`. C4 moved the line into `redirectIfOnboardingIncomplete()`
+  but did not introduce it: C3's `main.ts` has the same line. Under a non-root
+  base path, the URL lost its base, so a reload left the app. It now uses
+  `browserPath('/onboarding')`, like every other history write in `main.ts`.
+- Regression test `main-onboarding-base-path.test.ts`: `keeps the base path
+  when redirecting to onboarding` (stubs `BASE_URL` to `/scion/`). It fails
+  without the fix (`'/onboarding'` instead of `'/scion/onboarding'`).
