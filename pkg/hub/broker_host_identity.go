@@ -130,14 +130,14 @@ func RecordHostObservation(ctx context.Context, st store.Store, brokerID string,
 // attention, and an info line when the metadata server could not be read.
 func LogHostIdentityState(b *store.RuntimeBroker) {
 	state := hostIdentityState(b)
-	switch {
-	case state == HostIdentityMismatch:
+	switch state {
+	case HostIdentityMismatch:
 		slog.Warn("the configured GCP host service account differs from the host's identity; the configured value is used (change it through the Runtime Broker update API)",
 			"runtime_broker_id", b.ID, "configured", b.GCPHostServiceAccountEmail, "observed", b.HostObservation.Email)
-	case state == HostIdentityPinnedAbsent:
+	case HostIdentityPinnedAbsent:
 		slog.Warn("the configured GCP host service account is not present on the host; the configured value is used (change it through the Runtime Broker update API)",
 			"runtime_broker_id", b.ID, "configured", b.GCPHostServiceAccountEmail)
-	case state == HostIdentityUnknown:
+	case HostIdentityUnknown:
 		slog.Info("the host's GCP identity could not be read from the metadata server", "runtime_broker_id", b.ID)
 	}
 }
