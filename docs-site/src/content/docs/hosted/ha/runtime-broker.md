@@ -27,9 +27,15 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 
 ### 0. Prerequisites
 
-- Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
-- Configure the Hub endpoint in your global settings **before** starting the Runtime Broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. The `scion runtime-broker` commands take their Hub from `--hub` (a URL, or a nickname from the hub list), `SCION_HUB_ENDPOINT` or `hub.endpoint`; they do not use the current Hub selected with `scion use`. A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
-- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset. While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
+- Add the Hub to your hub list, make it current, and sign in:
+  ```bash
+  scion hub add prod https://hub.example.com --use
+  ```
+  ```bash
+  scion hub auth login
+  ```
+- `scion runtime-broker register`, `join` and the other Runtime Broker administration commands (`deregister` picks the hub connection from the Runtime Broker's stored connections (with `--name` when there are several), or, with none stored, the registration in the global settings, but sends the deregistration to the Hub the CLI selects, so select that connection's Hub first) talk to the Hub the CLI selects, like any other command: `--hub` (a URL or a hub list nickname), `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`, then, inside a linked project directory, its link entry, then the current Hub. `scion runtime-broker start` does not use the current Hub: the Runtime Broker process reports to the Hub named in its server settings (next item). A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again. `register` and `join` refuse a Hub URL with user info, a query or a fragment; pass a plain `http(s)` URL.
+- The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset (except on a host that runs a workstation Hub). While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
 - Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - `scion runtime-broker start`, `register` and `join` work outside a project directory; no `--global` is needed.
 
@@ -111,7 +117,7 @@ scion runtime-broker join --broker-id <broker-id> --token-file /path/to/token
 - The token is read from `--token-file` (`-` reads it from stdin), or else from the `SCION_BROKER_JOIN_TOKEN` environment variable. There is no flag that takes the token on the command line. If the file has any group or other permissions, `join` prints a warning and still uses it.
 - `--broker-id` can also come from `SCION_BROKER_ID`.
 - The broker server does not have to be running yet; `join` only warns if it is not.
-- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the Hub endpoint and broker ID in global settings, as `register` does.
+- `join` saves the credentials to `~/.scion/hub-credentials/<name>.json` and records the broker ID and, when unset, `server.broker.hub_endpoint` in global settings (not on a host that runs a workstation Hub), as `register` does.
 - If the host already has credentials for this Hub connection, or its settings name a different broker ID, `join` stops. Pass `--force` to replace them.
 - `--name`, `--transport-mode` and `--transport-audience` work as for `register`.
 
@@ -264,9 +270,11 @@ fs.inotify.max_user_instances=8192
 fs.inotify.max_user_watches=524288
 ```
 
+The new limits apply to new watchers without restarting the Runtime Broker or the agents; the Runtime Broker's startup warning is re-evaluated only at its next start. A VS Code window opened with [`scion vscode`](/scion/reference/cli/#scion-vscode) runs its file watcher inside the agent container too, so it uses an instance of the same limit; when none is left, files created outside the explorer stop appearing in that window. See [Troubleshooting: new files do not appear in the explorer](/scion/reference/cli/#troubleshooting-new-files-do-not-appear-in-the-explorer).
+
 ## Broker Health Monitoring
 
-A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with the Hub), an agent whose saved profile is not one of them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, and otherwise gets the same `503`.
+A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with a Hub that stores at least one profile), an agent whose saved profile is neither one of them nor a built-in profile kept beside them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, otherwise a built-in profile that `active_profile` names (when several are stored), and otherwise gets the same `503`.
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
 
