@@ -219,6 +219,8 @@ func TestApplyBuiltinDefaultResources(t *testing.T) {
 		{name: "fractional request just above builtin", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "2.5"}}, wantLimitCPU: "2.5", wantReqCPU: "2.5"},
 		{name: "explicit limit never changed", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "4"}, Limits: api.ResourceList{CPU: "1"}}, wantLimitCPU: "1", wantReqCPU: "4"},
 		{name: "unparseable request gives no raise", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "lots"}}, wantLimitCPU: "2", wantReqCPU: "lots"},
+		{name: "infinite request gives no raise", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "Inf"}}, wantLimitCPU: "2", wantReqCPU: "Inf"},
+		{name: "infinite millicore request gives no raise", res: &api.ResourceSpec{Requests: api.ResourceList{CPU: "+Infm"}}, wantLimitCPU: "2", wantReqCPU: "+Infm"},
 		{
 			name:          "k8s request above builtin sets k8s limit only",
 			k8s:           &api.K8sResources{Requests: map[string]string{"cpu": "4"}},
@@ -266,6 +268,11 @@ func TestApplyBuiltinDefaultResources(t *testing.T) {
 		{
 			name:         "unparseable k8s request gives no raise",
 			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "many"}},
+			wantLimitCPU: "2",
+		},
+		{
+			name:         "infinite k8s request gives no raise",
+			k8s:          &api.K8sResources{Requests: map[string]string{"cpu": "Infinity"}},
 			wantLimitCPU: "2",
 		},
 	}

@@ -146,12 +146,10 @@ func TestHandleAuthScopes_NonAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleAuthScopes_NonUserIdentity pins the parameterless catalog's
-// backward compatibility: any authenticated identity, not only a user, gets
-// it -- exactly as before this endpoint gained per-project eligibility.
-// Eligibility itself is a per-user computation (CanMintSelector requires a
-// local user principal), so a non-user identity requesting it gets 401
-// instead of a partial or crafted response.
+// TestHandleAuthScopes_NonUserIdentity pins that the selector catalog and
+// the per-project eligibility admit only the credentials the
+// user.self.scopes catalog operation declares: an agent identity, whose
+// credential is an agent JWT, is refused both.
 func TestHandleAuthScopes_NonUserIdentity(t *testing.T) {
 	srv, _ := testServer(t)
 	handler := srv.guarded("/api/v1/auth/scopes", srv.handleAuthScopes)
@@ -160,27 +158,24 @@ func TestHandleAuthScopes_NonUserIdentity(t *testing.T) {
 		ProjectID: tid("authscopes-agent-identity-project"),
 	}}
 
-	t.Run("catalog with no params succeeds for a non-user identity", func(t *testing.T) {
+	t.Run("catalog with no params refuses an agent identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes", nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), agent))
 
 		rr := httptest.NewRecorder()
 		handler(rr, req)
 
-		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-		var resp AuthScopesResponse
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-		assert.NotEmpty(t, resp.Scopes)
+		assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 	})
 
-	t.Run("eligibility with projectId requires a user identity", func(t *testing.T) {
+	t.Run("eligibility with projectId refuses an agent identity", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/scopes?projectId="+tid("authscopes-agent-identity-project"), nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), agent))
 
 		rr := httptest.NewRecorder()
 		handler(rr, req)
 
-		assert.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+		assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
 	})
 }
 
@@ -210,20 +205,16 @@ func TestHandleAuthScopes_ContainsNewScopes(t *testing.T) {
 		"template:read", "template:create", "template:list", "template:update", "template:delete",
 		"harness_config:read", "harness_config:create", "harness_config:list", "harness_config:update", "harness_config:delete",
 		"group:read", "group:create", "group:list", "group:update", "group:delete", "group:addMember", "group:removeMember",
-		"user:read",
+		"user:read", "user:list",
 		"broker:read", "broker:list",
 		"gcp_service_account:read", "gcp_service_account:list", "gcp_service_account:verify", "gcp_service_account:assign",
+		"role:read", "role_binding:read", "access_constraint:read", "hub_audit:read",
 	}
 
 	for _, scope := range expectedNewScopes {
 		if !scopeIDs[scope] {
 			t.Errorf("expected scope %q not found in response", scope)
 		}
-	}
-
-	// user.list is Reserved, so its scope is not offered.
-	if scopeIDs["user:list"] {
-		t.Errorf("scope %q of a Reserved permission is offered", "user:list")
 	}
 
 	// Verify existing agent/project scopes still present
@@ -249,11 +240,12 @@ func TestUATScopes_NoPolicyScopesExist(t *testing.T) {
 
 // TestUATScopes_NoAuthorityEscalationScopes verifies no UAT scopes for
 // authority-escalation operations.
+//
+// user.update and user.suspend have hub-only selectors, pinned by
+// TestUATScopes_UserUpdateAndSuspendAreHubOnly; user.promote has none.
 func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 	forbidden := map[string]bool{
-		"user.suspend":            true,
 		"user.promote":            true,
-		"user.update":             true,
 		"hub.maintenance.execute": true,
 		"hub.admin_mode.update":   true,
 		"hub.auth_reset.execute":  true,
@@ -262,6 +254,23 @@ func TestUATScopes_NoAuthorityEscalationScopes(t *testing.T) {
 		if forbidden[perm.ID] && perm.UATScope != "" {
 			t.Errorf("authority-escalation permission %q has UAT scope %q — should not have UAT scope", perm.ID, perm.UATScope)
 		}
+	}
+}
+
+// TestUATScopes_UserUpdateAndSuspendAreHubOnly pins the selectors of
+// user.update and user.suspend: user:update and user:suspend, each allowed
+// only on a hub boundary and only on the hub-level user record.
+func TestUATScopes_UserUpdateAndSuspendAreHubOnly(t *testing.T) {
+	for id, selector := range map[string]string{"user.update": "user:update", "user.suspend": "user:suspend"} {
+		var scope string
+		for _, perm := range permissions.Registry {
+			if perm.ID == id {
+				scope = perm.UATScope
+			}
+		}
+		assert.Equal(t, selector, scope, "%s selector", id)
+		assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, permissions.PermissionAllowedBoundaries[id], "%s boundaries", id)
+		assert.Equal(t, []permissions.TargetClassKind{permissions.TargetClassKindHubResource}, permissions.SupportedTargetClasses[id], "%s target classes", id)
 	}
 }
 

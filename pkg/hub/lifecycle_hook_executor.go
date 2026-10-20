@@ -311,8 +311,11 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 		vars["ERROR_MSG"] = agent.Message
 	}
 	// The exit reason, only when it is one of the known values; it reaches
-	// the request only as a JSON-encoded body value.
-	if agent.ExitReason != "" && state.ExitReason(agent.ExitReason).IsValid() {
+	// the request only as a JSON-encoded body value. The agent-reported
+	// signaled reason is left out, as unknown values are: it accompanies
+	// almost every ordinary stop.
+	if agent.ExitReason != "" && state.ExitReason(agent.ExitReason).IsValid() &&
+		state.ExitReason(agent.ExitReason) != state.ExitReasonSignaled {
 		vars["EXIT_REASON"] = agent.ExitReason
 	}
 

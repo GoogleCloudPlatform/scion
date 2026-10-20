@@ -88,8 +88,8 @@ container's image (`docker inspect` `.Config.Image`) as
 of the browser's SSE launch events with the time each first arrived, and
 `ui`, the page's launch-step texts with their times and raw step names.
 A2 requires the SSE steps to follow the canonical order (`LAUNCH_STEPS`
-in `selectors.ts`) and each page text to be `Step: ` plus one of them
-with underscores as spaces, in the same order; problems are listed in
+in `selectors.ts`) and each page text to be `Step: ` plus the label of
+one of them (`src/shared/agent-launch-labels.ts`), in the same order; problems are listed in
 `a2.launchStepProblems`. A fast launch may show no step in the page,
 which is recorded only. `stateSequence` entries carry the step shown in
 the banner.

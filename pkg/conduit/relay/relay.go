@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -217,6 +218,15 @@ type Config struct {
 	// session with CloseUnauthenticated. It covers a principal removed
 	// between the caller's pre-admission check and registration.
 	Revalidate func(ctx context.Context, p Principal) error
+	// OnBrokerIncarnationFlap, when set, is called when a broker session
+	// is admitted with an incarnation this relay admitted for the broker
+	// within BrokerIncarnationFlapWindow, after another one
+	// (broker_incarnation.go). Diagnostic only.
+	OnBrokerIncarnationFlap func(brokerID, incarnation string)
+	// OnBrokerSessionsSuperseded, when set, is called with the number of
+	// local sessions of a broker closed with 4409 superseded_incarnation
+	// because a newer incarnation of the broker was admitted here.
+	OnBrokerSessionsSuperseded func(brokerID string, closed int)
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -294,6 +304,16 @@ type Relay struct {
 	// under mu when the drain begins and read by drainOptions.
 	shutdownCap    time.Duration
 	shutdownCapSet bool
+
+	// brokerIncs remembers the incarnations admitted per broker, for the
+	// flap report (broker_incarnation.go).
+	brokerIncs brokerIncarnations
+	// testHookBeforeIncarnationClose runs in CloseOlderIncarnationSessions
+	// after the sessions were marked and counted, before they are closed
+	// (the close-once seam). testHookAfterBrokerAdmission runs when a
+	// broker session's admission step has finished, with its session id.
+	testHookBeforeIncarnationClose func()
+	testHookAfterBrokerAdmission   func(sessionID string)
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -318,6 +338,10 @@ type entry struct {
 	// closeForbidden records that a user StreamOpen was refused before
 	// sess was set; Serve closes the session with 4403 once it is.
 	closeForbidden atomic.Bool
+	// supersededClosed records that the session was closed because a newer
+	// incarnation of its broker was admitted, so it is closed and counted
+	// once (broker_incarnation.go).
+	supersededClosed atomic.Bool
 	// capAt is when the session reaches the lifetime cap (zero: no cap).
 	// Set before the entry is registered; read-only afterwards.
 	capAt time.Time
@@ -711,6 +735,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.goAway(e, r.drainOptions(e))
 	default:
 		r.revalidate(ctx, e)
+		r.admittedBroker(e)
 	}
 
 	<-ls.Done()
@@ -1026,6 +1051,35 @@ func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int
 		_ = e.sess.CloseWithCode(code, reason)
 	}
 	return len(hit)
+}
+
+// NotifyGrantKeysChanged sends GrantKeysChanged on every live local session
+// of a target (agent or broker) whose Hello advertised
+// conduit.FeatureStreamRenewal (design v2.21.27 §3.5, Key-set freshness),
+// and returns how many sessions it was queued on. The frame carries no
+// keys. Queuing never waits on a session, so a session with a full outbound
+// buffer (which is skipped and logged) does not delay the others.
+func (r *Relay) NotifyGrantKeysChanged() int {
+	r.mu.Lock()
+	var targets []*entry
+	for _, e := range r.sessions {
+		if e.rec.PrincipalKind == registry.PrincipalAgent || e.rec.PrincipalKind == registry.PrincipalBroker {
+			targets = append(targets, e)
+		}
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, e := range targets {
+		if !slices.Contains(e.sess.Info().Capabilities.GetFeatures(), conduit.FeatureStreamRenewal) {
+			continue
+		}
+		if err := e.sess.NotifyGrantKeysChanged(); err != nil {
+			r.log.Warn("Conduit relay: GrantKeysChanged not queued", "session_id", e.rec.SessionID, "error", err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // Sessions returns the number of live local sessions.

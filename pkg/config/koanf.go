@@ -169,7 +169,10 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 			return ""
 		}
 		if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, true); ok {
-			if ignoreEnvProjectID {
+			if ignoreEnvProjectID || s == projectkeys.EnvHubProjectID {
+				// SCION_HUB_PROJECT_ID is applied after the file sources
+				// below, so it outranks them; mapped here, the two env
+				// names would collide on project_id in os.Environ order.
 				return ""
 			}
 			return mapped
@@ -249,12 +252,37 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 	// it overrides any project_id inherited from global settings. The original
 	// projectPath points to the .scion directory (before resolveEffectiveProjectPath
 	// redirects to the external config dir).
+	var fileProjectID string
 	if projectPath != "" && projectPath != globalDir {
 		if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
+			fileProjectID = projectID
 			_ = k.Load(confmap.Provider(map[string]interface{}{
 				projectkeys.ConfigProjectIDKey: projectID,
 			}, "."), nil)
 		}
+	}
+
+	// SCION_HUB_PROJECT_ID outranks every file source: the project-id file
+	// and the settings key hub.project_id (and the SCION_PROJECT_ID
+	// environment variable). A disagreement is logged once per distinct
+	// pair of values. SCION_PROJECT_ID keeps its rank: above a top-level
+	// project_id in the files, below hub.project_id and the project-id file.
+	if hubEnv := envHubProjectID(); hubEnv != "" && !ignoreEnvProjectID {
+		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.EnvProjectID, os.Getenv(projectkeys.EnvProjectID))
+		warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDKey, hubProjectID)
+		if camel := k.String(projectkeys.ConfigHubProjectIDJSON); camel != hubProjectID {
+			warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectkeys.ConfigHubProjectIDJSON, camel)
+		}
+		if fileProjectID != "" {
+			warnProjectIDOverride(projectkeys.EnvHubProjectID, hubEnv, projectIDFileSource(projectPath), fileProjectID)
+		}
+		override := map[string]interface{}{projectkeys.ConfigProjectIDKey: hubEnv}
+		if k.Exists(projectkeys.ConfigHubProjectIDJSON) {
+			// Keep GetHubProjectID in step with ProjectID when the files
+			// set a hub project ID of their own.
+			override[projectkeys.ConfigHubProjectIDJSON] = hubEnv
+		}
+		_ = k.Load(confmap.Provider(override, "."), nil)
 	}
 
 	// In v1 format, broker identity fields are stored under server.broker.*

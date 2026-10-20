@@ -37,6 +37,7 @@ import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import type {
   AccessConstraintDraft,
   AccessBoundaryPreview as PreviewData,
@@ -108,7 +109,7 @@ export class ScionAccessBoundaryPreview extends LitElement {
   @state() private loadingMorePrincipals = false;
 
   private abortController: AbortController | null = null;
-  private expiryTimer: ReturnType<typeof setInterval> | null = null;
+  private stopExpiryTimer: (() => void) | null = null;
 
   static override styles = [
     srOnlyStyles,
@@ -499,10 +500,8 @@ export class ScionAccessBoundaryPreview extends LitElement {
   private cleanup(): void {
     this.abortController?.abort();
     this.abortController = null;
-    if (this.expiryTimer !== null) {
-      clearInterval(this.expiryTimer);
-      this.expiryTimer = null;
-    }
+    this.stopExpiryTimer?.();
+    this.stopExpiryTimer = null;
   }
 
   /** Start or restart a preview. */
@@ -597,11 +596,13 @@ export class ScionAccessBoundaryPreview extends LitElement {
   }
 
   private startExpiryTimer(): void {
-    if (this.expiryTimer !== null) {
-      clearInterval(this.expiryTimer);
-    }
+    this.stopExpiryTimer?.();
+    this.stopExpiryTimer = null;
     this.updateExpiryTime();
-    this.expiryTimer = setInterval(() => this.updateExpiryTime(), 1000);
+    // An already expired preview needs no countdown.
+    if (!this.isExpired) {
+      this.stopExpiryTimer = visibleInterval(() => this.updateExpiryTime(), 1000);
+    }
   }
 
   private updateExpiryTime(): void {
@@ -614,10 +615,8 @@ export class ScionAccessBoundaryPreview extends LitElement {
     if (diff <= 0) {
       this.isExpired = true;
       this.expiryTimeLeft = 'Expired';
-      if (this.expiryTimer !== null) {
-        clearInterval(this.expiryTimer);
-        this.expiryTimer = null;
-      }
+      this.stopExpiryTimer?.();
+      this.stopExpiryTimer = null;
       return;
     }
 

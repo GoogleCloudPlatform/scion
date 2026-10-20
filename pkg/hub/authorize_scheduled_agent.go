@@ -16,13 +16,11 @@ package hub
 
 import (
 	"net/http"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 )
 
-// scheduleAuthoringCredentialRefusedMessage is the message of the
-// session-only refusal written by authorizeScheduleAuthoringCredential.
-const scheduleAuthoringCredentialRefusedMessage = "access tokens cannot create, update or resume scheduled events or schedules; use an interactive session"
+// scheduleAuthoringCredentialRefusedMessage is the message of the refusal
+// written by authorizeScheduleAuthoringCredential.
+const scheduleAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume scheduled events or schedules"
 
 // scheduleAuthoringCredentialAllowed reports whether the request's
 // credential may author scheduled work: create a scheduled event or a
@@ -32,21 +30,29 @@ const scheduleAuthoringCredentialRefusedMessage = "access tokens cannot create, 
 //   - a user or dev identity with an interactive session or a dev
 //     credential (sessionCredentialAllowed), or with a broker credential
 //     acting on the user's behalf;
+//   - a scoped user identity with a user access token;
 //   - a federated user identity with a federation credential.
 //
-// Every user access token is refused, for every event type, as is any other
-// credential kind, including an empty or unknown one. A context with no
-// credential record falls back to the identity's own credential
-// classification, as AuthzRequestFromContext does.
+// Any other credential kind, including an empty or unknown one, is refused.
+// A context with no credential record falls back to the identity's own
+// credential classification, as AuthzRequestFromContext does.
+//
+// An admitted user access token is then held to its ceiling and boundary by
+// the scheduled_event permission check (authorizeScheduledEventAccess) and
+// by the event type's target checks, and the revision records the token's
+// ceiling and boundary (revisionAuthorityCeiling).
 func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
-	if identity == nil || IsScopedUserIdentity(identity) {
+	if isNilIdentity(identity) {
 		return false
 	}
 	credential := GetCredentialContextFromContext(ctx)
 	if credential.Kind == "" {
 		credential = credentialContextForIdentity(identity)
+	}
+	if IsScopedUserIdentity(identity) {
+		return credential.Kind == CredentialKindUAT
 	}
 	switch identity.Type() {
 	case "agent":
@@ -69,16 +75,14 @@ func scheduleAuthoringCredentialAllowed(r *http.Request) bool {
 // authorizeScheduleAuthoringCredential is the credential gate of scheduled
 // work authoring (scheduleAuthoringCredentialAllowed). It runs before any
 // target lookup or body read. On a refusal it writes 401 for a request with
-// no identity, otherwise a session-only 403 with the GOV_PENDING reason, and
-// returns false.
+// no identity, otherwise 403, and returns false.
 func authorizeScheduleAuthoringCredential(w http.ResponseWriter, r *http.Request) bool {
 	if GetIdentityFromContext(r.Context()) == nil {
 		Unauthorized(w)
 		return false
 	}
 	if !scheduleAuthoringCredentialAllowed(r) {
-		writeSessionOnlyDenial(w, ErrCodeForbidden, scheduleAuthoringCredentialRefusedMessage,
-			authzop.ReasonGovernancePending)
+		writeForbidden(w, scheduleAuthoringCredentialRefusedMessage)
 		return false
 	}
 	return true
@@ -88,7 +92,7 @@ func authorizeScheduleAuthoringCredential(w http.ResponseWriter, r *http.Request
 // a dispatch_agent scheduled event or schedule (create, any update, resume or
 // re-target that changes what a future dispatch does or who it runs as): the
 // request must carry an identity whose credential may author scheduled work
-// (authorizeScheduleAuthoringCredential). A user access token is refused.
+// (authorizeScheduleAuthoringCredential).
 //
 // An admitted revision records its author's frozen effect ceiling with its
 // attribution (revisionAuthorityCeiling), and each fire bounds the scheduled

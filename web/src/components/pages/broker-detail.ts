@@ -35,6 +35,7 @@ import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
@@ -97,7 +98,7 @@ export class ScionPageBrokerDetail extends LitElement {
   private brokerSettingsError: string | null = null;
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
-  private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopRelativeTimeTick: (() => void) | null = null;
 
   static override styles = [
     brokerTypeBadgeStyles,
@@ -453,16 +454,14 @@ export class ScionPageBrokerDetail extends LitElement {
 
     stateManager.addEventListener('brokers-updated', this.boundOnBrokersUpdated);
 
-    this.relativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+    this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('brokers-updated', this.boundOnBrokersUpdated);
-    if (this.relativeTimeInterval) {
-      clearInterval(this.relativeTimeInterval);
-      this.relativeTimeInterval = null;
-    }
+    this.stopRelativeTimeTick?.();
+    this.stopRelativeTimeTick = null;
   }
 
   private onBrokersUpdated(): void {

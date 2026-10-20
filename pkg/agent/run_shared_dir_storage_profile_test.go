@@ -331,7 +331,7 @@ func TestStartSharedDirStorage_OverlayProfiles(t *testing.T) {
 	o.Update(runtimes, map[string]config.V1ProfileConfig{
 		"local": {Runtime: "docker"},
 		"gke":   {Runtime: "k8s", SharedDirStorageBackend: "nfs"},
-	}, nil, "")
+	}, nil)
 	config.SetGlobalSettingsOverlay(o)
 
 	var a sdsCapture
@@ -343,7 +343,7 @@ func TestStartSharedDirStorage_OverlayProfiles(t *testing.T) {
 	o.Update(nil, map[string]config.V1ProfileConfig{
 		"local": {Runtime: "docker"},
 		"gke":   {Runtime: "k8s"},
-	}, nil, "")
+	}, nil)
 
 	var b sdsCapture
 	_, err = NewManager(newSDSMockRuntime("kubernetes", &b)).Start(context.Background(), sdsStartOpts(f, "agent-b", "gke"))
