@@ -439,14 +439,11 @@ func TestPopulateAgentConfig_NoTelemetryWrittenToRecord(t *testing.T) {
 	template := &store.Template{
 		ID:   "tmpl-no-tel",
 		Slug: "no-tel-template",
-		Config: &store.TemplateConfig{
+		AgentConfig: &api.ScionConfig{
 			Telemetry: &api.TelemetryConfig{
 				Enabled: &tmplEnabled,
 				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://template-otel.example.com"},
 			},
-		},
-		AgentConfig: &api.ScionConfig{
-			Telemetry: &api.TelemetryConfig{Enabled: &tmplEnabled},
 		},
 	}
 	project := &store.Project{

@@ -86,6 +86,11 @@ func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h 
 // Serve right after the session became visible as ready.
 func (r *Relay) SetAfterReadyHookForTest(h func()) { r.testHookAfterReady = h }
 
+// SetAfterDoneHookForTest installs h, which runs in Serve with the session
+// id once a session has ended, before it leaves the relay's session set.
+// Set it before the relay serves sessions.
+func (r *Relay) SetAfterDoneHookForTest(h func(sessionID string)) { r.testHookAfterDone = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 

@@ -686,6 +686,22 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	settingsPath := filepath.Join(globalDir, "settings.yaml")
 
+	// Hold the settings lock from the read below to the write, so a
+	// concurrent settings write (in this process or another, such as a CLI
+	// command) is not lost. Released right after the write, before the
+	// reload.
+	settingsLock, err := config.LockSettingsDir(globalDir)
+	if err != nil {
+		slog.Error("Failed to lock settings file", "error", err)
+		if errors.Is(err, config.ErrSettingsLockTimeout) {
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Settings are being written; try again", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to lock settings file", nil)
+		return
+	}
+	defer settingsLock.Unlock()
+
 	// Load existing settings to merge with updates
 	var raw map[string]interface{}
 	if data, err := os.ReadFile(settingsPath); err == nil {
@@ -818,10 +834,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
+	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
 	}
+	settingsLock.Unlock()
 
 	slog.Info("Server config updated via admin API",
 		"user", user(GetUserIdentityFromContext(r.Context())),

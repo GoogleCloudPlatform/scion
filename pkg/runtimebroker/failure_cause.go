@@ -32,8 +32,12 @@ const redactedMarker = "[REDACTED]"
 const causeCredentialWords = `(?:TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)`
 
 // causeValuePattern matches a value after a key and its separator: a
-// quoted string, or a run up to whitespace or a delimiter.
+// quoted string, or a run up to whitespace or a delimiter (blankKeyValues
+// extends an unquoted value over the words after it).
 const causeValuePattern = `("[^"]*"|'[^']*'|[^\s,;&"'}\]]+)`
+
+// causeValueDelimiters end an unquoted value.
+const causeValueDelimiters = ",;&\"'}]"
 
 var (
 	// A PEM block, or an unterminated one running to the end of the text.
@@ -73,9 +77,11 @@ var (
 // The result is then truncated to maxLoggedCauseBytes, with a marker giving
 // the sanitized length.
 //
-// The terminal create failure records (synchronous create and async
-// launch) pass their cause and error fields through this. The text never
-// reaches a client response.
+// The records of the create and start failures whose client response is
+// the fixed "Failed to <op>" text (synchronous create, async launch, create
+// preflight, start, restart, and start context preparation) pass their
+// cause and error fields through this. The text never reaches a client
+// response.
 func sanitizeFailureCause(text string) string {
 	s := causePEMRe.ReplaceAllString(text, redactedMarker)
 	s = causeURLUserInfoRe.ReplaceAllString(s, "${1}"+redactedMarker+"@")
@@ -109,15 +115,66 @@ func blankBasic(m string) string {
 
 // blankKeyValues replaces the value of every match of re in s, whose
 // groups are key, separator and value, with redactedMarker, keeping the key
-// and separator. A value an earlier rule already replaced is left as is.
+// and separator. An unquoted value also takes in the space-separated words
+// after it on the same line (extendValue), so a value with spaces is
+// blanked whole. A value an earlier rule already replaced is left as is.
 func blankKeyValues(re *regexp.Regexp, s string) string {
-	return re.ReplaceAllStringFunc(s, func(m string) string {
-		g := re.FindStringSubmatch(m)
-		if strings.HasPrefix(g[3], "[REDACTED") {
-			return m
+	var b strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringSubmatchIndex(s, -1) {
+		if m[0] < last {
+			continue // inside a value already blanked
 		}
-		return g[1] + g[2] + redactedMarker
-	})
+		value := s[m[6]:m[7]]
+		if strings.HasPrefix(value, "[REDACTED") {
+			continue
+		}
+		end := m[1]
+		if value[0] != '"' && value[0] != '\'' {
+			end = extendValue(s, end)
+		}
+		b.WriteString(s[last:m[6]])
+		b.WriteString(redactedMarker)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// extendValue returns the end of an unquoted value that ends at i in s,
+// extended over each following word that is separated from it by spaces or
+// tabs only, ends at whitespace, a delimiter or the end of s, and is not a
+// key: it holds no '=' or ':', and the next non-whitespace character after
+// it (on any line) is not one either. A redactedMarker counts as one word.
+func extendValue(s string, i int) int {
+	for {
+		j := i
+		for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+			j++
+		}
+		if j == i {
+			return i
+		}
+		k := j
+		if strings.HasPrefix(s[j:], redactedMarker) {
+			k = j + len(redactedMarker)
+		} else {
+			for k < len(s) && !strings.ContainsRune(" \t\r\n"+causeValueDelimiters, rune(s[k])) {
+				k++
+			}
+		}
+		if k == j || strings.ContainsAny(s[j:k], "=:") {
+			return i
+		}
+		n := k
+		for n < len(s) && strings.ContainsRune(" \t\r\n", rune(s[n])) {
+			n++
+		}
+		if n < len(s) && (s[n] == '=' || s[n] == ':') {
+			return i
+		}
+		i = k
+	}
 }
 
 // looksEncoded reports whether run, a long run of base64/hex characters,

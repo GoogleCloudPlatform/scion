@@ -168,6 +168,8 @@ A project's own accounts live under `/api/v1/projects/:id/gcp-service-accounts` 
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
+In the list (`GET /api/v1/runtime-brokers`, without `projectId`) and in `GET /api/v1/runtime-brokers/:id`, a Runtime Broker that runs in the process answering the request (the server's co-located Runtime Broker or one of its co-located flat instances) carries the read-only `hostedByThisServer: true`. The field is omitted for every other Runtime Broker. With several Hub replicas behind a load balancer, it describes the replica that answered.
+
 #### Broker Settings (`/api/v1/runtime-brokers/:id/settings`)
 
 A general per-broker settings mechanism. `maxAgents`, a per-broker override of the `max_agents_per_broker` cap, is the first registered key.
@@ -446,7 +448,6 @@ Besides the startup lines, issuance and revoke-all, every request a test hub-adm
 - `GET /experiments`, `PUT /experiments`, `DELETE /experiments`: Manage hub-wide experiment overrides (requires `hub.experiments.update`). `GET` lists every registered experiment with its `default`, stored `override`, and resolved `enabled` value, plus the section `revision`. `PUT` body: `{"overrides": {"<name>": true|false|null}, "expected_revision": N}`. `null` removes an override, omitted names are unchanged, and unregistered names return `400`. A stale revision returns `409` (`revision_conflict`). `DELETE` resets all overrides to registry defaults (body: `expected_revision`, or `confirm_reset_malformed: true` if the stored section is malformed). There is no admin UI yet.
 - `GET /validate-resources`: Check storage consistency for global templates and harness configs, and list templates whose config holds values agents ignore. Requires the admin role. The response has `reports` (one storage validation report per resource), `summary` (`total`, `passed`, `failed`) and `templateConfigFindings`, which covers templates in every scope. Each finding has `kind`, `template`, `templateId`, `scope`, `scopeId`, `keys` and `message`. Kinds:
   - `environment_keys`: the template's `scion-agent.yaml` sets environment keys (`image`, `resources`, `volumes`, `kubernetes`, `hub`, `telemetry`) or `SCION_*` env keys. `keys` lists them (`env.<KEY>` for an env key), and `message` is the warning agents print: `template <name> sets environment key(s) <keys>; ignored (environment comes from settings)`.
-  - `stored_config`: the template row still holds a stored `config` or `image` written through the old API, which no longer takes effect. `keys` lists `config.<field>` for each stored config field, and `image`.
 
   Findings are reported only; nothing is rewritten.
 - `GET /messaging/divergence`: View a read-only snapshot of migration divergence counters and metadata for the conversation model transition (requires `hub.diagnostics.read` permission).

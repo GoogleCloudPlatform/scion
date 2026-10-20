@@ -2830,8 +2830,6 @@ var (
 		{Name: "description", Type: field.TypeString, Nullable: true},
 		{Name: "harness", Type: field.TypeString},
 		{Name: "default_harness_config", Type: field.TypeString, Nullable: true},
-		{Name: "image", Type: field.TypeString, Nullable: true},
-		{Name: "config", Type: field.TypeString, Nullable: true},
 		{Name: "agent_config", Type: field.TypeString, Nullable: true},
 		{Name: "content_hash", Type: field.TypeString, Nullable: true},
 		{Name: "scope", Type: field.TypeString, Default: "global"},
@@ -2860,7 +2858,7 @@ var (
 			{
 				Name:    "template_slug_scope_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[11], TemplatesColumns[12]},
+				Columns: []*schema.Column{TemplatesColumns[2], TemplatesColumns[9], TemplatesColumns[10]},
 			},
 			{
 				Name:    "template_harness",
@@ -2870,12 +2868,12 @@ var (
 			{
 				Name:    "template_status",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[20]},
+				Columns: []*schema.Column{TemplatesColumns[18]},
 			},
 			{
 				Name:    "template_content_hash",
 				Unique:  false,
-				Columns: []*schema.Column{TemplatesColumns[10]},
+				Columns: []*schema.Column{TemplatesColumns[8]},
 			},
 		},
 	}

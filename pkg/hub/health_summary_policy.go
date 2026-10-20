@@ -55,6 +55,7 @@ const (
 	HealthAttentionIntegration    = "integration"
 	HealthAttentionDispatch       = "dispatch"
 	HealthAttentionAgents         = "agents"
+	HealthAttentionSchedule       = "schedule"
 )
 
 // HealthAttentionBrokerHostIdentity is the attention item kind for a
@@ -70,6 +71,8 @@ const (
 	HealthSubjectDispatch    = "dispatch"
 	HealthSubjectAgent       = "agent"
 	HealthSubjectAgents      = "agents"
+	HealthSubjectSchedule    = "schedule"
+	HealthSubjectSchedules   = "schedules"
 )
 
 // HealthAttentionItem is one entry of the health summary's ranked "Needs
@@ -78,7 +81,7 @@ type HealthAttentionItem struct {
 	// Severity is critical or warning.
 	Severity string `json:"severity"`
 	// Kind is hub_check, hub_instance, broker_offline, broker_degraded,
-	// broker_nfs, broker_host_identity, integration, dispatch or agents.
+	// broker_nfs, broker_host_identity, integration, dispatch, agents or schedule.
 	Kind    string                 `json:"kind"`
 	Subject HealthAttentionSubject `json:"subject"`
 	// Message is a fixed, server-composed sentence.
@@ -117,7 +120,9 @@ type HealthAttentionSubject struct {
 // warning for hubInstanceStoppedReportingWindow after its last write and
 // does not change the status. A stopped hub instance adds nothing.
 // Stalled agents are never counted. Offline agents, and error or crashed
-// agents below the ratio, add warning items only.
+// agents below the ratio, add warning items only. Failing schedules add
+// warning items only (scheduleAttention): the schedules section holds only
+// what the caller may read, so it must not change the status.
 //
 // Hub check items, one per non-healthy check per live hub instance, are
 // critical only when the fleet status is unhealthy, otherwise warnings.
@@ -126,7 +131,7 @@ type HealthAttentionSubject struct {
 // is reporting" or "Hub instance data not available"), hub check items
 // (critical checks first), then broker warnings, "stopped reporting" hub instance warnings, integration
 // and dispatch warnings, then the agent error ratio item, then agent items
-// (errored, crashed, offline).
+// (errored, crashed, offline), then failing schedule items.
 func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAttentionItem) {
 	status := HealthStatusHealthy
 	degrade := func() { status = worseHealthStatus(status, HealthStatusDegraded) }
@@ -264,6 +269,8 @@ func deriveHealthSummaryStatus(resp *HealthSummaryResponse) (string, []HealthAtt
 			items = append(items, agentGroupAttention(g)...)
 		}
 	}
+
+	items = append(items, scheduleAttention(resp.Schedules)...)
 
 	return status, items
 }

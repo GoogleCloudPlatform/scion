@@ -81,6 +81,12 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
+		// A target without stream renewal is refused (409), never retried
+		// on the port-forward tunnel: the caller answers it with
+		// writeConduitProxyError, not as "no session".
+		if s.conduitTargetUpgradeRequired(ctx, identity, renews, conduitRouteProxy, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
 		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
@@ -463,6 +469,9 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 	case errors.Is(err, errConduitStreamRenewalUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, conduitStreamRenewalUnavailableMessage,
 			map[string]interface{}{"reason": conduitReasonStreamRenewalUnavailable})
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		writeError(w, http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitAgentUpgradeRequiredMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnsupported})
 	case errors.Is(err, errConduitGrantInternal):
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
 	case errors.Is(err, errConduitInvalid):
