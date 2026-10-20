@@ -2531,6 +2531,7 @@ var (
 		{Name: "event_type", Type: field.TypeString},
 		{Name: "payload", Type: field.TypeString, Default: "{}"},
 		{Name: "status", Type: field.TypeString, Default: "active"},
+		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "next_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_at", Type: field.TypeTime, Nullable: true},
 		{Name: "last_run_status", Type: field.TypeString, Nullable: true},
@@ -2565,7 +2566,7 @@ var (
 			{
 				Name:    "schedule_next_run_at",
 				Unique:  false,
-				Columns: []*schema.Column{SchedulesColumns[22]},
+				Columns: []*schema.Column{SchedulesColumns[23]},
 			},
 		},
 	}

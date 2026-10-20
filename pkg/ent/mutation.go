@@ -73436,6 +73436,7 @@ type ScheduleMutation struct {
 	event_type                            *string
 	payload                               *string
 	status                                *string
+	status_reason                         *string
 	next_run_at                           *time.Time
 	last_run_at                           *time.Time
 	last_run_status                       *string
@@ -74518,6 +74519,55 @@ func (m *ScheduleMutation) ResetStatus() {
 	m.status = nil
 }
 
+// SetStatusReason sets the "status_reason" field.
+func (m *ScheduleMutation) SetStatusReason(s string) {
+	m.status_reason = &s
+}
+
+// StatusReason returns the value of the "status_reason" field in the mutation.
+func (m *ScheduleMutation) StatusReason() (r string, exists bool) {
+	v := m.status_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatusReason returns the old "status_reason" field's value of the Schedule entity.
+// If the Schedule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduleMutation) OldStatusReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatusReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatusReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatusReason: %w", err)
+	}
+	return oldValue.StatusReason, nil
+}
+
+// ClearStatusReason clears the value of the "status_reason" field.
+func (m *ScheduleMutation) ClearStatusReason() {
+	m.status_reason = nil
+	m.clearedFields[schedule.FieldStatusReason] = struct{}{}
+}
+
+// StatusReasonCleared returns if the "status_reason" field was cleared in this mutation.
+func (m *ScheduleMutation) StatusReasonCleared() bool {
+	_, ok := m.clearedFields[schedule.FieldStatusReason]
+	return ok
+}
+
+// ResetStatusReason resets all changes to the "status_reason" field.
+func (m *ScheduleMutation) ResetStatusReason() {
+	m.status_reason = nil
+	delete(m.clearedFields, schedule.FieldStatusReason)
+}
+
 // SetNextRunAt sets the "next_run_at" field.
 func (m *ScheduleMutation) SetNextRunAt(t time.Time) {
 	m.next_run_at = &t
@@ -74981,7 +75031,7 @@ func (m *ScheduleMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduleMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 31)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, schedule.FieldInitiatorPrincipalKind)
 	}
@@ -75044,6 +75094,9 @@ func (m *ScheduleMutation) Fields() []string {
 	}
 	if m.status != nil {
 		fields = append(fields, schedule.FieldStatus)
+	}
+	if m.status_reason != nil {
+		fields = append(fields, schedule.FieldStatusReason)
 	}
 	if m.next_run_at != nil {
 		fields = append(fields, schedule.FieldNextRunAt)
@@ -75122,6 +75175,8 @@ func (m *ScheduleMutation) Field(name string) (ent.Value, bool) {
 		return m.Payload()
 	case schedule.FieldStatus:
 		return m.Status()
+	case schedule.FieldStatusReason:
+		return m.StatusReason()
 	case schedule.FieldNextRunAt:
 		return m.NextRunAt()
 	case schedule.FieldLastRunAt:
@@ -75191,6 +75246,8 @@ func (m *ScheduleMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldPayload(ctx)
 	case schedule.FieldStatus:
 		return m.OldStatus(ctx)
+	case schedule.FieldStatusReason:
+		return m.OldStatusReason(ctx)
 	case schedule.FieldNextRunAt:
 		return m.OldNextRunAt(ctx)
 	case schedule.FieldLastRunAt:
@@ -75364,6 +75421,13 @@ func (m *ScheduleMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case schedule.FieldStatusReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatusReason(v)
 		return nil
 	case schedule.FieldNextRunAt:
 		v, ok := value.(time.Time)
@@ -75554,6 +75618,9 @@ func (m *ScheduleMutation) ClearedFields() []string {
 	if m.FieldCleared(schedule.FieldFixtureIssuerID) {
 		fields = append(fields, schedule.FieldFixtureIssuerID)
 	}
+	if m.FieldCleared(schedule.FieldStatusReason) {
+		fields = append(fields, schedule.FieldStatusReason)
+	}
 	if m.FieldCleared(schedule.FieldNextRunAt) {
 		fields = append(fields, schedule.FieldNextRunAt)
 	}
@@ -75615,6 +75682,9 @@ func (m *ScheduleMutation) ClearField(name string) error {
 		return nil
 	case schedule.FieldFixtureIssuerID:
 		m.ClearFixtureIssuerID()
+		return nil
+	case schedule.FieldStatusReason:
+		m.ClearStatusReason()
 		return nil
 	case schedule.FieldNextRunAt:
 		m.ClearNextRunAt()
@@ -75701,6 +75771,9 @@ func (m *ScheduleMutation) ResetField(name string) error {
 		return nil
 	case schedule.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case schedule.FieldStatusReason:
+		m.ResetStatusReason()
 		return nil
 	case schedule.FieldNextRunAt:
 		m.ResetNextRunAt()

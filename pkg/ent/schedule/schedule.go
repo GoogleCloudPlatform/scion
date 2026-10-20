@@ -56,6 +56,8 @@ const (
 	FieldPayload = "payload"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldStatusReason holds the string denoting the status_reason field in the database.
+	FieldStatusReason = "status_reason"
 	// FieldNextRunAt holds the string denoting the next_run_at field in the database.
 	FieldNextRunAt = "next_run_at"
 	// FieldLastRunAt holds the string denoting the last_run_at field in the database.
@@ -102,6 +104,7 @@ var Columns = []string{
 	FieldEventType,
 	FieldPayload,
 	FieldStatus,
+	FieldStatusReason,
 	FieldNextRunAt,
 	FieldLastRunAt,
 	FieldLastRunStatus,
@@ -267,6 +270,11 @@ func ByPayload(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByStatusReason orders the results by the status_reason field.
+func ByStatusReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStatusReason, opts...).ToFunc()
 }
 
 // ByNextRunAt orders the results by the next_run_at field.
