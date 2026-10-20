@@ -4024,7 +4024,8 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 			agentStatus = string(state.PhaseError)
 		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
 			// Non-terminal pod phases are represented via ContainerStatus and
-			// local agent-info state until the agent exits.
+			// local agent-info state until the agent exits; a Pending pod
+			// reports "starting" (below, after the container status check).
 		}
 
 		// Try to get more detail from container status
@@ -4056,6 +4057,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 				}
 				break
 			}
+		}
+
+		// A Pending pod has not started its agent container yet: it is
+		// waiting to be scheduled (for example for a node scale-up), pulling
+		// images or running init containers. Report it as starting, so
+		// agent.Manager.List does not fall back to agent-info.json's phase,
+		// which Start sets to running before the pod is created; otherwise a
+		// broker heartbeat would report a Pending pod as running and the hub
+		// would end an active launch as observed running (ptone/scion#5365).
+		// A terminated agent container keeps its stopped/error mapping, and a
+		// committed disruption below still overrides this.
+		if agentStatus == "" && p.Status.Phase == corev1.PodPending {
+			agentStatus = string(state.PhaseStarting)
 		}
 
 		// A pod that reached a terminal phase may have gotten there through a
