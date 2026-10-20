@@ -277,7 +277,7 @@ func init() {
 	serverStartCmd.Flags().IntVar(&webPort, "web-port", 8080, "Web frontend port")
 	serverStartCmd.Flags().StringVar(&webAssetsDir, "web-assets-dir", "", "Path to client assets directory (overrides embedded)")
 	serverStartCmd.Flags().StringVar(&webSessionSecret, "session-secret", "", "Session cookie signing secret (auto-generated if empty)")
-	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects (e.g., https://scion.example.com)")
+	serverStartCmd.Flags().StringVar(&webBaseURL, "base-url", "", "Public base URL for OAuth redirects and the hub endpoint; outranks server.hub.public_url (e.g., https://scion.example.com)")
 
 	// Admin bootstrap flags
 	registerConduitServerFlags(serverStartCmd.Flags())

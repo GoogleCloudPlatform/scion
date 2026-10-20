@@ -25,7 +25,7 @@ import (
 
 // NormalizeFileContent normalizes line endings from CRLF to LF for text files.
 // Binary content (detected by the presence of null bytes or invalid UTF-8 in
-// the first 8KB) is returned unchanged.
+// the first 8KB, extended to a rune boundary) is returned unchanged.
 func NormalizeFileContent(data []byte) []byte {
 	if !isTextContent(data) {
 		return data
@@ -37,11 +37,16 @@ func NormalizeFileContent(data []byte) []byte {
 }
 
 // isTextContent returns true if data appears to be text (UTF-8, no null bytes).
-// It inspects at most the first 8KB.
+// It inspects the first 8KB, plus up to three bytes to finish a UTF-8 rune.
 func isTextContent(data []byte) bool {
 	sample := data
 	if len(sample) > 8192 {
-		sample = sample[:8192]
+		end := 8192
+		// Do not reject valid text just because the sample splits a rune.
+		for end < len(data) && end < 8192+utf8.UTFMax-1 && !utf8.RuneStart(data[end]) {
+			end++
+		}
+		sample = data[:end]
 	}
 	if bytes.ContainsRune(sample, 0) {
 		return false

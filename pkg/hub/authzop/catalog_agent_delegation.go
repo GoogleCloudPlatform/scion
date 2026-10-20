@@ -62,7 +62,7 @@ var agentDelegationOperations = []OperationSpec{
 		Domain:      "agent.delegation",
 		Description: "Exchange an agent delegation grant, with the bound agent's own agent token, for a short-lived opaque delegated credential",
 		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/delegations/{grantId}/exchange", Method: "POST"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/delegations/{grantId}/exchange", Method: "POST", Response: ResponseCredential},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialAgentJWT},

@@ -82,8 +82,9 @@ var conduitRenewalDenyGrantErrors = []error{
 //     (a store or key-set read failed), even when the error also reads as a
 //     refusal;
 //   - deny: authorization denied (including an inactive principal and a
-//     project mismatch), or a verification result in
-//     conduitRenewalDenyGrantErrors;
+//     project mismatch), a relay-presented grant naming another principal
+//     than the stream's session (errConduitRenewalSessionBinding), or a
+//     verification result in conduitRenewalDenyGrantErrors;
 //   - unavailable: everything else, including an inconsistent placement, a
 //     validly signed grant whose via or stream is missing or outside the
 //     origin table, a signing key past its not_after (reported only for an
@@ -96,7 +97,8 @@ func ClassifyConduitRenewal(err error) ConduitRenewalOutcome {
 		return ConduitRenewalTargetGone
 	case errors.Is(err, errConduitAuthzUnavailable):
 		return ConduitRenewalUnavailable
-	case errors.Is(err, errConduitForbidden), errors.Is(err, errConduitPrincipalInactive):
+	case errors.Is(err, errConduitForbidden), errors.Is(err, errConduitPrincipalInactive),
+		errors.Is(err, errConduitRenewalSessionBinding):
 		return ConduitRenewalDeny
 	}
 	for _, deny := range conduitRenewalDenyGrantErrors {
@@ -106,3 +108,11 @@ func ClassifyConduitRenewal(err error) ConduitRenewalOutcome {
 	}
 	return ConduitRenewalUnavailable
 }
+
+// errConduitRenewalSessionBinding refuses a relay-presented renewal
+// re-check whose grant names another principal than the admitted
+// principal of the session holding the stream (design v2.21.40 §3.9,
+// Session binding; §3.5 deny list). It is a binding failure, the same
+// class as a session, epoch, incarnation, open_jti or stream_id mismatch,
+// so ClassifyConduitRenewal reports it as a deny.
+var errConduitRenewalSessionBinding = errors.New("conduit: renewal grant is not bound to the stream's session")
