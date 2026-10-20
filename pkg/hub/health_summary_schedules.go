@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // The schedules section of the health summary (ptone/scion#5404): active
@@ -114,6 +115,11 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 		}
 		filter.InitiatorAgentID = agentID
 		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			if _, err := uuid.Parse(agent.ProjectID()); err != nil {
+				// A project claim that is not a project ID names no
+				// schedules the agent may read.
+				return out, nil
+			}
 			filter.ProjectID = agent.ProjectID()
 		}
 	}

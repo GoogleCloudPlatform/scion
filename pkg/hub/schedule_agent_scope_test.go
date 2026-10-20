@@ -654,3 +654,79 @@ func TestAgentScheduleScope_HealthScanSkipsUnheldRows(t *testing.T) {
 	assert.Equal(t, 1, sec.Total)
 	assert.False(t, sec.ScanLimited)
 }
+
+// scheduledListWideStore lists schedules and scheduled events without the
+// InitiatorAgentID and ProjectID filters, as a store that ignored them would.
+type scheduledListWideStore struct{ store.Store }
+
+func (w scheduledListWideStore) ListSchedules(ctx context.Context, f store.ScheduleFilter, o store.ListOptions) (*store.ListResult[store.Schedule], error) {
+	f.InitiatorAgentID, f.ProjectID = "", ""
+	return w.Store.ListSchedules(ctx, f, o)
+}
+
+func (w scheduledListWideStore) ListScheduledEvents(ctx context.Context, f store.ScheduledEventFilter, o store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+	f.InitiatorAgentID, f.ProjectID = "", ""
+	return w.Store.ListScheduledEvents(ctx, f, o)
+}
+
+// Each row a store returns is decided for an agent caller: with a store that
+// ignores the agent and project filters, the schedule list, the
+// scheduled-event list and the health summary still show only the row the
+// agent holds.
+func TestAgentScheduleScope_RowDecisionHidesRowsStoreReturns(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	ranAt := time.Now().UTC().Add(-time.Minute)
+	ids := map[agentScopeHolder]string{}
+	evtIDs := map[agentScopeHolder]string{}
+	for _, h := range agentScopeHolders {
+		sc := storeAgentScopeSchedule(t, s, projectID, "scope-wide-"+string(h), h, store.ScheduleStatusActive)
+		require.NoError(t, s.UpdateScheduleAfterRun(ctx, sc.ID, ranAt, ranAt.Add(time.Hour), "run failed"))
+		ids[h] = sc.ID
+		evtIDs[h] = storeAgentScopeEvent(t, s, projectID, h).ID
+	}
+	srv.store = scheduledListWideStore{Store: s}
+	t.Cleanup(func() { srv.store = s })
+	caller := agentScopeCaller(projectID)
+
+	rec := doAuthoredScheduleRequest(t, srv, caller, projectID, "", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list ListSchedulesResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&list))
+	require.Len(t, list.Schedules, 1)
+	assert.Equal(t, ids[holderCallerAgent], list.Schedules[0].ID)
+	assert.Zero(t, list.TotalCount, "the count is omitted when rows are dropped")
+
+	rec = doAgentScopeEventRequest(t, srv, caller, projectID, "", http.MethodGet)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var events ListScheduledEventsResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&events))
+	require.Len(t, events.Events, 1)
+	assert.Equal(t, evtIDs[holderCallerAgent], events.Events[0].ID)
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), caller))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	require.Len(t, sec.Failing, 1)
+	assert.Equal(t, ids[holderCallerAgent], sec.Failing[0].ID)
+}
+
+// An agent whose project claim is not a project ID reads no schedules in
+// its health summary: the section is empty and the store is not read.
+func TestAgentScheduleScope_HealthNonUUIDProjectClaimIsEmpty(t *testing.T) {
+	srv, s, _ := setupScheduleTest(t)
+	agent := authzHelperAgent("not-a-project-id", ScopeProjectRead)
+	reads := &scheduledListReadStore{Store: s}
+	srv.store = reads
+	t.Cleanup(func() { srv.store = s })
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+	r = r.WithContext(contextWithIdentity(r.Context(), agent))
+	sec, err := srv.healthSummarySchedules(r)
+	require.NoError(t, err)
+	require.NotNil(t, sec)
+	assert.Empty(t, sec.Failing)
+	assert.Zero(t, sec.Total)
+	assert.Zero(t, reads.reads, "the store is not read")
+}
