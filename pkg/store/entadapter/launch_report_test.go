@@ -1313,27 +1313,33 @@ func TestApplyLaunchReportEnded_OnlyNewBranchEndsFailed(t *testing.T) {
 		name     string
 		report   func(launchID string) store.LaunchReport
 		eligible bool
+		// mutate, when set, changes the row after the launch has ended.
+		mutate func(u *ent.AgentUpdateOne)
 	}{
 		{"claim", func(l string) store.LaunchReport {
 			return store.LaunchReport{LaunchID: l, InstanceID: "i1", State: store.LaunchReportStateClaim, Seq: 10}
-		}, false},
+		}, false, nil},
 		{"checkpoint", func(l string) store.LaunchReport {
 			return store.LaunchReport{LaunchID: l, InstanceID: "i1", State: store.LaunchReportStateCheckpoint, Seq: 11}
-		}, false},
+		}, false, nil},
 		{"progress", func(l string) store.LaunchReport {
 			return store.LaunchReport{LaunchID: l, InstanceID: "i1", State: store.LaunchReportStateProgress, Seq: 12, Step: "home_sync"}
-		}, false},
+		}, false, nil},
 		{"succeeded", func(l string) store.LaunchReport {
 			return store.LaunchReport{LaunchID: l, InstanceID: "i1", State: store.LaunchReportStateSucceeded}
-		}, false},
-		{"failed without a run ID", func(l string) store.LaunchReport { return roFailedReport(l, "") }, false},
-		{"failed for another run", func(l string) store.LaunchReport { return roFailedReport(l, "run-older") }, false},
+		}, false, nil},
+		{"failed without a run ID", func(l string) store.LaunchReport { return roFailedReport(l, "") }, false, nil},
+		{"failed for another run", func(l string) store.LaunchReport { return roFailedReport(l, "run-older") }, false, nil},
 		{"failed broker_restarted", func(l string) store.LaunchReport {
 			r := roFailedReport(l, roRunID)
 			r.ErrorCode = store.LaunchErrorBrokerRestarted
 			return r
-		}, false},
-		{"failed, eligible", func(l string) store.LaunchReport { return roFailedReport(l, roRunID) }, true},
+		}, false, nil},
+		{"failed with live activity", func(l string) store.LaunchReport { return roFailedReport(l, roRunID) }, false,
+			func(u *ent.AgentUpdateOne) { u.SetActivity("working") }},
+		{"failed on a stopped row", func(l string) store.LaunchReport { return roFailedReport(l, roRunID) }, false,
+			func(u *ent.AgentUpdateOne) { u.SetPhase("stopped") }},
+		{"failed, eligible", func(l string) store.LaunchReport { return roFailedReport(l, roRunID) }, true, nil},
 	}
 	ends := []string{store.LaunchEndReasonRunningObserved, store.LaunchEndReasonSucceeded}
 
@@ -1355,6 +1361,9 @@ func TestApplyLaunchReportEnded_OnlyNewBranchEndsFailed(t *testing.T) {
 					})
 					require.NoError(t, err)
 					updateRow(t, ctx, s, a.ID, func(u *ent.AgentUpdateOne) { u.SetActivity("") })
+				}
+				if rc.mutate != nil {
+					updateRow(t, ctx, s, a.ID, rc.mutate)
 				}
 				_, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, rc.report(launchID))
 				require.NoError(t, err)
