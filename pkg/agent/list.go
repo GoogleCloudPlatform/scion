@@ -85,6 +85,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 	runningNames := make(map[string]bool)
 	runtimePhases := make(map[string]string, len(agents))
 	for i := range agents {
+		// startFailed is set when the failed-start overlay below shows this
+		// entry as error; the runtime-starting override then leaves it.
+		startFailed := false
 		// Capture the runtime's Phase before agent-info.json overwrites it.
 		// The runtime Phase (derived from container state) is authoritative
 		// for running/stopped reconciliation below.
@@ -148,12 +151,27 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			// A failed start recorded in the host state file
 			// (ptone/scion#4815) shows as error, for the run this container
 			// belongs to only, and not once the runtime reports the
-			// container running or starting. Display-only and fail-quiet:
-			// HubProjectID is the container's project-id label (set at
-			// create; a local CLI start fills it from project settings), so
-			// this must never feed a delete, cleanup or ownership decision.
-			// Any refusal, error or invalid record means no overlay.
-			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) && rp != string(state.PhaseStarting) &&
+			// container running. The run is the entry's run ID: every start
+			// clears the record before Runtime.Run and carries a new run
+			// ID, so a start in progress never matches a stale record.
+			//
+			// A runtime-reported "starting" does not suppress the overlay
+			// (ptone/scion#5373): a failed synchronous start can leave this
+			// run's entry starting (a Kubernetes pod left Pending), and it
+			// shows as error. The broker heartbeat uses List, so it reports
+			// such an agent to the hub as error too, the report from before
+			// the Kubernetes pod list gave "starting" (ptone/scion#5365).
+			// Cloud Run sandbox entries are unchanged: their List reports no
+			// ProjectPath, so this block is never reached for them; the
+			// broker heartbeat (an unfiltered List) still reports a failed
+			// start's leftover Starting entry as starting.
+			//
+			// Display-only and fail-quiet: HubProjectID is the container's
+			// project-id label (set at create; a local CLI start fills it
+			// from project settings), so this must never feed a delete,
+			// cleanup or ownership decision. Any refusal, error or invalid
+			// record means no overlay.
+			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) &&
 				agents[i].RunID != "" && agents[i].Phase != "deleted" {
 				t := RunOwnerTarget{
 					ProjectPath:  agents[i].ProjectPath,
@@ -163,6 +181,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				if startFailedForDisplay(t, agentDir) == agents[i].RunID {
 					agents[i].Phase = string(state.PhaseError)
 					agents[i].Activity = ""
+					startFailed = true
 				}
 			}
 
@@ -239,8 +258,10 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 		// provisioning, or a previous run's "stopped", "error" or
 		// "running" — must not replace it. Otherwise list and the
 		// broker heartbeat would report a live start as stopped or as
-		// running (ptone/scion#4756).
-		if runtimePhase == string(state.PhaseStarting) {
+		// running (ptone/scion#4756). A failed start recorded for this
+		// run (startFailed, above) is not live and keeps its error
+		// (ptone/scion#5373).
+		if runtimePhase == string(state.PhaseStarting) && !startFailed {
 			agents[i].Phase = string(state.PhaseStarting)
 			agents[i].Activity = ""
 		}

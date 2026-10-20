@@ -36,6 +36,14 @@ type startDispatch struct {
 	agent *store.Agent
 	// priorPhase is the agent's phase when beginStartDispatch was called.
 	priorPhase string
+	// priorRestingPhase is the agent's effective resting phase
+	// (store.EffectiveRestingPhase) when beginStartDispatch was called: the
+	// remembered phase for an error row that remembers the phase a failed
+	// asynchronous start began from, else priorPhase. An asynchronous start
+	// records it as its launch's prior phase, so the memory carries forward
+	// across repeated failures (ptone/scion#4669). rollback restores
+	// priorPhase, the stored phase, not this.
+	priorRestingPhase string
 	// reserved reports whether beginStartDispatch created the reservation
 	// (as opposed to finding one the agent already held).
 	reserved bool
@@ -138,10 +146,11 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 		return nil, err
 	}
 	d := &startDispatch{
-		s:          s,
-		agent:      agent,
-		priorPhase: agent.Phase,
-		reserved:   reserved,
+		s:                 s,
+		agent:             agent,
+		priorPhase:        agent.Phase,
+		priorRestingPhase: store.EffectiveRestingPhase(agent),
+		reserved:          reserved,
 	}
 	if !isBrokerQuotaCountedPhase(agent.Phase) {
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
@@ -247,6 +256,15 @@ func (d *startDispatch) reassertReservation(ctx context.Context) {
 // been dropped by the store's delete guard; see the contract, item 2.
 func (d *startDispatch) wroteStarting() bool {
 	return d != nil && d.marked
+}
+
+// restingPhase returns the effective resting phase recorded when the
+// dispatch began (priorRestingPhase), or "" for a nil d.
+func (d *startDispatch) restingPhase() string {
+	if d == nil {
+		return ""
+	}
+	return d.priorRestingPhase
 }
 
 // settle marks d as finished without undoing anything: the dispatch

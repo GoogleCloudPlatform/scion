@@ -37,14 +37,7 @@ var settingsBypassScanRoots = []string{".", "../../cmd", "../hub", "../hubsync",
 // file directly, as far as this check can see (see its limits below). Each
 // must be a known, tracked exception; an entry that no longer matches fails
 // the test, so the list cannot go stale.
-var settingsBypassAllowed = map[string]string{
-	// The legacy project-ID key migration: it runs from the settings
-	// loaders, sometimes while the caller already holds the settings lock,
-	// so it cannot take the (non-re-entrant) lock and uses compare-then-
-	// rename instead (see its comment). Retired with the legacy loader in
-	// ptone/scion#3919.
-	"migrateLegacyYAMLKeysLocked": "ptone/scion#3919",
-}
+var settingsBypassAllowed = map[string]string{}
 
 // settingsFileNames are the file names whose writes must use the writer.
 var settingsFileNames = map[string]bool{

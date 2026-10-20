@@ -27,6 +27,11 @@ import (
 type StartDispatchArgs struct {
 	Task   string `json:"task,omitempty"`
 	Resume bool   `json:"resume,omitempty"`
+	// Async asks the owner to send the start as an asynchronous launch
+	// (StartDispatchOptions.Async, ptone/scion#4669). An owner that does
+	// not know it runs the start synchronously, and the requester's wait
+	// then ends on the agent's phase as before. No requester sets it yet.
+	Async bool `json:"async,omitempty"`
 }
 
 // RestartDispatchArgs is intentionally empty — the owner's
@@ -156,12 +161,17 @@ type LifecycleDispatchResult struct {
 	// agent never reaches the start's success phase then, so the requester
 	// stops waiting for it once the row is done.
 	DeleteWon bool `json:"deleteWon,omitempty"`
+	// Launch is set when the owner's start was accepted as an
+	// asynchronous launch (StartDispatchResult.Launch, ptone/scion#4669).
+	// The agent reaches its success phase only when the launch ends, so
+	// the requester stops waiting once the row is done with it.
+	Launch *LaunchAccepted `json:"launch,omitempty"`
 }
 
 // marshalLifecycleResult returns the result for a completed start or restart
 // row: "" when there is nothing to carry, as before.
 func marshalLifecycleResult(r LifecycleDispatchResult) string {
-	if len(r.Warnings) == 0 && !r.DeleteWon {
+	if len(r.Warnings) == 0 && !r.DeleteWon && r.Launch == nil {
 		return ""
 	}
 	b, err := json.Marshal(r)
