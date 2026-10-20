@@ -314,7 +314,8 @@ type HubRPCRequest struct {
 	// Features lists what the forwarding relay supports. A relay that opens
 	// the tunnels the hub authorizes lists HubFeatureTunnels; a relay that
 	// does not (an older one) gets the tunnel request refused, never an
-	// instruction it would ignore.
+	// instruction it would ignore. A relay that also re-checks every tunnel
+	// it opens lists HubFeatureTunnelRecheck.
 	Features []string `json:"features,omitempty"`
 }
 
@@ -332,6 +333,13 @@ type HubRPCResponse struct {
 // HubFeatureTunnels is the HubRPCRequest feature of a relay that opens
 // the tunnels the hub authorizes (HubRPCResponse.Tunnel).
 const HubFeatureTunnels = "tunnels"
+
+// HubFeatureTunnelRecheck is the HubRPCRequest feature of a relay that
+// hands every tunnel it opens to its stream scheduler (hint and sweep
+// re-checks; design v2.21.46 §3.9, "Relay feature tunnel_recheck"). The
+// hub stamps a relay-held tunnel's grant for renewal only when the
+// forwarding relay lists it.
+const HubFeatureTunnelRecheck = "tunnel_recheck"
 
 // TunnelsRPCPath is the RPC path of a tunnel request (POST), on the hub
 // and on a relay-held session alike.

@@ -303,7 +303,9 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 			ExcludeTargets: exclude,
 			ExcludeRelays:  excludeRelays,
 			OpenTunnels:    openTunnels,
-			Features:       []string{relay.HubFeatureTunnels},
+			// Every tunnel this relay opens goes to its stream
+			// scheduler (openTunnel), so it lists tunnel_recheck.
+			Features: []string{relay.HubFeatureTunnels, relay.HubFeatureTunnelRecheck},
 		}, &out)
 		var refusal *relay.HubRefusal
 		switch {
