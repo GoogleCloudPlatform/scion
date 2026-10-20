@@ -91,7 +91,7 @@ func TestMoveCheckOrder_WorkspaceRecreatableAfterWorkspaceOnExport(t *testing.T)
 	t.Fatal("workspace_on_export not in moveCheckOrder")
 }
 
-// F2: --force on a move the export checks allow is an export move, with the
+// --force on a move the export checks allow is an export move, with the
 // same checks as without --force.
 func TestEvaluateMoveEligibility_ForceNeverDowngradesExportMove(t *testing.T) {
 	for _, force := range []bool{false, true} {
@@ -476,7 +476,7 @@ func TestAgentMoveRecreateCapabilityIngest(t *testing.T) {
 	}
 }
 
-// A2.6: a Kubernetes, export-placed clone-per-agent agent moving to a
+// A Kubernetes, export-placed clone-per-agent agent moving to a
 // broker whose profile is docker. The export checks refuse it at
 // target_profile only because of placement: --force recreates it, and
 // without --force the refusal is unchanged with forceWouldApply set.
@@ -504,7 +504,7 @@ func TestEvaluateMoveEligibility_PlacementCausedTargetProfile(t *testing.T) {
 	if !ref.ForceWouldApply {
 		t.Error("forceWouldApply not set for a placement-caused target_profile refusal")
 	}
-	// A5 (N1): the same refusal onto a target without forced moves does not
+	// The same refusal onto a target without forced moves does not
 	// suggest --force.
 	noCap := forceMoveInput(moveTestProbeCalls{})
 	noCap.Profile = "local"
@@ -531,7 +531,7 @@ func TestEvaluateMoveEligibility_PlacementCausedTargetProfile(t *testing.T) {
 	}
 }
 
-// A2.6: an nfs target with an unhealthy mount and a docker profile. The
+// An nfs target with an unhealthy mount and a docker profile. The
 // export checks refuse it at target_profile (the Kubernetes constraint,
 // placement-caused), and the recreate checks do not need the mount on a
 // docker profile, so --force recreates.
@@ -548,7 +548,7 @@ func TestEvaluateMoveEligibility_ForceUnhealthyMountDockerProfile(t *testing.T) 
 	}
 }
 
-// A2.6: an nfs target with an unhealthy mount and a Kubernetes profile for
+// An nfs target with an unhealthy mount and a Kubernetes profile for
 // a clone-per-agent workspace: the recreated agent directory would be on
 // the export too, so the move is refused 503 with --force as without it,
 // and forceWouldApply is not set.
@@ -570,7 +570,7 @@ func TestEvaluateMoveEligibility_UnhealthyMountKubernetesProfileStaysRefused(t *
 	}
 }
 
-// A3 (R1): a target_health failure of the export checks is never waived. A
+// A target_health failure of the export checks is never waived. A
 // shared-workspace agent on the same export, with an unhealthy target
 // mount, gets the same 503 at target_health with and without --force, and
 // forceWouldApply is not set.
@@ -608,7 +608,7 @@ func TestEvaluateMoveEligibility_UnhealthyMountSharedWorkspaceNotWaived(t *testi
 	}
 }
 
-// A14: a forced move onto a target with no capabilities at all is refused
+// A forced move onto a target with no capabilities at all is refused
 // at the capability check (412), without a panic. The AgentMove check
 // refuses it first; the nil guard on the forced-move capability behind it
 // is defence in depth and cannot be reached.
@@ -628,7 +628,7 @@ func TestEvaluateMoveEligibility_ForceTargetWithoutCapabilities(t *testing.T) {
 	}
 }
 
-// A14: the git remote is normalized for display, so a remote carrying
+// The git remote is normalized for display, so a remote carrying
 // userinfo shows none, in the workspace_recreatable message and in the
 // workspace consequence.
 func TestEvaluateMoveEligibility_ForceGitRemoteNormalizedForDisplay(t *testing.T) {
@@ -670,7 +670,7 @@ func TestEvaluateMoveEligibility_ForceGitRemoteNormalizedForDisplay(t *testing.T
 	}
 }
 
-// A14: a target without an NFS descriptor reads as an unhealthy export
+// A target without an NFS descriptor reads as an unhealthy export
 // mount, so a move that needs the mount is refused (503), never a panic.
 // The export pass cannot reach target_health with no descriptor
 // (same_export requires one), so the decision is pinned on its helper.
@@ -690,7 +690,7 @@ func TestTargetExportMountHealthy_MissingDescriptorIsUnhealthy(t *testing.T) {
 	}
 }
 
-// A16: in the recreate pass, an nfs target with no NFS details needs the
+// In the recreate pass, an nfs target with no NFS details needs the
 // export mount for a Kubernetes clone-per-agent workspace, reads as
 // unhealthy, and is refused 503 at target_health; a target that reports no
 // workspace storage at all is not refused there (workspace_storage_reported
@@ -710,10 +710,7 @@ func TestEvaluateMoveEligibility_ForceTargetHealthWithoutNFSDetails(t *testing.T
 	t.Run("no workspace storage reported", func(t *testing.T) {
 		in := forceMoveInput(moveTestProbeCalls{})
 		in.Dst.WorkspaceStorage = nil
-		v, ref := evaluateMoveEligibility(in)
-		if ref != nil && checkResults(v)[moveCheckTargetHealth] == MoveCheckFailed {
-			t.Fatalf("refused at target_health: %+v", ref)
-		}
+		v, _ := evaluateMoveEligibility(in)
 		if got := checkResults(v)[moveCheckTargetHealth]; got != MoveCheckPassed {
 			t.Errorf("target_health = %s, want passed", got)
 		}

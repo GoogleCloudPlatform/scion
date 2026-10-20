@@ -67,7 +67,7 @@ func forceHub(t *testing.T, dryStatus int, dryRunBody string, realStatus int, re
 const recreateVerdictBody = `{"agentId":"agent-1","generation":2,"state":"planned","plan":{},"sourceBrokerId":"b1","targetBrokerId":"b2",
 	"moveVerdict":{"eligible":true,"sourceBroker":{"id":"b1"},"targetBroker":{"id":"b2"},"transferMode":"recreate",
 	"checks":[{"name":"same_export","result":"waived","message":"not needed: the workspace is recreated on the target (--force)"},
-		{"name":"workspace_recreatable","result":"passed","message":"fresh clone of https://example.com/r.git on the target"}],
+		{"name":"workspace_recreatable","result":"passed","message":"fresh clone of example.com/r on the target"}],
 	"consequences":[{"kind":"lost","item":"local-work","text":"uncommitted files"},
 		{"kind":"kept","item":"identity","text":"agent ID"},
 		{"kind":"recreated","item":"workspace","text":"fresh clone"},
@@ -170,7 +170,7 @@ func TestPrintMoveVerdict_ExportModeHasNoLossLine(t *testing.T) {
 	assert.NotContains(t, out.String(), "will not survive")
 }
 
-// A5 (O1): a message-less workspace_recreatable pass outside recreate mode
+// A message-less workspace_recreatable pass outside recreate mode
 // says why, for a refused shared-agent verdict and an eligible export
 // verdict alike; a recreate verdict keeps the hub's message.
 func TestPrintMoveVerdict_WorkspaceRecreatableNotNeeded(t *testing.T) {
@@ -254,7 +254,7 @@ func TestPrintMoveForceHint(t *testing.T) {
 	assert.Empty(t, out.String())
 }
 
-// A3 (O2): --dry-run --force --json writes the response, with the transfer
+// --dry-run --force --json writes the response, with the transfer
 // mode and consequences, as JSON on stdout, and none of the human-only
 // lines.
 func TestReincarnateForce_DryRunJSON(t *testing.T) {
@@ -277,7 +277,7 @@ func TestReincarnateForce_DryRunJSON(t *testing.T) {
 	}
 }
 
-// F2 in human output: an export verdict under --force says --force was
+// In human output, an export verdict under --force says --force was
 // not needed.
 func TestReincarnateForce_ExportVerdictSaysForceNotNeeded(t *testing.T) {
 	withBrokerFlags(t, "b2", true)

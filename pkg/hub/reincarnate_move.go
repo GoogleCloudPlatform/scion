@@ -515,6 +515,7 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 	// A forced move needs a target that refuses to provision over files
 	// already there (source cleanup is a localOnly delete, which AgentMove
 	// covers).
+	// Unreachable defence in depth: the AgentMove check above refuses nil Capabilities.
 	if recreate && (dst.Capabilities == nil || !dst.Capabilities.AgentMoveRecreate) {
 		return fail(http.StatusPreconditionFailed, ErrCodeUnsupportedCapability,
 			fmt.Sprintf("broker %s does not support forced moves; upgrade it", dstName))

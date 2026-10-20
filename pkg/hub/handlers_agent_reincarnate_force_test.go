@@ -68,7 +68,7 @@ func forceWouldApplyDetail(t *testing.T, rec *httptest.ResponseRecorder) bool {
 	return v
 }
 
-// AC-2: a forced dry run of a local-workspace agent is a 200 recreate
+// A forced dry run of a local-workspace agent is a 200 recreate
 // verdict, and writes nothing: no provider link, no quota, no record, no
 // agent row change, no dispatch.
 func TestReincarnateMove_ForceDryRun_RecreateVerdictNoSideEffects(t *testing.T) {
@@ -120,7 +120,7 @@ func TestReincarnateMove_ForceReal_RecreateNotEnabled(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// F2 end to end: --force on an export-eligible agent is an export move.
+// End to end: --force on an export-eligible agent is an export move.
 func TestReincarnateMove_ForceDryRun_ExportEligibleStaysExport(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	count := f.agentCount(t)
@@ -136,7 +136,7 @@ func TestReincarnateMove_ForceDryRun_ExportEligibleStaysExport(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// AC-1: without --force the refusal is unchanged, and the details say
+// Without --force the refusal is unchanged, and the details say
 // --force would apply.
 func TestReincarnateMove_WithoutForce_RefusalCarriesForceWouldApply(t *testing.T) {
 	f := setupForceMoveFixture(t, true, nil)
@@ -178,7 +178,7 @@ func TestReincarnateMove_ForceWithoutTarget_Returns400(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// A3 (O1): forceMove with a target that resolves to the agent's current
+// forceMove with a target that resolves to the agent's current
 // broker is a 400 before any plan, on a dry run too.
 func TestReincarnateMove_ForceToCurrentBroker_Returns400(t *testing.T) {
 	f := setupForceMoveFixture(t, true, nil)
