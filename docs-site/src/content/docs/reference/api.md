@@ -84,7 +84,7 @@ List endpoints for templates, harness configs and groups return an opaque `nextC
 
 There is no separate resume endpoint: resuming is the **start** action applied to a `suspended` agent. A `suspended` agent is also resumed automatically when a message is delivered to it with the `wake` option set.
 
-Agent creation and start are rejected with `429 Too Many Requests` (`quota_exceeded`) when the target runtime broker is at its `max_agents_per_broker` limit (see [Admin](#admin-apiv1admin)).
+Agent creation and start are rejected with `429 Too Many Requests` (`quota_exceeded`) when the target runtime broker is at its `max_agents_per_broker` limit (see [Admin](#admin-apiv1admin)). A request that would reserve capacity on one Runtime Broker for an agent that already holds an active reservation on another is refused with `409 broker_reservation_scope_conflict`; the existing reservation is kept and nothing is moved.
 
 Agent responses no longer include a `visibility` field. Access is determined by scope and grants only.
 

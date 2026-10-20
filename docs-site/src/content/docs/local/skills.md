@@ -146,6 +146,8 @@ The `@version` suffix accepts:
 
 The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
 
+If GitHub rejects the credential sent with a file download (`401`, `403` or `404`, for example because the token expired or was revoked), Scion retries that file once without credentials, so skills from public repositories still install. Hash checks apply to the result as usual.
+
 #### Private repository resolution
 
 For private repositories, Scion resolves skills using the project's configured git credentials or custom secrets:
@@ -156,7 +158,6 @@ For private repositories, Scion resolves skills using the project's configured g
    - uri: gh://acme-corp/partner-skills/my-skill@v1.2.3?token=PARTNER_GITHUB_TOKEN
    ```
    Scion retrieves the secret from the `ProvisionCredentials` channel during provisioning. The secret value is processed completely in memory and is **never** forwarded to the agent's container environment or harness scripts.
-3. **Local CLI fallback**: In local CLI mode, the resolver automatically falls back to your local `GITHUB_TOKEN` environment variable.
 
 #### Input validation & auto-normalization
 

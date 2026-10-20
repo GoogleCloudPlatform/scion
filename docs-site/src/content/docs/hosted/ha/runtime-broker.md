@@ -27,8 +27,14 @@ To allow the Hub to dispatch agents to your machine, you must start a Runtime Br
 
 ### 0. Prerequisites
 
-- Sign in to the Hub: `scion hub auth login --hub-url https://hub.example.com`.
-- Configure the Hub endpoint in your global settings **before** starting the Runtime Broker, for example with `scion config set --global hub.endpoint https://hub.example.com`, or set the `SCION_HUB_ENDPOINT` environment variable. The `scion runtime-broker` commands take their Hub from `--hub` (a URL, or a nickname from the hub list), `SCION_HUB_ENDPOINT` or `hub.endpoint`; they do not use the current Hub selected with `scion use`. A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again.
+- Add the Hub to your hub list, make it current, and sign in:
+  ```bash
+  scion hub add prod https://hub.example.com --use
+  ```
+  ```bash
+  scion hub auth login
+  ```
+- `scion runtime-broker register`, `join` and the other Runtime Broker administration commands talk to the Hub the CLI selects, like any other command: `--hub` (a URL or a hub list nickname), `SCION_HUB_ENDPOINT` or `SCION_HUB_URL`, then the current Hub. `scion runtime-broker start` does not use the current Hub: the Runtime Broker process reports to the Hub named in its server settings (next item). A Runtime Broker started without a Hub endpoint does not connect after a later `register`; stop and start it again. `register` and `join` refuse a Hub URL with user info, a query or a fragment; pass a plain `http(s)` URL.
 - The Runtime Broker process itself reports to the Hub named by `server.broker.hub_endpoint` (or `SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). `register` and `join` save that setting when it is unset. While it is unset, the Runtime Broker falls back to `hub.endpoint` and logs a deprecation warning at startup; set `server.broker.hub_endpoint` in `~/.scion/settings.yaml` to avoid it. See [The server's own hub endpoint](/scion/hosted/user/multiple-hubs/#the-servers-own-hub-endpoint).
 - Configure an image registry (`scion config set --global image_registry <registry>`): `scion runtime-broker start` refuses to start without one.
 - `scion runtime-broker start`, `register` and `join` work outside a project directory; no `--global` is needed.

@@ -116,7 +116,6 @@ To continue, run `scion start <agent>`. It starts the agent the way a start from
 
 `scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
-Local mode never records `halted`.
 
 #### Stalled, offline, and auto-suspend
 

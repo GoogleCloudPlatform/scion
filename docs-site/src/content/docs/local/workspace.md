@@ -450,7 +450,7 @@ When you delete an agent:
 ```bash
 scion delete <agent-name>
 ```
-- **Worktrees**: The worktree directory is removed and git metadata is pruned.
+- **Worktrees**: The worktree directory and git's entry for that one worktree are removed. Scion does not run a repository-wide `git worktree prune`, so other worktrees' entries are left alone.
 - **Branches**: By default, the branch is deleted. Use `--preserve-branch` (or `-b`) to keep it.
 - **Explicit Workspaces**: Directories mounted via `--workspace` are **NOT** deleted. Scion only cleans up resources it created.
 

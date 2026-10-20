@@ -64,7 +64,7 @@ When the configured hub is the local workstation server and it is not running:
 Local scion server is not running. Start it with 'scion server start'.
 ```
 
-To use a remote hub: `scion hub add <name> <url>`, then `scion use --hub <name>`. An existing `hub.endpoint` in your global settings is added once to the hub list as a named hub. Inside a project directory, the directory's hub link and any `hub.endpoint` in its settings or your global settings still take precedence over the selected hub; pass `--hub <name>` there, or remove the old `hub.endpoint`. If you used `scion server start` before, your global settings may still hold `hub.endpoint: http://127.0.0.1:8080`.
+To use a remote hub: `scion hub add <name> <url>`, then `scion use --hub <name>`. An existing `hub.endpoint` in your global settings is added once to the hub list as a named hub, and becomes the current hub when none is current; after that the CLI no longer reads it. Inside a project directory, the directory's link entry still takes precedence over the selected hub; a project linked through `hub.endpoint` in its settings gets a link entry for that hub the first time the CLI resolves it. Pass `--hub <name>` there to target another hub. If you used `scion server start` before, your global settings may still hold `hub.endpoint: http://127.0.0.1:8080`, which is imported as `local`.
 
 ## Your first command after upgrading
 
