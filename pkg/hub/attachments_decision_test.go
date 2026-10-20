@@ -87,7 +87,7 @@ func (d *decisionFixture) storeMessage(t *testing.T, msg *store.Message) string 
 	msg.Type = "instruction"
 	msg.Channel = "web"
 	msg.CreatedAt = time.Now().UTC()
-	require.NoError(t, d.refFixture.st.CreateMessage(context.Background(), msg))
+	require.NoError(t, d.st.CreateMessage(context.Background(), msg))
 	return msg.ID
 }
 
@@ -112,7 +112,7 @@ func TestPermitsMessageRead_AgentNotInStandingRefused(t *testing.T) {
 	require.True(t, host.PermitsMessageRead(ctx))
 	require.True(t, d.decide(ctx, d.dmMsg), "a DM party in standing reads")
 
-	holdAgentFor(t, d.refFixture.st, d.aa.ID, d.projA.ID, d.ua.ID)
+	holdAgentFor(t, d.st, d.aa.ID, d.projA.ID, d.ua.ID)
 	ctx = storedAgentContext(d.aa)
 	require.False(t, host.PermitsMessageRead(ctx), "a held agent's credential reads no message attachment")
 	require.False(t, d.decide(ctx, d.dmMsg))
@@ -184,12 +184,12 @@ func TestAttachmentDecision_AgentAddresseeRows(t *testing.T) {
 	require.False(t, d.decide(storedAgentContext(d.ab), d.dmMsg), "precondition: ab is no addressee")
 	row := &store.MessageAddressee{ID: uuid.NewString(), MessageID: d.dmMsg, PrincipalKind: "agent",
 		PrincipalID: d.ab.ID, Via: "body-mention", DeliveryState: "pending"}
-	require.NoError(t, d.refFixture.st.AddAddressee(ctx, row))
+	require.NoError(t, d.st.AddAddressee(ctx, row))
 	require.True(t, d.decide(storedAgentContext(d.ab), d.dmMsg), "pending row")
-	require.NoError(t, d.refFixture.st.UpdateDeliveryState(ctx, row.ID, "delivered", nil))
+	require.NoError(t, d.st.UpdateDeliveryState(ctx, row.ID, "delivered", nil))
 	require.True(t, d.decide(storedAgentContext(d.ab), d.dmMsg), "delivered row")
 	reason := "failed"
-	require.NoError(t, d.refFixture.st.UpdateDeliveryState(ctx, row.ID, "failed", &reason))
+	require.NoError(t, d.st.UpdateDeliveryState(ctx, row.ID, "failed", &reason))
 	require.False(t, d.decide(storedAgentContext(d.ab), d.dmMsg), "a failed row grants nothing")
 }
 

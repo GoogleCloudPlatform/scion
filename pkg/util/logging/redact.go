@@ -69,10 +69,14 @@ const maxUnescapeRounds = 4
 // escaped slashes, escaped letters) reaches a log or a trace whole.
 // Paths that merely contain the word are redacted too; that is the
 // intended trade-off.
-func artifactPath(p string) bool {
+func artifactPath(p string) bool { return pathMentions(p, "artifacts") }
+
+// pathMentions reports whether the URL path p, lowercased and
+// percent-decoded up to maxUnescapeRounds times, contains word.
+func pathMentions(p, word string) bool {
 	s := strings.ToLower(p)
 	for range maxUnescapeRounds {
-		if strings.Contains(s, "artifacts") {
+		if strings.Contains(s, word) {
 			return true
 		}
 		u, err := url.PathUnescape(s)
@@ -81,7 +85,23 @@ func artifactPath(p string) bool {
 		}
 		s = strings.ToLower(u)
 	}
-	return strings.Contains(s, "artifacts")
+	return strings.Contains(s, word)
+}
+
+// RedactedDeliveryPath is how every attachment delivery request path is
+// logged: the path carries a single-use delivery capability
+// (ptone/scion#4596).
+const RedactedDeliveryPath = "/api/v1/attachment-deliveries/" + redactedValue
+
+// deliveryPath reports whether the URL path p (decoded or escaped) may
+// belong to the attachment delivery route, whose path carries a delivery
+// capability. Like artifactPath it recognises any spelling: any path that
+// mentions "attachment-deliveries" after decoding counts.
+func deliveryPath(p string) bool { return pathMentions(p, "attachment-deliveries") }
+
+// isDeliveryURL applies deliveryPath to both forms of u's path.
+func isDeliveryURL(u *url.URL) bool {
+	return u != nil && (deliveryPath(u.Path) || deliveryPath(u.EscapedPath()))
 }
 
 // isArtifactURL applies artifactPath to both forms of u's path: the
@@ -93,11 +113,12 @@ func isArtifactURL(u *url.URL) bool {
 // IsCredentialURL reports whether a request for u must not be recorded
 // with its path, for example in a trace. It shares its predicate with
 // RequestPath and RedactURL.
-func IsCredentialURL(u *url.URL) bool { return isArtifactURL(u) }
+func IsCredentialURL(u *url.URL) bool { return isArtifactURL(u) || isDeliveryURL(u) }
 
 // RequestPath returns r's URL path for a log line: RedactedArtifactPath
 // for any request under the artifact routes (see artifactPath, which
-// checks the decoded and the escaped path), the decoded path otherwise.
+// checks the decoded and the escaped path), RedactedDeliveryPath for the
+// attachment delivery route (deliveryPath), the decoded path otherwise.
 // Every log attribute that records a request path must use it.
 func RequestPath(r *http.Request) string {
 	if r == nil || r.URL == nil {
@@ -105,6 +126,9 @@ func RequestPath(r *http.Request) string {
 	}
 	if isArtifactURL(r.URL) {
 		return RedactedArtifactPath
+	}
+	if isDeliveryURL(r.URL) {
+		return RedactedDeliveryPath
 	}
 	return r.URL.Path
 }
@@ -121,6 +145,8 @@ func RedactURL(u *url.URL) string {
 	c.RawQuery = RedactQuery(u.RawQuery)
 	if isArtifactURL(u) {
 		c.Path, c.RawPath = RedactedArtifactPath, ""
+	} else if isDeliveryURL(u) {
+		c.Path, c.RawPath = RedactedDeliveryPath, ""
 	}
 	return c.String()
 }

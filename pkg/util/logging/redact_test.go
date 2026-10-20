@@ -141,3 +141,43 @@ func TestNonArtifactPathsKept(t *testing.T) {
 		t.Errorf("RequestPath(nil)")
 	}
 }
+
+// TestDeliveryPathRedacted: the attachment delivery route's path carries a
+// delivery capability (ptone/scion#4596). No spelling of it reaches a log
+// line, a redacted URL or a trace whole, and the request log records the
+// redacted path.
+func TestDeliveryPathRedacted(t *testing.T) {
+	for _, p := range []string{
+		"/api/v1/attachment-deliveries/TOKENSECRET",
+		"/api/v1//attachment-deliveries/TOKENSECRET",
+		"/api/v1/attachment%2Ddeliveries/TOKENSECRET",
+		"/api/v1/ATTACHMENT-DELIVERIES/TOKENSECRET",
+	} {
+		u := &url.URL{Path: p}
+		if raw, err := url.Parse("https://hub.example.com" + p); err == nil {
+			u = raw
+		}
+		r := &http.Request{URL: u}
+		if got := RequestPath(r); got != RedactedDeliveryPath {
+			t.Errorf("RequestPath(%q) = %q, want %q", p, got, RedactedDeliveryPath)
+		}
+		if got := RedactURL(u); strings.Contains(got, "TOKENSECRET") {
+			t.Errorf("RedactURL(%q) = %q, keeps the capability", p, got)
+		}
+		if !IsCredentialURL(u) {
+			t.Errorf("IsCredentialURL(%q) = false", p)
+		}
+	}
+	if got := RequestPath(&http.Request{URL: &url.URL{Path: "/api/v1/agents/x/message"}}); got != "/api/v1/agents/x/message" {
+		t.Errorf("an ordinary path is redacted: %q", got)
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	handler := RequestLogMiddleware(logger, "hub", HubPathPatterns(), 0)(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) }))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/attachment-deliveries/TOKENSECRET", nil))
+	if out := buf.String(); strings.Contains(out, "TOKENSECRET") {
+		t.Fatalf("the request log records the capability: %s", out)
+	}
+}

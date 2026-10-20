@@ -69,7 +69,7 @@ func textReadyRuntime() (*fakeReadyRuntime, func() []string) {
 	rt := newFakeReadyRuntime(func(int) (string, error) { return hookProbe(true), nil })
 	var mu sync.Mutex
 	var texts []string
-	rt.MockRuntime.ExecWithStdinFunc = func(_ context.Context, _ string, cmd []string, stdin io.Reader) (string, error) {
+	rt.ExecWithStdinFunc = func(_ context.Context, _ string, cmd []string, stdin io.Reader) (string, error) {
 		b, _ := io.ReadAll(stdin)
 		rt.mu.Lock()
 		rt.cmds = append(rt.cmds, strings.Join(cmd, " "))

@@ -56,10 +56,10 @@ func (c *client) FetchAttachmentDelivery(ctx context.Context, path string) (io.R
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return resp.Body, nil
-	case resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusSeeOther || resp.StatusCode == http.StatusTemporaryRedirect:
+	case http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect:
 		loc := resp.Header.Get("Location")
 		_ = resp.Body.Close()
 		return fetchRedirect(ctx, loc, strings.HasPrefix(c.transport.BaseURL, "http://"))
