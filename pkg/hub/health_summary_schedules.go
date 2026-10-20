@@ -97,7 +97,6 @@ type HealthFailingSchedule struct {
 func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedules, error) {
 	ctx := r.Context()
 	out := &HealthSummarySchedules{Failing: []HealthFailingSchedule{}}
-	allowed := map[string]bool{}
 	var visible []store.Schedule
 	scanned := 0
 	opts := store.ListOptions{Limit: healthSummarySchedulePageSize}
@@ -119,12 +118,7 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 			if sc.Status != store.ScheduleStatusActive || sc.LastRunStatus != store.ScheduleRunError {
 				continue
 			}
-			ok, seen := allowed[sc.ProjectID]
-			if !seen {
-				ok = s.healthSummaryCanReadSchedules(r, sc.ProjectID)
-				allowed[sc.ProjectID] = ok
-			}
-			if ok {
+			if s.healthSummaryCanReadSchedules(r, &sc) {
 				visible = append(visible, sc)
 			}
 		}
@@ -178,16 +172,17 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 }
 
 // healthSummaryCanReadSchedules reports whether the caller of r may read
-// the schedules of projectID: the decision the schedules API makes for a
-// read (scheduledEventAccessDecision), plus, for an agent, the project
-// isolation and project:read scope that API's router checks first. It
-// fails closed and logs nothing, since it runs on every poll.
-func (s *Server) healthSummaryCanReadSchedules(r *http.Request, projectID string) bool {
-	if projectID == "" {
+// schedule sc: the decision the schedules API makes for a read of that row
+// (scheduledEventAccessDecision), plus, for an agent, the project isolation
+// and project:read scope that API's router checks first. An agent sees only
+// the schedules it holds authority for. It fails closed and logs nothing,
+// since it runs on every poll.
+func (s *Server) healthSummaryCanReadSchedules(r *http.Request, sc *store.Schedule) bool {
+	if sc == nil || sc.ProjectID == "" {
 		return false
 	}
 	if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
-		if !agent.HasScope(ScopeProjectRead) || agent.ProjectID() != projectID {
+		if !agent.HasScope(ScopeProjectRead) || agent.ProjectID() != sc.ProjectID {
 			return false
 		}
 	} else if id := GetIdentityFromContext(r.Context()); id != nil && id.Type() == "agent" {
@@ -195,10 +190,9 @@ func (s *Server) healthSummaryCanReadSchedules(r *http.Request, projectID string
 		// checked for project isolation: deny.
 		return false
 	}
-	return s.scheduledEventAccessDecision(r.Context(), projectID, ActionRead).allowed
+	return s.scheduledEventAccessDecision(r.Context(), sc.ProjectID, ActionRead, scheduleRow(sc)).allowed
 }
 
-// scheduleLastRunAt is the schedule's last run time, or the zero time.
 func scheduleLastRunAt(sc store.Schedule) time.Time {
 	if sc.LastRunAt == nil {
 		return time.Time{}

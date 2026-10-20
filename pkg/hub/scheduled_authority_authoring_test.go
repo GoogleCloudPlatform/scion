@@ -23,7 +23,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -155,13 +154,15 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 	before, err := s.GetSchedule(context.Background(), created.ID)
 	require.NoError(t, err)
 
-	// An agent whose row is not stored: its write ceiling cannot be
-	// computed, so it cannot be recorded as an authority source.
-	unrecordable := &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: tid("sched-typechange-unstored-agent")},
-		ProjectID: projectID,
-		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate},
-	}}
+	// A federated user holding the project owner role: its ceiling cannot
+	// be recorded as an authority source. Agent callers do not edit
+	// schedule definitions, so the PATCH caller is a user.
+	fedUserID := tid("sched-typechange-fed")
+	unrecordable := &federatedTestIdentity{id: fedUserID, email: "fedtypechange@example.com", displayName: "Fed", role: "member"}
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{
+		ID: fedUserID, Email: unrecordable.Email(), DisplayName: unrecordable.DisplayName(), Role: "member", Status: "active",
+	}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(context.Background(), projectID, fedUserID))
 
 	rec = doAuthoredScheduleRequest(t, srv, unrecordable, projectID, created.ID, http.MethodPatch,
 		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"ghost-worker"}`})

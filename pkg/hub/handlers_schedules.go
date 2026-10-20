@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -366,12 +367,31 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	schedules, totalCount := s.visibleSchedules(r.Context(), projectID, result.Items, result.TotalCount)
 	writeJSON(w, http.StatusOK, ListSchedulesResponse{
-		Schedules:  result.Items,
+		Schedules:  schedules,
 		NextCursor: result.NextCursor,
-		TotalCount: result.TotalCount,
+		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
+}
+
+// visibleSchedules keeps the schedules of one list page that the caller may
+// see, each decided by scheduledEventAccessDecision for ActionList. A user
+// caller's decision does not depend on the row, so its page and count are
+// returned as listed. For an agent caller the store's total count also
+// counts rows the agent may not see, so it is omitted.
+func (s *Server) visibleSchedules(ctx context.Context, projectID string, items []store.Schedule, totalCount int) ([]store.Schedule, int) {
+	if !isAgentCaller(ctx) {
+		return items, totalCount
+	}
+	visible := make([]store.Schedule, 0, len(items))
+	for i := range items {
+		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, scheduleRow(&items[i])).allowed {
+			visible = append(visible, items[i])
+		}
+	}
+	return visible, 0
 }
 
 // getSchedule handles GET /api/v1/projects/{projectId}/schedules/{id}
@@ -384,6 +404,9 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, 
 
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {
 		return
 	}
 
@@ -399,6 +422,9 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleEditRow(schedule)) {
 		return
 	}
 	originalStatus := schedule.Status
@@ -602,6 +628,9 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 		NotFound(w, "Schedule")
 		return
 	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduleRow(schedule)) {
+		return
+	}
 
 	// No future dispatch is created by a delete, so there is no
 	// re-attribution — just a record of who deleted it, written in the same
@@ -629,6 +658,9 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
 		return
 	}
 	if schedule.Status != store.ScheduleStatusActive {
@@ -663,6 +695,9 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
 		return
 	}
 	// Resuming re-arms future dispatch and records the resumer as the
@@ -747,6 +782,9 @@ func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, proj
 	}
 	if schedule.ProjectID != projectID {
 		NotFound(w, "Schedule")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {
 		return
 	}
 

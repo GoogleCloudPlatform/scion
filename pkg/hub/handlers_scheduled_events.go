@@ -66,21 +66,24 @@ type ListScheduledEventsResponse struct {
 	ServerTime time.Time              `json:"serverTime"`
 }
 
-// authorizeScheduledEventAccess gates access to scheduled-event and recurring-
-// schedule operations for every caller kind. Exhaustive and fail-closed.
-//
-// Agent identities are authorized by the caller: the existing checkAgentReadScope
-// and project isolation checks in the dispatcher are sufficient for agents.
-// User identities are authorized via s.authzService.Decide (with a canonical
-// permission ID for role-binding resolution) against a project-scoped
-// scheduled_event resource.
+// authorizeScheduledEventAccess is the project-level gate the scheduled-event
+// and schedule routers run before any row lookup. It fails closed for every
+// caller kind. See scheduledEventAccessDecision for the rule.
 func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Request, projectID string, action Action) bool {
+	return s.authorizeScheduledEventRow(w, r, projectID, action, nil)
+}
+
+// authorizeScheduledEventRow decides action on one scheduled row (nil for
+// the project-level gate) and writes the 403 for a denial. Per-ID handlers
+// call it with the row they loaded, after their project check and before
+// any other work.
+func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Request, projectID string, action Action, row *scheduledEventRow) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
 		return false
 	}
-	d := s.scheduledEventAccessDecision(r.Context(), projectID, action)
+	d := s.scheduledEventAccessDecision(r.Context(), projectID, action, row)
 	if d.allowed {
 		return true
 	}
@@ -99,9 +102,35 @@ type scheduledEventAccess struct {
 	// reason is logged for a denial.
 	reason string
 	// byPolicy is true when the authorization service denied the request,
-	// the one denial authorizeScheduledEventAccess explains to the caller.
+	// the one denial authorizeScheduledEventRow explains to the caller.
 	byPolicy bool
 }
+
+// scheduledEventRow is the row a scheduled-event decision is about: a
+// schedule or a scheduled event, by its current initiator attribution.
+type scheduledEventRow struct {
+	attribution store.InitiatorAttribution
+	// edit marks a PATCH of a schedule definition. Pause and resume share
+	// ActionUpdate with it, so agentScheduleEditAllowed keys on this flag.
+	edit bool
+}
+
+func scheduleRow(sc *store.Schedule) *scheduledEventRow {
+	return &scheduledEventRow{attribution: sc.InitiatorAttribution}
+}
+
+func scheduleEditRow(sc *store.Schedule) *scheduledEventRow {
+	return &scheduledEventRow{attribution: sc.InitiatorAttribution, edit: true}
+}
+
+func scheduledEventRowOf(evt *store.ScheduledEvent) *scheduledEventRow {
+	return &scheduledEventRow{attribution: evt.InitiatorAttribution}
+}
+
+// agentScheduleEditAllowed is the single switch for whether an agent caller
+// may PATCH a schedule definition it holds. Agent callers do not edit
+// schedule definitions; a user edits them.
+const agentScheduleEditAllowed = false
 
 // scheduledEventResource is the resource a scheduled event decision is
 // about: scheduled events under projectID.
@@ -114,19 +143,37 @@ func scheduledEventResource(projectID string) Resource {
 }
 
 // scheduledEventAccessDecision decides whether the identity in ctx may
-// perform action on the scheduled events of projectID, without writing a
-// response. It fails closed. An agent identity is allowed here; its
+// perform action on the scheduled events and schedules of projectID,
+// without writing a response. It fails closed. Every router, list filter
+// and the health summary decide through it.
+//
+// A user caller is decided by the authorization service on
+// scheduled_event.<action>; row is not consulted.
+//
+// An agent caller manages only the rows it holds authority for: the row's
+// current initiator principal (scheduledInitiator, never CreatedBy) must
+// be that agent. A LegacyUnknown row is held by no agent. With row nil
+// (the project-level gate the routers run before a lookup) an agent is let
+// through: create keeps its own checks, and every other agent request is
+// decided again with its row before a row is returned or changed. Agent
 // project isolation and read scope are enforced on the request path (see
 // handleSchedules and healthSummaryCanReadSchedules).
-func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID string, action Action) scheduledEventAccess {
+func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID string, action Action, row *scheduledEventRow) scheduledEventAccess {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		return scheduledEventAccess{reason: "no identity"}
 	}
 	switch identity.Type() {
 	case "agent":
-		// Agent authorization is handled by checkAgentReadScope and project
-		// isolation in the dispatcher. If we reach here, those passed.
+		if row == nil || action == ActionCreate {
+			return scheduledEventAccess{allowed: true}
+		}
+		if row.edit && !agentScheduleEditAllowed {
+			return scheduledEventAccess{reason: "agent callers do not edit schedule definitions"}
+		}
+		if !s.agentHoldsScheduledRow(identity, row.attribution) {
+			return scheduledEventAccess{reason: "agent does not hold authority for this scheduled row"}
+		}
 		return scheduledEventAccess{allowed: true}
 
 	case "user", "dev", "federated_user":
@@ -155,6 +202,22 @@ func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID str
 	default:
 		return scheduledEventAccess{reason: "identity type may not access scheduled events"}
 	}
+}
+
+// agentHoldsScheduledRow reports whether agent is the current initiator
+// principal of a scheduled row. A LegacyUnknown row is held by no agent.
+func (s *Server) agentHoldsScheduledRow(agent Identity, attr store.InitiatorAttribution) bool {
+	initiator := s.scheduledInitiator(attr)
+	return !initiator.LegacyUnknown &&
+		initiator.PrincipalKind == "agent" &&
+		initiator.PrincipalID != "" &&
+		initiator.PrincipalID == agent.ID()
+}
+
+// isAgentCaller reports whether the identity in ctx is an agent.
+func isAgentCaller(ctx context.Context) bool {
+	id := GetIdentityFromContext(ctx)
+	return id != nil && id.Type() == "agent"
 }
 
 // handleScheduledEvents routes requests under /api/v1/projects/{projectId}/scheduled-events[/{id}]
@@ -420,12 +483,31 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
+	events, totalCount := s.visibleScheduledEvents(r.Context(), projectID, result.Items, result.TotalCount)
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
-		Events:     result.Items,
+		Events:     events,
 		NextCursor: result.NextCursor,
-		TotalCount: result.TotalCount,
+		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
+}
+
+// visibleScheduledEvents keeps the events of one list page that the caller
+// may see, each decided by scheduledEventAccessDecision for ActionList. A
+// user caller's decision does not depend on the row, so its page and count
+// are returned as listed. For an agent caller the store's total count also
+// counts rows the agent may not see, so it is omitted.
+func (s *Server) visibleScheduledEvents(ctx context.Context, projectID string, items []store.ScheduledEvent, totalCount int) ([]store.ScheduledEvent, int) {
+	if !isAgentCaller(ctx) {
+		return items, totalCount
+	}
+	visible := make([]store.ScheduledEvent, 0, len(items))
+	for i := range items {
+		if s.scheduledEventAccessDecision(ctx, projectID, ActionList, scheduledEventRowOf(&items[i])).allowed {
+			visible = append(visible, items[i])
+		}
+	}
+	return visible, 0
 }
 
 // getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}
@@ -439,6 +521,9 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, proje
 	// Verify the event belongs to the requested project
 	if evt.ProjectID != projectID {
 		NotFound(w, "Scheduled event")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduledEventRowOf(evt)) {
 		return
 	}
 
@@ -455,6 +540,9 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	}
 	if evt.ProjectID != projectID {
 		NotFound(w, "Scheduled event")
+		return
+	}
+	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduledEventRowOf(evt)) {
 		return
 	}
 
