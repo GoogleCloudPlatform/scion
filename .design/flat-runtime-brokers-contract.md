@@ -38,7 +38,7 @@ The git history here is shallow, so the comparison is by tree content. Of roughl
 | Quota | Per Runtime Broker only (`max_agents_per_broker`, `BrokerSettings.MaxAgents`) | Each flat Runtime Broker is its own scope. Aggregate limits are a P3/P5 question. |
 | Conduit | `conduit_session.exec_scope`, `endpoint_incarnation` and `connection_epoch` exist. Nothing computes a Runtime Broker exec scope. Gated by `hub.conduit` | Section 13 records the fencing contract that flat dispatch preserves. |
 | Settings | Storage and eviction keys on runtime/profile entries. `schema_version` is not checked at load. Unknown keys are dropped silently | Schema stays `"1"` with an additive key and a strict loader (section 2). |
-| Experiments | Server and web layers, `Server.experimentEnabled`, `requireExperiment` (no production callers), `dispatchExperimentNames` | `hub.flat_runtime_brokers` is a server-layer experiment (section 14). |
+| Experiments | Server and web layers, `Server.experimentEnabled`, `requireExperiment` (no production callers), `dispatchExperimentNames` | `hub.flat_runtime_brokers` is a server- and web-layer experiment (section 14). The web layer only selects the Brokers UI; it is presentation only and every Hub check is unchanged. |
 
 In-flight work this was checked against:
 - ptone/scion#3081 and ptone/scion#3091 (start claims, queued stops, recovery)
@@ -636,8 +636,9 @@ GoogleCloudPlatform/scion#2479 and GoogleCloudPlatform/scion#2483 are in flight 
 - **Name: `hub.flat_runtime_brokers`**, exported as `experiments.FlatRuntimeBrokers`.
 - **Fields:**
   - Title: "Flat Runtime Brokers"
-  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged."
-  - Layers `[LayerServer]`, Default `false`, Stage `alpha`, Issue `ptone/scion#2926` (the delivery tracker, which outlives P1.1 until the experiment graduates or is retired), Owner `runtime-broker`, ReviewBy `2027-03-31`.
+  - Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer."
+  - Layers `[LayerServer, LayerWeb]`, Default `false`, Stage `alpha`, Issue `ptone/scion#2926` (the delivery tracker, which outlives P1.1 until the experiment graduates or is retired), Owner `runtime-broker`, ReviewBy `2027-03-31`.
+- **Web layer:** `LayerWeb` lets the browser read the flag to select the Brokers UI. It is presentation only; every Hub check below is unchanged, and `Default` stays `false` (not in `DEFAULT_ON_FLAGS`).
 - **Enforcement:** in Hub code with `s.experimentEnabled(experiments.FlatRuntimeBrokers)`, at registration (R1, including the embedded wrapper) and at agent create (section 10).
   - It is not a UI-only flag and is not exposed through `/api/v1/settings/public`.
   - It is not added to `dispatchExperimentNames`. A Runtime Broker's flat behaviour comes from its own configuration.

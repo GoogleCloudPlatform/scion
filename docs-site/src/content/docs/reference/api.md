@@ -168,6 +168,8 @@ A project's own accounts live under `/api/v1/projects/:id/gcp-service-accounts` 
 - `POST /join`: Complete the two-phase broker registration.
 - `GET /:id`: Get broker status and capacity.
 
+In the list (`GET /api/v1/runtime-brokers`, without `projectId`) and in `GET /api/v1/runtime-brokers/:id`, a Runtime Broker that runs in the process answering the request (the server's co-located Runtime Broker or one of its co-located flat instances) carries the read-only `hostedByThisServer: true`. The field is omitted for every other Runtime Broker. With several Hub replicas behind a load balancer, it describes the replica that answered.
+
 #### Broker Settings (`/api/v1/runtime-brokers/:id/settings`)
 
 A general per-broker settings mechanism. `maxAgents`, a per-broker override of the `max_agents_per_broker` cap, is the first registered key.
