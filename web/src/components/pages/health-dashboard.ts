@@ -42,6 +42,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
 import type { HealthAttentionItem, HealthSummarySchedules } from './health-attention.js';
@@ -134,7 +135,8 @@ export class ScionPageHealthDashboard extends LitElement {
   @state()
   private autoRefresh = true;
 
-  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** Stops the auto-refresh poll; paused while the tab is hidden. */
+  private stopRefreshTimer: (() => void) | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -150,15 +152,13 @@ export class ScionPageHealthDashboard extends LitElement {
   private startAutoRefresh(): void {
     this.stopAutoRefresh();
     if (this.autoRefresh) {
-      this.refreshTimer = setInterval(() => void this.fetchData(), 30_000);
+      this.stopRefreshTimer = visibleInterval(() => void this.fetchData(), 30_000);
     }
   }
 
   private stopAutoRefresh(): void {
-    if (this.refreshTimer) {
-      clearInterval(this.refreshTimer);
-      this.refreshTimer = null;
-    }
+    this.stopRefreshTimer?.();
+    this.stopRefreshTimer = null;
   }
 
   private toggleAutoRefresh(): void {
