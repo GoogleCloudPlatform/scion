@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -309,9 +310,26 @@ func TestScheduleCreatorPause_ZonePrefixPauseRecordsReason(t *testing.T) {
 }
 
 // failingUpdateScheduleStore fails every UpdateSchedule with an error that is
-// neither a revision conflict nor not-found.
+// neither a revision conflict nor not-found. It is passed to the Server
+// constructor, so srv.store is never reassigned; it forwards the raw store's
+// optional DB and Dialect methods, which New() and other Server code
+// type-assert (see store_fault_helpers_test.go).
 type failingUpdateScheduleStore struct {
 	store.Store
+}
+
+func (f *failingUpdateScheduleStore) DB() *sql.DB {
+	if p, ok := f.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (f *failingUpdateScheduleStore) Dialect() string {
+	if p, ok := f.Store.(interface{ Dialect() string }); ok {
+		return p.Dialect()
+	}
+	return ""
 }
 
 func (f *failingUpdateScheduleStore) UpdateSchedule(context.Context, *store.Schedule, store.ScheduleFieldMask, int, bool, *store.InitiatorAttribution) error {
