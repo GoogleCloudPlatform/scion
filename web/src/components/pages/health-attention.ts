@@ -74,9 +74,11 @@ export interface HealthFailingSchedule {
 /** The schedules section of the summary; null when it could not be read. */
 export interface HealthSummarySchedules {
   failing: HealthFailingSchedule[];
-  /** Failing schedules visible to the caller. */
+  /** Failing schedules visible to the caller; a lower bound when scan_limited. */
   total: number;
   truncated: boolean;
+  /** True when the hub read only part of the failing schedules. */
+  scan_limited: boolean;
 }
 
 /** Longest last error, in characters, a schedule detail line shows. */

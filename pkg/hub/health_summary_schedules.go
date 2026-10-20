@@ -56,11 +56,17 @@ type HealthSummarySchedules struct {
 	// Failing lists active schedules whose last run failed, most recent
 	// failure first, capped at healthSummaryScheduleLimit. Never null.
 	Failing []HealthFailingSchedule `json:"failing"`
-	// Total is the number of failing schedules visible to the caller.
+	// Total is the number of failing schedules visible to the caller among
+	// the rows read. When ScanLimited is true it is a lower bound.
 	Total int `json:"total"`
-	// Truncated is true when Total exceeds len(Failing), or when the store
-	// held more failing schedules than one summary reads.
+	// Truncated is true when Total exceeds len(Failing), or when
+	// ScanLimited is true.
 	Truncated bool `json:"truncated"`
+	// ScanLimited is true when the store held more failing schedules than
+	// one summary reads (healthSummaryScheduleScanLimit). The rows read are
+	// the first in the store's listing order (newest schedule first, then
+	// ID), so the result is deterministic; Total then counts only those.
+	ScanLimited bool `json:"scan_limited"`
 }
 
 // HealthFailingSchedule is one active schedule whose last run failed.
@@ -104,6 +110,7 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 		for _, sc := range page.Items {
 			if scanned >= healthSummaryScheduleScanLimit {
 				out.Truncated = true
+				out.ScanLimited = true
 				break
 			}
 			scanned++
@@ -183,6 +190,10 @@ func (s *Server) healthSummaryCanReadSchedules(r *http.Request, projectID string
 		if !agent.HasScope(ScopeProjectRead) || agent.ProjectID() != projectID {
 			return false
 		}
+	} else if id := GetIdentityFromContext(r.Context()); id != nil && id.Type() == "agent" {
+		// An agent-type identity without its agent context cannot be
+		// checked for project isolation: deny.
+		return false
 	}
 	return s.scheduledEventAccessDecision(r.Context(), projectID, ActionRead).allowed
 }
@@ -227,8 +238,10 @@ func capRunes(s string, limit int) string {
 }
 
 // scheduleAttention returns one warning per listed failing schedule, plus
-// one for failing schedules beyond the cap, or one "not available" warning
-// when the section could not be read. Schedules never change the status.
+// one for failing schedules beyond the cap ("at least" when the scan was
+// limited, since Total is then a lower bound), or one "not available"
+// warning when the section could not be read. Schedules never change the
+// status.
 func scheduleAttention(sec *HealthSummarySchedules) []HealthAttentionItem {
 	if sec == nil {
 		return []HealthAttentionItem{{
@@ -249,11 +262,21 @@ func scheduleAttention(sec *HealthSummarySchedules) []HealthAttentionItem {
 			Message: "Scheduled event " + label + " failed its last run",
 		})
 	}
-	if more := sec.Total - len(sec.Failing); more > 0 {
+	more := sec.Total - len(sec.Failing)
+	msg := ""
+	switch {
+	case more > 0 && sec.ScanLimited:
+		msg = "At least " + pluralCount(more, "more scheduled event failed its", "more scheduled events failed their") + " last run"
+	case more > 0:
+		msg = pluralCount(more, "more scheduled event failed its", "more scheduled events failed their") + " last run"
+	case sec.ScanLimited:
+		msg = "More scheduled events may have failed their last run"
+	}
+	if msg != "" {
 		out = append(out, HealthAttentionItem{
 			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
 			Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
-			Message: pluralCount(more, "more scheduled event", "more scheduled events") + " failed their last run",
+			Message: msg,
 		})
 	}
 	return out

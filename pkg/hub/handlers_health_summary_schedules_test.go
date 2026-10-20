@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -139,7 +140,7 @@ func TestHandleHealthSummary_FailingSchedulesCapAndOrder(t *testing.T) {
 	assert.Contains(t, resp.Attention, HealthAttentionItem{
 		Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
 		Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
-		Message: "1 more scheduled event failed their last run",
+		Message: "1 more scheduled event failed its last run",
 	})
 }
 
@@ -218,3 +219,85 @@ func TestHandleHealthSummary_FailingSchedulesNotReported(t *testing.T) {
 	})
 	assert.NotContains(t, rr.Body.String(), "10.0.0.9")
 }
+
+// Past the scan limit only the first rows in store order are read: the
+// section says so, Total is a lower bound and one item notes the rest.
+func TestHandleHealthSummary_FailingSchedulesScanLimited(t *testing.T) {
+	srv, s := testServer(t)
+	tickHubInstance(t, srv)
+	p := createHealthScheduleProject(t, s, "sched-scan")
+	ranAt := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+	for _, n := range []string{"scan-a", "scan-b", "scan-c"} {
+		createHealthSchedule(t, s, p.ID, n, ranAt, "e")
+	}
+	prevScan, prevPage := healthSummaryScheduleScanLimit, healthSummarySchedulePageSize
+	healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = 2, 1
+	t.Cleanup(func() { healthSummaryScheduleScanLimit, healthSummarySchedulePageSize = prevScan, prevPage })
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/admin/health/summary", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp HealthSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Schedules)
+	assert.True(t, resp.Schedules.ScanLimited)
+	assert.True(t, resp.Schedules.Truncated)
+	assert.Equal(t, 2, resp.Schedules.Total)
+	assert.Len(t, resp.Schedules.Failing, 2)
+	assert.Contains(t, resp.Attention, HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+		Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
+		Message: "More scheduled events may have failed their last run",
+	})
+}
+
+// healthSchedAgentTypeIdentity reports Type() "agent" without being an
+// AgentIdentity, so its project cannot be checked.
+type healthSchedAgentTypeIdentity struct{}
+
+func (healthSchedAgentTypeIdentity) ID() string   { return "hs-agent-type-only" }
+func (healthSchedAgentTypeIdentity) Type() string { return "agent" }
+
+// An agent caller sees the schedules of its own project only, and only
+// with project:read. An agent-type identity without agent claims, and an
+// empty project, are denied.
+func TestHealthSummaryCanReadSchedules_AgentCaller(t *testing.T) {
+	srv, _ := testServer(t)
+	own, other := tid("hs-agent-own"), tid("hs-agent-other")
+	req := func(id Identity) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health/summary", nil)
+		return r.WithContext(contextWithIdentity(r.Context(), id))
+	}
+	assert.True(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), own))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), other))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own)), own))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(healthSchedAgentTypeIdentity{}), own))
+	assert.False(t, srv.healthSummaryCanReadSchedules(req(authzHelperAgent(own, ScopeProjectRead)), ""))
+}
+
+// The schedules API's denials keep their status and body after the access
+// decision moved into scheduledEventAccessDecision: a user without access
+// gets the explained 403, an identity kind the API does not serve gets the
+// generic 403.
+func TestScheduleAPI_DenialStatusAndBody(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	userID := tid("sched-deny-body-user")
+	user := NewAuthenticatedUser(userID, "scheddenybody@test.com", "Deny Body", "member", "api")
+	require.NoError(t, s.CreateUser(context.Background(), &store.User{
+		ID: userID, Email: user.Email(), DisplayName: user.DisplayName(), Role: "member", Status: "active",
+	}))
+
+	rec := doScheduleUserRequest(t, srv, user, http.MethodGet, projectID, "", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.JSONEq(t, `{"error":{"code":"forbidden","message":"You don't have permission to access scheduled events in this project"}}`, rec.Body.String())
+
+	rec = doScheduleUserRequest(t, srv, healthSchedServiceIdentity{}, http.MethodGet, projectID, "", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.JSONEq(t, `{"error":{"code":"forbidden","message":"Insufficient permissions"}}`, rec.Body.String())
+}
+
+// healthSchedServiceIdentity is an identity kind the schedules API does
+// not serve.
+type healthSchedServiceIdentity struct{}
+
+func (healthSchedServiceIdentity) ID() string   { return "hs-service" }
+func (healthSchedServiceIdentity) Type() string { return "service" }

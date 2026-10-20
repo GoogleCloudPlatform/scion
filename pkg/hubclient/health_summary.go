@@ -61,6 +61,9 @@ type HealthSummary struct {
 	// HubInstances is nil when the hub-instance registry could not be read.
 	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
 	Links        *HealthSummaryLinks        `json:"links,omitempty"`
+	// Schedules lists the failing schedules the caller may read; nil when
+	// the hub could not list them.
+	Schedules *HealthSummarySchedules `json:"schedules"`
 
 	// Raw is the response body exactly as the hub sent it, so callers can
 	// pass the summary through without dropping fields this client does
@@ -295,6 +298,32 @@ type HealthHubInstanceDB struct {
 	PoolIdle           int   `json:"pool_idle"`
 	PoolMax            int   `json:"pool_max"`
 	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
+}
+
+// HealthSummarySchedules is the schedules section: active schedules whose
+// last run failed, limited to projects where the caller holds
+// scheduled_event.read.
+type HealthSummarySchedules struct {
+	Failing []HealthFailingSchedule `json:"failing"`
+	// Total is a lower bound when ScanLimited is true.
+	Total       int  `json:"total"`
+	Truncated   bool `json:"truncated"`
+	ScanLimited bool `json:"scan_limited"`
+}
+
+// HealthFailingSchedule is one active schedule whose last run failed.
+type HealthFailingSchedule struct {
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	ProjectID     string     `json:"project_id"`
+	ProjectSlug   string     `json:"project_slug"`
+	EventType     string     `json:"event_type"`
+	Target        string     `json:"target"`
+	RunCount      int        `json:"run_count"`
+	ErrorCount    int        `json:"error_count"`
+	LastFailureAt *time.Time `json:"last_failure_at"`
+	// LastError is stored error text, capped by the hub.
+	LastError string `json:"last_error"`
 }
 
 // HealthSummaryLinks holds operator-configured Health page links.

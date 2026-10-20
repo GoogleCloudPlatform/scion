@@ -81,6 +81,29 @@ func TestScheduleAttention_MessageOmitsLastError(t *testing.T) {
 	}
 }
 
+// When the scan was limited, Total is a lower bound and the extra item
+// says so.
+func TestScheduleAttention_ScanLimited(t *testing.T) {
+	more := HealthAttentionItem{
+		Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+		Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
+	}
+	sec := &HealthSummarySchedules{
+		Failing: []HealthFailingSchedule{{ID: "s1", Name: "n", ProjectID: "p"}},
+		Total:   2, Truncated: true, ScanLimited: true,
+	}
+	items := scheduleAttention(sec)
+	assert.Len(t, items, 2)
+	more.Message = "At least 1 more scheduled event failed its last run"
+	assert.Equal(t, more, items[1])
+
+	sec.Total = 1
+	items = scheduleAttention(sec)
+	assert.Len(t, items, 2)
+	more.Message = "More scheduled events may have failed their last run"
+	assert.Equal(t, more, items[1])
+}
+
 func TestScheduleAttention_NotReported(t *testing.T) {
 	assert.Equal(t, []HealthAttentionItem{{
 		Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
