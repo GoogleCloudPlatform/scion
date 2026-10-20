@@ -33,7 +33,8 @@
 #   - A Dockerfile covers a directory when a COPY (without --from) has a
 #     source whose first path component is that directory (dir/, dir/*.go),
 #     or copies the whole context (`COPY . .`).
-#   - Ignore files: .dockerignore, .gcloudignore, image-build/gcloudignore-omni.
+#   - Ignore files: the tracked .dockerignore, .gcloudignore and
+#     image-build/gcloudignore-* files (Cloud Build --ignore-file variants).
 #     A line that names a required directory as a whole (dir, /dir, dir/,
 #     /dir/, dir/**) is a violation.
 #   - An excluded directory must not be imported by non-test code in any
@@ -59,8 +60,6 @@ EXCLUDED_DIRS=(
   "perf     benchmark programs, never imported by the binaries"
   "scripts  helper programs behind //go:build ignore, never imported by the binaries"
 )
-
-IGNORE_FILES=(.dockerignore .gcloudignore image-build/gcloudignore-omni)
 
 # check ROOT: print violations; exit 0 clean, 1 violations, 2 could not run.
 check() {
@@ -144,8 +143,7 @@ check() {
     done
   done
 
-  for f in "${IGNORE_FILES[@]}"; do
-    [[ -f "$root/$f" ]] || continue
+  for f in $(grep -E '^(\.dockerignore|\.gcloudignore|image-build/gcloudignore-[^/]+)$' <<<"$files"); do
     for d in "${required[@]}"; do
       local hit
       hit=$(grep -nE "^/?$d(/|/\*\*)?[[:space:]]*$" "$root/$f")
@@ -163,46 +161,56 @@ check() {
 }
 
 self_test() {
+  # The fixture is its own git repository: never let a leaked environment
+  # point the git commands below at the real one.
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
   local tmp rc out
   tmp=$(mktemp -d) || return 2
   trap 'rm -rf "$tmp"' RETURN
-  mkdir -p "$tmp"/{cmd/x,internal/y,hack/z,pkg/p/testdata,extras/plug,extras/solo,img}
+  mkdir -p "$tmp"/{cmd/x,internal/y,hack/z,pkg/p/testdata,web,extras/plug,extras/solo,img,img2,image-build}
   echo 'module x' >"$tmp/go.mod"
   echo 'package main' >"$tmp/cmd/x/main.go"
   echo 'package y' >"$tmp/internal/y/y.go"
   echo 'package z' >"$tmp/hack/z/z.go"
+  echo 'package web' >"$tmp/web/w.go"
   echo 'package p' >"$tmp/pkg/p/p_test.go"
   echo 'package t' >"$tmp/pkg/p/testdata/t.go"
   printf 'module plug\nreplace %s => ../../\n' "$MODULE" >"$tmp/extras/plug/go.mod"
   echo 'package main' >"$tmp/extras/plug/main.go"
   echo 'module solo' >"$tmp/extras/solo/go.mod"
-  printf 'COPY go.mod ./\nCOPY cmd/ ./cmd/\nRUN go build ./cmd/x\n' >"$tmp/img/Dockerfile"
-  printf 'COPY cmd/ cmd/\nRUN go build .\n' >"$tmp/extras/plug/Dockerfile"
+  # ./dir and dir/*.go sources count; COPY --from does not.
+  printf 'COPY go.mod ./\nCOPY ./cmd/ ./cmd/\nCOPY web/*.go ./web/\nRUN go build ./cmd/x\n' >"$tmp/img/Dockerfile"
+  printf 'FROM a AS src\nFROM b\nCOPY --from=src internal/ ./internal/\nCOPY cmd/ cmd/\nCOPY web/ web/\nRUN go build ./cmd/x\n' >"$tmp/img2/Dockerfile"
+  printf 'COPY cmd/ cmd/\nCOPY web/ web/\nRUN go build .\n' >"$tmp/extras/plug/Dockerfile"
   printf 'COPY . .\nRUN go build .\n' >"$tmp/extras/solo/Dockerfile"
   printf 'COPY . .\nRUN go build ./cmd/x\n' >"$tmp/Dockerfile"
-  printf '/hack/\n/internal/\n' >"$tmp/.gcloudignore"
+  printf '/hack/\n' >"$tmp/.gcloudignore"
+  printf 'web/node_modules/\n/internal/**\n' >"$tmp/image-build/gcloudignore-extra"
   git -C "$tmp" init -q && git -C "$tmp" add -A || return 2
 
   out=$(check "$tmp"); rc=$?
   local want
   for want in "MISSING COPY: img/Dockerfile does not copy internal/" \
+              "MISSING COPY: img2/Dockerfile does not copy internal/" \
               "MISSING COPY: extras/plug/Dockerfile does not copy internal/" \
-              "IGNORED: .gcloudignore excludes required Go directory internal/ (line 2)"; do
+              "IGNORED: image-build/gcloudignore-extra excludes required Go directory internal/ (line 2)"; do
     if [[ $rc -ne 1 || "$out" != *"$want"* ]]; then
       echo "$NAME --self-test: FAIL (exit $rc), expected '$want' in:" >&2
       echo "$out" >&2
       return 2
     fi
   done
-  if [[ $(grep -c . <<<"$out") -ne 3 ]]; then
+  if [[ $(grep -c . <<<"$out") -ne 4 ]]; then
     echo "$NAME --self-test: FAIL, unexpected extra findings:" >&2
     echo "$out" >&2
     return 2
   fi
 
-  sed -i 's|COPY cmd/ ./cmd/|COPY cmd/ ./cmd/\nCOPY internal/ ./internal/|' "$tmp/img/Dockerfile"
-  sed -i 's|COPY cmd/ cmd/|COPY cmd/ cmd/\nCOPY internal/ internal/|' "$tmp/extras/plug/Dockerfile"
-  printf '/hack/\n' >"$tmp/.gcloudignore"
+  local f
+  for f in img/Dockerfile img2/Dockerfile extras/plug/Dockerfile; do
+    sed -i 's|^RUN go build|COPY internal/ internal/\nRUN go build|' "$tmp/$f"
+  done
+  printf 'web/node_modules/\n' >"$tmp/image-build/gcloudignore-extra"
   printf 'package main\nimport _ "%s/hack/z"\n' "$MODULE" >"$tmp/cmd/x/main.go"
   out=$(check "$tmp"); rc=$?
   if [[ $rc -ne 1 || "$out" != *"EXCLUDED BUT IMPORTED: hack/"* || $(grep -c '^[A-Z]' <<<"$out") -ne 1 ]]; then
@@ -219,7 +227,7 @@ self_test() {
     return 2
   fi
 
-  echo "$NAME --self-test: ok (missing COPY, ignored directory and imported exclusion flagged; whole-context COPY, test files, testdata and self-contained extras ignored)"
+  echo "$NAME --self-test: ok (missing COPY, COPY --from, discovered ignore file with dir/**, and imported exclusion flagged; ./dir, dir/*.go, whole-context COPY, test files, testdata and self-contained extras accepted)"
 }
 
 if [[ "${1:-}" == "--self-test" ]]; then
