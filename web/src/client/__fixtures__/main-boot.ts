@@ -32,7 +32,7 @@ class FakeEventSource extends EventTarget {
   }
 }
 
-function json(body: unknown, status = 200): Response {
+export function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'Content-Type': 'application/json' },
@@ -42,13 +42,24 @@ function json(body: unknown, status = 200): Response {
 /** Booting the entry module takes a few seconds; room for slow CI runners. */
 export const BOOT_WAIT = { timeout: 5_000 };
 
-export async function bootMainAt(path: string): Promise<typeof import('../main.js')> {
+/**
+ * Answers a boot request for `pathname` itself, or returns undefined to fall
+ * back to the default answer.
+ */
+export type BootFetchOverride = (pathname: string) => Promise<Response> | undefined;
+
+export async function bootMainAt(
+  path: string,
+  override?: BootFetchOverride
+): Promise<typeof import('../main.js')> {
   vi.stubGlobal('EventSource', FakeEventSource);
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string | URL | Request) => {
       const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const p = new URL(raw, 'http://localhost').pathname;
+      const overridden = override?.(p);
+      if (overridden) return overridden;
       if (p === '/api/v1/auth/admin-status') {
         return Promise.resolve(json({ isAdmin: true, isSuperAdmin: true, permissions: [] }));
       }
