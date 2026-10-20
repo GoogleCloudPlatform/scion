@@ -51,17 +51,19 @@ func (f *relayTunnelFixture) postExcluding(t *testing.T, exclude ...string) (*co
 	return resp, out.Tunnel
 }
 
-// verifyRelayTunnelGrant verifies tok with the hub's published grant keys
-// against target, the row the test expects the grant to bind.
-func verifyRelayTunnelGrant(t *testing.T, f *relayTunnelFixture, tok []byte, target grant.Target) (*grant.Claims, error) {
+// verifyRelayTunnelGrant verifies the instruction's grant with the hub's
+// published grant keys against target, the row the test expects the grant
+// to bind. The stream header is the instruction's own (the grant carries
+// the normalized params), so only the binding is under test.
+func verifyRelayTunnelGrant(t *testing.T, f *relayTunnelFixture, open *relay.HubTunnelOpen, target grant.Target) (*grant.Claims, error) {
 	t.Helper()
 	pubs, err := f.cf.srv.ConduitGrantPublicKeys(context.Background())
 	require.NoError(t, err)
 	keys, err := grant.NewKeySet(pubs...)
 	require.NoError(t, err)
-	return grant.Verify(context.Background(), tok, keys, grant.Expectation{
+	return grant.Verify(context.Background(), open.Grant, keys, grant.Expectation{
 		Target:    target,
-		Header:    grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamPort: "3000"}},
+		Header:    grant.StreamHeader{Kind: open.Kind, Params: open.Params},
 		ProjectID: f.cf.agent.ProjectID, Issuer: conduitGrantIssuer,
 	}, grant.NewMemoryReplayCache(f.cf.clock.Now, 0), f.cf.clock.Now())
 }
@@ -90,7 +92,7 @@ func TestRelayTunnel_GrantBindsResolvedRow(t *testing.T) {
 	assert.Equal(t, f.ops.relayGen, open.OwnerGeneration)
 	assert.Equal(t, f.cf.agent.RunID, open.WantIncarnation)
 	assert.Equal(t, f.cf.agent.ProjectID, open.WantProjectID)
-	c, err := verifyRelayTunnelGrant(t, f, open.Grant, rowA)
+	c, err := verifyRelayTunnelGrant(t, f, open, rowA)
 	require.NoError(t, err, "the grant binds row A")
 	assert.Equal(t, rowA, c.Target)
 	assert.Equal(t, c.JTI, open.OpenJTI)
@@ -126,10 +128,10 @@ func TestRelayTunnel_GrantBindsResolvedRow(t *testing.T) {
 	assert.Equal(t, gen1, open.OwnerGeneration)
 	assert.Equal(t, "http://relay-1.invalid", open.OwnerEndpoint)
 	assert.Equal(t, "launch-2", open.WantIncarnation)
-	c, err = verifyRelayTunnelGrant(t, f, open.Grant, rowB)
+	c, err = verifyRelayTunnelGrant(t, f, open, rowB)
 	require.NoError(t, err, "the re-minted grant binds row B")
 	assert.Equal(t, rowB, c.Target)
 	assert.Equal(t, c.JTI, open.OpenJTI)
-	_, err = verifyRelayTunnelGrant(t, f, open.Grant, rowA)
+	_, err = verifyRelayTunnelGrant(t, f, open, rowA)
 	assert.ErrorIs(t, err, grant.ErrTarget, "the re-minted grant does not verify for row A")
 }

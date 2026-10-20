@@ -18,9 +18,13 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // bridgedRenewalE2E is the separate relay world under enforce with a 2m
@@ -40,24 +45,103 @@ import (
 type bridgedRenewalE2E struct {
 	w       *separateRelayWorld
 	spawned chan *fakePTY
+
+	mu sync.Mutex
+	// refreshed are the stream ids of the AuthRefresh frames the agent's
+	// session received (relay-0 forwarding a renewal).
+	refreshed []uint32
+	// sends are the results of hub B's renewal sends on the leaf's bridge.
+	sends []error
+	// Diagnostics (r2 only; removed in the final round): hub B's renewal
+	// attempts and the credentials the agent's session received.
+	outcomes []string
+	creds    [][]byte
 }
 
 func newBridgedRenewalE2E(t *testing.T) *bridgedRenewalE2E {
 	t.Helper()
-	spawned := make(chan *fakePTY, 4)
-	w := newSeparateRelayWorldWith(t, separateRelayOptions{
+	e := &bridgedRenewalE2E{spawned: make(chan *fakePTY, 4)}
+	e.w = newSeparateRelayWorldWith(t, separateRelayOptions{
 		enforce: true,
 		srvMod:  func(s *Server) { s.config.ConduitUserStreamAuthzMax = e2eInterval },
 	}, func(w *separateRelayWorld) {
 		w.spawnPTY = func(_ context.Context, req sconduit.PTYRequest) (sconduit.PTYProcess, error) {
 			p := newFakePTY(req)
-			spawned <- p
+			e.spawned <- p
 			return p, nil
 		}
+		// Record every AuthRefresh that reaches the agent's session, in
+		// front of the world's own interceptor.
+		next := w.agentSession.Interceptor
+		w.agentSession.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+			if ar := f.GetAuthRefresh(); dir == conduit.Inbound && ar != nil {
+				e.mu.Lock()
+				e.refreshed = append(e.refreshed, ar.GetStreamId())
+				e.creds = append(e.creds, append([]byte(nil), ar.GetCredential()...))
+				e.mu.Unlock()
+			}
+			if next == nil {
+				return []*conduitv1.Frame{f}
+			}
+			return next(dir, f)
+		}
 	})
-	require.NotNil(t, w.hubB.conduitExternal.Load(), "hub B is in external relay mode")
-	require.True(t, w.clock.Now().Equal(w.authzClocks["hub-b"].Now()), "the clocks start together")
-	return &bridgedRenewalE2E{w: w, spawned: spawned}
+	require.NotNil(t, e.w.hubB.conduitExternal.Load(), "hub B is in external relay mode")
+	require.True(t, e.w.clock.Now().Equal(e.w.authzClocks["hub-b"].Now()), "the clocks start together")
+	// Diagnostics: record hub B's renewal outcomes. Set before any stream
+	// is tracked, so no driver reads it concurrently.
+	a := e.w.hubB.conduitAuthz.Load()
+	require.NotNil(t, a)
+	renew := a.cfg.Renew
+	a.cfg.Renew = func(ctx context.Context, st *conduitUserStream) (*conduitRenewal, error) {
+		r, err := renew(ctx, st)
+		out := "minted"
+		if err != nil {
+			out = fmt.Sprintf("class=%s err=%v", ClassifyConduitRenewal(err), err)
+		}
+		if r != nil {
+			out += " authz_until=" + r.AuthzUntil.UTC().Format(time.RFC3339)
+		}
+		e.mu.Lock()
+		e.outcomes = append(e.outcomes, out)
+		e.mu.Unlock()
+		return r, err
+	}
+	return e
+}
+
+// recordSends wraps st's renewal sender (under st.mu, where the driver
+// reads it) so each send's result is recorded.
+func (e *bridgedRenewalE2E) recordSends(t *testing.T, st *conduitUserStream) {
+	t.Helper()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	send := st.Renew
+	require.NotNil(t, send, "the leaf has a renewal sender (its bridge)")
+	st.Renew = func(g []byte) error {
+		err := send(g)
+		e.mu.Lock()
+		e.sends = append(e.sends, err)
+		e.mu.Unlock()
+		return err
+	}
+}
+
+// waitFor polls cond for up to 10s.
+func (e *bridgedRenewalE2E) waitFor(cond func() bool) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		e.mu.Lock()
+		ok := cond()
+		e.mu.Unlock()
+		if ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // advance moves f.clock first, then the agent's timers, then both hubs'
@@ -164,12 +248,23 @@ func TestBridgedRenewalE2E_RenewalMovesTargetDeadline(t *testing.T) {
 			}
 			st := e.soleBridgedLeaf(t)
 			first := st.AuthzUntil
+			e.stage(t, st, e.w.agentClock.WaitForTimer(10*time.Second, first.Add(30*time.Second)),
+				"S1: the agent enforces the open grant's deadline (a timer at authz_until + 30s)")
+			e.recordSends(t, st)
 
 			// Past 80% plus the largest jitter, before the first deadline.
 			e.advance(e2eInterval*4/5 + e2eInterval/20 + time.Second)
 			renewedUntil := e.w.clock.Now().Truncate(time.Second).Add(e2eInterval)
-			require.True(t, e.w.agentClock.WaitForTimer(10*time.Second, renewedUntil.Add(30*time.Second)),
-				"the agent moved its deadline to the renewal's authz_until")
+			e.stage(t, st, e.waitFor(func() bool { return len(e.sends) > 0 }),
+				"S2: hub B minted a renewal and called the leaf's sender")
+			e.mu.Lock()
+			firstSend := e.sends[0]
+			e.mu.Unlock()
+			e.stage(t, st, firstSend == nil, "S2: hub B's renewal send on the bridge to relay-0 succeeded (%v)", firstSend)
+			e.stage(t, st, e.waitFor(func() bool { return slices.Contains(e.refreshed, st.StreamID) }),
+				"S3: relay-0 forwarded the renewal to the agent's stream (AuthRefresh for stream %d)", st.StreamID)
+			e.stage(t, st, e.w.agentClock.WaitForTimer(10*time.Second, renewedUntil.Add(30*time.Second)),
+				"S4: the agent accepted the renewal and moved its deadline to its authz_until + 30s")
 			assert.True(t, st.Deadline().Equal(renewedUntil), "hub B's deadline moved with it")
 
 			// Past the first deadline plus the target's grace.
@@ -201,4 +296,53 @@ func TestBridgedRenewalE2E_NoSenderClosesAtDeadline(t *testing.T) {
 	require.True(t, errors.As(err, &sc), "the stream ended with a close: %v", err)
 	assert.Equal(t, 4401, sc.Code)
 	assert.Equal(t, conduitReasonAuthzExpired, sc.Reason)
+}
+
+// jwsPayload returns the decoded payload of a compact JWS (unverified), for
+// diagnostics only.
+func jwsPayload(tok []byte) string {
+	parts := strings.Split(string(tok), ".")
+	if len(parts) != 3 {
+		return fmt.Sprintf("<not a compact JWS: %d parts>", len(parts))
+	}
+	body, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Sprintf("<payload: %v>", err)
+	}
+	return string(body)
+}
+
+// diagnose logs (r2 diagnostics; removed in the final round) what each hop
+// of st's renewal did: hub B's renewal attempts, its sends on the bridge,
+// the AuthRefresh frames the agent's session received with their claims,
+// st's open grant claims, the agent's session rows and the clocks. It
+// separates a mint or verification refusal from a delivery miss.
+func (e *bridgedRenewalE2E) diagnose(t *testing.T, st *conduitUserStream) {
+	t.Helper()
+	e.mu.Lock()
+	outcomes, sends, refreshed := slices.Clone(e.outcomes), slices.Clone(e.sends), slices.Clone(e.refreshed)
+	creds := slices.Clone(e.creds)
+	e.mu.Unlock()
+	t.Logf("DIAG hub B renewal attempts: %q", outcomes)
+	t.Logf("DIAG hub B sends on the bridge: %v", sends)
+	t.Logf("DIAG agent AuthRefresh stream ids: %v (leaf target stream %d on session %s)", refreshed, st.StreamID, st.SessionID)
+	for i, c := range creds {
+		t.Logf("DIAG agent AuthRefresh %d claims: %s", i, jwsPayload(c))
+	}
+	t.Logf("DIAG leaf open grant claims: %s", jwsPayload(st.Grant))
+	for _, r := range e.w.agentSessions(t) {
+		t.Logf("DIAG agent session row: session=%s epoch=%d incarnation=%s relay=%s", r.SessionID, r.ConnectionEpoch, r.EndpointIncarnation, r.RelayInstanceID)
+	}
+	t.Logf("DIAG clocks: grants/agent=%s hub-b=%s; hub B deadline=%s",
+		e.w.clock.Now().UTC().Format(time.RFC3339), e.w.authzClocks["hub-b"].Now().UTC().Format(time.RFC3339), st.Deadline().UTC().Format(time.RFC3339))
+}
+
+// stage requires ok for one hop of the renewal; on failure it first logs
+// the diagnostics (diagnose), so the run shows which hop failed and why.
+func (e *bridgedRenewalE2E) stage(t *testing.T, st *conduitUserStream, ok bool, msg string, args ...any) {
+	t.Helper()
+	if !ok {
+		e.diagnose(t, st)
+	}
+	require.Truef(t, ok, msg, args...)
 }
