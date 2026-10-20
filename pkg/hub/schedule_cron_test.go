@@ -507,11 +507,11 @@ type failingPauseStore struct {
 	failID string
 }
 
-func (f *failingPauseStore) UpdateScheduleStatus(ctx context.Context, id, status string) error {
+func (f *failingPauseStore) UpdateScheduleStatus(ctx context.Context, id, status, reason string) error {
 	if id == f.failID {
 		return fmt.Errorf("injected pause failure")
 	}
-	return f.Store.UpdateScheduleStatus(ctx, id, status)
+	return f.Store.UpdateScheduleStatus(ctx, id, status, reason)
 }
 
 func TestPauseZonePrefixedSchedules_PauseFailureTerminates(t *testing.T) {
@@ -624,7 +624,7 @@ type noopPauseStore struct {
 	calls int
 }
 
-func (n *noopPauseStore) UpdateScheduleStatus(context.Context, string, string) error {
+func (n *noopPauseStore) UpdateScheduleStatus(context.Context, string, string, string) error {
 	n.calls++
 	return nil
 }

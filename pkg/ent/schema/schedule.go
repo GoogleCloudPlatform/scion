@@ -71,6 +71,11 @@ func (Schedule) Fields() []ent.Field {
 			Default("{}"),
 		field.String("status").
 			Default("active"),
+		// status_reason is the system reason a schedule is paused
+		// (store.ScheduleStatusReason*). Empty when active or paused by a
+		// user.
+		field.String("status_reason").
+			Optional(),
 		field.Time("next_run_at").
 			Optional().
 			Nillable(),

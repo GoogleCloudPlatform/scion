@@ -57,6 +57,17 @@ An expression that starts with a `CRON_TZ=` or `TZ=` prefix is rejected with `40
 
 For how Scion handles times and zones elsewhere (API timestamps, display zone, agent `TZ`), see [Times and Timezones](/scion/reference/times-and-timezones/).
 
+### Schedules paused by the Hub
+
+The Hub pauses a recurring schedule on its own in two cases, and records why in the schedule's status reason (`statusReason` in the API). `scion schedule list` shows it after the status, for example `paused (creator_deleted)`, `scion schedule get` prints it on a `Reason:` line, and the Web schedule list shows it under the status badge.
+
+| Reason | Cause | To bring it back |
+| :--- | :--- | :--- |
+| `creator_deleted` | The agent the schedule runs under was deleted, so no fire could be authorized. | Resume it. Resuming records your authority, and the schedule then runs as you. |
+| `cron_zone_unsupported` | The cron expression carries a `CRON_TZ=` or `TZ=` prefix. | Edit the expression to UTC, then resume it. |
+
+A schedule you pause yourself has no status reason. Any pause, resume or status edit by a user clears the reason.
+
 ### Creating a Recurring Schedule via CLI
 
 ```bash
