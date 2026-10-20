@@ -158,3 +158,145 @@ describe('scion-profile-nav — hub role badge', () => {
     expect(badge(element)).toBeNull();
   });
 });
+
+describe('scion-profile-nav — GitHub Application link (ptone/scion#5311)', () => {
+  const INSTALL_URL = 'https://github.com/apps/scion/installations/new';
+  let element: HTMLElement | null = null;
+  let projectRequests: string[] = [];
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Mounts the nav against a hub whose app config is `app` and whose
+   * `mine=true` project list is `pages` (one array of projects per page,
+   * chained with cursors), then waits for the GitHub App check to finish.
+   */
+  async function mount(
+    app: unknown,
+    pages: Array<Array<{ id: string; githubInstallationId?: number }>>,
+    projectsStatus = 200
+  ): Promise<HTMLElement> {
+    projectRequests = [];
+    let appDone = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string) => {
+        if (input === '/api/v1/github-app') {
+          appDone = true;
+          return Promise.resolve(jsonResponse(app));
+        }
+        if (input.startsWith('/api/v1/projects')) {
+          projectRequests.push(input);
+          const cursor = new URL(input, 'http://localhost').searchParams.get('cursor');
+          const index = cursor ? Number(cursor) : 0;
+          const next = index + 1 < pages.length ? String(index + 1) : undefined;
+          return Promise.resolve(
+            jsonResponse({ projects: pages[index] ?? [], nextCursor: next }, projectsStatus)
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+    };
+    el.user = user('member');
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(appDone).toBe(true));
+    // Let the project walk (if any) settle.
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  function githubLink(el: HTMLElement): HTMLAnchorElement | null {
+    return el.shadowRoot?.querySelector<HTMLAnchorElement>('a.nav-link-external') ?? null;
+  }
+
+  function page(n: number, matchAt = -1): Array<{ id: string; githubInstallationId?: number }> {
+    return Array.from({ length: n }, (_, i) =>
+      i === matchAt ? { id: `p${i}`, githubInstallationId: 7 } : { id: `p${i}` }
+    );
+  }
+
+  it('an unconfigured app sends no projects request and shows no link', async () => {
+    element = await mount({ configured: false }, [page(3, 0)]);
+    expect(projectRequests).toEqual([]);
+    expect(githubLink(element)).toBeNull();
+  });
+
+  it('a configured app without an installation URL sends no projects request', async () => {
+    element = await mount({ configured: true }, [page(3, 0)]);
+    expect(projectRequests).toEqual([]);
+    expect(githubLink(element)).toBeNull();
+  });
+
+  it('a match on the first page shows the link after one bounded request', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [page(100, 5)]);
+    expect(projectRequests).toEqual(['/api/v1/projects?mine=true&limit=100']);
+    expect(githubLink(element)?.getAttribute('href')).toBe(INSTALL_URL);
+  });
+
+  it('a match on a later page is found by following the cursor, then stops', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [
+      page(100),
+      page(100),
+      page(100, 42),
+      page(100),
+    ]);
+    expect(projectRequests).toHaveLength(3);
+    expect(projectRequests[2]).toBe('/api/v1/projects?mine=true&limit=100&cursor=2');
+    expect(githubLink(element)?.getAttribute('href')).toBe(INSTALL_URL);
+  });
+
+  it('no matching project shows no link', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [
+      page(100),
+      page(10),
+    ]);
+    expect(projectRequests).toHaveLength(2);
+    expect(githubLink(element)).toBeNull();
+  });
+
+  it('reads at most 500 projects, the window the former unbounded request saw', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [
+      page(100),
+      page(100),
+      page(100),
+      page(100),
+      page(100),
+      page(100, 0),
+    ]);
+    expect(projectRequests).toHaveLength(5);
+    expect(githubLink(element)).toBeNull();
+  });
+
+  it('an empty page ends the scan even when it carries a cursor', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [
+      page(100),
+      [],
+      page(100, 0),
+    ]);
+    expect(projectRequests).toHaveLength(2);
+    expect(githubLink(element)).toBeNull();
+  });
+
+  it('a failed projects request shows no link', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [page(3, 0)], 500);
+    expect(githubLink(element)).toBeNull();
+  });
+});
