@@ -594,6 +594,10 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// mention (not a message) for Type mention deliveries, matching how chat
 	// v2 and broker-inbound already render their secondary/fan-out
 	// recipients.
+	// The attachments delivered with this message are planned for the
+	// target once, before any render; the dispatcher issues their
+	// capabilities from the plan (ptone/scion#4596).
+	s.applyAttachmentPlan(ctx, input.TargetAgent, structuredMsg)
 	if s.writeDenyEnabled() {
 		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -601,6 +605,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			Msg:        structuredMsg,
 			CreatedAt:  storeMsg.CreatedAt,
 			IsMention:  input.Type == messages.TypeMention,
+			Plan:       structuredMsg.AttachmentPlan,
 		})
 	}
 
@@ -655,6 +660,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 					Msg:        deliverMsg,
 					CreatedAt:  storeMsg.CreatedAt,
 					IsMention:  input.Type == messages.TypeMention,
+					Plan:       deliverMsg.AttachmentPlan,
 				})
 			}
 			dispatchMsg = deliverMsg
@@ -763,6 +769,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		observerMsg := *structuredMsg
 		observerMsg.ObserverOnly = true
 		observerMsg.AttachmentDeliveries = nil
+		observerMsg.AttachmentPlan = nil
 		observerMsg.ConversationAsserted = false
 		if input.SenderAgent.ProjectID != input.TargetAgent.ProjectID {
 			sanitizeCrossProjectObserver(&observerMsg)

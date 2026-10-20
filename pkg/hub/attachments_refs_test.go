@@ -284,6 +284,9 @@ func TestOpenBoundAttachment_OnlyFromSendPath(t *testing.T) {
 	sites := hubCallerFuncs(t, "OpenBoundAttachment", "stageArtifactAttachment")
 	require.Equal(t, []string{"attachments_artifacts.go:stageArtifactAttachment"}, sites["OpenBoundAttachment"])
 	require.Equal(t, []string{"handlers_chat_v2.go:stageChatAttachments"}, sites["stageArtifactAttachment"])
+	// The capability redemption route is the one other caller-less read of
+	// a bound attachment (ptone/scion#4596, section 8.3).
+	require.Equal(t, []string{"attachment_delivery.go:handleAttachmentDelivery"}, hubCallerFuncs(t, "ServeBoundAttachment")["ServeBoundAttachment"])
 }
 
 // attachmentDecisionPaths are the artifact attachment paths of
@@ -291,6 +294,8 @@ func TestOpenBoundAttachment_OnlyFromSendPath(t *testing.T) {
 // function of a file ("file.go:func").
 var attachmentDecisionPaths = []string{
 	"attachments_artifacts.go:*",
+	"attachments_agent_upload.go:*",
+	"attachment_delivery.go:*",
 }
 
 // TestAttachmentReadDecision_NoSecondRule (required by the design, section
@@ -309,6 +314,174 @@ func TestAttachmentReadDecision_NoSecondRule(t *testing.T) {
 					t.Errorf("%s calls %s: the attachment read decision is artifactHost's alone", site, helper)
 				}
 			}
+		}
+	}
+}
+
+// TestAttachmentDecision_OnlyFromDeliveryComponent: the hub asks the read
+// decision for someone other than the request's caller in exactly one
+// place: attachmentDecisionForRecipient, built only by the delivery
+// component's Plan and Issue (ptone/scion#4596, section 8.2).
+func TestAttachmentDecision_OnlyFromDeliveryComponent(t *testing.T) {
+	sites := hubCallerFuncs(t, "attachmentDecisionForRecipient")["attachmentDecisionForRecipient"]
+	require.ElementsMatch(t, []string{"attachment_delivery.go:Plan", "attachment_delivery.go:Issue"}, sites)
+}
+
+// renderNeverCarries are the RenderDeliveryText call sites (file:function)
+// whose messages never carry attachments stored as artifacts, each with
+// the reason (ptone/scion#4596, section 8.2). Every other call site passes
+// the recipient's attachment plan.
+var renderNeverCarries = map[string]string{
+	"handlers_agent_messaging.go:handleGroupMessage":            "hub group sends refuse attachment_ids",
+	"handlers_agent_messaging.go:broadcastDirect":               "project broadcasts refuse attachment_ids",
+	"handlers_agent_messaging.go:processMentions":               "human and broker mention fan-out is out of phase 2",
+	"messagebroker.go:deliverToAgent":                           "artifact attachments never travel on the bus",
+	"handlers_broker_inbound.go:handleBrokerInbound":            "chat plugins move attachments in a later phase",
+	"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "chat plugins move attachments in a later phase",
+	"notifications.go:dispatchToAgent":                          "notifications carry no attachments",
+	"server.go:messageEventHandler":                             "event notices carry no attachments",
+	"artifacts_review.go:deliverArtifactReview":                 "artifact review notices carry no attachments",
+}
+
+// renderSite is one RenderDeliveryText call: its file:function and whether
+// it passes a plan.
+type renderSite struct {
+	where string
+	plan  bool
+}
+
+// renderSites returns every RenderDeliveryText call in the non-test files
+// of pkg/hub. A call passes a plan when its argument is a
+// RenderDeliveryInput literal keying Plan, or a variable the function
+// assigns such a literal.
+func renderSites(t *testing.T) []renderSite {
+	t.Helper()
+	paths, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	var out []renderSite
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err, path)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			hasPlanLit := func(lit *ast.CompositeLit) bool {
+				for _, elt := range lit.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Plan" {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			// varHasPlan records, for each variable assigned a
+			// RenderDeliveryInput literal in this function, whether that
+			// literal keys Plan.
+			varHasPlan := map[string]bool{}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok || len(as.Lhs) != len(as.Rhs) {
+					return true
+				}
+				for i, rhs := range as.Rhs {
+					lit, ok := rhs.(*ast.CompositeLit)
+					if !ok {
+						continue
+					}
+					sel, ok := lit.Type.(*ast.SelectorExpr)
+					id, isIdent := as.Lhs[i].(*ast.Ident)
+					if ok && isIdent && sel.Sel.Name == "RenderDeliveryInput" {
+						varHasPlan[id.Name] = hasPlanLit(lit)
+					}
+				}
+				return true
+			})
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "RenderDeliveryText" || len(call.Args) != 1 {
+					return true
+				}
+				site := renderSite{where: path + ":" + fn.Name.Name}
+				switch arg := call.Args[0].(type) {
+				case *ast.CompositeLit:
+					site.plan = hasPlanLit(arg)
+				case *ast.Ident:
+					site.plan = varHasPlan[arg.Name]
+				}
+				out = append(out, site)
+				return true
+			})
+		}
+	}
+	return out
+}
+
+// TestRenderSites_ApplyAttachmentPlan (closed list): every
+// RenderDeliveryText call in pkg/hub passes the recipient's attachment plan
+// or is on renderNeverCarries; a new call site fails until it is
+// classified.
+func TestRenderSites_ApplyAttachmentPlan(t *testing.T) {
+	sites := renderSites(t)
+	require.NotEmpty(t, sites)
+	planned := 0
+	for _, s := range sites {
+		if _, never := renderNeverCarries[s.where]; never {
+			require.False(t, s.plan, "%s is on the never-carries list but passes a plan", s.where)
+			continue
+		}
+		require.True(t, s.plan, "%s renders a delivery without the attachment plan; pass Plan or classify it in renderNeverCarries", s.where)
+		planned++
+	}
+	require.Equal(t, 6, planned, "the six delivery render sites pass the plan")
+}
+
+// TestNeverCarriesSites_NoDeliveries: the functions on the never-carries
+// list never set AttachmentDeliveries.
+func TestNeverCarriesSites_NoDeliveries(t *testing.T) {
+	paths, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		require.NoError(t, err, path)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			where := path + ":" + fn.Name.Name
+			if _, never := renderNeverCarries[where]; !never {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.AssignStmt:
+					for _, lhs := range x.Lhs {
+						if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "AttachmentDeliveries" || sel.Sel.Name == "AttachmentPlan") {
+							t.Errorf("%s sets %s", where, sel.Sel.Name)
+						}
+					}
+				case *ast.KeyValueExpr:
+					if k, ok := x.Key.(*ast.Ident); ok && (k.Name == "AttachmentDeliveries" || k.Name == "AttachmentPlan" || k.Name == "Deliveries" || k.Name == "AttachRefs") {
+						t.Errorf("%s sets %s", where, k.Name)
+					}
+				}
+				return true
+			})
 		}
 	}
 }

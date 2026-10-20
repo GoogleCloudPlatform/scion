@@ -402,6 +402,10 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries (ptone/scion#4596; store.BrokerCapabilities.AttachmentDelivery
+	// is its counterpart).
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).

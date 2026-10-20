@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1279,6 +1280,12 @@ func (s *Server) stageChatAttachments(ctx context.Context, projectID, messageID 
 	staging := s.resolveAttachmentStaging(ctx, projectID)
 	for _, ref := range attachmentRefs {
 		if ref.artifact {
+			// While the experiment is on, an attachment stored as an artifact
+			// reaches the agent by delivery into its home, not through the
+			// project's scratchpad (ptone/scion#4596).
+			if s.experimentEnabled(experiments.AttachmentArtifacts) {
+				continue
+			}
 			staged, err := s.stageArtifactAttachment(ctx, staging, messageID, ref)
 			if err != nil {
 				s.messageLog.Error("Failed to stage attachment for agent",
@@ -2000,6 +2007,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Additive model: the primary always gets IsMention=false (type:"message").
 	// When multiple agents are engaged, CoAddressees lists all of them so
 	// the primary's envelope includes a "to" field naming the full group.
+	// The attachments delivered with this message are planned for the
+	// primary once, before any render (ptone/scion#4596).
+	s.applyAttachmentPlan(ctx, primaryAgent, msg)
 	if s.writeDenyEnabled() {
 		renderInput := messaging.RenderDeliveryInput{
 			MessageID:  storeMsg.ID,
@@ -2007,6 +2017,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			Msg:        msg,
 			CreatedAt:  storeMsg.CreatedAt,
 			ReplyToID:  replyToID,
+			Plan:       msg.AttachmentPlan,
 		}
 		if len(agents) > 1 {
 			renderInput.CoAddressees = groupCoAddressees(agents)
@@ -2203,6 +2214,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// Additive model: fan-out recipients get IsMention=true (type:"mention")
 			// and the same CoAddressees as the primary, so every agent sees the
 			// identical "to" list naming the full group.
+			s.applyAttachmentPlan(ctx, mentionAgent, mentionMsg)
 			if s.writeDenyEnabled() && mentionPersisted {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
@@ -2212,6 +2224,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					IsMention:    true,
 					CoAddressees: groupCoAddressees(agents),
 					ReplyToID:    replyToID,
+					Plan:         mentionMsg.AttachmentPlan,
 				})
 			}
 

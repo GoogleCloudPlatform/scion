@@ -293,3 +293,39 @@ func nullStringPtr(v sql.NullString) *string {
 	s := v.String
 	return &s
 }
+
+// redemptionInsertHook, when a test in this package sets it, runs
+// immediately before the nonce insert, so a test can hold one redeemer there
+// while another records the same nonce. It is nil in production: nothing
+// outside this package's tests sets it.
+var redemptionInsertHook func(ctx context.Context)
+
+// RecordDeliveryRedemption implements Store.
+func (s *sqlStore) RecordDeliveryRedemption(ctx context.Context, nonce string, at time.Time) (bool, error) {
+	if nonce == "" {
+		return false, errors.New("artifacts: RecordDeliveryRedemption needs a nonce")
+	}
+	if hook := redemptionInsertHook; hook != nil {
+		hook(ctx)
+	}
+	res, err := s.db.ExecContext(ctx, s.rebind(`INSERT INTO artifact_delivery_redemption (nonce, redeemed_at)
+		VALUES (?, ?) ON CONFLICT (nonce) DO NOTHING`), nonce, s.timeArg(at))
+	if err != nil {
+		return false, fmt.Errorf("artifacts: record delivery redemption: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("artifacts: record delivery redemption: %w", err)
+	}
+	return n == 1, nil
+}
+
+// SweepDeliveryRedemptions implements Store.
+func (s *sqlStore) SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM artifact_delivery_redemption WHERE redeemed_at < ?`), s.timeArg(before))
+	if err != nil {
+		return 0, fmt.Errorf("artifacts: sweep delivery redemptions: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}

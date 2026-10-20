@@ -470,6 +470,11 @@ func deliveryFor(r *http.Request, b backend) delivery {
 // nosniff, private caching) are set here for every delivery, so all read
 // routes, now and in later phases, share one code path.
 func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool) {
+	serveFileTTL(w, r, b, f, how, immutable, signedURLTTL)
+}
+
+// serveFileTTL is serveFile with ttl as the lifetime of a redirect URL.
+func serveFileTTL(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool, ttl time.Duration) {
 	ctx := r.Context()
 	disposition := contentDisposition(f.MediaType, f.Path)
 	ctype := responseContentType(f.MediaType)
@@ -481,7 +486,7 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 	blobPath := BlobPath(b.hubID, f.SHA256)
 	if how == deliverRedirect {
 		signed, err := b.blobs.GenerateSignedURL(ctx, blobPath, storage.SignedURLOptions{
-			Method: http.MethodGet, Expires: signedURLTTL,
+			Method: http.MethodGet, Expires: ttl,
 			ResponseContentType: ctype, ResponseContentDisposition: disposition,
 		})
 		if err != nil {

@@ -228,7 +228,7 @@ func TestWebMentionCopy_DMSenderMentionsOtherAgentGetsFile(t *testing.T) {
 func TestMentionCopy_OutboundAgentDMDeliversToMentioned(t *testing.T) {
 	f, c := newMentionFixture(t)
 	id := f.upload(t, f.sender, "x.txt", "x")
-	rec := f.outbound(t, f.sender, OutboundMessageRequest{Recipient: "agent:" + f.target.Slug, Msg: "see this @cee",
+	rec := f.outbound(t, f.sender, OutboundMessageRequest{ConversationRef: "@" + f.target.Slug, Msg: "see this @cee",
 		Type: messages.TypeInstruction, AttachmentIDs: []string{id}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	primary := messageIDOf(t, rec)
@@ -244,11 +244,12 @@ func TestMentionCopy_OutboundAgentDMDeliversToMentioned(t *testing.T) {
 func TestMentionCopy_DefaultAgentWakeDeliversAttachment(t *testing.T) {
 	f, c := newMentionFixture(t)
 	ctx := context.Background()
-	convID := seedGroupConversation(t, f.st, f.projA.ID, "wake-room")
-	conv, err := f.st.GetConversation(ctx, convID)
-	require.NoError(t, err)
-	conv.DefaultAgentID = &c.ID
-	require.NoError(t, f.st.UpdateConversation(ctx, conv))
+	// A native group conversation (no legacy external ref).
+	pid := f.projA.ID
+	conv := &store.Conversation{ID: uuid.NewString(), Kind: "group", Surface: "native", ProjectID: &pid,
+		DisplayName: "wake-room", DriftState: "active", DefaultAgentID: &c.ID}
+	require.NoError(t, f.st.CreateConversation(ctx, conv))
+	convID := conv.ID
 	grantAgentProjectAccess(t, f.st, f.sender.ID, f.projA.ID)
 	id := f.upload(t, f.sender, "x.txt", "x")
 	rec := f.outbound(t, f.sender, OutboundMessageRequest{ConversationRef: "conv:" + convID, Msg: "status for the room",

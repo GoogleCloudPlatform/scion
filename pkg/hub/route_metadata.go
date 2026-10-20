@@ -1327,6 +1327,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/runtime-brokers/connect", RouteID: "runtimeBrokers.connect",
 		Classification: RouteBrokerHMAC,
 	},
+	// Attachment delivery capability redemption (ptone/scion#4596): the
+	// handler requires the broker credential whose broker id the capability
+	// names, and answers every refusal with one 404.
+	"/api/v1/attachment-deliveries/": {
+		Pattern: "/api/v1/attachment-deliveries/", RouteID: "attachmentDeliveries.redeem",
+		Classification: RouteBrokerHMAC,
+	},
 
 	// -------------------------------------------------------------------------
 	// Agent token: GCP identity and OIDC

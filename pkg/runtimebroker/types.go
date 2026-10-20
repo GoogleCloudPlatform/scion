@@ -569,6 +569,11 @@ type MessageRequest struct {
 	// MessageID is the hub's persisted message ID, when the hub wants to be
 	// told about a buffered delivery that fails after acceptance (#1820).
 	MessageID string `json:"message_id,omitempty"`
+
+	// Attachments are the files the broker downloads, verifies and writes
+	// into the agent's home before it delivers the text (ptone/scion#4596).
+	// An entry without URL is reported to the agent as not delivered.
+	Attachments []messages.WireAttachment `json:"attachments,omitempty"`
 }
 
 // UnmarshalJSON implements custom unmarshaling to support the legacy

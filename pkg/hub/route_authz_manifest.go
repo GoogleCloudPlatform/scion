@@ -86,6 +86,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/runtime-brokers":         "authenticated", // List/create runtime brokers
 	"/api/v1/runtime-brokers/":        "authenticated", // Runtime broker routes
 	"/api/v1/runtime-brokers/connect": "broker-hmac",   // WebSocket control channel — broker HMAC
+	"/api/v1/attachment-deliveries/":  "broker-hmac",   // Attachment delivery capability redemption (broker credential, one 404)
 
 	// ── Templates ──────────────────────────────────────────────────────
 	"/api/v1/templates":  "authenticated", // List/create templates

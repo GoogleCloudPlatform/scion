@@ -457,9 +457,10 @@ func TestAttachmentArtifacts_ArtifactRoutesAnswerNotFound(t *testing.T) {
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status, "still readable through the chat route")
 }
 
-// An attachment sent to an agent reaches the project's staging directory
-// from its stored bytes.
-func TestAttachmentArtifacts_StagedForAgent(t *testing.T) {
+// While the experiment is on, an attachment stored as an artifact sent to
+// an agent is no longer staged into the project's scratchpad: it reaches
+// the agent by delivery into its home (ptone/scion#4596).
+func TestAttachmentArtifacts_NotStagedForAgent(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
@@ -467,9 +468,8 @@ func TestAttachmentArtifacts_StagedForAgent(t *testing.T) {
 
 	id := f.uploadAs(t, f.ua, f.projA.ID, "log.txt", "agent bytes")
 	f.sendWith(t, f.ua, f.topicA, id)
-	got, err := os.ReadFile(filepath.Join(stagingDir, id, "log.txt"))
-	require.NoError(t, err, "the attachment is staged for the agent")
-	assert.Equal(t, "agent bytes", string(got))
+	_, err := os.Stat(filepath.Join(stagingDir, id, "log.txt"))
+	require.True(t, os.IsNotExist(err), "the attachment is not staged: %v", err)
 }
 
 // A retry of a send whose upload the first send already bound, with the

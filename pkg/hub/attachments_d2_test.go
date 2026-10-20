@@ -227,7 +227,7 @@ func TestAgentSend_BrokerPathStampsCrossChannelWatermark(t *testing.T) {
 	f.srv.events = orderedEvents{EventPublisher: f.srv.events, rec: rec}
 	id := f.upload(t, f.sender, "x.txt", "x")
 	resp := f.outbound(t, f.sender, OutboundMessageRequest{Recipient: "user:" + f.ua.Email, Msg: "in a thread",
-		ThreadID: f.topicA, AttachmentIDs: []string{id}})
+		Channel: "web", ThreadID: f.topicA, AttachmentIDs: []string{id}})
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
 	msgID := messageIDOf(t, resp)
 	got := rec.list()

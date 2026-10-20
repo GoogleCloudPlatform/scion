@@ -46,6 +46,7 @@ func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Attachments = nil
 	msg.ArtifactRefsAdmitted = false
 	msg.AttachmentDeliveries = nil
+	msg.AttachmentPlan = nil
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
@@ -2956,12 +2957,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 		// Phase 9b(ii): render the delivery envelope from the persisted row
 		// and conversation result when the envelope switch is ON.
+		// The attachments delivered with this message are planned for the
+		// agent once, before any render (ptone/scion#4596).
+		s.applyAttachmentPlan(ctx, agent, structuredMsg)
 		if s.writeDenyEnabled() && persistedMsgID != "" {
 			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 				MessageID:  storeMsg.ID,
 				ConvResult: convResult,
 				Msg:        structuredMsg,
 				CreatedAt:  storeMsg.CreatedAt,
+				Plan:       structuredMsg.AttachmentPlan,
 			})
 		}
 
@@ -2994,6 +2999,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						ConvResult: convResult,
 						Msg:        deliverMsg,
 						CreatedAt:  storeMsg.CreatedAt,
+						Plan:       deliverMsg.AttachmentPlan,
 					})
 				}
 				dispatchMsg = deliverMsg

@@ -440,8 +440,8 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 	// Delivery writes the attachments of one message into one directory
 	// under their names, so two attachments may not share a name, artifact
 	// and AttachmentStore ones alike (ptone/scion#4596).
-	if name := duplicateAttachmentName(attachmentRefs); name != "" {
-		return "", nil, chatSendValidationError(duplicateAttachmentMessage(name))
+	if msg := duplicateAttachmentRefusal(attachmentRefs); msg != "" {
+		return "", nil, chatSendValidationError(msg)
 	}
 	return content, attachmentRefs, nil
 }

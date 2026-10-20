@@ -268,11 +268,15 @@ func (s *Server) handlePutMessaging(w http.ResponseWriter, r *http.Request) {
 	resultEnvelope := ops.ConversationEnvelopeSwitch()
 	resultCrossProject := ops.CrossProjectMessagingEnabled()
 	resultOffloadThreshold := ops.OffloadThresholdRunes()
+	resultDeliveryMax := ops.AttachmentDeliveryMaxBytes()
+	resultRetention := ops.AttachmentInboxRetentionDays()
 	resultRevision := ops.SectionRevision("messaging")
 	writeJSON(w, http.StatusOK, messagingResponse{
 		ConversationEnvelopeSwitch:   &resultEnvelope,
 		CrossProjectMessagingEnabled: &resultCrossProject,
 		OffloadThresholdRunes:        &resultOffloadThreshold,
+		AttachmentDeliveryMaxBytes:   &resultDeliveryMax,
+		AttachmentInboxRetentionDays: &resultRetention,
 		Revision:                     resultRevision,
 	})
 }

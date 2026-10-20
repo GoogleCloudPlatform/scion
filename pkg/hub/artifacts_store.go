@@ -184,6 +184,7 @@ func (s *Server) reapArtifactVersions(ctx context.Context) {
 	}
 	s.reconcileArtifactOwners(ctx, st, now)
 	s.retireArtifactAttachments(ctx, st, now)
+	s.sweepDeliveryRedemptions(ctx)
 	n, err = artifacts.SweepExpired(ctx, st, now, artifactReapBatch, s.artifactLog())
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)

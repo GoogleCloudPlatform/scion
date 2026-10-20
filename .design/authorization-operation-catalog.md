@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 346
+**Operations:** 347
 
 ## Table of Contents
 
@@ -322,6 +322,7 @@
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
+- [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
@@ -11913,6 +11914,41 @@
 ### Exemptions
 
 - **internal_only:** The broker authenticates with its own HMAC credential for its own record; no user permission applies (scope: broker self access) — waives: `base_permission`
+
+---
+
+## broker.attachment.redeem
+
+**Domain:** broker
+
+**Description:** Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/attachment-deliveries/{token}` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestDeliveryRedemption_WrongBrokerRefused`
+- `pkg/hub:TestDeliveryRedemption_UniformRefusal`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential and presents a capability the hub signed for that broker and recipient under the attachment read decision; no user permission applies (scope: broker capability redemption) — waives: `base_permission`
 
 ---
 

@@ -586,6 +586,16 @@ type Store interface {
 	// deleted.
 	RetireStaleUploads(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
+	// RecordDeliveryRedemption records that the attachment delivery
+	// capability with nonce was redeemed at at (ptone/scion#4596). It
+	// reports true only for the first redemption of nonce: the insert does
+	// nothing on a conflict, so two concurrent redemptions record one.
+	RecordDeliveryRedemption(ctx context.Context, nonce string, at time.Time) (bool, error)
+
+	// SweepDeliveryRedemptions deletes redemption records older than
+	// before and returns how many it deleted.
+	SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error)
+
 	// ListLiveScopeRefs returns up to limit distinct scope refs of live
 	// artifacts of scope kind, in ascending order, strictly after after
 	// ("" = from the start).

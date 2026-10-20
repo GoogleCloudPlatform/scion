@@ -635,3 +635,44 @@ func TestAttachmentRefusedUnderLockAnswers409(t *testing.T) {
 		t.Errorf("attachment after refusals = %+v, %v", a, err)
 	}
 }
+
+// TestServeBoundAttachment: a bound attachment is streamed on the local
+// provider and redirected, with a DeliveryRedirectTTL lifetime, on an
+// object store; an attachment bound to another message, an unbound upload
+// and an unknown id answer ServeNotFound with nothing written
+// (ptone/scion#4596).
+func TestServeBoundAttachment(t *testing.T) {
+	serve := func(f *attachmentFixture, id, msg string) (ServeOutcome, *httptest.ResponseRecorder) {
+		rec := httptest.NewRecorder()
+		return f.svc.ServeBoundAttachment(rec, httptest.NewRequest(http.MethodGet, "/x", nil), id, msg), rec
+	}
+	f := newAttachmentFixture(t, false)
+	id := f.send(userU, "msg-1", pngBytes)
+	out, rec := serve(f, id, "msg-1")
+	if out != ServeWritten || rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), pngBytes) {
+		t.Fatalf("local stream = %v %d", out, rec.Code)
+	}
+	for name, c := range map[string][2]string{
+		"other message": {id, "msg-2"},
+		"unknown id":    {"00000000-0000-4000-8000-000000000000", "msg-1"},
+		"unbound":       {f.upload(userU, "u.png", "image/png", pngBytes), "msg-1"},
+	} {
+		out, rec := serve(f, c[0], c[1])
+		if out != ServeNotFound || rec.Body.Len() != 0 {
+			t.Errorf("%s: %v, %d bytes written", name, out, rec.Body.Len())
+		}
+	}
+
+	r := newAttachmentFixture(t, true)
+	rid := r.send(userU, "msg-1", pngBytes)
+	out, rec = serve(r, rid, "msg-1")
+	if out != ServeWritten || rec.Code != http.StatusFound || rec.Header().Get("Location") == "" {
+		t.Fatalf("object store = %v %d", out, rec.Code)
+	}
+	rs := r.blobs.(*redirectingStorage)
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if rs.last.Expires != DeliveryRedirectTTL {
+		t.Errorf("redirect lifetime = %v, want %v", rs.last.Expires, DeliveryRedirectTTL)
+	}
+}

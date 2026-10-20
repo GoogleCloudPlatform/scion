@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 )
 
 // Web-chat attachments stored as artifacts (ptone/scion#4595).
@@ -351,6 +353,63 @@ func (s *Service) OpenBoundAttachment(ctx context.Context, artifactID, messageID
 		return nil, AttachmentInfo{}, fmt.Errorf("artifacts: open attachment: %w", err)
 	}
 	return rc, AttachmentInfo{ID: a.ID, Name: f.Path, MediaType: f.MediaType, Size: f.Size}, nil
+}
+
+// DeliveryRedirectTTL is the lifetime of the object-store URL a broker is
+// redirected to when it redeems an attachment delivery capability
+// (ptone/scion#4596).
+const DeliveryRedirectTTL = 60 * time.Second
+
+// ServeBoundAttachment answers a broker redeeming a delivery capability
+// for attachment artifactID, which must be bound to message messageID
+// (ptone/scion#4596). Like OpenBoundAttachment it checks no caller: the host
+// calls it only from its capability redemption route, after the capability
+// (issued under the read decision for the recipient) has been verified and
+// spent. The local provider streams the bytes; an object store answers a
+// redirect to a URL with a DeliveryRedirectTTL lifetime. On ServeNotFound
+// nothing is written.
+func (s *Service) ServeBoundAttachment(w http.ResponseWriter, r *http.Request, artifactID, messageID string) ServeOutcome {
+	ctx := r.Context()
+	b, ok := s.backend()
+	if !ok || !canonicalID(artifactID) || messageID == "" {
+		return ServeNotFound
+	}
+	a, err := b.store.GetAttachment(ctx, artifactID)
+	if err != nil || a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			slog.ErrorContext(ctx, "artifacts: bound attachment lookup failed", "error", err)
+		}
+		return ServeNotFound
+	}
+	f, err := attachmentFile(ctx, b, a)
+	if err != nil {
+		return ServeNotFound
+	}
+	how := deliverRedirect
+	if b.blobs.Provider() == storage.ProviderLocal {
+		how = deliverStream
+	}
+	serveFileTTL(w, r, b, f, how, false, DeliveryRedirectTTL)
+	return ServeWritten
+}
+
+// RedeemDeliveryNonce spends the nonce of an attachment delivery capability
+// and reports whether this was its first use (ptone/scion#4596).
+func (s *Service) RedeemDeliveryNonce(ctx context.Context, nonce string) (bool, error) {
+	b, ok := s.backend()
+	if !ok {
+		return false, ErrUnavailable
+	}
+	return b.store.RecordDeliveryRedemption(ctx, nonce, time.Now())
+}
+
+// SweepDeliveryRedemptions deletes redemption records older than before.
+func (s *Service) SweepDeliveryRedemptions(ctx context.Context, before time.Time) (int, error) {
+	b, ok := s.backend()
+	if !ok {
+		return 0, nil
+	}
+	return b.store.SweepDeliveryRedemptions(ctx, before)
 }
 
 // retireBatch is how many artifacts one retire store call deletes.

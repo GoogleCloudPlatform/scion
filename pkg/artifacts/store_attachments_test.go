@@ -595,3 +595,125 @@ func TestBindAttachment_ProjectNotWrittenWithoutBind(t *testing.T) {
 		}
 	})
 }
+
+// TestMigration0011_DeliveryRedemptions: a database at 0010 migrates to
+// the redemption table; a nonce is recorded once, a second record reports
+// a repeated use, the sweep deletes old rows, and a second Init is a no-op.
+func TestMigration0011_DeliveryRedemptions(t *testing.T) {
+	if i := migrationIndex(migrationDeliveryRedemptions); i < 1 || migrations[i-1].name != migrationAttachmentProject {
+		t.Fatalf("migration %q is not right after %q", migrationDeliveryRedemptions, migrationAttachmentProject)
+	}
+	if got := migrationDeliveryRedemptions; got != "0011_delivery_redemptions" {
+		t.Fatalf("migrationDeliveryRedemptions = %q", got)
+	}
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver).(*sqlStore)
+			migrateTo(t, db, st, migrationDeliveryRedemptions)
+			ctx := context.Background()
+			if err := st.Init(ctx); err != nil {
+				t.Fatalf("Init over 0010: %v", err)
+			}
+			old := time.Now().Add(-48 * time.Hour)
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-old", old); err != nil || !first {
+				t.Fatalf("first record = %v, %v", first, err)
+			}
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-new", time.Now()); err != nil || !first {
+				t.Fatalf("first record = %v, %v", first, err)
+			}
+			if again, err := st.RecordDeliveryRedemption(ctx, "nonce-new", time.Now()); err != nil || again {
+				t.Fatalf("second record of one nonce = %v, %v; want false", again, err)
+			}
+			n, err := st.SweepDeliveryRedemptions(ctx, time.Now().Add(-24*time.Hour))
+			if err != nil || n != 1 {
+				t.Fatalf("sweep = %d, %v; want 1", n, err)
+			}
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-old", time.Now()); err != nil || !first {
+				t.Errorf("a swept nonce records again: %v, %v", first, err)
+			}
+			if err := st.Init(ctx); err != nil {
+				t.Errorf("Init again: %v", err)
+			}
+		})
+	}
+}
+
+// TestRecordDeliveryRedemption_HeldRedeemerLoses (K31): one redeemer is
+// held immediately before its nonce insert while a second records the same
+// nonce; when released, the held one is answered "not first" with no error.
+// The conflict is answered by the insert itself, so a check made before the
+// insert cannot decide it.
+func TestRecordDeliveryRedemption_HeldRedeemerLoses(t *testing.T) {
+	type heldKey struct{}
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		redemptionInsertHook = func(ctx context.Context) {
+			if ctx.Value(heldKey{}) != nil {
+				close(reached)
+				<-release
+			}
+		}
+		t.Cleanup(func() { redemptionInsertHook = nil })
+		type result struct {
+			first bool
+			err   error
+		}
+		held := make(chan result, 1)
+		go func() {
+			ctx := context.WithValue(context.Background(), heldKey{}, true)
+			first, err := st.RecordDeliveryRedemption(ctx, "held-nonce", time.Now())
+			held <- result{first, err}
+		}()
+		<-reached
+		first, err := st.RecordDeliveryRedemption(context.Background(), "held-nonce", time.Now())
+		if err != nil || !first {
+			close(release)
+			t.Fatalf("second redeemer: first=%v err=%v, want the first use", first, err)
+		}
+		close(release)
+		got := <-held
+		if got.err != nil {
+			t.Fatalf("held redeemer: %v (a repeated nonce is a normal answer, never an error)", got.err)
+		}
+		if got.first {
+			t.Fatal("held redeemer was answered as the first use after the nonce was recorded")
+		}
+	})
+}
+
+// TestRecordDeliveryRedemption_Concurrent: concurrent records of one
+// nonce, released together: exactly one is a first use, and none is an
+// error (the conflict is answered by the insert itself).
+func TestRecordDeliveryRedemption_Concurrent(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		var wg sync.WaitGroup
+		results := make([]bool, 8)
+		errs := make([]error, 8)
+		start := make(chan struct{})
+		for i := range results {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				results[i], errs[i] = st.RecordDeliveryRedemption(ctx, "shared-nonce", time.Now())
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		firsts := 0
+		for i := range results {
+			if errs[i] != nil {
+				t.Fatalf("record %d: %v (a repeated nonce is a normal answer, never an error)", i, errs[i])
+			}
+			if results[i] {
+				firsts++
+			}
+		}
+		if firsts != 1 {
+			t.Fatalf("first uses = %d, want exactly 1", firsts)
+		}
+	})
+}

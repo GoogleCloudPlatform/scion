@@ -402,6 +402,11 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	if msgID := dispatchMessageIDFromContext(ctx); msgID != "" {
 		reqBody["message_id"] = msgID
 	}
+	// ptone/scion#4596: the attachments the broker downloads and writes into
+	// the agent's home before delivering the text.
+	if wire := dispatchAttachmentsFromContext(ctx); len(wire) > 0 {
+		reqBody["attachments"] = wire
+	}
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {

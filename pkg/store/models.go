@@ -1158,6 +1158,12 @@ type BrokerCapabilities struct {
 	// --broker`). The hub refuses a move unless both the source and the
 	// target broker report it (412).
 	AgentMove bool `json:"agentMove"`
+	// AttachmentDelivery indicates the broker can receive attachment
+	// deliveries: it redeems the capabilities of a message request's
+	// attachments field and writes the files into the agent's home before
+	// delivering the text (ptone/scion#4596). The hub issues capabilities
+	// only to brokers that report it.
+	AttachmentDelivery bool `json:"attachmentDelivery"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
@@ -3004,6 +3010,19 @@ type Message struct {
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// DeferredAttachments is never stored. For a deferred message, the
+	// conversation messages route lists its attachments stored as
+	// artifacts here, to a reader only, so catch-up can say they were not
+	// delivered (ptone/scion#4596).
+	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+}
+
+// DeferredAttachment names one attachment of a deferred message: its
+// reduced file name and size, and nothing else.
+type DeferredAttachment struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // MessageFilter defines query parameters for listing messages.

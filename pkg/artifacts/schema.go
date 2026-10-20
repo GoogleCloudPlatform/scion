@@ -423,3 +423,26 @@ ALTER TABLE artifact ADD COLUMN message_project_id TEXT;
 const postgresAttachmentProject = `
 ALTER TABLE artifact ADD COLUMN IF NOT EXISTS message_project_id TEXT;
 `
+
+// migrationDeliveryRedemptions records the redeemed nonces of attachment
+// delivery capabilities (ptone/scion#4596), so each capability serves at
+// most once. Rows older than a day are swept by the maintenance pass.
+const migrationDeliveryRedemptions = "0011_delivery_redemptions"
+
+const sqliteDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`
+
+const postgresDeliveryRedemptions = `
+CREATE TABLE IF NOT EXISTS artifact_delivery_redemption (
+    nonce       TEXT PRIMARY KEY,
+    redeemed_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_delivery_redemption_at
+    ON artifact_delivery_redemption (redeemed_at);
+`

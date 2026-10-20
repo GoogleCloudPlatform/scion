@@ -74,8 +74,8 @@ func (s *Server) validateAttachmentIDs(ctx context.Context, senderKind, senderID
 		}
 		refs = append(refs, newArtifactAttachmentRef(info))
 	}
-	if name := duplicateAttachmentName(refs); name != "" {
-		return nil, duplicateAttachmentMessage(name)
+	if msg := duplicateAttachmentRefusal(refs); msg != "" {
+		return nil, msg
 	}
 	return refs, ""
 }
@@ -87,12 +87,18 @@ func (s *Server) experimentEnabledAttachments() bool {
 	return s.attachmentArtifactsReady() && s.experimentEnabled(experiments.AttachmentArtifacts)
 }
 
-// duplicateAttachmentName returns the name two of refs share, compared
-// case-insensitively after SanitizeFilename, or "". Delivery writes the
-// attachments of one message into one directory under their names, so
-// names must be unique within a message.
-func duplicateAttachmentName(refs []AttachmentRef) string {
+// duplicateAttachmentRefusal returns the validation message for two refs
+// that share a name, compared case-insensitively after SanitizeFilename, or
+// "". A collision after the delivery reduction names both files as sent.
+// Delivery writes the attachments of one message into one directory under
+// their names, so names must be unique within a message.
+func duplicateAttachmentRefusal(refs []AttachmentRef) string {
 	seen := make(map[string]bool, len(refs))
+	// Attachments stored as artifacts are delivered under the name the hub
+	// reduces them to (reduceAttachmentName), which maps distinct names (a
+	// space and an underscore, a non-ASCII letter, a long name past its cut)
+	// to one file, so they must also be unique after that reduction.
+	reduced := make(map[string]string, len(refs))
 	for _, ref := range refs {
 		name := ref.Name
 		if clean, err := SanitizeFilename(ref.Name); err == nil {
@@ -100,15 +106,18 @@ func duplicateAttachmentName(refs []AttachmentRef) string {
 		}
 		key := strings.ToLower(name)
 		if seen[key] {
-			return name
+			return fmt.Sprintf("two attachments are named %q; rename one", name)
 		}
 		seen[key] = true
+		if ref.artifact {
+			r := strings.ToLower(reduceAttachmentName(ref.Name))
+			if first, ok := reduced[r]; ok {
+				return fmt.Sprintf("two attachments, %q and %q, are delivered under one file name; rename one", first, ref.Name)
+			}
+			reduced[r] = ref.Name
+		}
 	}
 	return ""
-}
-
-func duplicateAttachmentMessage(name string) string {
-	return fmt.Sprintf("two attachments are named %q; rename one", name)
 }
 
 // attachmentDeliveryMaxBytes returns the messaging setting
@@ -251,10 +260,7 @@ func duplicateAttachmentNameWithPaths(refs []AttachmentRef, paths []string) stri
 	for _, p := range paths {
 		all = append(all, AttachmentRef{Name: filepath.Base(p)})
 	}
-	if name := duplicateAttachmentName(all); name != "" {
-		return duplicateAttachmentMessage(name)
-	}
-	return ""
+	return duplicateAttachmentRefusal(all)
 }
 
 // validateAgentSendAttachments runs the attachment_ids checks of an agent

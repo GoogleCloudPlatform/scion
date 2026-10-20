@@ -3,6 +3,7 @@
     "agentMove",
     "asyncLaunch",
     "attach",
+    "attachmentDelivery",
     "emptyPerAgentWorkspace",
     "nodeImageRegistry",
     "reprovision",

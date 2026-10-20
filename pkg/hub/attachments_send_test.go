@@ -513,3 +513,22 @@ func TestAttachmentProbe_DeliveryBudget(t *testing.T) {
 	require.NotNil(t, got.DeliveryMaxBytes)
 	require.Equal(t, int64(4096), *got.DeliveryMaxBytes)
 }
+
+// TestSend_ReducedNameCollisionRefused: two attachments whose names reduce
+// to the same delivered file name are refused like a duplicate name.
+func TestSend_ReducedNameCollisionRefused(t *testing.T) {
+	f := newSendFixture(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	a := f.uploadAs(t, f.ua, "", "a b.txt", "one")
+	b := f.uploadAs(t, f.ua, "", "a_b.txt", "two")
+	got := f.send(t, f.ua, dm, map[string]interface{}{"content": "x", "attachments": []string{a, b}})
+	require.Equal(t, http.StatusBadRequest, got.status, got.body)
+	require.Contains(t, got.body, "a b.txt")
+	require.Contains(t, got.body, "a_b.txt")
+	x := f.upload(t, f.sender, "résumé.pdf", "one")
+	y := f.upload(t, f.sender, "r_sum_.pdf", "two")
+	rec := f.message(t, f.sender, f.target, "two files", x, y)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "r\u00e9sum\u00e9.pdf")
+	require.Contains(t, rec.Body.String(), "r_sum_.pdf")
+}

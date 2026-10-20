@@ -63,6 +63,7 @@ var migrations = []migration{
 	{name: migrationVersionFailReason, sqlite: sqliteVersionFailReason, postgres: postgresVersionFailReason},
 	{name: migrationAttachments, sqlite: sqliteAttachments, postgres: postgresAttachments},
 	{name: migrationAttachmentProject, sqlite: sqliteAttachmentProject, postgres: postgresAttachmentProject},
+	{name: migrationDeliveryRedemptions, sqlite: sqliteDeliveryRedemptions, postgres: postgresDeliveryRedemptions},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
