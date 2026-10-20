@@ -14,6 +14,11 @@ the C3/C4/C7 reviews. Config only; no change to tests or production code.
   `__fixtures__/terminal-workspace-fake.ts`). `npm run typecheck` already runs
   this project. The root `tsconfig.json` leaves out `*.test.ts` and
   `__fixtures__/**`, so before this change tsc never checked these files.
+- After the restack onto upstream main, four more boot suites that arrived
+  with the upstream C3 merge (#3828) were added the same way:
+  `main-terminal-hides-outlet`, `main-terminal-loading`,
+  `main-terminal-loading-handoff`, `main-terminal-loading-teardown`. That
+  makes all eleven `main-*.test.ts` suites covered. They were type-clean too.
 - The suites and fixtures were already type-clean under the strict root
   options (`exactOptionalPropertyTypes`, `noUnused*`), so no cast or fixture
   type change was needed. They went into the existing client-tests project:
@@ -28,6 +33,7 @@ the C3/C4/C7 reviews. Config only; no change to tests or production code.
   files) with the new config. With the old config, the same edits pass
   typecheck. The edits were not committed.
 - Clean `npm run typecheck` passes; vitest of the seven suites passes (8 tests).
+  On the restacked base, vitest of all eleven suites passes.
 
 ## Learned / follow-ups
 
