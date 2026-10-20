@@ -264,17 +264,22 @@ func TestHandleHealthSummary_HubPausedSchedulesNotReported(t *testing.T) {
 	assert.NotContains(t, rr.Body.String(), "10.0.0.9")
 }
 
-// pausedFilterIgnoredStore drops SystemPausedOnly from every schedule
-// list, as a store that does not know the field would.
+// pausedFilterIgnoredStore drops SystemPausedOnly and Status from the
+// hub-paused schedule list, as a store that ignored both would, so every
+// non-deleted schedule reaches the hub's re-check.
 type pausedFilterIgnoredStore struct{ store.Store }
 
 func (f pausedFilterIgnoredStore) ListSchedules(ctx context.Context, filter store.ScheduleFilter, opts store.ListOptions) (*store.ListResult[store.Schedule], error) {
-	filter.SystemPausedOnly = false
+	if filter.SystemPausedOnly {
+		filter.SystemPausedOnly = false
+		filter.Status = ""
+	}
 	return f.Store.ListSchedules(ctx, filter, opts)
 }
 
-// When the store ignores SystemPausedOnly, the hub's per-row re-check
-// still leaves out a user-paused schedule.
+// When the store ignores the paused filter, the hub's per-row re-check
+// still leaves out a user-paused schedule (empty reason) and an active
+// schedule that carries a reason.
 func TestHandleHealthSummary_HubPausedSchedulesRecheckedPerRow(t *testing.T) {
 	srv, s, _, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) pausedFilterIgnoredStore {
 		return pausedFilterIgnoredStore{Store: inner}
@@ -285,10 +290,14 @@ func TestHandleHealthSummary_HubPausedSchedulesRecheckedPerRow(t *testing.T) {
 	hub := createHealthSchedule(t, s, p.ID, "recheck-hub", ranAt)
 	pauseHealthSchedule(t, s, hub, store.ScheduleStatusReasonCreatorDeleted)
 	pauseHealthSchedule(t, s, createHealthSchedule(t, s, p.ID, "recheck-user", ranAt), store.ScheduleStatusReasonNone)
+	activeWithReason := createHealthSchedule(t, s, p.ID, "recheck-active", ranAt)
+	require.NoError(t, s.UpdateScheduleStatus(context.Background(), activeWithReason.ID,
+		store.ScheduleStatusActive, store.ScheduleStatusReasonCreatorDeleted))
 
 	resp, body := healthSummaryAsAdmin(t, srv)
 	require.NotNil(t, resp.Schedules)
 	assert.Equal(t, 1, resp.Schedules.PausedTotal)
 	assert.Equal(t, []string{hub.ID}, pausedScheduleIDs(resp.Schedules))
 	assert.NotContains(t, body, "recheck-user")
+	assert.NotContains(t, body, "recheck-active")
 }
