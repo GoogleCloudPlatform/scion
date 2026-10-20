@@ -5958,7 +5958,8 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Decided once per request: while hub.attachment_artifacts is on (and
-	// the artifact service is ready and the caller is a session), each file
+	// the artifact service is ready and the caller is a session or a user
+	// access token, attachmentWriterKind), each file
 	// is stored as an upload in the artifact service, with the artifact file
 	// size limit.
 	toArtifacts := s.attachmentUploadsToArtifacts(ctx)

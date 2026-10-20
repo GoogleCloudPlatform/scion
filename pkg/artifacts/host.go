@@ -158,6 +158,13 @@ type MessageScopeHost interface {
 	// "" for a message without a project. A host may require it for some
 	// credentials (ptone/scion#4596); nil and "" are distinct.
 	MayReadMessage(ctx context.Context, messageID string, messageProjectID *string) bool
+
+	// PermitsUploadRead reports whether the caller's credential allows the
+	// uploader to read its own unsent upload (an upload-scoped row). It is
+	// asked after the uploader matches (ptone/scion#4596, section 9, clause
+	// 0): a project-bounded user access token does not read its holder's
+	// unsent upload, which belongs to no project.
+	PermitsUploadRead(ctx context.Context) bool
 }
 
 // ScopeExplainer is an optional extension of Host. When a credential

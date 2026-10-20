@@ -69,10 +69,17 @@ func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 // the AttachmentStore path. It is not a read question: who reads an
 // attachment is the artifact service's decision alone
 // (artifacts.Service.MayReadAttachments and ServeAttachment over
-// artifactHost). Admitted: a session of a user or the dev user, and an
-// agent that may send (agentMaySend).
+// artifactHost). Admitted: a session of a user or the dev user, a user
+// access token (as its holder; the routes keep their token checks,
+// ptone/scion#4596 section 9), and an agent that may send (agentMaySend).
 func (s *Server) attachmentWriterKind(ctx context.Context) string {
-	cred, _ := inboxCredentialOf(ctx)
+	cred, token := inboxCredentialOf(ctx)
+	if cred == inboxCredentialToken {
+		if token != nil && token.ID() != "" {
+			return artifacts.PrincipalKindUser
+		}
+		return ""
+	}
 	if cred == inboxCredentialAgent {
 		if _, ok := s.agentMaySend(ctx); ok {
 			return artifacts.PrincipalKindAgent

@@ -150,7 +150,7 @@ func TestAttachmentReadDecision_EveryReturnPath(t *testing.T) {
 		{name: "agent addressee of another project's group message", ctx: storedAgentContext(d.aa), msgID: d.groupMsg, permits: true, want: true},
 		{name: "agent non-addressee", ctx: storedAgentContext(d.ab), msgID: d.dmMsg, permits: true, want: false},
 		{name: "agent non-addressee, other project", ctx: storedAgentContext(d.ab), msgID: d.groupMsg, permits: true, want: false},
-		{name: "user access token (section 9 not yet)", identity: token, msgID: d.dmMsg, file: d.dmFile, want: false},
+		{name: "user access token, reader (section 9)", identity: token, msgID: d.dmMsg, permits: true, want: true},
 		{name: "federated user", identity: federated, msgID: d.dmMsg, file: d.dmFile, want: false},
 		{name: "project visitor", identity: visitor, msgID: d.dmMsg, file: d.dmFile, want: false},
 		{name: "broker acting for a user", ctx: brokerOBO, msgID: d.dmMsg, want: false},

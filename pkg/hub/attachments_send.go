@@ -341,9 +341,12 @@ func (s *Server) storeOutboundBeforeBroker(ctx context.Context, w http.ResponseW
 // validateMessageAttachments validates the attachment_ids of a send on
 // POST /api/v1/agents/{id}/message, whose recipient is an agent. An agent
 // sender goes through validateAgentSendAttachments. A user sender is
-// admitted only when attachmentWriterKind is "user" (a session); any other
-// caller's ids get the answer of an unknown id, as with the experiment off.
-func (s *Server) validateMessageAttachments(ctx context.Context, ids, paths []string) ([]AttachmentRef, string, bool) {
+// admitted only when attachmentWriterKind is "user" (a session or a user
+// access token); any other caller's ids get the answer of an unknown id, as
+// with the experiment off. A token also needs inbox:write, eligible for its
+// boundary, and allowed for the target agent's project (ptone/scion#4596,
+// section 9); otherwise the send is refused (ok false).
+func (s *Server) validateMessageAttachments(ctx context.Context, target *store.Agent, ids, paths []string) ([]AttachmentRef, string, bool) {
 	const route = "agent-message"
 	if sender := GetAgentIdentityFromContext(ctx); sender != nil {
 		rec, err := s.store.GetAgent(ctx, sender.ID())
@@ -356,6 +359,13 @@ func (s *Server) validateMessageAttachments(ctx context.Context, ids, paths []st
 	if user == nil || s.attachmentWriterKind(ctx) != artifacts.PrincipalKindUser {
 		logReferenceRefused(ctx, route, "caller may not name attachments stored as artifacts", GetIdentityFromContext(ctx))
 		return nil, attachmentNotAvailable(ids[0]), true
+	}
+	if token := chatToken(ctx); token != nil {
+		check := s.newSelfScopeCheck(ctx, token, permInboxWrite)
+		if target == nil || !check.allows(tokenBoundaryProject(token)) || !check.allows(target.ProjectID) {
+			logReferenceRefused(ctx, route, "token may not send attachments to this agent's project", token)
+			return nil, "", false
+		}
 	}
 	refs, msg := s.validateAttachmentIDs(ctx, artifacts.PrincipalKindUser, user.ID(), ids, len(paths), route, user)
 	if msg == "" {

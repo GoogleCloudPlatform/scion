@@ -262,8 +262,9 @@ func delegate(t *testing.T, s store.Store, delegatorType, delegatorID string, a 
 
 // TestAttachmentProbe_AnyTokenReads: the probe describes only the caller's
 // own upload capability, so any user access token reads it, whatever its
-// selectors or boundary; a token without the upload capability gets
-// "legacy".
+// selectors or boundary. A token uploads to the artifact service
+// (ptone/scion#4596, section 9), so it gets "artifact"; the upload and
+// the send keep their token checks.
 func TestAttachmentProbe_AnyTokenReads(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
@@ -274,6 +275,6 @@ func TestAttachmentProbe_AnyTokenReads(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, chatAttachmentsPath, nil)
 		rec := httptest.NewRecorder()
 		f.srv.chatAttachmentRoute(f.srv.handleChatAttachments)(rec, req.WithContext(contextWithIdentity(req.Context(), token)))
-		require.Equal(t, "legacy", probeAnswer(t, rec))
+		require.Equal(t, "artifact", probeAnswer(t, rec))
 	}
 }

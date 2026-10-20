@@ -512,61 +512,6 @@ func (f *refFixture) downloadAs(t *testing.T, identity Identity, id string) refA
 	return refAnswer{status: rec.Code, body: rec.Body.String()}
 }
 
-// User access tokens read no attachment stored as an artifact: whatever the
-// token carries and whatever the conversation, including an upload not sent
-// yet, a token gets the answer of an unknown id, while the session of the
-// same user reads the attachment. Token access comes with its own design
-// (ptone/scion#4596).
-func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-
-	threadFile := f.uploadAs(t, f.ua, f.projA.ID, "thread.txt", "in project A")
-	f.sendWith(t, f.ua, f.topicA, threadFile)
-	unsent := f.uploadAs(t, f.ua, f.projA.ID, "unsent.txt", "not sent yet")
-	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	dmFile := f.uploadAs(t, f.ua, "", "dm.txt", "between users")
-	f.sendWith(t, f.ua, userDM, dmFile)
-	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	agentMsg := f.seedMessage(t, f.projA.ID, agentDM, "", "for the agent")
-	agentFile := f.uploadAs(t, f.ua, f.projA.ID, "agent.txt", "agent dm")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, agentFile, artifacts.PrincipalKindUser, f.ua.ID, agentMsg, f.projA.ID))
-	conv, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind: "group", Surface: "native", ExternalRef: "group:none:" + uuid.NewString(), DriftState: "active",
-	})
-	require.NoError(t, err)
-	require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{ID: uuid.NewString(),
-		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.ua.ID, Role: "member", JoinedAt: time.Now()}))
-	groupMsg := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
-	groupFile := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, groupFile, artifacts.PrincipalKindUser, f.ua.ID, groupMsg, ""))
-
-	hubToken := selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read")
-	missing := f.downloadAs(t, hubToken, uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-	tokens := []struct {
-		name  string
-		token *ScopedUserIdentity
-	}{
-		{"hub boundary", hubToken},
-		{"project A boundary", selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "agent:read")},
-	}
-	files := []struct{ name, id string }{
-		{"project thread", threadFile},
-		{"upload not sent", unsent},
-		{"direct message between users", dmFile},
-		{"direct message with an agent", agentFile},
-		{"group without a project", groupFile},
-	}
-	for _, file := range files {
-		require.Equal(t, http.StatusOK, f.download(t, f.ua, file.id).status, "session: %s", file.name)
-		for _, tk := range tokens {
-			require.Equal(t, missing, f.downloadAs(t, tk.token, file.id), "%s token: %s", tk.name, file.name)
-		}
-	}
-}
-
 // tokenRequest serves the chat conversation routes for a user access token:
 // the chat route wrapper and the handler, with token as the request's caller.
 func (f *refFixture) tokenRequest(t *testing.T, token *ScopedUserIdentity, method, path string, body interface{}) refAnswer {
@@ -586,32 +531,10 @@ func (f *refFixture) tokenRequest(t *testing.T, token *ScopedUserIdentity, metho
 	return refAnswer{status: rec.Code, body: rec.Body.String()}
 }
 
-// A user access token cannot send an attachment stored as an artifact: an
-// upload its holder made in a session gets the same answer as an unknown id
-// when the token names it, and stays an unsent upload the session can send.
-func TestAttachmentArtifacts_TokenCannotSendArtifactAttachment(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	id := f.uploadAs(t, f.ua, f.projA.ID, "draft.txt", "session upload")
-	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
-	path := "/api/v1/chat/conversations/" + f.topicA + "/messages"
-
-	unknown := uuid.NewString()
-	missing := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{unknown}})
-	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
-	require.Contains(t, missing.body, "not available in this conversation")
-	got := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{id}})
-	require.Equal(t, missing.status, got.status, got.body)
-	require.Equal(t, strings.ReplaceAll(missing.body, unknown, "ID"), strings.ReplaceAll(got.body, id, "ID"), "the same answer as an unknown id")
-
-	// Still an unsent upload of alice: her session sends it.
-	resp := f.sendWith(t, f.ua, f.topicA, id)
-	require.Len(t, resp.Attachments, 1)
-}
-
-// A user access token's history of a conversation does not list attachments
-// stored as artifacts; the session's history of the same message does.
-func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) {
+// A user access token's history of a conversation lists the attachments
+// stored as artifacts it may read under the token rule (ptone/scion#4596,
+// section 9), as the session's history does.
+func TestAttachmentArtifacts_TokenHistoryListsReadableArtifactAttachments(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
@@ -625,7 +548,7 @@ func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) 
 	var hist chatHistoryResponse
 	require.NoError(t, json.Unmarshal([]byte(got.body), &hist))
 	require.NotEmpty(t, hist.Messages, "the token reads the conversation")
-	require.Empty(t, hist.MessageAttachments[resp.ID], "the token's history lists no attachment stored as an artifact")
+	require.Len(t, hist.MessageAttachments[resp.ID], 1, "the token's history lists the attachment it may read")
 }
 
 // streamPublishedAs opens the agent messages stream of agentID as identity,
@@ -706,37 +629,10 @@ func TestAttachmentArtifacts_AgentStreamOmitsArtifactAttachmentsForTokens(t *tes
 	require.NotContains(t, body, "artifact-file.txt")
 }
 
-// With the experiment on, a user access token's upload is stored in the
-// AttachmentStore, not in the artifact service, and the token reads it back
-// under the AttachmentStore's rule, as with the experiment off.
-func TestAttachmentArtifacts_TokenUploadsUseAttachmentStore(t *testing.T) {
-	f := newRefFixture(t)
-	st := enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
-
-	req := attachmentUploadRequest(t, f.projA.ID, "token.txt", "from a token")
-	rec := httptest.NewRecorder()
-	f.srv.chatRoute(f.srv.handleChatAttachments)(rec, req.WithContext(contextWithIdentity(req.Context(), token)))
-	id := uploadedAttachmentID(t, rec, "token.txt")
-
-	meta, err := f.wcs.GetAttachment(ctx, id)
-	require.NoError(t, err)
-	require.NotNil(t, meta, "the upload is a row of the AttachmentStore")
-	assert.Equal(t, f.ua.ID, meta.UploadedBy)
-	assert.Equal(t, f.projA.ID, meta.ProjectID)
-	_, err = st.GetAttachment(ctx, id)
-	require.ErrorIs(t, err, artifacts.ErrNotFound, "nothing is stored in the artifact service")
-
-	got := f.downloadAs(t, token, id)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "from a token", got.body)
-}
-
-// With the experiment on, uploads go to the artifact service only for a
-// caller it lets read attachments: a session. A user access token and a
-// federated user upload to the AttachmentStore as with the experiment off,
-// instead of storing a file they could not read back (or failing).
+// With the experiment on, uploads go to the artifact service for a session
+// and a user access token (ptone/scion#4596, section 9). A federated user
+// uploads to the AttachmentStore as with the experiment off, instead of
+// storing a file it could not read back (or failing).
 func TestAttachmentArtifacts_NonSessionUploadsUseAttachmentStore(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
@@ -744,7 +640,7 @@ func TestAttachmentArtifacts_NonSessionUploadsUseAttachmentStore(t *testing.T) {
 
 	require.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "session")
 	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:write")
-	require.False(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
+	require.True(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
 
 	fed := NewFederatedUserIdentity("https://issuer.attachments.test", "att-fed", "att-fed@test.com", "Fed", "member", nil)
 	fedCtx := contextWithCredentialContext(contextWithIdentity(ctx, fed), CredentialContext{Kind: CredentialKindFederation})

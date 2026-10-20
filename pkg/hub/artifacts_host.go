@@ -753,7 +753,14 @@ func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 		}
 		return h.server.agentStanding(ctx, agent.ID()) == nil
 	case inboxCredentialToken:
-		return false // user access tokens: ptone/scion#4596, section 9
+		// Clause 1 of the token rule (ptone/scion#4596, section 9): the
+		// token carries inbox:read, eligible for its boundary, and a
+		// project-boundary holder is a current member of that project.
+		token := chatToken(ctx)
+		if token == nil || h.server == nil {
+			return false
+		}
+		return h.server.newSelfScopeCheck(ctx, token, permInboxRead).allows(tokenBoundaryProject(token))
 	default:
 		return false
 	}
@@ -789,20 +796,7 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string, mes
 		if user == nil || user.ID() == "" {
 			return false
 		}
-		if s.canReadNativeMessage(ctx, user, msg) {
-			return true
-		}
-		addressees, err := s.store.ListAddressees(ctx, messageID)
-		if err != nil {
-			slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
-			return false
-		}
-		for _, a := range addressees {
-			if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == user.ID() {
-				return true
-			}
-		}
-		return false
+		return s.canReadNativeMessage(ctx, user, msg) || s.attachmentUserAddressee(ctx, messageID, user.ID())
 	case inboxCredentialAgent:
 		agent := GetAgentIdentityFromContext(ctx)
 		if agent == nil || agent.ID() == "" {
@@ -812,6 +806,8 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string, mes
 			return true
 		}
 		return s.attachmentAgentAddressee(ctx, msg, agent.ID())
+	case inboxCredentialToken:
+		return s.tokenMayReadAttachmentMessage(ctx, msg, messageProjectID)
 	default:
 		return false
 	}
@@ -874,3 +870,105 @@ const (
 	addresseeDelivered = "delivered"
 	addresseeFailed    = "failed"
 )
+
+// attachmentUserAddressee reports whether user userID is one of the user
+// addressees of message messageID. A lookup failure answers false.
+func (s *Server) attachmentUserAddressee(ctx context.Context, messageID, userID string) bool {
+	addressees, err := s.store.ListAddressees(ctx, messageID)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment addressee lookup failed", "message", messageID, "error", err)
+		return false
+	}
+	for _, a := range addressees {
+		if a.PrincipalKind == artifacts.PrincipalKindUser && a.PrincipalID == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenMayReadAttachmentMessage is the token branch of MayReadMessage
+// (ptone/scion#4596, section 9). Clause 1 ran in PermitsMessageRead and
+// clause 2 (a live message) in MayReadMessage; then every one of these
+// must hold:
+//  3. the holder reads the message: through its conversation
+//     (canReadNativeMessage with the token identity, so the token's
+//     ceiling applies), or as one of its user addressees;
+//  4. the attachments record the message's project (not nil), and the
+//     token's inbox:read self-scope check allows it ("" needs a hub
+//     boundary);
+//  5. for a direct conversation, agent:read on every agent party of its
+//     key (dmAgentParties), whichever party the holder is; a missing agent
+//     row refuses.
+//
+// It is not tokenMayUseConversation: the project is the one stored at
+// bind, and the agent requirement does not depend on the caller.
+func (s *Server) tokenMayReadAttachmentMessage(ctx context.Context, msg *store.Message, messageProjectID *string) bool {
+	token := chatToken(ctx)
+	if token == nil || token.ID() == "" {
+		return false
+	}
+	if !s.canReadNativeMessage(ctx, token, msg) && !s.attachmentUserAddressee(ctx, msg.ID, token.ID()) {
+		return false
+	}
+	if messageProjectID == nil || !s.newSelfScopeCheck(ctx, token, permInboxRead).allows(*messageProjectID) {
+		return false
+	}
+	conv, err := s.attachmentMessageConversation(ctx, msg)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment conversation lookup failed", "message", msg.ID, "error", err)
+		return false
+	}
+	if conv == nil || conv.Kind != "direct" {
+		return true
+	}
+	parties, err := dmAgentParties(conv)
+	if err != nil {
+		return false
+	}
+	for _, id := range parties {
+		agent, err := s.store.GetAgent(ctx, id)
+		if err != nil || agent == nil {
+			return false
+		}
+		if !s.authzService.CheckAccess(ctx, token, agentResource(agent), ActionRead).Allowed {
+			return false
+		}
+	}
+	return true
+}
+
+// attachmentMessageConversation returns the conversation of msg: its
+// stored conversation, or for a message without one in a DM thread, a
+// direct conversation of the thread's key. It returns nil when neither
+// applies.
+func (s *Server) attachmentMessageConversation(ctx context.Context, msg *store.Message) (*store.Conversation, error) {
+	if msg.ConversationID != "" {
+		return s.store.GetConversation(ctx, msg.ConversationID)
+	}
+	if strings.HasPrefix(msg.ThreadID, "dm:") {
+		return &store.Conversation{Kind: "direct", ExternalRef: msg.ThreadID}, nil
+	}
+	return nil, nil
+}
+
+// PermitsUploadRead implements artifacts.MessageScopeHost (ptone/scion#4596,
+// section 9, clause 0): whether the uploader's credential reads its own
+// unsent upload. Sessions and agents in standing do; a user access token
+// does only when its inbox:read self-scope check allows a record with no
+// project (a hub boundary), as for a project-less upload in the
+// AttachmentStore.
+func (h *artifactHost) PermitsUploadRead(ctx context.Context) bool {
+	cred, _ := inboxCredentialOf(ctx)
+	switch cred {
+	case inboxCredentialSession, inboxCredentialAgent:
+		return h.PermitsMessageRead(ctx)
+	case inboxCredentialToken:
+		token := chatToken(ctx)
+		if token == nil || h.server == nil {
+			return false
+		}
+		return h.PermitsMessageRead(ctx) && h.server.newSelfScopeCheck(ctx, token, permInboxRead).allows("")
+	}
+	return false
+}

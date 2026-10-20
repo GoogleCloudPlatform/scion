@@ -2089,7 +2089,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if structuredMsg != nil {
 			paths = structuredMsg.Attachments
 		}
-		refs, msg, ok := s.validateMessageAttachments(ctx, req.AttachmentIDs, paths)
+		refs, msg, ok := s.validateMessageAttachments(ctx, agent, req.AttachmentIDs, paths)
 		if !ok {
 			Forbidden(w)
 			return

@@ -386,6 +386,14 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 		if s.attachmentArtifactsReady() && s.attachmentWriterKind(ctx) != "" {
 			svc = s.attachmentService()
 		}
+		// A user access token names its uploads only where it may post
+		// (chatTokenMaySend, ptone/scion#4596 section 9); otherwise its ids
+		// get the answer of an unknown one.
+		if token := chatToken(ctx); svc != nil && token != nil {
+			if allowed, err := s.chatTokenMaySend(ctx, token, target.Key, target.ProjectID); err != nil || !allowed {
+				svc = nil
+			}
+		}
 		for _, aid := range in.Attachments {
 			// An attachment stored as an artifact (ptone/scion#4595) is
 			// usable only as an unsent upload of the sender, in any

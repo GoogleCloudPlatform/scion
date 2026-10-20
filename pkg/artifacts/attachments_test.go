@@ -42,13 +42,14 @@ type messageHost struct {
 	mmu           sync.Mutex
 	readers       map[string]map[string]bool
 	noMessageRead map[string]bool
+	noUploadRead  map[string]bool
 	asked         []string
 }
 
 var _ MessageScopeHost = (*messageHost)(nil)
 
 func newMessageHost() *messageHost {
-	return &messageHost{fakeHost: newFakeHost(), readers: map[string]map[string]bool{}, noMessageRead: map[string]bool{}}
+	return &messageHost{fakeHost: newFakeHost(), readers: map[string]map[string]bool{}, noMessageRead: map[string]bool{}, noUploadRead: map[string]bool{}}
 }
 
 func (h *messageHost) allowMessage(p principal, messageID string) {
@@ -75,6 +76,16 @@ func (h *messageHost) PermitsMessageRead(ctx context.Context) bool {
 	defer h.mmu.Unlock()
 	h.asked = append(h.asked, "permits-message-read")
 	return !h.noMessageRead[PrincipalRef(kind, ref)]
+}
+
+func (h *messageHost) PermitsUploadRead(ctx context.Context) bool {
+	kind, ref, _, ok := h.Principal(ctx)
+	if !ok {
+		return false
+	}
+	h.mmu.Lock()
+	defer h.mmu.Unlock()
+	return !h.noUploadRead[PrincipalRef(kind, ref)]
 }
 
 func (h *messageHost) MayReadMessage(ctx context.Context, messageID string, _ *string) bool {
@@ -148,6 +159,20 @@ func (f *attachmentFixture) serve(p *principal, target, id string) (ServeOutcome
 }
 
 var pngBytes = []byte("\x89PNG\r\n\x1a\nnot-really-an-image")
+
+// TestAttachmentUpload_UploaderNeedsUploadRead (ptone/scion#4596, section
+// 9, clause 0): the uploader reads its unsent upload only when the host's
+// PermitsUploadRead allows its credential.
+func TestAttachmentUpload_UploaderNeedsUploadRead(t *testing.T) {
+	f := newAttachmentFixture(t, false)
+	id := f.upload(userU, "shot.png", "image/png", pngBytes)
+	f.mh.mmu.Lock()
+	f.mh.noUploadRead[PrincipalRef(userU.kind, userU.ref)] = true
+	f.mh.mmu.Unlock()
+	if out, rec := f.serve(&userU, "/api/v1/chat/attachments/"+id, id); out != ServeRefused || rec.Body.Len() != 0 {
+		t.Fatalf("uploader without upload read: outcome %d, body %q; want ServeRefused", out, rec.Body.String())
+	}
+}
 
 // TestAttachmentUploadReadableByUploaderOnly: an unsent upload is served
 // to its uploader and refused to everyone else, and nothing is written for

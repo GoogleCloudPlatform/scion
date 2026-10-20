@@ -167,7 +167,7 @@ func canReadAttachmentScope(ctx context.Context, host Host, a *Artifact, kind, r
 	}
 	switch a.ScopeKind {
 	case ScopeKindUpload:
-		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref)
+		return kind == a.OwnerKind && ref == a.OwnerRef && a.ScopeRef == PrincipalRef(kind, ref) && mh.PermitsUploadRead(ctx)
 	case ScopeKindMessage:
 		return a.ScopeRef != "" && mh.MayReadMessage(ctx, a.ScopeRef, a.MessageProjectID)
 	}
