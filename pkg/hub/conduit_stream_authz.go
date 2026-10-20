@@ -169,6 +169,9 @@ type conduitUserStream struct {
 	StreamID  uint32
 	// Admitted is when the stream was opened.
 	Admitted time.Time
+	// LegacyPort marks a user request the port-forward tunnel serves
+	// (port_forward_legacy_recheck.go), for the re-check's log line.
+	LegacyPort bool
 	// Close ends the stream on both legs with code and reason. It may be
 	// called at most once and must not block on the tracker.
 	Close func(code uint32, reason string)
@@ -594,6 +597,9 @@ func (a *conduitStreamAuthz) check(ctx context.Context, trigger string, st *cond
 	}
 	if outcome == conduitAuthzOutcomeRenewed {
 		attrs = append(attrs, "notice", notice, "deadline", st.Deadline())
+	}
+	if st.LegacyPort {
+		attrs = append(attrs, "route", "legacy_port_proxy")
 	}
 	a.cfg.Logger.Log(ctx, level, "conduit_stream_authz", attrs...)
 }

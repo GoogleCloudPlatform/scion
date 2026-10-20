@@ -36,7 +36,10 @@ import (
 //   - hub-held renewal: renewConduitStream (verify, evaluate, mint);
 //   - relay-held renewal: recheckRelayStream, an adapter over
 //     renewConduitStream;
-//   - in-process re-check: checkConduitUserStream.
+//   - in-process re-check: checkConduitUserStream;
+//   - legacy port proxy request: checkLegacyPortRequest, at the start of
+//     each user request the port-forward tunnel serves (the in-process
+//     re-check covers the request while it is open).
 
 // conduitStreamEval is the input to evaluateConduitStream.
 type conduitStreamEval struct {
@@ -172,4 +175,31 @@ func (s *Server) conduitStreamPlacement(ctx context.Context, agent *store.Agent,
 func (s *Server) conduitConfirmAgentPresent(ctx context.Context, agentID string) bool {
 	agent, err := s.store.GetAgent(ctx, agentID)
 	return err == nil && agent != nil && agent.DeletedAt.IsZero() && ctx.Err() == nil
+}
+
+// recordedStreamEval is the evaluation input of a stream from what this
+// node recorded at open: the principal, the agent and its project, the
+// kind, origin and port. A deny is acted on only while the store answers
+// for the agent (conduitConfirmAgentPresent).
+func (s *Server) recordedStreamEval(ctx context.Context, st *conduitUserStream) conduitStreamEval {
+	return conduitStreamEval{
+		AgentID:     st.AgentID,
+		ProjectID:   st.ProjectID,
+		Identity:    func() (Identity, error) { return st.Identity, nil },
+		Kind:        st.Kind,
+		ViaTunnel:   st.ViaTunnel,
+		Port:        st.Port,
+		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
+		LogAttrs:    []any{"session_id", st.SessionID, "stream_id", st.StreamID},
+	}
+}
+
+// checkLegacyPortRequest evaluates a user request to an agent port that
+// the port-forward tunnel serves, before it is forwarded, with the same
+// evaluation as the in-process re-check of a conduit port stream (st is
+// a tcp stream to the exposed port). It returns the class and the cause,
+// which the proxy maps to its answer (writeLegacyPortRefusal).
+func (s *Server) checkLegacyPortRequest(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, error) {
+	verdict, _, err := s.evaluateConduitStream(ctx, s.recordedStreamEval(ctx, st))
+	return verdict, err
 }
