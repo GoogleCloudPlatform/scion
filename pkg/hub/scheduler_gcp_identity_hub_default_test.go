@@ -675,6 +675,9 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 				{Name: "sandbox", Type: "cloudrun-sandbox", Available: true},
 			}
 			b.DefaultProfile = tc.brokerDefault
+			// Translation needs enforce mode, and the schedule's principal
+			// must own the broker and hold actAs on its host account.
+			b.CreatedBy = f.owner.ID
 			require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
 			hostEmail := hostSAEmail
 			if tc.untranslatable {
@@ -682,6 +685,7 @@ func TestScheduledDispatch_ProjectDefaultPassthroughFollowsProfileType(t *testin
 			}
 			_, err = f.store.SetRuntimeBrokerGCPHost(ctx, f.broker.ID, hostEmail, hostProjectID)
 			require.NoError(t, err)
+			enforceSAAssign(f.srv, store.NewFakeCallerPermissionChecker().AllowTarget(hostSAEmail))
 			setProjectDefaultGCPMode(t, f, store.GCPMetadataModePassthrough)
 
 			const agentName = "sched-project-passthrough-profile"

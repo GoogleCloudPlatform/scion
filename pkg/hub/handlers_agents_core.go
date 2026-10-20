@@ -2296,11 +2296,10 @@ func (s *Server) createAgentInProject(
 		agent.AppliedConfig.GCPIdentity != nil &&
 		agent.AppliedConfig.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough &&
 		runtimeBrokerID != "" {
-		if err := s.translatePassthroughForSandbox(ctx, agent, runtimeBrokerID, project); err != nil {
+		if err := s.translatePassthroughForSandbox(ctx, r, agent, runtimeBrokerID, project); err != nil {
 			slog.ErrorContext(ctx, "passthrough-to-assign translation failed",
 				"agent", agent.Name, "broker", runtimeBrokerID, "error", err)
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-				"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+			writePassthroughTranslationError(w, err)
 			return
 		}
 		if agentHasAssignModeIdentity(agent) {
@@ -4586,11 +4585,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if err := s.translatePassthroughForSandbox(ctx, agent, agent.RuntimeBrokerID, passthroughProject); err != nil {
+			if err := s.translatePassthroughForSandbox(ctx, r, agent, agent.RuntimeBrokerID, passthroughProject); err != nil {
 				slog.ErrorContext(ctx, "passthrough-to-assign translation failed (PATCH)",
 					"agent", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
-				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
-					"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
+				writePassthroughTranslationError(w, err)
 				return
 			}
 		case store.GCPMetadataModeAssign:
@@ -6034,11 +6032,26 @@ func resolvePassthroughProfile(broker *store.RuntimeBroker, profileName string) 
 //   - the broker has no host SA registered (leaves passthrough as-is with a
 //     warning; the profile is recorded).
 //
+// Otherwise the translation makes the Hub impersonate the host service
+// account, so it is gated for every passthrough source (explicit, PATCH,
+// project default, hub default, scheduled) in this one place:
+//  1. gcpIamCheckMode must be enforce, as for any hub-scoped assignment;
+//  2. the creator on ctx must pass the passthrough gate for this broker
+//     (evaluatePassthroughIdentity: broker owner or admin, plus actAs on the
+//     host service account);
+//  3. the record used must pass the shared service-account rules
+//     (saAssignPolicyPreconditions).
+//
+// A refusal is a *passthroughTranslationDenied and leaves no record or
+// assignment behind; checks 1 and 2 run before any record is created. r
+// names the request in denial logs and may be nil (the scheduler).
+//
 // On success the agent's AppliedConfig.GCPIdentity is rewritten in place to
 // assign mode with the broker's host SA, and a GCPServiceAccount record is
 // created if one does not already exist for the email.
 func (s *Server) translatePassthroughForSandbox(
 	ctx context.Context,
+	r *http.Request,
 	agent *store.Agent,
 	brokerID string,
 	project *store.Project,
@@ -6066,19 +6079,49 @@ func (s *Server) translatePassthroughForSandbox(
 	}
 
 	if broker.GCPHostServiceAccountEmail == "" {
-		// The broker has no host SA registered. The passthrough gate should
-		// have caught this for explicit passthrough requests; for project-
-		// default passthrough the gate doesn't run. Log and leave as-is —
-		// the agent won't get credentials, same as the pre-fix behavior.
+		// The broker has no host SA registered, so there is nothing to
+		// translate to. Explicit passthrough is refused earlier by the
+		// passthrough gate; a default passthrough is left as-is and the
+		// agent gets no credentials.
 		slog.WarnContext(ctx, "cloudrun-sandbox broker has no host SA — cannot translate passthrough to assign",
 			"broker_id", broker.ID, "broker_name", broker.Name)
 		return nil
+	}
+
+	// 1. Hub-scoped impersonation needs gcpIamCheckMode=enforce.
+	mode := s.saAssignCheckModeValue()
+	if mode != SAAssignCheckEnforce {
+		slog.WarnContext(ctx, "passthrough translation refused: gcpIamCheckMode is not enforce",
+			"broker_id", broker.ID, "mode", mode)
+		return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden,
+			msg: passthroughTranslationModeDeniedMsg}
+	}
+	// 2. The creator must pass the passthrough gate for this broker.
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughTranslation); d != nil {
+		return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden, msg: d.msg}
 	}
 
 	// Ensure a GCPServiceAccount record exists for the broker's host SA.
 	sa, err := s.ensureHostSARecord(ctx, broker)
 	if err != nil {
 		return fmt.Errorf("ensure host SA record: %w", err)
+	}
+
+	// 3. The shared service-account rules, on the record actually used.
+	if pre := saAssignPolicyPreconditions(sa, agent.ProjectID, mode); pre != nil {
+		slog.WarnContext(ctx, "passthrough translation refused by service-account rules",
+			"broker_id", broker.ID, "sa_id", sa.ID, "rule", string(pre.Kind))
+		switch pre.Kind {
+		case saAssignPreconditionUnverified:
+			return &passthroughTranslationDenied{status: http.StatusBadRequest,
+				code: ErrCodeIdentityNotVerified, msg: identityNotVerifiedMessage(sa)}
+		case saAssignPreconditionHubMode:
+			return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden,
+				msg: passthroughTranslationModeDeniedMsg}
+		default:
+			return &passthroughTranslationDenied{status: http.StatusBadRequest,
+				code: ErrCodeValidationError, msg: msgSANotAvailableInProject}
+		}
 	}
 
 	slog.InfoContext(ctx, "translated passthrough to assign for cloudrun-sandbox",
@@ -6100,6 +6143,42 @@ func (s *Server) translatePassthroughForSandbox(
 	agent.Annotations["scion.dev/gcp-identity-translated-from"] = "passthrough"
 
 	return nil
+}
+
+// SurfacePassthroughTranslation labels the passthrough gate's audit record
+// when it runs for translation to assign mode on a cloudrun-sandbox profile.
+const SurfacePassthroughTranslation = "passthrough-translation"
+
+// passthroughTranslationModeDeniedMsg is the refusal when translation would
+// need hub-scoped impersonation outside gcpIamCheckMode=enforce.
+const passthroughTranslationModeDeniedMsg = "GCP identity passthrough on a cloudrun-sandbox profile uses the " +
+	"broker's host service account through the Hub, which requires gcpIamCheckMode=enforce"
+
+// passthroughTranslationDenied is a refusal from
+// translatePassthroughForSandbox. HTTP callers write it with write; other
+// callers (the scheduler) fail with its message.
+type passthroughTranslationDenied struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (d *passthroughTranslationDenied) Error() string { return d.msg }
+
+func (d *passthroughTranslationDenied) write(w http.ResponseWriter) {
+	writeError(w, d.status, d.code, d.msg, nil)
+}
+
+// writePassthroughTranslationError writes a translation failure: a refusal
+// with its own status, anything else as a 500.
+func writePassthroughTranslationError(w http.ResponseWriter, err error) {
+	var denied *passthroughTranslationDenied
+	if errors.As(err, &denied) {
+		denied.write(w)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError,
+		"failed to configure GCP identity for sandbox runtime: "+err.Error(), nil)
 }
 
 // ensureHostSARecord looks up or creates a hub-scoped GCPServiceAccount

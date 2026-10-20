@@ -124,11 +124,12 @@ func hostSATarget(c hostSAClaim) *store.GCPServiceAccount {
 // disabled checker allows and the audit record names mechanism check-disabled.
 // Following the mode here grants nothing the mode does not already grant: the
 // passthrough gate runs the same mode-following actAs check at use time, and
-// a passthrough translated for a sandbox profile becomes a hub-scoped
-// assignment that the start and token-mint preconditions
-// (admissibleGCPServiceAccount) refuse unless the mode is enforce, where this
-// check is not disabled. With enforce and no token generator the unavailable
-// checker denies.
+// translatePassthroughForSandbox refuses translation to a hub-scoped
+// assignment at create unless the mode is enforce, where this check is not
+// disabled (the start and token-mint preconditions in
+// admissibleGCPServiceAccount refuse such an assignment again). Relaxing that
+// refusal requires revisiting this mode-following. With enforce and no token
+// generator the unavailable checker denies.
 func (s *Server) evaluateHostSAClaim(ctx context.Context, prior, requested hostSAClaim, surface string) hostSAClaimVerdict {
 	if requested.Email == "" || requested == prior {
 		return hostSAClaimVerdict{Claim: requested, Allowed: true}
@@ -150,9 +151,8 @@ func (s *Server) evaluateHostSAClaim(ctx context.Context, prior, requested hostS
 
 	target := hostSATarget(requested)
 	result, err := store.EvaluateActAs(ctx, store.ActAsGate{
-		// Off mode allows here (check-disabled); a translated hub-scoped
-		// assignment is refused at start and mint unless the mode is enforce.
-		// See the doc comment.
+		// Off mode allows here (check-disabled) because translation is
+		// refused at create unless the mode is enforce. See the doc comment.
 		Checker: s.saAssignCheckerFor(),
 		Caller:  principal,
 		Surface: surface,
