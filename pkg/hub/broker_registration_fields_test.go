@@ -869,3 +869,44 @@ func embeddedFlatTestInstance(f *flatRegFixture) config.V1RuntimeBrokerInstanceC
 	return config.V1RuntimeBrokerInstanceConfig{Key: "local-docker", Name: "embedded-flat-row",
 		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: f.target.Type, DisplayName: f.target.DisplayName}}
 }
+
+// TestBrokerRoleLabel_HubManaged: scion.io/broker-role is set by the Hub.
+// A value in a registration or update request is ignored; HTTP registration
+// creates rows with "remote".
+func TestBrokerRoleLabel_HubManaged(t *testing.T) {
+	t.Parallel()
+	embeddedLabel := map[string]string{store.BrokerRoleLabel: store.BrokerRoleEmbedded, "team": "a"}
+
+	t.Run("new flat row", func(t *testing.T) {
+		f := newFlatRegFixture(t, true)
+		id := tid("role-new-flat")
+		rec := f.register(t, f.operator, CreateBrokerRegistrationRequest{BrokerID: id, Name: "role-new-flat", RuntimeTarget: f.targetFor(id), Labels: embeddedLabel})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		row := f.flatRow(t, id)
+		assert.Equal(t, store.BrokerRoleRemote, row.Labels[store.BrokerRoleLabel])
+		assert.Equal(t, "a", row.Labels["team"])
+	})
+
+	t.Run("new legacy row", func(t *testing.T) {
+		srv, s := testServer(t)
+		member := newHubMemberUser(t, s, "role-new-legacy")
+		rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "role-new-legacy", Labels: embeddedLabel})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		row, err := s.GetRuntimeBroker(context.Background(), decodeBrokerRegistration(t, rec.Body).BrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, store.BrokerRoleRemote, row.Labels[store.BrokerRoleLabel])
+	})
+
+	forFlatAndLegacy(t, func(t *testing.T, flat bool) {
+		f := newOwnedBrokerFixture(t, flat, "role-existing")
+		before := f.row(t).Labels[store.BrokerRoleLabel]
+
+		resp := f.reregister(t, func(r *CreateBrokerRegistrationRequest) { r.Labels = embeddedLabel })
+		assert.Equal(t, before, f.row(t).Labels[store.BrokerRoleLabel], "re-registration")
+		assert.NotContains(t, keptByField(resp.KeptSettings), "labels."+store.BrokerRoleLabel)
+
+		f.update(t, map[string]interface{}{"labels": embeddedLabel})
+		assert.Equal(t, before, f.row(t).Labels[store.BrokerRoleLabel], "update")
+		assert.Equal(t, "a", f.row(t).Labels["team"])
+	})
+}

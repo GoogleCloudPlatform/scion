@@ -160,11 +160,18 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	// If not found by ID, try to find an existing broker with the same name
 	// to prevent duplicate registrations when the broker ID changes (e.g.,
 	// settings file recreated, format migration, or database reset). Only
-	// legacy rows are candidates: a flat row is never adopted by name.
+	// legacy rows are candidates: a flat row is never adopted by name, and
+	// neither is a row with a recorded owner (only the Hub-managed row the
+	// co-located server wrote itself).
 	if broker == nil && brokerName != "" {
 		existingByName, nameErr := s.GetLegacyRuntimeBrokerByName(ctx, brokerName)
 		if nameErr != nil && nameErr != store.ErrNotFound {
 			return brokerID, fmt.Errorf("failed to check for runtime broker by name: %w", nameErr)
+		}
+		if existingByName != nil && existingByName.CreatedBy != "" {
+			log.Printf("Warning: broker %q (ID: %s) has a recorded owner and is not adopted as the co-located broker; registering a new record",
+				brokerName, existingByName.ID)
+			existingByName = nil
 		}
 		if existingByName != nil {
 			log.Printf("Found existing broker by name %q (ID: %s), reusing instead of creating duplicate", brokerName, existingByName.ID)

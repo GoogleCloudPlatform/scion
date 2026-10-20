@@ -1700,8 +1700,8 @@ type RuntimeBrokerStore interface {
 	// exists, or nil if zero or multiple embedded brokers are found (ambiguous).
 	// "Embedded" means the broker's labels contain {"scion.io/broker-role": "embedded"}.
 	// Used to recover the legacy broker ID from DB when settings are lost;
-	// rows with a stored runtime target (flat Runtime Brokers) are never
-	// candidates.
+	// rows with a stored runtime target (flat Runtime Brokers) and rows with
+	// a recorded owner (CreatedBy) are never candidates.
 	FindEmbeddedBroker(ctx context.Context) (*RuntimeBroker, error)
 
 	// UpdateRuntimeBrokerHeartbeat updates the last heartbeat and status.

@@ -240,13 +240,14 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 			}
 			if created {
 				// A new row takes the GCP host pair and labels from the
-				// request.
+				// request; the Hub sets the broker role.
 				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {
 					b.GCPHostServiceAccountEmail = saEmail
 					b.GCPHostProjectID = req.GCPHostProjectID
 					b.GCPHostSource = store.GCPHostSourceRegistration
 				}
 				b.Labels = registrationLabels(requested)
+				b.Labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
 				return
 			}
 			// An existing row keeps its GCP host pair here (filled below

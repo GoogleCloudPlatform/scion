@@ -127,3 +127,35 @@ func TestLegacyEmbedded_ReregistrationLeavesUpdateValue(t *testing.T) {
 	assert.Equal(t, updateHostEmail, got.GCPHostServiceAccountEmail)
 	assert.Equal(t, "proj", got.GCPHostProjectID)
 }
+
+func TestLegacyEmbedded_AdoptsOnlyHubManagedRowByName(t *testing.T) {
+	ctx := context.Background()
+	settings := &config.Settings{}
+	stubHostDetection(t, hostDetection{})
+
+	t.Run("owned row is not adopted", func(t *testing.T) {
+		s := newTestStore(t)
+		owned := &store.RuntimeBroker{ID: tid("owned-by-user"), Name: "shared-name", Slug: "shared-name", CreatedBy: "user-1",
+			Labels: map[string]string{store.BrokerRoleLabel: store.BrokerRoleEmbedded}}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, owned))
+
+		effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("colocated-new"), "shared-name", "http://localhost:9800", nil, false, settings, nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, tid("colocated-new"), effectiveID, "a row with a recorded owner is not adopted by name")
+
+		got, err := s.GetRuntimeBroker(ctx, owned.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "user-1", got.CreatedBy)
+		assert.Equal(t, store.BrokerStatusOffline, got.Status, "the owned row is not updated")
+	})
+
+	t.Run("hub-managed row is adopted", func(t *testing.T) {
+		s := newTestStore(t)
+		_, err := registerGlobalProjectAndBroker(ctx, s, tid("colocated-old"), "shared-name", "http://localhost:9800", nil, false, settings, nil, nil)
+		require.NoError(t, err)
+
+		effectiveID, err := registerGlobalProjectAndBroker(ctx, s, tid("colocated-lost"), "shared-name", "http://localhost:9800", nil, false, settings, nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, tid("colocated-old"), effectiveID)
+	})
+}

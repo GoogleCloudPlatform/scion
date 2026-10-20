@@ -552,6 +552,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 
 		labels := registrationLabels(req.Labels)
+		labels[store.BrokerRoleLabel] = store.BrokerRoleRemote
 		broker := &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       req.Name,
@@ -1437,7 +1438,7 @@ func registrationLabels(in map[string]string) map[string]string {
 // reservedBrokerLabels are the Hub-managed label keys: only hub-internal
 // code sets them, and a client-supplied value is dropped on registration
 // and update.
-var reservedBrokerLabels = []string{pluginBrokerLabel}
+var reservedBrokerLabels = []string{pluginBrokerLabel, store.BrokerRoleLabel}
 
 // isReservedBrokerLabel reports whether key is Hub-managed.
 func isReservedBrokerLabel(key string) bool {
