@@ -1138,16 +1138,17 @@ Separately: if an agent's **template** can no longer be resolved at all on a res
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
 file default — matching the behavior before this change. Since GoogleCloudPlatform/scion#2646
-that recorded value is the template's own, recorded in broker-side agent state (`image-provenance.json`), not the
-merged `scion-agent.json` value, for agents provisioned at that version or later. A template's
-`image` is now ignored, so new agents record no template value; values recorded for older agents
-are still replayed.
+that recorded value is the template's own, recorded in broker-side agent state
+(`image-provenance.json`), not the merged `scion-agent.json` value, for agents provisioned at
+that version or later. A template's `image` is now ignored, so new agents record no template
+value; values recorded for older agents are still replayed.
 
 ### Image registry order
 
 Introduced by GoogleCloudPlatform/scion#3786. A bare image name (one without a registry host,
-such as `scion-claude:latest`) is rewritten to `<image_registry>/<name>`. Every place that resolves `image_registry` uses one order: the source
-decides first, and within a source the more specific scope wins.
+such as `scion-claude:latest`) is rewritten to `<image_registry>/<name>`. Every place that
+resolves `image_registry` uses one order: the source decides first, and within a source the
+more specific scope wins.
 
 | Rank | Layer | Where it comes from |
 | :--- | :--- | :--- |
