@@ -193,16 +193,17 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Output results
+	status := resultStatus(results)
 	if isJSONOutput() {
-		return outputJSON(ActionResult{
-			Status:  resultStatus(results),
+		return outputJSONResult(ActionResult{
+			Status:  status,
 			Command: "templates import",
 			Message: resultMessage(results, dryRun),
 			Details: map[string]interface{}{
 				"templates": results,
 				"dryRun":    dryRun,
 			},
-		})
+		}, status != "success", "one or more templates failed to import")
 	}
 
 	for _, r := range results {
@@ -216,6 +217,9 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if status != "success" {
+		return fmt.Errorf("one or more templates failed to import")
+	}
 	return nil
 }
 
