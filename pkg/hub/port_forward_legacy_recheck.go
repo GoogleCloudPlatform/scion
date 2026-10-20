@@ -35,8 +35,9 @@ import (
 // status, agent.port_access with deny confirmation, the tcp target rule
 // and the agent's placement. While the request is open it is tracked by
 // the in-process re-check like a conduit port stream, so a re-check that
-// denies it ends it. No grant is minted for it. Requests from an agent to
-// its own ports are not evaluated here.
+// denies it ends it. No grant is minted for it. Non-user callers are not
+// evaluated; authorizePortAccess admits only the agent itself (its own
+// agent token) among them.
 
 // legacyPortSessionPrefix marks the session id of a legacy port proxy
 // request in the stream re-check's log lines.
@@ -69,7 +70,9 @@ type legacyPortRequest struct {
 // before the port-forward tunnel serves it. A refused request is answered
 // here and ok is false. An allowed request is tracked by the in-process
 // re-check until end is called; a re-check that denies it cancels its
-// context. Non-user identities are not evaluated (nil, true).
+// context. Non-user callers are not evaluated (nil, true);
+// authorizePortAccess admits only the agent itself (its own agent token)
+// among them.
 func (s *Server) startLegacyPortRequest(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent, port int) (l *legacyPortRequest, ok bool) {
 	if !conduitIsUserIdentity(identity) {
 		return nil, true
