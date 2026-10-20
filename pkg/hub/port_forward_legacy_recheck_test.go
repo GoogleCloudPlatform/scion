@@ -370,7 +370,7 @@ func TestLegacyPortRefusal_MatchesConduitProxy(t *testing.T) {
 	t.Run("denied", func(t *testing.T) {
 		want, got := httptest.NewRecorder(), httptest.NewRecorder()
 		writeConduitProxyError(want, req(""), f.agent.ID, errConduitForbidden)
-		writeLegacyPortRefusal(got, req(""), conduitAuthzDenied, errConduitPrincipalInactive)
+		writeLegacyPortRefusal(got, req(""), f.agent.ID, conduitAuthzDenied, errConduitPrincipalInactive)
 		same(t, want, got)
 		assert.Equal(t, http.StatusForbidden, got.Code)
 	})
@@ -379,7 +379,7 @@ func TestLegacyPortRefusal_MatchesConduitProxy(t *testing.T) {
 		want, got := httptest.NewRecorder(), httptest.NewRecorder()
 		_, ok := f.srv.authorizePortAccess(want, req(""), tid("no-such-agent"), ActionPortAccess)
 		require.False(t, ok)
-		writeLegacyPortRefusal(got, req(""), conduitAuthzTargetGone, errConduitAgentGone)
+		writeLegacyPortRefusal(got, req(""), f.agent.ID, conduitAuthzTargetGone, errConduitAgentGone)
 		same(t, want, got)
 		assert.Equal(t, http.StatusNotFound, got.Code)
 	})
@@ -387,7 +387,7 @@ func TestLegacyPortRefusal_MatchesConduitProxy(t *testing.T) {
 	t.Run("placement", func(t *testing.T) {
 		want, got := httptest.NewRecorder(), httptest.NewRecorder()
 		writeConduitProxyError(want, req(""), f.agent.ID, placement)
-		writeLegacyPortRefusal(got, req(""), conduitAuthzUnavailable,
+		writeLegacyPortRefusal(got, req(""), f.agent.ID, conduitAuthzUnavailable,
 			errors.Join(errConduitAuthzUnavailable, errConduitRenewalUnavailable, placement))
 		same(t, want, got)
 		assert.Equal(t, placement.Refusal.Status, got.Code)
@@ -396,7 +396,7 @@ func TestLegacyPortRefusal_MatchesConduitProxy(t *testing.T) {
 	t.Run("other unavailable is 503", func(t *testing.T) {
 		for _, cause := range []error{errConduitAuthzUnavailable, errConduitUserStatusUnavailable, errors.New("anything")} {
 			got := httptest.NewRecorder()
-			writeLegacyPortRefusal(got, req(""), conduitAuthzUnavailable, cause)
+			writeLegacyPortRefusal(got, req(""), f.agent.ID, conduitAuthzUnavailable, cause)
 			require.Equal(t, http.StatusServiceUnavailable, got.Code, "cause %v", cause)
 			var er ErrorResponse
 			require.NoError(t, json.Unmarshal(got.Body.Bytes(), &er))
@@ -404,7 +404,7 @@ func TestLegacyPortRefusal_MatchesConduitProxy(t *testing.T) {
 			assert.Equal(t, legacyPortUnavailableMessage, er.Error.Message)
 		}
 		got := httptest.NewRecorder()
-		writeLegacyPortRefusal(got, req("text/html"), conduitAuthzUnavailable, errConduitAuthzUnavailable)
+		writeLegacyPortRefusal(got, req("text/html"), f.agent.ID, conduitAuthzUnavailable, errConduitAuthzUnavailable)
 		assert.Equal(t, http.StatusServiceUnavailable, got.Code)
 		assert.Contains(t, got.Header().Get("Content-Type"), "text/html")
 	})

@@ -59,6 +59,7 @@ func (e *legacyPortClosed) Error() string {
 // nil receiver (a request that is not evaluated): it then has no context
 // of its own and is never ended by a re-check.
 type legacyPortRequest struct {
+	agentID string
 	ctx     context.Context
 	cancel  context.CancelCauseFunc
 	untrack func()
@@ -91,12 +92,12 @@ func (s *Server) startLegacyPortRequest(w http.ResponseWriter, r *http.Request, 
 	}
 	cancel()
 	if verdict != conduitAuthzAllowed {
-		writeLegacyPortRefusal(w, r, verdict, err)
+		writeLegacyPortRefusal(w, r, agent.ID, verdict, err)
 		return nil, false
 	}
 	ctx, cancelCause := context.WithCancelCause(r.Context())
 	st.Close = func(code uint32, _ string) { cancelCause(&legacyPortClosed{code: code}) }
-	return &legacyPortRequest{ctx: ctx, cancel: cancelCause, untrack: s.trackConduitUserStream(st)}, true
+	return &legacyPortRequest{agentID: agent.ID, ctx: ctx, cancel: cancelCause, untrack: s.trackConduitUserStream(st)}, true
 }
 
 // context returns the request's context: one a re-check can end, or r's
@@ -129,9 +130,9 @@ func (l *legacyPortRequest) refused(w http.ResponseWriter, r *http.Request) bool
 		return false
 	}
 	if closed.code == relay.CloseTargetNotFound {
-		writeLegacyPortRefusal(w, r, conduitAuthzTargetGone, errConduitAgentGone)
+		writeLegacyPortRefusal(w, r, l.agentID, conduitAuthzTargetGone, errConduitAgentGone)
 	} else {
-		writeLegacyPortRefusal(w, r, conduitAuthzDenied, errConduitForbidden)
+		writeLegacyPortRefusal(w, r, l.agentID, conduitAuthzDenied, errConduitForbidden)
 	}
 	return true
 }
@@ -147,16 +148,16 @@ func (l *legacyPortRequest) refused(w http.ResponseWriter, r *http.Request) bool
 //     (writeConduitProxyError);
 //   - any other unavailable: 503 unavailable, retryable (the proxy error
 //     page for a browser).
-func writeLegacyPortRefusal(w http.ResponseWriter, r *http.Request, verdict conduitAuthzVerdict, cause error) {
+func writeLegacyPortRefusal(w http.ResponseWriter, r *http.Request, agentID string, verdict conduitAuthzVerdict, cause error) {
 	switch verdict {
 	case conduitAuthzDenied:
-		writeConduitProxyError(w, r, "", fmt.Errorf("%w: %w", errConduitForbidden, cause))
+		writeConduitProxyError(w, r, agentID, fmt.Errorf("%w: %w", errConduitForbidden, cause))
 	case conduitAuthzTargetGone:
 		writeErrorFromErr(w, store.ErrNotFound, "")
 	default:
 		var placement *PlacementConflictError
 		if errors.As(cause, &placement) {
-			writeConduitProxyError(w, r, "", placement)
+			writeConduitProxyError(w, r, agentID, placement)
 			return
 		}
 		if isBrowserRequest(r) {
