@@ -564,9 +564,7 @@ export class ScionPageBrokerDetail extends LitElement {
         ${hostIdentity.observedEmail
           ? html`<div>Host reports: ${hostIdentity.observedEmail}</div>`
           : ''}
-        <div>
-          The configured value is used. Change it through the Runtime Broker update API.
-        </div>
+        <div>The configured value is used. Change it through the Runtime Broker update API.</div>
       </sl-alert>
     `;
   }
