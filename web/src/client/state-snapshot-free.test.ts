@@ -24,7 +24,7 @@
  * attaches to the shared `stateManager`, not just StateManager itself.
  */
 
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { BOOT_WAIT, bootMainAt } from './__fixtures__/main-boot.js';
 import { stateManager } from './state.js';
 
@@ -47,7 +47,19 @@ function flush(): void {
   (stateManager as unknown as { flush(): void }).flush();
 }
 
+/** Listeners added to the shared stateManager; removed after each test even if an assertion fails. */
+const cleanups: Array<() => void> = [];
+
+function listen(type: string, listener: () => void): void {
+  stateManager.addEventListener(type, listener);
+  cleanups.push(() => stateManager.removeEventListener(type, listener));
+}
+
 describe('StateManager snapshot cost', () => {
+  afterEach(() => {
+    for (const cleanup of cleanups.splice(0)) cleanup();
+  });
+
   afterAll(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -62,7 +74,7 @@ describe('StateManager snapshot cost', () => {
 
     const snapshot = vi.spyOn(stateManager, 'getStateSnapshot');
     const updated = vi.fn();
-    stateManager.addEventListener('agents-updated', updated);
+    listen('agents-updated', updated);
 
     emit('agent.a1.created', { name: 'A1', phase: 'running' });
     flush();
@@ -77,19 +89,16 @@ describe('StateManager snapshot cost', () => {
 
     expect(updated).toHaveBeenCalledTimes(100);
     expect(snapshot).toHaveBeenCalledTimes(0);
-    stateManager.removeEventListener('agents-updated', updated);
 
     // The removed listener also snapshotted on project and broker updates.
     const projects = vi.fn();
     const brokers = vi.fn();
-    stateManager.addEventListener('projects-updated', projects);
-    stateManager.addEventListener('brokers-updated', brokers);
+    listen('projects-updated', projects);
+    listen('brokers-updated', brokers);
     emit('project.p1.updated', { name: 'P1' });
     emit('broker.b1.updated', { name: 'B1' });
     expect(projects).toHaveBeenCalledTimes(1);
     expect(brokers).toHaveBeenCalledTimes(1);
     expect(snapshot).toHaveBeenCalledTimes(0);
-    stateManager.removeEventListener('projects-updated', projects);
-    stateManager.removeEventListener('brokers-updated', brokers);
   }, 15_000);
 });
