@@ -264,6 +264,8 @@ fs.inotify.max_user_instances=8192
 fs.inotify.max_user_watches=524288
 ```
 
+The new limits apply without restarting the Runtime Broker or the agents. A VS Code window opened with [`scion vscode`](/scion/reference/cli/#scion-vscode) runs its file watcher inside the agent container too, so it uses an instance of the same limit; when none is left, files created outside the explorer stop appearing in that window. See [Troubleshooting: new files do not appear in the explorer](/scion/reference/cli/#troubleshooting-new-files-do-not-appear-in-the-explorer).
+
 ## Broker Health Monitoring
 
 A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with the Hub), an agent whose saved profile is not one of them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, and otherwise gets the same `503`.

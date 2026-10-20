@@ -1327,6 +1327,16 @@ scion vscode my-agent
 scion vscode my-project/my-agent --path /workspace/web
 ```
 
+#### Troubleshooting: new files do not appear in the explorer
+
+**Symptom:** in a `scion vscode` window, files created outside the explorer (from a terminal, or by the agent) do not show up until you click Refresh in the explorer.
+
+**Cause:** VS Code's file watcher runs inside the agent container and needs an inotify instance. With Docker or Podman, every agent container runs as the same host user, so all of them share that user's `fs.inotify.max_user_instances` limit (often 128). On a busy Runtime Broker host the limit can run out, and the watcher then stops without a visible error. `max_user_watches` is usually already high and is not the cause.
+
+**Confirm:** in the VS Code Output panel, the "Log (Remote Server)" or "File Watcher" channel shows inotify, `ENOSPC` or "unable to watch" errors, and Refresh brings the files back.
+
+**Fix:** a host administrator raises the limit on the Runtime Broker host, for example `sudo sysctl -w fs.inotify.max_user_instances=8192`, and keeps it in a file under `/etc/sysctl.d/` (see [Scaling a Broker Host: inotify Limits](/scion/hosted/ha/runtime-broker/#scaling-a-broker-host-inotify-limits)). No restart is needed. Then reload the VS Code window (**Developer: Reload Window**). No `scion vscode` setting affects file watching: the command sets only `remote.SSH.configFile`, the terminal profiles and `terminal.integrated.sendKeybindingsToShell`.
+
 ### `scion expose` / `scion unexpose`
 
 Register or remove an agent-local HTTP port with the Hub's port forwarding proxy. Run these inside an agent container: they act as the calling agent, using its own Hub identity, and fail with `must be run inside an agent container with a hub connection` anywhere else. Available in agent mode. They need no local project. See [Manual Port Management](/scion/hosted/user/port-forwarding/#manual-port-management).
