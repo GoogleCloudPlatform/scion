@@ -525,8 +525,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// store (templates, harness configs, pre-start hooks, skills settings),
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
-	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
+	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -535,6 +535,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"failed to resolve new configuration: "+err.Error(), nil)
 		return
 	}
+	imageRegistry := resolveRegistry(fresh.Profile)
 	if len(req.SharedDirBackends) > 0 {
 		fresh.SharedDirBackendChanges = req.SharedDirBackends
 		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
@@ -792,8 +793,10 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	// buildFreshAppliedConfig only reads; the plan and the profile the
 	// agent would run under come from the same call the real path uses.
-	imageRegistry := dispatchImageRegistry(dispatcher)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, imageRegistry, patch)
+	// The new generation runs on dst: resolve its registry there, for the
+	// new profile (ptone/scion#3916).
+	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -810,7 +813,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, resolveRegistry(fresh.Profile))
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)

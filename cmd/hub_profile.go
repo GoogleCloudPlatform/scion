@@ -42,7 +42,11 @@ import (
 //     every other command is refused before it runs;
 //   - a profile whose endpoint names the agent's own hub (SCION_HUB_ENDPOINT,
 //     SCION_HUB_URL) is refused; the comparison is by parsed host name and
-//     port (hubprofile.CheckNotOwnHub) and does not resolve DNS aliases.
+//     port (hubprofile.CheckNotOwnHub). Before a profile bearer is minted
+//     or sent, the session also compares hub identities: a target that
+//     reports the agent's own hub id is refused under any name
+//     (Session.CheckNotOwnHubByID; the name check alone applies when an id
+//     is unavailable).
 
 var (
 	hubProfileFlag string // --hub-profile
@@ -86,6 +90,8 @@ var hubProfileAllowed = map[string]bool{
 	"completion":                   true,
 	"__complete":                   true,
 	"__completeNoDesc":             true,
+	// issue-admin (X4b) issues through the profile's admin delegation.
+	"hub.test-identity.issue-admin": true,
 	// hub.test-identity.delegate is deliberately absent: the delegation
 	// routes take a human session, which a profile never uses.
 
@@ -127,6 +133,10 @@ var hubProfileAgentRuntime = map[string]bool{
 	"hub.test-identity.web-code":   true,
 	"hub.test-identity.cleanup":    true,
 	"hub.test-identity.provenance": true,
+	// issue-admin (X4b) needs a profile in human mode too (it refuses
+	// without one); listing it here gives agent mode the same refusal
+	// before any work.
+	"hub.test-identity.issue-admin": true,
 }
 
 // commandPath returns cmd's dot-separated path below the root.
@@ -308,8 +318,14 @@ no transport credential.
 --issuer-sa is the target's issuer service account; issuer ID tokens are
 minted as this account for the target's issuer audience (read from the
 target's GET /api/v1/test-infra/status). --issuer-delegation member=<id>
-names the delegation a human issuer created on the target. Only the member
-tier is supported.
+names the member delegation a human issuer created on the target.
+
+On a target running the test admin tier (a systemd test hub),
+--issuer-delegation hub-admin=<id> and super-admin=<id> name its admin
+delegations, and --admin-issuer-sa names the target's admin issuer service
+account (<T>-admin-issuer), which the admin delegations pin. It is required
+with an admin delegation and must differ from --issuer-sa; admin issuer ID
+tokens are minted as this account.
 
 Tokens are minted in-process from the agent's assigned service account (the
 metadata server in "assign" mode) through IAM Credentials generateIdToken,
@@ -356,6 +372,7 @@ var (
 	hubProfileAddTransport   string
 	hubProfileAddIAPAudience string
 	hubProfileAddIssuerSA    string
+	hubProfileAddAdminSA     string
 	hubProfileAddUATSA       string
 	hubProfileAddDelegations []string
 	hubProfileAddReplace     bool
@@ -381,8 +398,9 @@ func init() {
 	f.StringVar(&hubProfileAddTransport, "transport", hubprofile.TransportIAP, `Transport credential: "iap" or "none"`)
 	f.StringVar(&hubProfileAddIAPAudience, "iap-audience", "", "IAP OAuth client id (transport iap)")
 	f.StringVar(&hubProfileAddIssuerSA, "issuer-sa", "", "The target's issuer service account email")
+	f.StringVar(&hubProfileAddAdminSA, "admin-issuer-sa", "", "The target's admin issuer service account email (with an admin delegation)")
 	f.StringVar(&hubProfileAddUATSA, "uat-sa", "", "The target's IAP service account email (transport iap)")
-	f.StringSliceVar(&hubProfileAddDelegations, "issuer-delegation", nil, "Issuer delegation on the target, tier=id (only member=<id>)")
+	f.StringSliceVar(&hubProfileAddDelegations, "issuer-delegation", nil, "Issuer delegation on the target, tier=id (member=<id>, hub-admin=<id>, super-admin=<id>)")
 	f.BoolVar(&hubProfileAddReplace, "replace", false, "Replace an existing profile of the same name")
 	_ = hubProfileAddCmd.MarkFlagRequired("endpoint")
 
@@ -409,7 +427,8 @@ func runHubProfileAdd(cmd *cobra.Command, args []string) error {
 	p := &hubprofile.Profile{
 		Name: args[0], Endpoint: hubProfileAddEndpoint, Transport: hubProfileAddTransport,
 		IAPAudience: hubProfileAddIAPAudience, IssuerServiceAccount: hubProfileAddIssuerSA,
-		UATServiceAccount: hubProfileAddUATSA, IssuerDelegations: delegations,
+		AdminIssuerServiceAccount: hubProfileAddAdminSA,
+		UATServiceAccount:         hubProfileAddUATSA, IssuerDelegations: delegations,
 	}
 	if err := p.Validate(); err != nil {
 		return asUsageError(err)
@@ -499,6 +518,11 @@ func runHubProfileShow(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(out, "Issuer account:     %s\n", valueOrNone(p.IssuerServiceAccount))
 	_, _ = fmt.Fprintf(out, "Member delegation:  %s\n", valueOrNone(p.MemberDelegation()))
+	if p.AdminIssuerServiceAccount != "" || p.Delegation(hubprofile.TierHubAdmin) != "" || p.Delegation(hubprofile.TierSuperAdmin) != "" {
+		_, _ = fmt.Fprintf(out, "Admin issuer:       %s\n", valueOrNone(p.AdminIssuerServiceAccount))
+		_, _ = fmt.Fprintf(out, "Hub-admin deleg.:   %s\n", valueOrNone(p.Delegation(hubprofile.TierHubAdmin)))
+		_, _ = fmt.Fprintf(out, "Super-admin deleg.: %s\n", valueOrNone(p.Delegation(hubprofile.TierSuperAdmin)))
+	}
 	_, _ = fmt.Fprintf(out, "Cached runs:        %s\n", valueOrNone(strings.Join(runs, ", ")))
 	return nil
 }

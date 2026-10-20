@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -74,6 +75,10 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 		UserStreamAuthzMax: s.config.ConduitUserStreamAuthzMax,
 		Metrics:            serverConduitAuthzMetrics{s},
 		Logger:             slog.Default().With("subsystem", "hub.conduit"),
+		Renew:              s.renewConduitUserStream,
+		Enforce: func() bool {
+			return s.conduitTargetStreamDeadlines() == config.ConduitTargetStreamDeadlinesEnforce
+		},
 	})
 	if !s.conduitAuthz.CompareAndSwap(nil, a) {
 		return nil, nil, errors.New("conduit stream re-check already started")
@@ -310,33 +315,27 @@ func (s *Server) trackConduitUserStream(st *conduitUserStream) (untrack func()) 
 	return a.Track(st)
 }
 
-// checkConduitUserStream evaluates whether st's principal still holds the
-// authorization its stream was opened with, against current state: the
-// agent row, then authorizeConduitUserStream (the decision the tunnel open
-// path makes, with the actions conduitStreamActions requires for st's kind
-// and origin). Every read goes to s.store, the primary store (the hub has
-// no read-replica routing).
+// checkConduitUserStream is the in-process entry point of the stream
+// evaluation (design v2.21.40 §3.9, One evaluation, three entry points):
+// it evaluates st's principal against current state with
+// evaluateConduitStream, from what this node recorded at open (the
+// principal, the agent and its project, the kind, origin and port), and
+// adds no decision of its own. Every read goes to s.store, the primary
+// store (the hub has no read-replica routing).
 //
 // A store or authorization lookup failure is unavailable, never denied: a
-// deny is acted on only while the store is reachable.
+// deny is acted on only while the store answers for the agent
+// (conduitConfirmAgentPresent).
 func (s *Server) checkConduitUserStream(ctx context.Context, st *conduitUserStream) (conduitAuthzVerdict, string) {
-	agent, err := s.store.GetAgent(ctx, st.AgentID)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return conduitAuthzTargetGone, "agent not found"
-	case err != nil:
-		return conduitAuthzUnavailable, "agent lookup failed"
-	case !agent.DeletedAt.IsZero():
-		return conduitAuthzTargetGone, "agent deleted"
-	}
-
-	verdict, reason, _ := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
-		Identity:    st.Identity,
-		Agent:       agent,
+	verdict, reason, _ := s.evaluateConduitStream(ctx, conduitStreamEval{
+		AgentID:     st.AgentID,
+		ProjectID:   st.ProjectID,
+		Identity:    func() (Identity, error) { return st.Identity, nil },
 		Kind:        st.Kind,
 		ViaTunnel:   st.ViaTunnel,
 		Port:        st.Port,
-		ConfirmDeny: func() bool { return s.conduitAuthzStoreReachable(ctx, st) },
+		ConfirmDeny: func(agent *store.Agent) bool { return s.conduitConfirmAgentPresent(ctx, agent.ID) },
+		LogAttrs:    []any{"session_id", st.SessionID, "stream_id", st.StreamID},
 	})
 	return verdict, reason
 }
@@ -456,13 +455,6 @@ func (s *Server) conduitUserStatus(ctx context.Context, identity Identity, userI
 		return conduitAuthzDenied, "user suspended"
 	}
 	return conduitAuthzAllowed, ""
-}
-
-// conduitAuthzStoreReachable confirms the store answers after a deny, so
-// that a deny observed during a store fault is not acted on.
-func (s *Server) conduitAuthzStoreReachable(ctx context.Context, st *conduitUserStream) bool {
-	_, err := s.store.GetAgent(ctx, st.AgentID)
-	return err == nil && ctx.Err() == nil
 }
 
 // conduitIdentityHasUserRow reports whether identity is a local user whose

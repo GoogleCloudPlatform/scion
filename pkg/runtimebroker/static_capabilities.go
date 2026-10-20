@@ -28,8 +28,13 @@ import (
 //
 // StartsInFlight is set only when the heartbeat actually carries the
 // starts-in-flight list, so it is not part of this static set.
-func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
+//
+// nodeImageRegistry is the broker's SCION_IMAGE_REGISTRY
+// (config.ImageRegistryFromEnv); it is a node configuration value carried
+// with the capabilities, not a feature flag (ptone/scion#3916).
+func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient.BrokerCapabilities {
 	return &hubclient.BrokerCapabilities{
+		NodeImageRegistry:      nodeImageRegistry,
 		WebPTY:                 webPTYSupported(rt),
 		Sync:                   true,
 		Attach:                 scionrt.HasAttachSupport(rt),
@@ -86,7 +91,7 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 // registration and join requests carry (the names the Hub's
 // capabilitiesFromStrings accepts).
 func StaticCapabilityNames(rt scionrt.Runtime) []string {
-	c := StaticCapabilities(rt)
+	c := StaticCapabilities(rt, "")
 	var names []string
 	add := func(on bool, name string) {
 		if on {

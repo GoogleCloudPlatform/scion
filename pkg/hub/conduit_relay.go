@@ -102,6 +102,10 @@ type ConduitRelayOptions struct {
 	Store       registry.Store
 	Clock       clock.Clock
 	RegistryNow func() time.Time
+	// AuthzClock, when set, drives the user-stream re-check and its renewal
+	// driver instead of Clock, so a test can move stream deadlines without
+	// moving the relay's session timers.
+	AuthzClock clock.Clock
 }
 
 // conduitRuntime is the running relay and what it was built from.
@@ -229,7 +233,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		Session:          conduit.Config{WriteWait: opts.sessionWriteWait},
 		ReconnectWindow:  opts.ReconnectWindow,
 		LifetimeCap:      lifetimeCap,
-		Logger:           slog.Default().With("subsystem", "hub.conduit"),
+		OnBrokerSessionsSuperseded: func(brokerID string, closed int) {
+			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
+		},
+		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
@@ -252,7 +260,11 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if interval == 0 {
 		interval = s.config.ConduitAuthzRecheckInterval
 	}
-	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, opts.Clock, interval)
+	authzClock := opts.Clock
+	if opts.AuthzClock != nil {
+		authzClock = opts.AuthzClock
+	}
+	_, stopAuthz, err := s.startConduitStreamAuthz(ctx, authzClock, interval)
 	if err != nil {
 		return err
 	}

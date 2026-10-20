@@ -285,7 +285,7 @@ func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeC
 		return nil, err
 	}
 	o := NewSettingsOverlay()
-	o.Update(storedRuntimes, storedProfiles, nil, "")
+	o.Update(storedRuntimes, storedProfiles, nil)
 	o.Apply(vs)
 	return vs, nil
 }

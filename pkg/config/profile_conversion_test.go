@@ -321,7 +321,7 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 	lcd, _ := vs.ResolveCloneDepthWithSource(p)
 	fcd, _ := flat.ResolveCloneDepthWithSource("")
 	check("clone depth", lcd, fcd)
-	check("image registry", vs.ResolveImageRegistry(p), flat.ResolveImageRegistry(""))
+	check("image registry", vs.SettingsImageRegistry(p), flat.SettingsImageRegistry(""))
 	for hc := range hcs {
 		lhc, lerr := vs.ResolveHarnessConfig(p, hc)
 		fhc, ferr := flat.ResolveHarnessConfig("", hc)

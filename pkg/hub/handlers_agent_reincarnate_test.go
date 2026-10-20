@@ -1181,7 +1181,7 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
 		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
-	}, "")
+	})
 	config.SetGlobalSettingsOverlay(overlay)
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
 
@@ -1736,12 +1736,20 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 
 // TestDispatchImageRegistry_ReadsTheHTTPDispatcher proves the reincarnate
 // path reads the registry from the HTTP dispatcher itself, the value it
-// rewrites images with at send time.
+// rewrites images with at send time, for the agent's broker and saved
+// profile (ptone/scion#3916).
 func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
 	d := &HTTPAgentDispatcher{}
-	d.SetImageRegistryProvider(func() string { return "ghcr.io/test-org" })
-	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
-	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
+	var gotBroker, gotProfile string
+	d.SetImageRegistryProvider(func(brokerID, profile string) string {
+		gotBroker, gotProfile = brokerID, profile
+		return "ghcr.io/test-org"
+	})
+	agent := &store.Agent{RuntimeBrokerID: "broker-1", AppliedConfig: &store.AgentAppliedConfig{Profile: "k8s"}}
+	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d, agent))
+	assert.Equal(t, "broker-1", gotBroker, "the agent's broker")
+	assert.Equal(t, "k8s", gotProfile, "the agent's saved profile")
+	assert.Equal(t, "", dispatchImageRegistry(nil, agent), "a dispatcher that does not rewrite images reports no registry")
 }
 
 // TestReincarnateAgent_LegacyAgent_DropsSkillsWithWarning covers the legacy

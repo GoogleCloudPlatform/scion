@@ -214,7 +214,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_groups.go:authorizeGroupMemberGrant:GetGroupMembership":                  "group governance: the caller's group role (not a role binding); the grant itself goes through CanDelegate with the grantee",
 	"handlers_groups.go:removeGroupMember:GetGroupMembership":                          "group governance: the caller's group role for a removal",
 	"handlers_groups.go:removeGroupMember:CountGroupMembersByRole":                     "guard: last group owner on removal",
-	"handlers_groups.go:groupClosureHasRoleBinding:GetParentGroups":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:GetParentGroups":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":             "routing: chat recipients of a project; grants nothing",
 	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                "routing: chat recipients of a project; grants nothing",
 
@@ -263,7 +263,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
-	"handlers_groups.go:groupClosureHasRoleBinding:ListRoleBindingsForPrincipals":                    "group: whether a group carries bindings (session requirement), not a user's authority",
+	"handlers_groups.go:groupClosureAuthority:ListRoleBindingsForPrincipals":                         "group: the bindings a group closure carries, read to confirm a token's delegation check in the membership transaction; not a user's authority",
 
 	// Visitor admission (federated accounts only). Every caller passes the
 	// ID of a *VisitorIdentity, and resolveFederatedVisitor builds one only
