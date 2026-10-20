@@ -83,6 +83,11 @@ type launchRecord struct {
 	// recorded resources (a local stop or delete owns the files), so a
 	// retry reruns only that.
 	resourcesOnlyCleanup atomic.Bool
+	// terminalUndelivered is set when the launch's terminal report got no
+	// definitive hub answer within its TTL, so runLaunch keeps the journal
+	// record (and the launch marker) for the next boot to resend it
+	// (ptone/scion#5186).
+	terminalUndelivered atomic.Bool
 
 	// journal is the launch's journal entry (launch_journal.go), or nil
 	// when the launch is not journalled. Its methods are nil-safe.

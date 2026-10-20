@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -62,6 +63,15 @@ type separateRelayWorld struct {
 	userTokenB           string
 	relay                *relayserver.Server
 	release              chan struct{} // feeds the app's event stream
+	// regClient is the conduit registry database (each relay opens its own
+	// store on it).
+	regClient *ent.Client
+	// spawnPTY, when set, makes the agent serve pty streams with it.
+	spawnPTY func(context.Context, sconduit.PTYRequest) (sconduit.PTYProcess, error)
+
+	// authzClocks are the hubs' stream re-check clocks, by hub id ("hub-a",
+	// "hub-b"); each starts at the clock grants are minted on.
+	authzClocks map[string]*clock.Fake
 
 	mu          sync.Mutex
 	agentOpened []uint32 // ids of the streams opened on the agent's session
@@ -77,12 +87,35 @@ func (w *separateRelayWorld) lastAgentStream(t *testing.T) uint32 {
 	return w.agentOpened[len(w.agentOpened)-1]
 }
 
-func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
+func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *separateRelayWorld {
+	t.Helper()
+	return newSeparateRelayWorldWith(t, separateRelayOptions{}, mods...)
+}
+
+// separateRelayOptions adjusts the separate relay world before it serves.
+type separateRelayOptions struct {
+	// enforce sets target_stream_deadlines to enforce on both hubs before
+	// they start.
+	enforce bool
+	// agentWithoutRenewal makes the agent's Hello advertise no protocol
+	// features, as a sciontool without stream renewal does.
+	agentWithoutRenewal bool
+	// srvMod, when set, is applied to both hubs before they start external
+	// relay mode (after enforce), so a test can configure them without
+	// racing serving goroutines.
+	srvMod func(*Server)
+	// noConduitAgent starts no conduit agent: the agent has no conduit
+	// session.
+	noConduitAgent bool
+}
+
+// newSeparateRelayWorldWith is newSeparateRelayWorld with opts.
+func newSeparateRelayWorldWith(t *testing.T, opts separateRelayOptions, mods ...func(*separateRelayWorld)) *separateRelayWorld {
 	t.Helper()
 	cf := newConduitFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	w := &separateRelayWorld{release: make(chan struct{})}
+	w := &separateRelayWorld{release: make(chan struct{}), authzClocks: map[string]*clock.Fake{}}
 
 	// The app inside the agent: /events holds an event stream open until
 	// the test feeds it; everything else answers hello.
@@ -115,13 +148,26 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 	cf.srv.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
 	w.hubB.conduitGrants = newConduitGrantKeys(keys, cf.clock.Now)
 
-	regStore := entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	// One database for the conduit registry. The hubs share one store on it;
+	// each separate relay gets its own store on the same database, as a relay
+	// process has its own registry access.
+	w.regClient = enttest.NewClient(t)
+	regStore := entadapter.NewConduitRegistryStore(w.regClient)
 	replay := testReplayStore(t) // shared by both hubs, as the database is
 	for id, srv := range map[string]*Server{"hub-a": cf.srv, "hub-b": w.hubB} {
 		srv.config.SharedSigningSecret = testRelaySessionSecret
+		if opts.enforce {
+			enforceTargetDeadlines(srv)
+		}
+		if opts.srvMod != nil {
+			opts.srvMod(srv)
+		}
+		w.authzClocks[id] = clock.NewFake(cf.clock.Now())
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
-			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(time.Now()),
+			// The clock also drives the stream re-check and its renewal
+			// driver, so it starts at the clock grants are minted on.
+			Registry: registry.New(regStore, registry.Config{}), Clock: w.authzClocks[id],
 			replayStore: replay,
 		}))
 	}
@@ -134,7 +180,7 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 	w.relay, err = relayserver.Start(ctx, relayserver.Config{
 		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
 		PublicListener: publicLn, InternalListen: "127.0.0.1:0",
-		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: regStore, Experiment: conduitAlwaysOn{},
+		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: entadapter.NewConduitRegistryStore(w.regClient), Experiment: conduitAlwaysOn{},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -160,7 +206,15 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 			return []*conduitv1.Frame{f}
 		}},
 	}
-	w.startAgentDialingRelay(t, addr)
+	if opts.agentWithoutRenewal {
+		stripHelloFeatures(&w.agentSession)
+	}
+	for _, m := range mods {
+		m(w)
+	}
+	if !opts.noConduitAgent {
+		w.startAgentDialingRelay(t, addr)
+	}
 
 	w.publicB = httptest.NewServer(w.hubB.Handler())
 	t.Cleanup(w.publicB.Close)
@@ -211,11 +265,12 @@ func (w *separateRelayWorld) startAgentDialingRelay(t *testing.T, relayAddr stri
 			w.sessions.Add(1)
 			admitted <- wel
 		},
-		OnEnd:   w.onEnd,
-		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
-		Clock:   fixtureClock{Fake: w.agentClock, now: w.clock.Now},
-		Session: w.agentSession,
-		WS:      toRelay,
+		OnEnd:    w.onEnd,
+		Backoff:  &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
+		Clock:    fixtureClock{Fake: w.agentClock, now: w.clock.Now},
+		Session:  w.agentSession,
+		WS:       toRelay,
+		SpawnPTY: w.spawnPTY,
 	})
 	require.NoError(t, err)
 	w.sciontool = a
@@ -308,4 +363,20 @@ func TestSeparateRelay_AgentReachedThroughAnotherHub(t *testing.T) {
 		t.Fatal("hub B's leaf stayed open after the agent was deleted")
 	}
 	assert.Empty(t, w.trackedOnB(t))
+}
+
+// stripHelloFeatures makes the session's outbound Hello advertise no
+// protocol features (stream renewal among them), as an older sciontool's
+// does, keeping any interceptor already set.
+func stripHelloFeatures(cfg *conduit.Config) {
+	prev := cfg.Interceptor
+	cfg.Interceptor = func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if h := f.GetHello(); dir == conduit.Outbound && h != nil && h.GetCapabilities() != nil {
+			h.Capabilities.Features = nil
+		}
+		if prev != nil {
+			return prev(dir, f)
+		}
+		return []*conduitv1.Frame{f}
+	}
 }

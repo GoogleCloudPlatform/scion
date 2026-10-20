@@ -32,7 +32,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `schema_version` | string | **Required**. Must be `"1"`. |
-| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). On a Runtime Broker co-located with a database-backed Hub, profiles come from the Hub's stored profiles. The default profile is then `active_profile` if it is one of them. Otherwise, if the Hub stores exactly one profile, that profile is used (the broker logs which one and why). With no stored profiles, or several, a dispatch that needs the default profile is refused with an error that names the available profiles. The Hub's own reads of the default profile follow the same rule. The runtime selector (`GET`/`PUT /api/v1/system/runtime`, used during onboarding) does not: it always reads and writes the profile that `active_profile` names. |
+| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). On a Runtime Broker co-located with a database-backed Hub that stores at least one profile, profiles come from the Hub's stored profiles; with none stored, the settings file's profiles apply. The default profile is then `active_profile` if it is a stored profile. Otherwise, if the Hub stores exactly one profile, that profile is used (the Runtime Broker logs which one and why). Built-in profiles that agents or projects still reference, and the built-in runtimes they need, keep resolving beside the stored profiles (a stored profile of the same name wins). With several stored profiles, a built-in profile that `active_profile` names is kept as well and used as the default. Otherwise a dispatch that needs the default profile is refused with an error that names the available profiles, listing kept built-ins after `retained built-in:`. The Hub's own reads of the default profile follow the same rule. The runtime selector (`GET`/`PUT /api/v1/system/runtime`, used during onboarding) does not: it always reads and writes the profile that `active_profile` names. |
 | `default_template` | string | The default template to use when creating agents (e.g., `gemini`, `antigravity`). |
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents (e.g., `api-key`, `vertex-ai`, `none`). |
@@ -71,7 +71,7 @@ hub:
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `endpoint` | string | The Hub API endpoint URL. A configured endpoint is what makes the CLI use a Hub. Can be overridden per-agent in `scion-agent.yaml`. The value in the global settings is added once to the CLI's hub list as a named hub (`local` for the workstation hub); to add a hub, use `scion hub add <name> <url>`. Inside a project directory, a `hub.endpoint` here (project or global) takes precedence over the hub selected with `scion use --hub`. Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead (see [Server Configuration](/scion/reference/server-config/)). |
+| `endpoint` | string | **Deprecated and ignored by the CLI**, which takes its Hub only from the hub list ([Working with Several Hubs](/scion/hosted/user/multiple-hubs/)); accepted so existing settings files still load, and nothing in the CLI writes it. The value in the global settings is imported once into the hub list as a named hub (`local` for the workstation hub), and becomes the current hub when none is current; for a linked project, its own value (or the inherited global one) is imported once as that directory's link entry. To add a hub, use `scion hub add <name> <url>`. When an agent is provisioned, a `hub.endpoint` in the agent's `scion-agent.yaml` still sets the Hub endpoint that agent is given; when neither it nor the Runtime Broker supplies one, the project's settings `hub.endpoint` is used if those settings still mark the Hub as enabled (the deprecated `hub.enabled: true`, or an endpoint with a token or API key). Servers use `server.hub.public_url` and `server.broker.hub_endpoint` instead, and fall back to this value only as a deprecated legacy source (see [Server Configuration](/scion/reference/server-config/)). |
 | `project_id` | string | The unique identifier for this project on the Hub. |
 | `linked` | bool | Written by the CLI: `true` once the project is linked, `false` after `scion hub unlink` (agent commands then refuse until `scion hub link`). Unset means never linked; the project links on its first command. |
 | `enabled`, `local_only` | bool | **Deprecated and ignored.** Accepted so existing settings files still validate. `scion hub status` notes it when they are set; see the [migration page](/scion/reference/local-mode-removal/). |
@@ -122,6 +122,8 @@ runtimes:
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Without an entry, the broker uses the one ServiceAccount in the namespace annotated `iam.gke.io/gcp-service-account` with the email, if there is exactly one; that discovery needs `list` on `serviceaccounts` in the namespace. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
 | `kubernetes_block_service_account` | string | (Kubernetes) Kubernetes ServiceAccount the agent pod runs as when its GCP identity mode is `block`. Use a dedicated ServiceAccount with no Workload Identity annotation and no IAM grants; Scion does not create or check it. Unset or empty: the pod runs as the namespace's default ServiceAccount. A profile's value wins over this. Read from global settings only. See [block](/scion/hosted/ha/kubernetes/#block). |
 | `env` | map | Environment variables to set for the runtime. |
+
+The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.workspace_storage.backend`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
 
 :::note
 The `tmux` field is now deprecated. All agent sessions are wrapped in tmux by default.
@@ -233,7 +235,7 @@ profiles:
 | `runtime` | string | **Required**. Name of a runtime defined in `runtimes`. |
 | `default_template` | string | Default template for agents created under this profile. |
 | `default_harness_config` | string | Default harness config name for agents created under this profile. |
-| `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
+| `image_registry` | string | Profile-level registry. Beats the top-level `image_registry` of the same source; a saved Hub top-level value and a node's `SCION_IMAGE_REGISTRY` beat a settings-file profile value. See [Image registry order](/scion/reference/settings-precedence/#image-registry-order). |
 | `volumes` | list | Volume mounts for agents created under this profile, appended after the harness config's `volumes`. Each entry has `target` (required), `source`, `read_only`, `type`, `bucket` (GCS bucket name), `prefix` (GCS object prefix), `mode` (mount options), `server` (NFS server host or IP) and `volume_name` (Cloud Run or GKE volume name). `type` is `local` (default; host bind mount, requires `source`), `gcs` (GCS FUSE mount, requires `bucket`), `nfs` (NFS mount, requires `server` and `source`), `cloudrun-volume` (Cloud Run managed volume, requires `volume_name`) or `gke-shared-volume` (GKE-provided shared volume such as a Filestore CSI PVC, requires `volume_name`). |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
@@ -365,7 +367,6 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | :--- | :--- |
 | `active_profile` | `SCION_ACTIVE_PROFILE` |
 | `default_template` | `SCION_DEFAULT_TEMPLATE` |
-| `hub.endpoint` | `SCION_HUB_ENDPOINT` |
 | `hub.project_id` | `SCION_HUB_PROJECT_ID` |
 | `cli.autohelp` | `SCION_CLI_AUTOHELP` |
 | `telemetry.enabled` | `SCION_TELEMETRY_ENABLED` |

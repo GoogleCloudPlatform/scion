@@ -82,9 +82,12 @@ function notif(id: string): any {
   };
 }
 
+/** The real setTimeout, captured before the tests fake timers. */
+const realSetTimeout = globalThis.setTimeout;
+
 /** Lets pending promise chains (fetch, json, Lit update) settle. */
 async function flush(): Promise<void> {
-  for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+  for (let i = 0; i < 5; i++) await new Promise((r) => realSetTimeout(r, 0));
 }
 
 /** Takes the single outstanding list request. */
@@ -134,7 +137,7 @@ describe('notification tray: user switch', () => {
     FakeNotification.permission = 'granted';
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
     localStorage.setItem(PUSH_STORAGE_KEYS.agent, 'true');
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
   });
 
   afterEach(() => {

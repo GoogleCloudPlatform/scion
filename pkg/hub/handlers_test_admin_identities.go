@@ -28,6 +28,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -519,6 +520,12 @@ func (s *Server) testAdminIssuer(w http.ResponseWriter, r *http.Request, spec te
 		if testIdentityDelegationScopes[st.delegation.Scope].adminKind != spec.kind {
 			return deny(user, "workload delegation scope does not cover this admin kind", "")
 		}
+		// Admin-tier delegations need a live human grantor (X4); an
+		// offline delegation (phase DL) or any other grantor kind never
+		// issues an admin kind.
+		if st.delegation.EffectiveGrantorKind() != store.DelegationGrantorHuman || st.offlineGatePassed || st.offline != nil {
+			return deny(user, "admin-tier workload delegations require a human grantor", "")
+		}
 		workload = st
 	default:
 		return deny(user, "credential kind not admitted for test admin issuance", "")
@@ -609,7 +616,8 @@ func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission strin
 }
 
 // recheckTestAdminDelegationGrantor is DEC-3 C1 inside the issuance
-// transaction of a workload delegation request (phase X4): through tx, and
+// transaction of a workload delegation request (phase X4): the delegation's
+// grantor kind must be human (phase DL); then, through tx, and
 // so in the same transaction and under the same issuance lock as the caps
 // and the insert, the delegation's grantor must still be a human (its
 // stored kind), an active user with the stored admin role, hold an active
@@ -618,7 +626,15 @@ func (s *Server) canIssueTestAdmin(ctx context.Context, userID, permission strin
 // grantor demoted after the request authenticated mints nothing. It returns
 // errTestAdminIssuerNotLive on any failure; a store error is returned as
 // is.
-func (s *Server) recheckTestAdminDelegationGrantor(ctx context.Context, tx store.Store, grantorID, permission string) error {
+func (s *Server) recheckTestAdminDelegationGrantor(ctx context.Context, tx store.Store, grantorKind, grantorID, permission string) error {
+	// The grantor kind, explicitly (phase DL): only a human grantor can
+	// back an admin-kind mint; an offline or any other kind is refused
+	// before any read.
+	switch grantorKind {
+	case store.DelegationGrantorHuman:
+	default:
+		return fmt.Errorf("%w: grantor kind %q is not human", errTestAdminIssuerNotLive, grantorKind)
+	}
 	az := s.authzFor(tx)
 	if az == nil {
 		return fmt.Errorf("%w: no authorization service", errTestAdminIssuerNotLive)
@@ -846,7 +862,7 @@ func (s *Server) handleIssueTestAdminIdentity(w http.ResponseWriter, r *http.Req
 			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
 				return err
 			}
-			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, issuerID, spec.permission); err != nil {
+			if err := s.recheckTestAdminDelegationGrantor(ctx, tx, workload.delegation.EffectiveGrantorKind(), issuerID, spec.permission); err != nil {
 				return err
 			}
 			n, err = tx.CountLiveTestAdminUsersByDelegation(ctx, delegationID, now)
@@ -1113,7 +1129,14 @@ func (s *Server) revokeTestAdminIdentity(ctx context.Context, u *store.User, aud
 	if u.IssuanceID != nil && *u.IssuanceID != "" {
 		report := &TestIdentityPurgeReport{IdentityID: u.ID}
 		run := fixturePurgeRun{rootID: u.ID, user: u, issuanceID: *u.IssuanceID, trigger: testAdminRevokeMutation, actor: auditActor}
-		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: auditActor.CorrelationID, Trigger: testAdminRevokeMutation}
+		// The run ID every grant row of this revoke shares: the request's
+		// correlation ID, or a new one (a provenance basis without a run
+		// is refused, which would abort each grant delete).
+		runID := auditActor.CorrelationID
+		if runID == "" {
+			runID = api.NewUUID()
+		}
+		basis := fixturePurgeBasis{RootID: u.ID, Basis: fixturePurgeBasisName, RunID: runID, Trigger: testAdminRevokeMutation}
 		if u.IssuedBy != nil {
 			run.issuerID, basis.IssuerID = *u.IssuedBy, *u.IssuedBy
 		}

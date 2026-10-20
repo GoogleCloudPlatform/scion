@@ -221,6 +221,11 @@ type ProjectProvider struct {
 }
 
 // ProjectSettings represents project configuration settings.
+//
+// Bucket, Runtimes, Harnesses and Profiles are not stored at the project
+// layer: GET never returns them, and a PUT that sets any of them (to a
+// non-null value) is refused with 400. They are configured in server or
+// Runtime Broker settings.
 type ProjectSettings struct {
 	// ActiveProfile names the broker profile new agents in the project run
 	// under when the request names none. On PUT, an absent (null) field
@@ -390,6 +395,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). No broker
+	// sets it yet; brokers advertise it once they implement the async start
+	// (design wave 3, D2). Mirrors store.BrokerCapabilities.AsyncStart.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (design #2703;
 	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
@@ -413,6 +423,12 @@ type BrokerCapabilities struct {
 	// create/start/restart as policy above everything. A hub may stop writing those values into
 	// InlineConfig only for a broker that reports this (ptone/scion#4222).
 	TemplateTiers bool `json:"templateTiers,omitempty"`
+	// NodeImageRegistry is the broker's SCION_IMAGE_REGISTRY, the node env
+	// layer of image_registry that beats every settings value for agents
+	// this broker runs (ptone/scion#3916). It is a node configuration value
+	// carried with the capabilities, not a feature flag; empty means none
+	// (store.BrokerCapabilities.NodeImageRegistry is its counterpart).
+	NodeImageRegistry string `json:"nodeImageRegistry,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.

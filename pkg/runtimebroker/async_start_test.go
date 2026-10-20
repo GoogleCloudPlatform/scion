@@ -66,18 +66,6 @@ func postAsyncStart(t *testing.T, srv *Server, slug, query string, body map[stri
 	return w
 }
 
-// postStop posts a stop of slug with the given query (without "?").
-func postStop(srv *Server, slug, query string) *httptest.ResponseRecorder {
-	target := "/api/v1/agents/" + slug + "/stop"
-	if query != "" {
-		target += "?" + query
-	}
-	req := httptest.NewRequest(http.MethodPost, target, nil)
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	return w
-}
-
 func asyncStartQuery() string {
 	return api.AgentIDQueryParam + "=" + asyncStartHubAgentID + "&runId=run-1"
 }
@@ -290,7 +278,7 @@ func TestAsyncStart_StopBetweenCancels(t *testing.T) {
 	<-atHandOff
 	stopDone := make(chan struct{})
 	go func() {
-		postStop(srv, "agent-ii", api.AgentIDQueryParam+"="+asyncStartHubAgentID)
+		postStop(t, srv, "agent-ii", api.AgentIDQueryParam+"="+asyncStartHubAgentID)
 		close(stopDone)
 	}()
 	<-parked
@@ -324,7 +312,7 @@ func TestAsyncStart_StopAfter202(t *testing.T) {
 	if !waitUntil(t, 2*time.Second, func() bool { return mgr.StartCallCount() == 1 }) {
 		t.Fatal("the launch did not reach Manager.Start")
 	}
-	postStop(srv, "agent-iii", api.AgentIDQueryParam+"="+asyncStartHubAgentID)
+	postStop(t, srv, "agent-iii", api.AgentIDQueryParam+"="+asyncStartHubAgentID)
 	if !waitUntil(t, 2*time.Second, func() bool { return mgr.CleanupCallCount() >= 1 }) {
 		t.Fatal("the stop did not end the launch with a resource cleanup")
 	}
@@ -373,7 +361,7 @@ func newStartIVFixture(t *testing.T, slug, stopQuery string) *startIVFixture {
 		}
 		stopOnce.Do(func() {
 			go func() {
-				f.stopResp = postStop(f.srv, slug, stopQuery)
+				f.stopResp = postStop(t, f.srv, slug, stopQuery)
 				close(f.stopped)
 			}()
 			<-f.parked // the stop's registry cancel has run: nothing was registered yet

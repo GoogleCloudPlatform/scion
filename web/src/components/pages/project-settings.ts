@@ -46,6 +46,7 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
 import type { BoundarySummaryGroup } from '../shared/boundary-summary-notice.js';
 import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js';
+import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import '../shared/boundary-summary-notice.js';
 import '../shared/env-var-list.js';
@@ -66,6 +67,7 @@ import { showConfirm } from '../shared/confirm-dialog.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { navigateTo } from '../../client/navigation.js';
+import { visibleInterval } from '../../client/visible-interval.js';
 
 interface ProjectResourceSpec {
   requests?: { cpu?: string | undefined; memory?: string | undefined };
@@ -316,7 +318,7 @@ export class ScionPageProjectSettings extends LitElement {
   @state()
   private messagingPolicySuccess: string | null = null;
 
-  private brokerRelativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  private stopBrokerRelativeTimeTick: (() => void) | null = null;
 
   static override styles = css`
     :host {
@@ -882,10 +884,8 @@ export class ScionPageProjectSettings extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.brokerRelativeTimeInterval) {
-      clearInterval(this.brokerRelativeTimeInterval);
-      this.brokerRelativeTimeInterval = null;
-    }
+    this.stopBrokerRelativeTimeTick?.();
+    this.stopBrokerRelativeTimeTick = null;
   }
 
   private async loadProject(skipGitHubCheck = false): Promise<void> {
@@ -1303,14 +1303,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
   private async loadHubTelemetryDefaultFallback(): Promise<void> {
-    try {
-      const response = await apiFetch('/api/v1/settings/public');
-      if (response.ok) {
-        const data = (await response.json()) as { telemetryEnabled?: boolean };
-        this.hubTelemetryDefault = data.telemetryEnabled ?? false;
-      }
-    } catch (err) {
-      console.error('Failed to load hub telemetry default:', err);
+    const settings = await getPublicSettings();
+    if (settings) {
+      this.hubTelemetryDefault = settings.telemetryEnabled ?? false;
     }
   }
 
@@ -3028,9 +3023,10 @@ export class ScionPageProjectSettings extends LitElement {
       const data = (await response.json()) as { brokers: RuntimeBrokerWithProvider[] };
       this.brokers = data.brokers || [];
 
-      // Start relative time refresh if we have brokers
-      if (this.brokers.length > 0 && !this.brokerRelativeTimeInterval) {
-        this.brokerRelativeTimeInterval = setInterval(() => this.requestUpdate(), 15_000);
+      // Start relative time refresh if we have brokers. The fetch can resolve
+      // after the page was disconnected; do not start a timer nobody stops.
+      if (this.isConnected && this.brokers.length > 0 && !this.stopBrokerRelativeTimeTick) {
+        this.stopBrokerRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15_000);
       }
     } catch (err) {
       console.error('Failed to load brokers:', err);

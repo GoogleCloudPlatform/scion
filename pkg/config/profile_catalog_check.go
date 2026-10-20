@@ -68,9 +68,6 @@ const (
 	ProfileSourceFile ProfileSource = "file"
 	// ProfileSourceBuiltin: defined only by the embedded default settings.
 	ProfileSourceBuiltin ProfileSource = "builtin"
-	// ProfileSourceSettings: a legacy settings hierarchy, where a file
-	// profile and a built-in default are not told apart.
-	ProfileSourceSettings ProfileSource = "settings"
 	// ProfileSourceNone: not defined before either.
 	ProfileSourceNone ProfileSource = "none"
 )
@@ -285,7 +282,7 @@ func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeC
 		return nil, err
 	}
 	o := NewSettingsOverlay()
-	o.Update(storedRuntimes, storedProfiles, nil, "")
+	o.Update(storedRuntimes, storedProfiles, nil)
 	o.Apply(vs)
 	return vs, nil
 }
@@ -328,28 +325,14 @@ func activeProfileResolves(vs *VersionedSettings) bool {
 // hierarchy before any hub-stored overlay: ProfileSourceFile for a name a
 // settings file layer (global or project) or the SCION_ environment
 // defines, ProfileSourceBuiltin for a name only the embedded defaults
-// define. It takes the same branch as LoadEffectiveSettings. On a versioned
-// hierarchy it uses LoadVersionedSettings' own layers
-// (loadVersionedSettingsKoanf), once with and once without the embedded
-// defaults. On a legacy hierarchy every profile is ProfileSourceSettings: the
-// legacy adapter has no separable defaults layer. Profiles that reach the hub
+// define. It uses LoadVersionedSettings' own layers
+// (loadVersionedSettingsKoanf), the ones LoadEffectiveSettings reads, once
+// with and once without the embedded defaults; a legacy-format file is
+// converted at its own layer the same way. Profiles that reach the hub
 // only through its stored set (server config, SCION_SEED_*) are not
 // labelled here; CheckProfileCatalog labels them "stored" from before.
 func ProfileOrigins(projectPath string) (map[string]ProfileSource, error) {
 	out := map[string]ProfileSource{}
-	// The same branch LoadEffectiveSettings takes; the second result
-	// (a missing schema_version) only feeds its warnings.
-	if hasVersioned, _ := detectHierarchyFormat(projectPath); !hasVersioned {
-		legacy, err := LoadSettingsKoanf(projectPath)
-		if err != nil {
-			return nil, fmt.Errorf("loading legacy settings: %w", err)
-		}
-		vs, _ := AdaptLegacySettings(legacy)
-		for name := range vs.Profiles {
-			out[name] = ProfileSourceSettings
-		}
-		return out, nil
-	}
 	if data, err := GetDefaultSettingsDataYAML(); err == nil {
 		defaults := koanf.New(".")
 		if err := defaults.Load(rawbytes.Provider(data), yaml.Parser()); err != nil {

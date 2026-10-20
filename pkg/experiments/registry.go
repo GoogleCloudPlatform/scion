@@ -171,7 +171,10 @@ const AgentDelegation = "hub.agent_delegation"
 // before; while it is on, a token whose (issuer, subject) is linked to an
 // active federated account yields that account's visitor identity. It also
 // gates POST /api/v1/auth/federation-token (404 while off), where this
-// hub's own users obtain user access credentials for peer hubs.
+// hub's own users obtain user access credentials for peer hubs, and the
+// acceptance of user access credentials from peer hub issuers with
+// accept_user_tokens (refused while off; agent tokens from those issuers are
+// unaffected).
 const FederationProjectVisitors = "federation.project_visitors"
 
 // ChatThreadGroups gates project-scoped chat thread groups
@@ -195,10 +198,30 @@ const AgentPlugins = "hub.agent_plugins"
 // are reaped either way.
 const AsyncAgentLaunch = "hub.async_agent_launch"
 
+// AsyncAgentStart gates asynchronous start, resume and restart of existing
+// agents (ptone/scion#4669). It applies only while hub.async_agent_launch is
+// on too. Turn it on only after every hub node runs a version that
+// advertises async_start_v1 in the hub-instance registry; to roll back,
+// turn it off and wait launch_timeout plus 15 seconds before downgrading
+// any node. This release registers it only: every start stays synchronous
+// whatever its value.
+const AsyncAgentStart = "hub.async_agent_start"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AsyncAgentStart,
+		Title:       "Asynchronous agent start",
+		Description: "Lets the hub answer a start, resume or restart of an existing agent as soon as the Runtime Broker accepts it, like an asynchronous create; it applies only while hub.async_agent_launch is also on. Turn it on only after every hub node runs a version that supports it (each advertises async_start_v1). To roll back, turn it off and wait launch_timeout plus 15 seconds before downgrading any node. In this release starts stay synchronous whatever its value.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4669",
+		Owner:       "async-start",
+		ReviewBy:    "2027-01-12",
+	},
 	{
 		Name:        AsyncAgentLaunch,
 		Title:       "Asynchronous agent create",
@@ -213,7 +236,7 @@ var compiled = []Experiment{
 	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences. While off, federated user tokens behave exactly as before, no user access credentials are issued, and stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -268,13 +291,16 @@ var compiled = []Experiment{
 	{
 		Name:        FlatRuntimeBrokers,
 		Title:       "Flat Runtime Brokers",
-		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#2926",
-		Owner:       "runtime-broker",
-		ReviewBy:    "2027-03-31",
+		Layers: []Layer{
+			LayerServer,
+			LayerWeb,
+		},
+		Stage:    StageAlpha,
+		Issue:    "ptone/scion#2926",
+		Owner:    "runtime-broker",
+		ReviewBy: "2027-03-31",
 	},
 	{
 		Name:        Artifacts,

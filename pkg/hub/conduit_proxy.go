@@ -80,7 +80,17 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 	}
 	var conn net.Conn
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
-		tok, _, err := s.mintConduitGrant(ctx, conduitGrantRequest{
+		renews, canRenew := conduitTargetRenews(res), s.conduitRouteCanRenew(res)
+		// A target without stream renewal is refused (409), never retried
+		// on the port-forward tunnel: the caller answers it with
+		// writeConduitProxyError, not as "no session".
+		if s.conduitTargetUpgradeRequired(ctx, identity, renews, conduitRouteProxy, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
+		if s.conduitRenewalPathUnavailable(ctx, identity, renews, canRenew, conduitRouteProxy, agent.ID) {
+			return errConduitStreamRenewalUnavailable
+		}
+		tok, claims, err := s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: identity,
 			Agent:    agent,
 			Stream:   grant.StreamHeader{Kind: grant.StreamKindTCP, Params: params},
@@ -91,11 +101,14 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 				SessionID:           res.Record.SessionID,
 				ConnectionEpoch:     res.Record.ConnectionEpoch,
 			},
+			Via:          grant.ViaProxy,
+			TargetRenews: renews,
+			CanRenew:     canRenew,
 		})
 		if err != nil {
 			return err
 		}
-		st, err := res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, bridge, err := s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduitv1.StreamKind_STREAM_KIND_TCP,
 			Params: params,
 			Grant:  tok,
@@ -104,8 +117,8 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			return err
 		}
 		sc := newStreamConn(st, agent.ID, port)
-		target := conduitTargetOf(res, st)
-		sc.untrack = s.trackConduitUserStream(&conduitUserStream{
+		target := conduitLeafTarget(res, st, bridge)
+		tracked := &conduitUserStream{
 			Kind:      grant.StreamKindTCP,
 			Identity:  identity,
 			AgentID:   agent.ID,
@@ -114,8 +127,11 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 			SessionID: target.SessionID,
 			StreamID:  target.StreamID,
 			Close:     sc.closeWithCode,
-			Renew:     conduitStreamRenewal(res, st.ID()),
-		})
+			Bridge:    bridge,
+		}
+		applyConduitOpenGrant(tracked, tok, claims)
+		tracked.Renew = conduitStreamRenewal(res, st, !tracked.AuthzUntil.IsZero())
+		sc.untrack = s.trackConduitUserStream(tracked)
 		conn = sc
 		return nil
 	})
@@ -123,18 +139,6 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		return nil, err
 	}
 	return conn, nil
-}
-
-// conduitStreamRenewal returns the sender of the hub-originated
-// AuthRefresh{stream_id} renewal notice for a stream opened on res, or nil
-// when this node does not hold the target's session (the notice is not
-// forwarded across nodes; the deadline is enforced here regardless).
-func conduitStreamRenewal(res router.Resolved, streamID uint32) func() error {
-	ls, ok := res.Session.(conduit.LocalSession)
-	if !res.Local || !ok {
-		return nil
-	}
-	return func() error { return ls.RefreshAuth(nil, streamID) }
 }
 
 // conduitTargetOf returns the stream's ids on the target's own session: on
@@ -462,8 +466,22 @@ func writeConduitProxyError(w http.ResponseWriter, r *http.Request, agentID stri
 		writeError(w, placement.Refusal.Status, placement.Refusal.Code, placement.Refusal.Message, placement.Refusal.Details)
 	case errors.Is(err, errConduitForbidden):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
+	case errors.Is(err, errConduitStreamRenewalUnavailable):
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, conduitStreamRenewalUnavailableMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnavailable})
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		writeError(w, http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitAgentUpgradeRequiredMessage,
+			map[string]interface{}{"reason": conduitReasonStreamRenewalUnsupported})
+	case errors.Is(err, errConduitGrantInternal):
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
+	case errors.Is(err, errConduitInvalid):
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid port proxy request", nil)
 	case errors.Is(err, router.ErrRegistryUnavailable):
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit routing is unavailable", nil)
+	case errors.Is(err, errConduitLeafNotRelayHeld):
+		// An internal invariant broke (external relay mode resolved to a
+		// session that is not relay-held); logged at Warn where it is found.
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Internal error", nil)
 	case errors.As(err, &ce) && ce.Code == conduit.CloseRelayTimeout:
 		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, "Nothing is listening on the agent port", nil)
 	default:

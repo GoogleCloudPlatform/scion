@@ -63,7 +63,6 @@ type inheritedGoldenCase struct {
 // inheritedSources is the part of a case's sources this test applies.
 type inheritedSources struct {
 	Template struct {
-		Config *store.TemplateConfig `json:"config"`
 		// AgentConfig is the template's own scion-agent.yaml snapshot,
 		// the hub's only source of a template's job keys
 		// (ptone/scion#4222).
@@ -167,7 +166,6 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 		ContentHash: "d00dfeed",
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
-		Config:      src.Template.Config,
 		AgentConfig: src.Template.AgentConfig,
 	}
 	require.NoError(t, s.CreateTemplate(ctx, tmpl))
@@ -218,9 +216,12 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 			set("config.resources.limits.memory", r.Limits.Memory)
 			set("config.resources.disk", r.Disk)
 		}
-		if ic.Telemetry != nil && ic.Telemetry.Enabled != nil {
-			dispatched["config.telemetry"] = strconv.FormatBool(*ic.Telemetry.Enabled)
-		}
+		require.Nil(t, ic.Telemetry, "telemetry is never sent inline (ptone/scion#4224)")
+	}
+	// The project telemetry policy travels as its own tier
+	// (ptone/scion#4224); the form shows it as config.telemetry.
+	if p := req.Config.TelemetryPolicy; p != nil {
+		dispatched["config.telemetry"] = strconv.FormatBool(*p)
 	}
 	// Every agent gets a role and a message mode; record them only where
 	// the case's sources set one, the values the web can know.
@@ -229,10 +230,9 @@ func dispatchInheritedCase(t *testing.T, tier string, src inheritedSources) map[
 	if _, ok := ps["defaultAgentRole"]; ok {
 		dispatched["agentRole"] = resp.Agent.AppliedConfig.AgentRole
 	}
-	// The row's config.messageMode is recorded too, so a case can assert
-	// that it no longer contributes (ptone/scion#4222).
-	if (src.Template.Config != nil && src.Template.Config.MessageMode != "") ||
-		(src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "") {
+	// The template's message mode comes only from its snapshot
+	// (ptone/scion#4222); the row has no config (ptone/scion#4224).
+	if src.Template.AgentConfig != nil && src.Template.AgentConfig.MessageMode != "" {
 		dispatched["messageMode"] = resp.Agent.MessageMode
 	}
 	return dispatched
