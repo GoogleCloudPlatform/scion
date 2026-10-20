@@ -173,6 +173,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		AsyncLaunch:              c.AsyncLaunch,
 		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
 		AgentMove:                c.AgentMove,
+		AgentMoveRecreate:        c.AgentMoveRecreate,
 		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
 		StartsInFlight:           c.StartsInFlight,
 		NodeImageRegistry:        c.NodeImageRegistry,

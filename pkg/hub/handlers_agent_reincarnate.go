@@ -49,6 +49,11 @@ type ReincarnateAgentRequest struct {
 	// that broker; it must mount the same NFS export as the current one.
 	// Empty, or the agent's current broker, is a plain reincarnation.
 	TargetBroker string `json:"targetBroker,omitempty"`
+	// ForceMove, with TargetBroker, allows a move whose workspace cannot
+	// travel through a shared NFS export: the workspace is provisioned fresh
+	// on the target and the source's local state is given up. A 400 without
+	// TargetBroker. Never downgrades a move the export mode can carry.
+	ForceMove bool `json:"forceMove,omitempty"`
 
 	// SharedDirBackends changes the recorded shared-dir storage backend of
 	// the named shared dirs (dir name to "nfs" or "local"). Only the
@@ -325,6 +330,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// target is resolved without writing anything (no provider link).
 	var moveTarget *store.RuntimeBroker
 	targetBrokerID := ""
+	if req.ForceMove && req.TargetBroker == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"forceMove needs targetBroker: --force only applies to a move to another broker", nil)
+		return
+	}
 	if req.TargetBroker != "" {
 		// A move needs a source broker; refuse before resolving the target.
 		if agent.RuntimeBrokerID == "" {
@@ -409,8 +419,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// `--broker <current>`) the broker reuses the private workspace in
 	// place, gated below on a local-disk runtime and the broker's
 	// ReprovisionEmptyPerAgent capability. Any other empty-per-agent
-	// request (a move whose workspace is not movable) is still refused.
-	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() && s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget)
+	// request (a move whose workspace is not movable) is still refused,
+	// unless it is a forced move (ptone/scion#5441): then the move checks
+	// decide, and a workspace the export cannot carry is recreated empty on
+	// the target.
+	emptyPerAgentMove := moveTarget != nil && project.IsEmptyPerAgent() &&
+		(req.ForceMove || s.emptyPerAgentWorkspaceMovable(ctx, agent, moveTarget))
 	sameBrokerEmptyPerAgent := project.IsEmptyPerAgent() && moveTarget == nil
 	workspaceModeErr := ""
 	if project.IsEmptyPerAgent() && !emptyPerAgentMove && !sameBrokerEmptyPerAgent {
@@ -773,6 +787,10 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		CloneMode:          cloneMode,
 		SelfMove:           isSelfRequest(ctx, agent),
 		Probes:             s.moveProbesFor(r, project, agent.AppliedConfig),
+		Force:              req.ForceMove,
+		EmptyPerAgent:      project.IsEmptyPerAgent(),
+		WorkspaceMode:      string(project.SharingMode()),
+		GitRemote:          project.GitRemote,
 	}
 	if workspaceModeErr != "" {
 		v, ref := evaluateMoveEligibility(in)
@@ -822,6 +840,10 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	// passthrough gate (and the self-move passthrough refusal) follow the
 	// patched GCP identity, not the outgoing one.
 	in.Probes = s.moveProbesFor(r, project, fresh)
+	in.Branch = fresh.Branch
+	if fresh.GitClone != nil {
+		in.DefaultBranch = fresh.GitClone.Branch
+	}
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
 		writeMoveRefusal(w, ref, v)
@@ -837,6 +859,12 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 			TargetBrokerID: dst.ID,
 			MoveVerdict:    &v,
 		})
+		return
+	}
+	// A forced move that recreates the workspace is checked and dry-run
+	// only, until the move itself is implemented (ptone/scion#5441).
+	if v.TransferMode == MoveTransferModeRecreate {
+		writeError(w, http.StatusNotImplemented, "not_implemented", "forced moves are not enabled yet", nil)
 		return
 	}
 	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{

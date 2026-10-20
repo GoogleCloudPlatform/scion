@@ -402,6 +402,9 @@ type BrokerCapabilities struct {
 	// AgentMove indicates the broker can take part in a cross-broker agent
 	// move (store.BrokerCapabilities.AgentMove is its counterpart).
 	AgentMove bool `json:"agentMove"`
+	// AgentMoveRecreate indicates the broker can be the target of a forced
+	// move (store.BrokerCapabilities.AgentMoveRecreate is its counterpart).
+	AgentMoveRecreate bool `json:"agentMoveRecreate,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).
