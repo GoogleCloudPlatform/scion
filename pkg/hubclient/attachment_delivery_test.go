@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -85,5 +86,58 @@ func TestFetchRedirect_HTTPSOnly(t *testing.T) {
 	_ = rc.Close()
 	if _, err := fetchRedirect(context.Background(), "ftp://objects.example/blob", true); err == nil {
 		t.Fatal("other schemes are refused")
+	}
+}
+
+// TestFetchAttachmentDelivery_ErrorsCarryNoURL: whatever fails, the error
+// names neither the capability path nor the signed object-store URL, so a
+// caller may log it.
+func TestFetchAttachmentDelivery_ErrorsCarryNoURL(t *testing.T) {
+	const token = "TOKENSECRET"
+	// A hub that is not listening: a transport error (*url.Error).
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close()
+	c, err := New(deadURL, WithHMACAuth("broker-1", []byte("secret-key-for-test-0123456789ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
+	if err == nil || strings.Contains(err.Error(), token) || strings.Contains(err.Error(), deadURL) {
+		t.Fatalf("transport error = %v; want an error without the capability or the URL", err)
+	}
+	// An object store that is not listening: a transport error naming the
+	// signed URL, a bearer for its lifetime, stays out of the error.
+	deadObjects := httptest.NewServer(http.NotFoundHandler())
+	deadObjectsURL := deadObjects.URL
+	deadObjects.Close()
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, deadObjectsURL+"/blob?sig=SIGSECRET", http.StatusFound)
+	}))
+	defer redirecting.Close()
+	c, err = New(redirecting.URL, WithHMACAuth("broker-1", []byte("secret-key-for-test-0123456789ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
+	if err == nil || strings.Contains(err.Error(), "SIGSECRET") || strings.Contains(err.Error(), deadObjectsURL) || strings.Contains(err.Error(), token) {
+		t.Fatalf("object store transport error = %v; want an error without the signed URL or the capability", err)
+	}
+	// An object store that refuses: the signed URL stays out of the error.
+	objects := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no", http.StatusForbidden)
+	}))
+	defer objects.Close()
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, objects.URL+"/blob?sig=SIGSECRET", http.StatusFound)
+	}))
+	defer hub.Close()
+	c, err = New(hub.URL, WithHMACAuth("broker-1", []byte("secret-key-for-test-0123456789ab")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
+	if err == nil || strings.Contains(err.Error(), "SIGSECRET") || strings.Contains(err.Error(), token) {
+		t.Fatalf("object store error = %v; want an error without the signed URL or the capability", err)
 	}
 }

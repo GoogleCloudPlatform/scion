@@ -42,10 +42,47 @@ const attachmentDeliveriesPath = "/api/v1/attachment-deliveries/"
 // errDeliveryRefused is returned for any refusal of a delivery capability.
 var errDeliveryRefused = errors.New("attachment delivery refused")
 
-// FetchAttachmentDelivery implements AttachmentDeliveryFetcher.
+// FetchAttachmentDelivery implements AttachmentDeliveryFetcher. Its errors
+// never carry a URL: the hub path holds the delivery capability and the
+// object-store URL is signed, so a caller may log any error it returns
+// (deliveryError).
 func (c *client) FetchAttachmentDelivery(ctx context.Context, path string) (io.ReadCloser, error) {
+	body, err := c.fetchAttachmentDelivery(ctx, path)
+	if err != nil {
+		return nil, deliveryError(err)
+	}
+	return body, nil
+}
+
+// deliveryError returns err without any URL: a refusal, an API error from
+// the hub (built from the response, never the request) and a status from
+// the object store pass as they are; a transport error (*url.Error, which
+// formats with the full URL) keeps only its operation and cause; anything
+// else becomes a fixed message.
+func deliveryError(err error) error {
+	var ue *url.Error
+	var apiErr *apiclient.APIError
+	switch {
+	case errors.Is(err, errDeliveryRefused), errors.Is(err, errDeliveryObjectStore), errors.Is(err, errDeliveryPath),
+		errors.Is(err, errDeliveryRedirect), errors.As(err, &apiErr):
+		return err
+	case errors.As(err, &ue):
+		return fmt.Errorf("attachment delivery: %s request failed: %w", ue.Op, ue.Err)
+	default:
+		return errors.New("attachment delivery: request failed")
+	}
+}
+
+// Fixed errors of a delivery fetch; none carries a URL.
+var (
+	errDeliveryObjectStore = errors.New("attachment delivery: object store refused the download")
+	errDeliveryPath        = errors.New("attachment delivery: unexpected capability path")
+	errDeliveryRedirect    = errors.New("attachment delivery: invalid redirect")
+)
+
+func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.ReadCloser, error) {
 	if !strings.HasPrefix(path, attachmentDeliveriesPath) || strings.ContainsAny(path, "?#") {
-		return nil, fmt.Errorf("attachment delivery: unexpected capability path")
+		return nil, errDeliveryPath
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.transport.BaseURL+path, nil)
 	if err != nil {
@@ -79,7 +116,7 @@ func (c *client) FetchAttachmentDelivery(ctx context.Context, path string) (io.R
 func fetchRedirect(ctx context.Context, loc string, allowHTTP bool) (io.ReadCloser, error) {
 	u, err := url.Parse(loc)
 	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !allowHTTP)) || u.Host == "" {
-		return nil, fmt.Errorf("attachment delivery: invalid redirect")
+		return nil, errDeliveryRedirect
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -92,7 +129,7 @@ func fetchRedirect(ctx context.Context, loc string, allowHTTP bool) (io.ReadClos
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("attachment delivery: object store answered %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w (status %d)", errDeliveryObjectStore, resp.StatusCode)
 	}
 	return resp.Body, nil
 }

@@ -152,6 +152,9 @@ func TestDeliveryPathRedacted(t *testing.T) {
 		"/api/v1//attachment-deliveries/TOKENSECRET",
 		"/api/v1/attachment%2Ddeliveries/TOKENSECRET",
 		"/api/v1/ATTACHMENT-DELIVERIES/TOKENSECRET",
+		"/api/v1/attachment%252Ddeliveries/TOKENSECRET",
+		"/api/v1/attachment-deliveries%2FTOKENSECRET",
+		"/api/v1/attachment-deliveries/TOKENSECRET/",
 	} {
 		u := &url.URL{Path: p}
 		if raw, err := url.Parse("https://hub.example.com" + p); err == nil {
@@ -168,8 +171,18 @@ func TestDeliveryPathRedacted(t *testing.T) {
 			t.Errorf("IsCredentialURL(%q) = false", p)
 		}
 	}
-	if got := RequestPath(&http.Request{URL: &url.URL{Path: "/api/v1/agents/x/message"}}); got != "/api/v1/agents/x/message" {
-		t.Errorf("an ordinary path is redacted: %q", got)
+	for _, p := range []string{"/api/v1/agents/x/message", "/api/v1/chat/attachments", "/api/v1/chat/attachments/abc"} {
+		if got := RequestPath(&http.Request{URL: &url.URL{Path: p}}); got != p {
+			t.Errorf("an ordinary path is redacted: %q -> %q", p, got)
+		}
+	}
+	// The host and a non-credential query are kept.
+	u, err := url.Parse("https://hub.example.com/api/v1/attachment-deliveries/TOKENSECRET/?trace=1&sig=SIGSECRET")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := RedactURL(u), "https://hub.example.com"+RedactedDeliveryPath+"?trace=1&sig=REDACTED"; got != want {
+		t.Errorf("RedactURL = %q, want %q", got, want)
 	}
 
 	var buf bytes.Buffer

@@ -56,8 +56,9 @@ func RedactQuery(rawQuery string) string {
 // RedactedArtifactPath is how every artifact request path is logged.
 const RedactedArtifactPath = "/api/v1/artifacts/" + redactedValue
 
-// maxUnescapeRounds bounds how many times artifactPath percent-decodes a
-// path while looking for the artifact routes.
+// maxUnescapeRounds bounds how many times pathMentions percent-decodes a
+// path while looking for the artifact routes or the attachment delivery
+// route.
 const maxUnescapeRounds = 4
 
 // artifactPath reports whether the URL path p (decoded or escaped) may
@@ -134,9 +135,9 @@ func RequestPath(r *http.Request) string {
 }
 
 // RedactURL returns u as a string with credential-bearing query parameter
-// values redacted (see RedactQuery) and, for an artifact request (see
-// RequestPath), the path replaced by RedactedArtifactPath. u is not
-// modified.
+// values redacted (see RedactQuery) and, for an artifact request or an
+// attachment delivery request (see RequestPath), the path replaced by
+// RedactedArtifactPath or RedactedDeliveryPath. u is not modified.
 func RedactURL(u *url.URL) string {
 	if u == nil {
 		return ""
