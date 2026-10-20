@@ -183,7 +183,7 @@ The user who registers a Runtime Broker becomes its owner. Registration admits a
 
 Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
-Register, re-register, rotate, link and unlink events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
+Register, re-register, rotate, link, unlink and update events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
 
 With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.
 
@@ -192,6 +192,20 @@ With the experiment on, a Runtime Broker's Conduit session also carries the Hub'
 - An `exec` whose request reached the Runtime Broker but whose result was lost (for example, the session closed while it ran) returns `502` with code `outcome_unknown`. The command may have run. The Hub does not retry it, and `error.details` carries `operation`, `broker_id` and `request_id`. A failure the Runtime Broker reports still returns `502 runtime_error`.
 - A request that is safe to repeat (logs, image status, image pull and project cleanup) is retried on another session of the same Runtime Broker when it loses its session. When no session serves it, logs return `503 unavailable`, and project cleanup, image status and image pull fail. Image removal is not retried.
 - Project cleanup on the Runtime Broker removes the project's directory under `~/.scion/project-configs` even when the project directory itself is already gone, and reports success only once both are gone, so repeating it finishes any step that failed. The Hub's Conduit path reports a cleanup failure as a failure.
+
+### Settings managed through the update API
+
+Fields set through the update API (`PATCH /api/v1/runtime-brokers/{id}`) persist across registrations:
+
+- **GCP host service account and project.** They are written together. Registration fills them only while they are unset; a value set or cleared through the update API stays until the next update. Send `gcpHostPinned: false` in an update to hand them back to registration.
+- **Name.** Registration keeps the stored name.
+- **Labels.** Labels a registration sends are added when the key is absent; an existing key keeps its value.
+
+A registration response lists any requested value that was kept (`keptSettings`), and `scion runtime-broker register` prints one line per kept value. The register audit event records them, and changes made through the update API are audited too.
+
+### Hub-managed labels
+
+The Hub sets the `scion.io/plugin` and `scion.io/broker-role` labels itself; values sent in registration or update requests are ignored.
 
 ## Headless registration with a hub token
 
@@ -269,6 +283,8 @@ fs.inotify.max_user_watches=524288
 A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with the Hub), an agent whose saved profile is not one of them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, and otherwise gets the same `503`.
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
+
+On a co-located server, the broker detail shows the host identity state: whether the configured GCP host service account matches the identity the host reports. `mismatch` and `pinned_absent` (configured, but the host reports no account) mark the broker as needing attention in the health summary. The configured value is used either way.
 
 ## Unregistering a Broker
 
