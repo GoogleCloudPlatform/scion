@@ -208,8 +208,10 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 		if errors.Is(err, ErrHostSAClaimNotAuthorized) {
 			if hostSAVerdict.Allowed {
-				// Allowed for a different value than the one the write
-				// would store: the row changed after the decision.
+				// Not reachable with today's write sites: each stores exactly
+				// the value this handler evaluated, so an allowed verdict
+				// always matches. Kept so that a future write site storing a
+				// different value fails closed as a conflict.
 				Conflict(w, "the broker's host service account changed during registration; retry")
 				return
 			}
@@ -353,9 +355,10 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 		return
 	}
 	if errors.Is(err, ErrHostSAClaimNotAuthorized) {
-		// The registration handler writes the decision-specific refusal
-		// first; this is the generic form for any other caller.
-		writeHostSAClaimDenied(w, hostSAClaimVerdict{})
+		// Not reachable today: the registration handler writes the
+		// decision-specific refusal first. This is the generic form for any
+		// other caller.
+		writeForbidden(w, "Setting gcpHostServiceAccountEmail on this broker is not authorized")
 		return
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

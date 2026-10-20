@@ -77,8 +77,14 @@ func hostSAClaimOf(b *store.RuntimeBroker) hostSAClaim {
 type hostSAClaimVerdict struct {
 	// Claim is the claim the decision was made for.
 	Claim hostSAClaim
+	// Prior is the stored claim the decision was made against.
+	Prior hostSAClaim
 	// Allowed is true when the claim may be written.
 	Allowed bool
+	// Checked is true when an actAs evaluation produced the decision. An
+	// unchecked allowed verdict (an unchanged or empty request) authorizes
+	// a write only while the stored claim is still Prior.
+	Checked bool
 	// Result carries the actAs outcome and mechanism for the 403 message.
 	// It is zero when no actAs evaluation ran.
 	Result store.ActAsResult
@@ -132,7 +138,7 @@ func hostSATarget(c hostSAClaim) *store.GCPServiceAccount {
 // generator the unavailable checker denies.
 func (s *Server) evaluateHostSAClaim(ctx context.Context, prior, requested hostSAClaim, surface string) hostSAClaimVerdict {
 	if requested.Email == "" || requested == prior {
-		return hostSAClaimVerdict{Claim: requested, Allowed: true}
+		return hostSAClaimVerdict{Claim: requested, Prior: prior, Allowed: true}
 	}
 
 	principal, err := s.callerPrincipal(ctx)
@@ -141,12 +147,16 @@ func (s *Server) evaluateHostSAClaim(ctx context.Context, prior, requested hostS
 		// audit record gets a fixed reason.
 		slog.WarnContext(ctx, "broker host service account: caller principal not resolved",
 			"surface", surface, "targetSA", requested.Email, "error", err.Error())
-		return s.denyHostSAClaimNonUser(ctx, store.Principal{}, requested, surface,
+		v := s.denyHostSAClaimNonUser(ctx, store.Principal{}, requested, surface,
 			"caller identity could not be resolved to a principal")
+		v.Prior = prior
+		return v
 	}
 	if principal.Kind != store.PrincipalUser {
-		return s.denyHostSAClaimNonUser(ctx, principal, requested, surface,
+		v := s.denyHostSAClaimNonUser(ctx, principal, requested, surface,
 			"caller is a "+principal.Kind.String()+" principal; only a user may set it")
+		v.Prior = prior
+		return v
 	}
 
 	target := hostSATarget(requested)
@@ -176,7 +186,7 @@ func (s *Server) evaluateHostSAClaim(ctx context.Context, prior, requested hostS
 			"outcome", result.Outcome.String(), "mechanism", result.Mechanism,
 			"reason", result.Reason)
 	}
-	return hostSAClaimVerdict{Claim: requested, Allowed: allowed, Result: result}
+	return hostSAClaimVerdict{Claim: requested, Prior: prior, Allowed: allowed, Checked: true, Result: result}
 }
 
 // denyHostSAClaimNonUser returns the denied verdict for a caller that is not a
@@ -219,12 +229,15 @@ func (s *Server) denyHostSAClaimNonUser(ctx context.Context, caller store.Princi
 // hostSAClaimWriteAllowed is the write-site guard for a broker's host service
 // account. A write that leaves the claim unchanged, or that clears the email,
 // is always allowed. Any other write needs an allowed verdict made for exactly
-// the claim being stored; a verdict for a different claim does not count.
+// the claim being stored; a verdict for a different claim does not count. An
+// unchecked verdict (no actAs evaluation ran) counts only while the stored
+// claim is still the one it was made against, so it never authorizes a
+// change back to its value after the row changed.
 func hostSAClaimWriteAllowed(prior, next hostSAClaim, v hostSAClaimVerdict) error {
 	if next == prior || next.Email == "" {
 		return nil
 	}
-	if v.Allowed && v.Claim == next {
+	if v.Allowed && v.Claim == next && (v.Checked || prior == v.Prior) {
 		return nil
 	}
 	return ErrHostSAClaimNotAuthorized

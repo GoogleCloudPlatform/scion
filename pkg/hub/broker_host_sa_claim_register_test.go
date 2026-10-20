@@ -43,6 +43,7 @@ func createBrokerRegistrationWithHostSA(ctx context.Context, svc *BrokerAuthServ
 	v := hostSAClaimVerdict{
 		Claim:   hostSAClaim{Email: strings.ToLower(req.GCPHostServiceAccountEmail), ProjectID: req.GCPHostProjectID},
 		Allowed: true,
+		Checked: true,
 	}
 	return svc.createBrokerRegistration(ctx, req, createdBy, "", false, true, v)
 }

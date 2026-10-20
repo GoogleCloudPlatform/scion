@@ -41,13 +41,17 @@ func TestHostSAClaimWriteAllowed(t *testing.T) {
 		{"unchanged empty, zero verdict", cleared, cleared, hostSAClaimVerdict{}, false},
 		{"cleared, zero verdict", a, cleared, hostSAClaimVerdict{}, false},
 		{"cleared email with project left, zero verdict", a, hostSAClaim{ProjectID: "p1"}, hostSAClaimVerdict{}, false},
-		{"changed, allowed for next", a, b, hostSAClaimVerdict{Claim: b, Allowed: true}, false},
-		{"set from empty, allowed for next", cleared, a, hostSAClaimVerdict{Claim: a, Allowed: true}, false},
+		{"changed, allowed for next", a, b, hostSAClaimVerdict{Claim: b, Prior: a, Allowed: true, Checked: true}, false},
+		{"set from empty, allowed for next", cleared, a, hostSAClaimVerdict{Claim: a, Prior: cleared, Allowed: true, Checked: true}, false},
 		{"changed, denied", a, b, hostSAClaimVerdict{Claim: b}, true},
 		{"changed, zero verdict", a, b, hostSAClaimVerdict{}, true},
-		{"changed, verdict for a different claim", cleared, b, hostSAClaimVerdict{Claim: a, Allowed: true}, true},
-		{"project-only change, verdict for old pair", a, aOtherProject, hostSAClaimVerdict{Claim: a, Allowed: true}, true},
-		{"project-only change, allowed for new pair", a, aOtherProject, hostSAClaimVerdict{Claim: aOtherProject, Allowed: true}, false},
+		{"changed, verdict for a different claim", cleared, b, hostSAClaimVerdict{Claim: a, Prior: cleared, Allowed: true, Checked: true}, true},
+		{"project-only change, verdict for old pair", a, aOtherProject, hostSAClaimVerdict{Claim: a, Prior: a, Allowed: true, Checked: true}, true},
+		{"project-only change, allowed for new pair", a, aOtherProject, hostSAClaimVerdict{Claim: aOtherProject, Prior: a, Allowed: true, Checked: true}, false},
+		// An unchecked verdict (the request equalled the stored value) does not
+		// authorize changing the row back after it moved on.
+		{"unchecked verdict, row changed since, write back", b, a, hostSAClaimVerdict{Claim: a, Prior: a, Allowed: true}, true},
+		{"unchecked verdict, row unchanged", a, a, hostSAClaimVerdict{Claim: a, Prior: a, Allowed: true}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
