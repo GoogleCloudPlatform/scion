@@ -633,6 +633,8 @@ measurement, with a discriminator key set in **both** the global and the project
 `profiles.<name>.env` has been removed from the `ProfileConfig` structs and the JSON schema.
 Schema validation now **rejects** settings files that include this field. If your settings
 files still contain `profiles.<name>.env`, you will receive a validation error on startup.
+Saving the profiles section of the Hub's admin server settings also rejects it, along with any
+other key a profile has no field for.
 Search your settings files and migrate any remaining values before upgrading.
 :::
 

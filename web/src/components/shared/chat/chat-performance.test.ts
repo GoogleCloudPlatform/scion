@@ -25,10 +25,14 @@ vi.mock('../../../client/api.js', () => ({
 }));
 
 await import('./chat-thread.js');
+const { stateManager } = await import('../../../client/__fixtures__/main-stub.js');
+const { setPreferredTimeZone } = await import('../../../utils/time.js');
+const { formatChatDate } = await import('./chat-date-divider.js');
 
 afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
+  setPreferredTimeZone('');
   vi.restoreAllMocks();
 });
 
@@ -148,6 +152,210 @@ describe('chat transcript update isolation', () => {
     thread.requestUpdate();
     await thread.updateComplete;
     expect(bubble.dispatchState).toBe('');
+  });
+});
+
+/** A chat message from `senderId`, with the fields the row model reads. */
+function chatMessage(id: string, senderId: string, createdAt: string, msg = id): any {
+  return {
+    id,
+    sender: `user:${senderId}`,
+    senderId,
+    msg,
+    createdAt,
+    type: 'chat',
+    plain: true,
+  };
+}
+
+/**
+ * Webperf C9a: the row model (renderMessages) is rebuilt only when its
+ * inputs change, and the per-message values it needs (time, date label,
+ * sender) are derived once per message, never served stale.
+ */
+describe('chat thread row model memoization', () => {
+  const dateLabels = (thread: any): string[] =>
+    [...thread.shadowRoot.querySelectorAll('.date-label')].map((el: Element) =>
+      (el.textContent ?? '').split(' · ')[0].trim()
+    );
+  const bubbles = (thread: any): any[] => [
+    ...thread.shadowRoot.querySelectorAll('scion-chat-message'),
+  ];
+
+  it('typing event does not rebuild row model', async () => {
+    const thread = await mountThread();
+    thread.startStreamV2();
+    const rows = vi.spyOn(thread, 'renderMessages');
+
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-typing-received', {
+        detail: {
+          data: { threadId: thread.conversationKey, userId: 'peer', displayName: 'Peer' },
+        },
+      })
+    );
+    await thread.updateComplete;
+
+    expect(thread.shadowRoot.querySelector('.typing-text').textContent).toContain('Peer');
+    expect(rows).toHaveBeenCalledTimes(0);
+  });
+
+  it('a new message rebuilds the row model exactly once', async () => {
+    const thread = await mountThread();
+    const rows = vi.spyOn(thread, 'renderMessages');
+
+    thread.mergeMessages([chatMessage('m2', 'peer', '2026-01-01T12:05:00Z', 'second')]);
+    await thread.updateComplete;
+
+    expect(rows).toHaveBeenCalledTimes(1);
+    expect(bubbles(thread).map((b) => b.body)).toEqual(['hello', 'second']);
+  });
+
+  it('an edit rebuilds the row model exactly once', async () => {
+    const thread = await mountThread();
+    const rows = vi.spyOn(thread, 'renderMessages');
+
+    thread.handleV2MessageEdited(
+      new CustomEvent('chat-message-edited', {
+        detail: {
+          conversationKey: thread.conversationKey,
+          messageId: 'm1',
+          content: 'edited',
+          editedAt: '2026-01-01T12:01:00Z',
+        },
+      })
+    );
+    await thread.updateComplete;
+
+    expect(rows).toHaveBeenCalledTimes(1);
+    expect(bubbles(thread)[0].body).toBe('edited');
+  });
+
+  it('a member change rebuilds the row model exactly once with the new name', async () => {
+    const thread = await mountThread();
+    thread.members = [{ id: 'me', kind: 'user', name: 'First name', email: '' }];
+    await thread.updateComplete;
+    expect(bubbles(thread)[0].senderName).toBe('First name');
+    const rows = vi.spyOn(thread, 'renderMessages');
+
+    thread.members = [{ id: 'me', kind: 'user', name: 'Renamed', email: '' }];
+    await thread.updateComplete;
+
+    expect(rows).toHaveBeenCalledTimes(1);
+    expect(bubbles(thread)[0].senderName).toBe('Renamed');
+  });
+
+  it('does not rebuild the row model for context menu, preview, reply or edit state', async () => {
+    const thread = await mountThread();
+    const rows = vi.spyOn(thread, 'renderMessages');
+    const msg = thread.messages[0];
+
+    thread.contextMenuMessage = msg;
+    thread.contextMenuPosition = { x: 10, y: 10 };
+    thread.contextMenuAsSheet = false;
+    await thread.updateComplete;
+    thread.contextMenuMessage = null;
+    thread.composerReplyTo = { messageId: msg.id, senderName: 'me', content: 'hello' };
+    await thread.updateComplete;
+    thread.composerReplyTo = null;
+    thread.composerEditMessage = { messageId: msg.id, content: msg.msg };
+    await thread.updateComplete;
+    thread.composerEditMessage = null;
+    thread.filePreview = { kind: 'gcs', messageId: msg.id, bucket: 'b', object: 'o', name: 'o' };
+    await thread.updateComplete;
+    thread.filePreview = null;
+    await thread.updateComplete;
+
+    expect(rows).toHaveBeenCalledTimes(0);
+  });
+
+  it('labels dates and names senders correctly after ingest', async () => {
+    const thread = await mountThread();
+    thread.members = [
+      { id: 'me', kind: 'user', name: 'Me Myself', email: 'me@example.com' },
+      { id: 'agent-1', kind: 'agent', name: 'Helper', email: '' },
+    ];
+    thread.mergeMessages([
+      chatMessage('m2', 'peer', '2026-01-02T09:00:00Z'),
+      {
+        ...chatMessage('m3', 'agent-1', '2026-01-03T09:00:00Z'),
+        sender: 'agent:helper',
+        type: 'assistant-reply',
+      },
+    ]);
+    await thread.updateComplete;
+
+    expect(dateLabels(thread)).toEqual([
+      formatChatDate('2026-01-01T12:00:00Z'),
+      formatChatDate('2026-01-02T09:00:00Z'),
+      formatChatDate('2026-01-03T09:00:00Z'),
+    ]);
+    const [own, peer, agent] = bubbles(thread);
+    expect(own.senderName).toBe('Me Myself');
+    // Not a member: the name falls back to the sender string.
+    expect(peer.senderName).toBe('peer');
+    expect(agent.senderName).toBe('Helper');
+    expect(agent.senderIsAgent).toBe(true);
+    expect(peer.senderIsAgent).toBe(false);
+  });
+
+  it('keeps the first matching member, by id or email, as a linear find would', async () => {
+    const thread = await mountThread();
+    thread.members = [
+      { id: 'other', kind: 'agent', name: 'Email match', email: 'user:me' },
+      { id: 'me', kind: 'user', name: 'Id match', email: '' },
+    ];
+    await thread.updateComplete;
+    // m1 has senderId "me" and sender "user:me": the email match comes first.
+    expect(bubbles(thread)[0].senderName).toBe('Email match');
+  });
+
+  it('re-derives a message replaced by a new object', async () => {
+    const thread = await mountThread();
+    thread.mergeMessages([
+      { ...chatMessage('m1', 'peer', '2026-03-04T12:00:00Z', 'hello'), sender: 'user:peer' },
+    ]);
+    await thread.updateComplete;
+
+    expect(dateLabels(thread)).toEqual([formatChatDate('2026-03-04T12:00:00Z')]);
+    expect(bubbles(thread)[0].senderName).toBe('peer');
+  });
+
+  it('re-derives a message whose sender fields were mutated in place', async () => {
+    const thread = await mountThread();
+    thread.members = [
+      { id: 'me', kind: 'user', name: 'Me', email: '' },
+      { id: 'peer', kind: 'user', name: 'Peer', email: '' },
+    ];
+    await thread.updateComplete;
+    expect(bubbles(thread)[0].senderName).toBe('Me');
+
+    const msg = thread.messages[0];
+    msg.senderId = 'peer';
+    msg.sender = 'user:peer';
+    thread.messages = [...thread.messages];
+    await thread.updateComplete;
+
+    expect(bubbles(thread)[0].senderName).toBe('Peer');
+  });
+
+  it('relabels dates when the display zone changes', async () => {
+    setPreferredTimeZone('UTC');
+    const thread = await mountThread();
+    // 23:30 UTC on Jan 1 is already Jan 2 in Tokyo.
+    thread.mergeMessages([chatMessage('m2', 'peer', '2026-01-01T23:30:00Z')]);
+    await thread.updateComplete;
+    expect(dateLabels(thread)).toEqual([formatChatDate('2026-01-01T12:00:00Z')]);
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await thread.updateComplete;
+
+    const labels = dateLabels(thread);
+    expect(labels).toEqual([
+      formatChatDate('2026-01-01T12:00:00Z'),
+      formatChatDate('2026-01-01T23:30:00Z'),
+    ]);
+    expect(labels[0]).not.toBe(labels[1]);
   });
 });
 

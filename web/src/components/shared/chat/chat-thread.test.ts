@@ -5157,6 +5157,47 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
     expect((marker as unknown as { messageCount: number }).messageCount).toBe(2);
   });
 
+  /**
+   * renderMessages() does not re-sort inter-agent messages (webperf C9a): it
+   * relies on fetchInteragentExchanges sorting them once at ingest. Feed the
+   * endpoint out-of-order data and check the rendered grouping and order.
+   */
+  it('orders unsorted inter-agent data from the endpoint by time', async () => {
+    const el = await mountAgentDM({
+      history: [
+        {
+          id: 'm1',
+          sender: 'them@example.com',
+          senderId: 'user-them',
+          recipient: 'agent:coder',
+          msg: 'between',
+          type: 'chat',
+          createdAt: new Date(2026, 0, 15, 10, 0).toISOString(),
+        },
+      ],
+      interagent: [
+        makeIaMessage({ id: 'ia-late-2', createdAt: new Date(2026, 0, 15, 11, 30).toISOString() }),
+        makeIaMessage({ id: 'ia-early', createdAt: new Date(2026, 0, 15, 9, 0).toISOString() }),
+        makeIaMessage({ id: 'ia-late-1', createdAt: new Date(2026, 0, 15, 11, 0).toISOString() }),
+      ],
+    });
+
+    const rows = Array.from(el.shadowRoot!.querySelector('.messages-list')!.children);
+    expect(rows.map((r) => r.tagName.toLowerCase())).toEqual([
+      'div', // date separator
+      'scion-chat-interagent-marker', // ia-early
+      'scion-chat-message', // m1
+      'scion-chat-interagent-marker', // ia-late-1, ia-late-2
+    ]);
+    const markers = Array.from(
+      el.shadowRoot!.querySelectorAll('scion-chat-interagent-marker')
+    ) as unknown as Array<{ messages: Message[] }>;
+    expect(markers.map((m) => m.messages.map((msg) => msg.id))).toEqual([
+      ['ia-early'],
+      ['ia-late-1', 'ia-late-2'],
+    ]);
+  });
+
   it('gives a human message its own divider the day after an inter-agent run', async () => {
     const el = await mountAgentDM({
       history: [
