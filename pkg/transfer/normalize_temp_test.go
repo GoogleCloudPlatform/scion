@@ -114,9 +114,10 @@ func TestNormalizeDir_TemporaryFileCollision(t *testing.T) {
 					t.Errorf("sibling symlink = %q, %v; want %q", target, err, outside)
 				}
 			}
-			if tc.kind == "symlink" || tc.kind == "hardlink" {
+			switch tc.kind {
+			case "symlink", "hardlink":
 				checkContent(outside, kept)
-			} else if tc.kind == "dangling_symlink" {
+			case "dangling_symlink":
 				if _, err := os.Lstat(outside); !os.IsNotExist(err) {
 					t.Errorf("dangling symlink target was created: %v", err)
 				}
