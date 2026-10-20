@@ -23,6 +23,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -173,4 +174,128 @@ func TestAgentLaunchReport_FailedAfterRunningDoesNotRevokeCredential(t *testing.
 
 	cred := getTestAgentCredential(t, s, "lr-afterrun-jti")
 	assert.Nil(t, cred.RevokedAt, "a failed report once the agent already reached running must not revoke — the agent did start")
+}
+
+// --- a failed report after running_observed (ptone/scion#5368) -------------
+
+// beginRunningObservedCreate adds a provisioning agent with run runID on the
+// fixture's broker, begins a create launch for it, seeds an active agent
+// credential jti, and records the run as a dispatch does.
+func beginRunningObservedCreate(t *testing.T, f *reconcileFixture, slug, runID, jti string) (*store.Agent, string) {
+	t.Helper()
+	ctx := context.Background()
+	a := f.addAgent(slug, string(state.PhaseProvisioning), "")
+	_, err := f.s.SetAgentRunID(ctx, a.ID, runID, nil)
+	require.NoError(t, err)
+	launchID, err := f.s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 10*time.Minute)
+	require.NoError(t, err)
+	insertTestAgentCredential(t, f.s, a.ID, f.projectID, jti)
+	return a, launchID
+}
+
+// heartbeatRunning sends a broker heartbeat reporting the agent running with
+// no activity, the shape a broker sends while its Start is still copying the
+// agent's files into a pod.
+func heartbeatRunning(t *testing.T, f *reconcileFixture, a *store.Agent) {
+	t.Helper()
+	row, err := f.s.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	f.send(brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: string(state.PhaseRunning), ContainerStatus: "Running", RuntimeTarget: "docker", RunID: row.RunID},
+		}}},
+	})
+	got, err := f.s.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchEndReasonRunningObserved, got.LaunchEndReason, "setup: the running heartbeat ends the launch running_observed")
+	require.Empty(t, got.Activity)
+}
+
+// launchReportResult decodes a 200 launch report answer's result.
+func launchReportResult(t *testing.T, body []byte) string {
+	t.Helper()
+	var resp agentLaunchReportAppliedResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	return resp.Result
+}
+
+func TestLaunchReport_FailedAfterHeartbeatRunning_EndToEnd(t *testing.T) {
+	f := newReconcileFixture(t)
+	a, launchID := beginRunningObservedCreate(t, f, "lr-ro-e2e", "run-ro-e2e", "lr-ro-e2e-jti")
+	heartbeatRunning(t, f, a)
+
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "failed", Step: "workspace_sync",
+		Message: "launch timed out before the agent started", ErrorCode: "launch_timeout", RunID: "run-ro-e2e",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, store.LaunchReportResultApplied, launchReportResult(t, rec.Body.Bytes()))
+
+	got, err := f.s.GetAgent(context.Background(), a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseError), got.Phase)
+	assert.Equal(t, "launch_timeout", got.LaunchError)
+	assert.Equal(t, "workspace_sync", got.LaunchStep)
+	assert.Equal(t, "workspace_sync: launch timed out before the agent started", got.Message)
+	assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
+
+	cred := getTestAgentCredential(t, f.s, "lr-ro-e2e-jti")
+	require.NotNil(t, cred.RevokedAt, "the applied failure revokes the create's credential")
+	require.NotNil(t, cred.RevokeReason)
+	assert.Equal(t, agentCredentialRevokeReasonCreateFailed, *cred.RevokeReason)
+}
+
+func TestLaunchReport_FailedAfterSelfReportedRunning_NoRevoke(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a, launchID := beginRunningObservedCreate(t, f, "lr-ro-self", "run-ro-self", "lr-ro-self-jti")
+	// The harness's first report: running with a live activity.
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseRunning), Activity: "initializing", ReportSource: store.StatusReportSourceAgent,
+	}))
+	before, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchEndReasonRunningObserved, before.LaunchEndReason)
+
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "failed", ErrorCode: "launch_timeout", RunID: "run-ro-self",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, store.LaunchReportResultCompleted, launchReportResult(t, rec.Body.Bytes()))
+
+	got, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "the row must not change")
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.Equal(t, store.LaunchEndReasonRunningObserved, got.LaunchEndReason)
+	cred := getTestAgentCredential(t, f.s, "lr-ro-self-jti")
+	assert.Nil(t, cred.RevokedAt, "a harness that reported keeps its credential")
+}
+
+func TestLaunchReport_StaleRunAfterSyncRestart_NoRevoke(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a, launchID := beginRunningObservedCreate(t, f, "lr-ro-stale", "run-ro-old", "lr-ro-stale-jti")
+	heartbeatRunning(t, f, a)
+	// A synchronous restart records a new run and begins no launch.
+	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-ro-new", nil)
+	require.NoError(t, err)
+	before, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, launchID, before.LaunchID, "setup: the restart began no launch")
+
+	// The old launch's failed report, resent later, names the old run.
+	rec := postLaunchReport(t, f.srv, f.brokerID, a.ID, f.brokerID, AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: "failed", ErrorCode: "launch_timeout", RunID: "run-ro-old",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, store.LaunchReportResultCompleted, launchReportResult(t, rec.Body.Bytes()))
+
+	got, err := f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "the row must not change")
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	cred := getTestAgentCredential(t, f.s, "lr-ro-stale-jti")
+	assert.Nil(t, cred.RevokedAt, "a report for an older run must not revoke the credential")
 }
