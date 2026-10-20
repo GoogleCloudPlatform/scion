@@ -43,20 +43,36 @@ func TestListKubernetesPendingPodIsStarting(t *testing.T) {
 		name         string
 		podPhase     corev1.PodPhase
 		agentState   corev1.ContainerState
+		infoPhase    string
+		infoActivity string
 		wantPhase    string
 		wantActivity string
 	}{
 		{
-			name:      "pending pod awaiting capacity",
-			podPhase:  corev1.PodPending,
-			wantPhase: string(state.PhaseStarting),
+			name:         "pending pod awaiting capacity",
+			podPhase:     corev1.PodPending,
+			infoPhase:    string(state.PhaseRunning),
+			infoActivity: string(state.ActivityThinking),
+			wantPhase:    string(state.PhaseStarting),
 		},
 		{
 			name:         "running pod",
 			podPhase:     corev1.PodRunning,
 			agentState:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			infoPhase:    string(state.PhaseRunning),
+			infoActivity: string(state.ActivityThinking),
 			wantPhase:    string(state.PhaseRunning),
 			wantActivity: string(state.ActivityThinking),
+		},
+		{
+			// ptone/scion#5368: Start records starting until Run returns;
+			// a Running pod whose startup gate is still closed lists no
+			// runtime phase, so agent-info.json's starting is used.
+			name:       "running pod, startup gate closed",
+			podPhase:   corev1.PodRunning,
+			agentState: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			infoPhase:  string(state.PhaseStarting),
+			wantPhase:  string(state.PhaseStarting),
 		},
 	}
 
@@ -72,8 +88,8 @@ func TestListKubernetesPendingPodIsStarting(t *testing.T) {
 			}
 			infoData, err := json.Marshal(api.AgentInfo{
 				Name:     agentName,
-				Phase:    string(state.PhaseRunning),
-				Activity: string(state.ActivityThinking),
+				Phase:    tc.infoPhase,
+				Activity: tc.infoActivity,
 				Runtime:  "kubernetes",
 			})
 			if err != nil {

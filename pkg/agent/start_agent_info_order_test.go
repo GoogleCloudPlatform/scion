@@ -18,9 +18,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -186,4 +190,239 @@ func TestStart_CopiedHome_StartingBeforeRunRunningAfter(t *testing.T) {
 	if got.Phase != "running" {
 		t.Errorf("Start returned phase %q, want running", got.Phase)
 	}
+}
+
+// copiedHomeContainer is a fake runtime that declares
+// runtime.CopiedAgentHomeRuntime and, once Run has been entered, lists the
+// agent's container with the given phase ("" is a Running Kubernetes pod
+// whose startup gate is still closed). run runs inside Run; a nil run
+// starts the container.
+func copiedHomeContainer(projectScionDir, phase string, run func() error) copiedHomeRuntime {
+	started := false
+	return copiedHomeRuntime{&runtime.MockRuntime{
+		NameFunc: func() string { return "fake" },
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			if !started {
+				return nil, nil
+			}
+			return []api.AgentInfo{{
+				Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: phase, ProjectPath: projectScionDir,
+				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+			}}, nil
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) {
+			started = true
+			if run != nil {
+				if err := run(); err != nil {
+					return "", err
+				}
+			}
+			return "cid-run-2", nil
+		},
+	}}
+}
+
+// Guard: on a copied-home runtime a failed Run still leaves error in
+// agent-info.json, the failed-start record and List, now starting from
+// starting rather than running. The fake lists the container with no phase
+// (a Running pod), so the result does not depend on how List treats a
+// runtime that reports starting for a failed start.
+func TestStart_CopiedHome_RunFailsLeavesError(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+	rt := copiedHomeContainer(projectScionDir, "", func() error { return errLaunchFailed })
+
+	if err := startTZ(t, rt, projectScionDir, "run-2"); err == nil {
+		t.Fatal("Start succeeded although the launch failed")
+	}
+	if got := agentInfoPhase(t, agentDir); got != "error" {
+		t.Errorf("agent-info.json phase = %q, want error", got)
+	}
+	if got := rawHostState(t, projectScionDir, "tz-agent")["startFailedRunId"]; got != "run-2" {
+		t.Errorf("host state startFailedRunId = %q, want run-2", got)
+	}
+	if got := listedPhase(t, rt, projectScionDir, "tz-agent"); got != "error" {
+		t.Errorf("List phase = %q, want error", got)
+	}
+}
+
+// Guard: a stop or soft-delete mark written while Run is in progress is
+// kept; Start's post-Run write moves starting to running only.
+func TestStart_CopiedHome_ConcurrentStopMarkWins(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark func(projectScionDir string) error
+		want string
+	}{
+		{"stopped", func(p string) error { return UpdateAgentConfig("tz-agent", p, "stopped", "", "") }, "stopped"},
+		{"soft-deleted", func(p string) error { return MarkAgentSoftDeleted("tz-agent", p, time.Now()) }, softDeletedPhase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projectScionDir, agentDir := startTZFixture(t, "", `""`)
+			writeRun1AgentInfo(t, projectScionDir, agentDir)
+			rt := copiedHomeContainer(projectScionDir, "", func() error { return tc.mark(projectScionDir) })
+
+			if err := startTZ(t, rt, projectScionDir, "run-2"); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := agentInfoPhase(t, agentDir); got != tc.want {
+				t.Errorf("agent-info.json phase = %q, want %q kept", got, tc.want)
+			}
+		})
+	}
+}
+
+// advanceAgentPhase writes only while the phase is still the expected one,
+// and never creates a missing agent-info.json.
+func TestAdvanceAgentPhase_OnlyFromExpected(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	infoPath := filepath.Join(agentDir, "home", "agent-info.json")
+
+	t.Run("from matches", func(t *testing.T) {
+		if err := os.WriteFile(infoPath, []byte(`{"name":"tz-agent","phase":"starting","runtime":"fake"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		advanceAgentPhase("tz-agent", projectScionDir, "starting", "running")
+		if got := agentInfoPhase(t, agentDir); got != "running" {
+			t.Errorf("phase = %q, want running", got)
+		}
+	})
+	t.Run("from differs", func(t *testing.T) {
+		before := []byte(`{"name":"tz-agent","phase":"stopped","runtime":"fake"}`)
+		if err := os.WriteFile(infoPath, before, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		advanceAgentPhase("tz-agent", projectScionDir, "starting", "running")
+		after, err := os.ReadFile(infoPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(after, before) {
+			t.Errorf("agent-info.json rewritten although the phase was not starting:\nbefore: %s\nafter:  %s", before, after)
+		}
+	})
+	t.Run("file missing", func(t *testing.T) {
+		if err := os.Remove(infoPath); err != nil {
+			t.Fatal(err)
+		}
+		advanceAgentPhase("tz-agent", projectScionDir, "starting", "running")
+		if _, err := os.Stat(infoPath); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("agent-info.json after advancing a missing file: %v, want it still missing", err)
+		}
+	})
+}
+
+// On every runtime, a container that exits immediately after Run is
+// deleted and the start fails; the failed start is now recorded as on the
+// Run error path, so agent-info.json and List show error rather than the
+// phase written before Run. MockRuntime declares no capability.
+func TestStart_ExitedImmediately_RecordsFailedStart(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+
+	started := false
+	deleted := false
+	rt := noContainers()
+	rt.ListFunc = func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		if !started {
+			return nil, nil
+		}
+		return []api.AgentInfo{{
+			Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "stopped", ContainerStatus: "Exited (1)", ProjectPath: projectScionDir,
+			Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+		}}, nil
+	}
+	rt.RunFunc = func(context.Context, runtime.RunConfig) (string, error) {
+		started = true
+		return "cid-run-2", nil
+	}
+	rt.DeleteFunc = func(context.Context, runtime.RunRef) error {
+		deleted = true
+		return nil
+	}
+
+	err := startTZ(t, rt, projectScionDir, "run-2")
+	if err == nil || !strings.Contains(err.Error(), "exited immediately") {
+		t.Fatalf("Start error = %v, want the exited-immediately error", err)
+	}
+	if !deleted {
+		t.Error("Start did not delete the exited container")
+	}
+	if got := rawHostState(t, projectScionDir, "tz-agent")["startFailedRunId"]; got != "run-2" {
+		t.Errorf("host state startFailedRunId = %q, want run-2", got)
+	}
+	if got := agentInfoPhase(t, agentDir); got != "error" {
+		t.Errorf("agent-info.json phase = %q, want error", got)
+	}
+	if got := listedPhase(t, rt, projectScionDir, "tz-agent"); got != "error" {
+		t.Errorf("List phase = %q, want error", got)
+	}
+}
+
+// Guard: a runtime without the capability (Docker, Podman, Apple) still
+// records running before Run, as ptone/scion#4766 requires, and the host
+// does not write agent-info.json after Run.
+func TestStart_SharedHome_StillWritesRunningBeforeRun(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+
+	started := false
+	atRun := ""
+	rt := noContainers()
+	rt.ListFunc = func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		if !started {
+			return nil, nil
+		}
+		return []api.AgentInfo{{
+			Name: "tz-agent", ContainerID: "cid-run-2", RunID: "run-2", Phase: "running", ProjectPath: projectScionDir,
+			Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-2"},
+		}}, nil
+	}
+	rt.RunFunc = func(context.Context, runtime.RunConfig) (string, error) {
+		atRun = agentInfoPhase(t, agentDir)
+		// What the container itself would write; the host must keep it.
+		if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"),
+			[]byte(`{"name":"tz-agent","phase":"starting"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		started = true
+		return "cid-run-2", nil
+	}
+	if err := startTZ(t, rt, projectScionDir, "run-2"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if atRun != "running" {
+		t.Errorf("agent-info.json phase when Run was entered = %q, want running", atRun)
+	}
+	if got := agentInfoPhase(t, agentDir); got != "starting" {
+		t.Errorf("agent-info.json phase after Start = %q, want the container's starting kept", got)
+	}
+}
+
+// A failed write of the pre-Run phase is logged at warn level, because the
+// file then keeps an earlier phase that the post-Run write will not
+// advance. An unparsable agent-info.json makes the write fail.
+func TestStart_PreRunWriteFailure_LogsWarn(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	writeRun1AgentInfo(t, projectScionDir, agentDir)
+	if err := os.WriteFile(filepath.Join(agentDir, "home", "agent-info.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var records []slog.Record
+	old := slog.Default()
+	slog.SetDefault(slog.New(&collectHandler{records: &records}))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	if err := startTZ(t, copiedHomeContainer(projectScionDir, "", nil), projectScionDir, "run-2"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	slog.SetDefault(old)
+	const want = "Start: failed to record the agent phase before the runtime launch"
+	for _, r := range records {
+		if r.Level == slog.LevelWarn && strings.HasPrefix(r.Message, want) {
+			return
+		}
+	}
+	t.Errorf("no warn record starting %q", want)
 }
