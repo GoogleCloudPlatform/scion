@@ -208,10 +208,12 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		}
 		if errors.Is(err, ErrHostSAClaimNotAuthorized) {
 			if hostSAVerdict.Allowed {
-				// Not reachable with today's write sites: each stores exactly
-				// the value this handler evaluated, so an allowed verdict
-				// always matches. Kept so that a future write site storing a
-				// different value fails closed as a conflict.
+				// Not reachable from this handler: it makes a decision only
+				// against an unset prior (a new row, or a row registration
+				// would fill), and a decision that allows a non-empty value
+				// against an unset prior is always checked. A write site that
+				// refuses an allowed decision fails closed, as a conflict to
+				// retry.
 				Conflict(w, "the broker's host service account changed during registration; retry")
 				return
 			}

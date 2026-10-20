@@ -354,6 +354,35 @@ func TestRegisterFlatRuntimeBroker_ZeroVerdictWithoutClaimChange_Allowed(t *test
 	assert.Equal(t, hostSARegOld, f.flatRow(t, id).GCPHostServiceAccountEmail)
 }
 
+// TestCreateBrokerRegistration_UncheckedVerdictAfterRowChanged_Refused: a
+// decision made without an actAs check, because the request matched the
+// stored value X, does not let the write site set X back after the row
+// changed to Y.
+func TestCreateBrokerRegistration_UncheckedVerdictAfterRowChanged_Refused(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	existing := &store.RuntimeBroker{
+		ID: tid("hsa-unchecked"), Name: "hsa-unchecked", Slug: "hsa-unchecked",
+		Status: store.BrokerStatusOffline, CreatedBy: "owner",
+		GCPHostServiceAccountEmail: hostSARegNew, GCPHostProjectID: "host-project", // Y
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, existing))
+
+	x := hostSAClaim{Email: hostSARegOld, ProjectID: "host-project"}
+	unchecked := hostSAClaimVerdict{Claim: x, Prior: x, Allowed: true}
+	req := CreateBrokerRegistrationRequest{
+		Name: existing.Name, GCPHostServiceAccountEmail: x.Email, GCPHostProjectID: x.ProjectID,
+	}
+
+	_, err := svc.createBrokerRegistration(ctx, req, "owner", existing.ID, false, false, unchecked)
+
+	assert.True(t, errors.Is(err, ErrHostSAClaimNotAuthorized), "got %v", err)
+	got, err := s.GetRuntimeBroker(ctx, existing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, hostSARegNew, got.GCPHostServiceAccountEmail, "the row still holds Y")
+}
+
 // clearOnUpdateStore clears a broker's GCP host pair and hands it back to
 // registration (source "") right after the next record update, once armed:
 // the row the handler read had a pair, and the row the fill sees has none.
