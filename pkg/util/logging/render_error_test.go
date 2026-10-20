@@ -232,7 +232,7 @@ func (p *attrProcessor) OnEmit(_ context.Context, r *sdklog.Record) error {
 		p.attrs = map[string]string{}
 	}
 	r.WalkAttributes(func(kv attribute.KeyValue) bool {
-		p.attrs[string(kv.Key)] = kv.Value.Emit()
+		p.attrs[string(kv.Key)] = kv.Value.String()
 		return true
 	})
 	return nil
