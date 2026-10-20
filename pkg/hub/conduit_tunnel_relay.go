@@ -136,10 +136,10 @@ func (ts *conduitTunnelSession) mintRelayTunnel(ctx context.Context, log *slog.L
 		// The open is logged and counted with the cause, for a
 		// stream_renewal.v2 target only.
 		if _, unsupported := conduitRenewalUnsupportedPrincipal(ts.identity); !unsupported {
-			kind := conduitPrincipalKind(ts.identity)
+			principalKind := conduitPrincipalKind(ts.identity)
 			log.Info("Conduit relay tunnel served unstamped: the forwarding relay does not re-check tunnels",
-				"route", conduitRouteRelayTunnel, "principal_kind", kind, "cause", conduitCauseRenewalRouteUnavailable)
-			ts.s.recordConduitOpenUnstampedCause(conduitRouteRelayTunnel, kind, conduitCauseRenewalRouteUnavailable)
+				"route", conduitRouteRelayTunnel, "principal_kind", principalKind, "cause", conduitCauseRenewalRouteUnavailable)
+			ts.s.recordConduitOpenUnstampedCause(conduitRouteRelayTunnel, principalKind, conduitCauseRenewalRouteUnavailable)
 			renews = false
 		}
 	}
