@@ -166,6 +166,7 @@ func TestConduitNoSession_ProxyInProcess(t *testing.T) {
 	f := newConduitProxyFixtureServer(t, nil, enforceTargetDeadlines)
 	rec := recordOpenRefusals(f.srv)
 	startLegacyTunnel(t, f, f.srv)
+	require.Empty(t, f.agentSessions(t), "the agent has no conduit session")
 
 	resp := f.get(t, "/legacy?v=1", nil)
 	body, err := io.ReadAll(resp.Body)
