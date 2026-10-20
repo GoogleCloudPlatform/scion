@@ -95,13 +95,16 @@ function content(el: ScionCodeEditor): HTMLElement | null {
 it('a failed language import keeps plain text and does not throw', async () => {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   await expect(languageFor('yaml')).resolves.toEqual([]);
+  expect(warn).toHaveBeenCalledTimes(1);
   const el = await openEditor('deploy.yaml');
-  await new Promise((r) => setTimeout(r, 20));
+  // The editor's own request has failed (and been logged) as well.
+  await vi.waitFor(() => {
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
   expect(h.imports).toContain('yaml');
   expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
   expect(content(el)?.textContent).toBe('contents of deploy.yaml');
   expect(content(el)?.hasAttribute('data-lang')).toBe(false);
-  expect(warn).toHaveBeenCalled();
 });
 
 it('a language change applies the new language and a slower earlier import does not win', async () => {
@@ -113,9 +116,11 @@ it('a language change applies the new language and a slower earlier import does 
     expect(content(el)?.getAttribute('data-lang')).toBe('python');
   });
   h.releaseRust();
-  await vi.waitFor(() => {
-    expect(h.imports).toContain('rust');
-  });
-  await new Promise((r) => setTimeout(r, 20));
+  // Settles once the rust module has loaded, the same import the editor's
+  // stale request is waiting on. From there the editor's remaining steps
+  // are promise continuations only, which a zero-delay task runs after.
+  await expect(languageFor('rust')).resolves.not.toEqual([]);
+  expect(h.imports).toContain('rust');
+  await new Promise((r) => setTimeout(r, 0));
   expect(content(el)?.getAttribute('data-lang')).toBe('python');
 });

@@ -86,11 +86,29 @@ it('editor loads only the requested language', async () => {
   expect(h.imports).toEqual(['go']);
 });
 
+it('language ids match case-insensitively', async () => {
+  await expect(languageFor('JSON')).resolves.not.toEqual([]);
+  expect(h.imports).toContain('json');
+  const el = document.createElement('scion-code-editor');
+  el.language = 'JSON';
+  el.content = '{}';
+  editors.push(el);
+  document.body.appendChild(el);
+  await vi.waitFor(() => {
+    expect(content(el)?.getAttribute('data-lang')).toBe('json');
+  });
+});
+
 it('a language without support imports nothing and stays plain text', async () => {
   const before = [...h.imports];
+  // languageFor settles only after any import it starts, so an unexpected
+  // import would already be recorded here.
   await expect(languageFor('toml')).resolves.toEqual([]);
+  await expect(languageFor('constructor')).resolves.toEqual([]);
+  expect(h.imports).toEqual(before);
+  // The editor resolves its language through the same languageFor.
   const el = await openEditor('config.toml');
-  await new Promise((r) => setTimeout(r, 20));
+  await el.updateComplete;
   expect(h.imports).toEqual(before);
   expect(content(el)?.textContent).toBe('contents of config.toml');
   expect(content(el)?.hasAttribute('data-lang')).toBe(false);

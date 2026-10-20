@@ -84,3 +84,12 @@ plus `lezer-lr` 26,439.
   guard fails the race test (`rust` instead of `python`).
 - `check-bundle-budget.test.mjs`: `chunk limits apply to every chunk matching
   the prefix`, and `fails when no chunk matches a sized prefix`.
+
+## Upstream review follow-up (fix1)
+
+- `languageFor` now matches ids case-insensitively. Before C8, `language='Go'` also fell back to plain text, so this is a fix, not a regression repair. It also looks ids up as own keys only, because an id such as `constructor` used to resolve to `Object.prototype.constructor`.
+- The fixed 20 ms waits in the negative tests are gone. Each test now waits for an event it can name:
+  - The unknown-language test awaits `languageFor` directly. That call settles only after any import it starts, so the check is deterministic. It then awaits `updateComplete` for the editor.
+  - The failed-import test waits until the editor's own failure has been logged.
+  - The race test awaits the slow module itself, then runs one zero-delay task. That task drains the editor's remaining promise continuations.
+- Each negative test was rechecked against a broken variant: case-sensitive lookup, toml mapped to a language, the own-key check removed, a failure that rethrows, the stale guard removed, and static imports. Every variant fails its test.

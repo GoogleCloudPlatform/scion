@@ -123,14 +123,18 @@ const LANGUAGE_LOADERS: Record<string, () => Promise<Extension>> = {
 };
 
 /**
- * The CodeMirror extension for a language id. A language without support
- * (plaintext, shell, toml, ...) resolves to no extension without importing
- * anything; a failed import also resolves to no extension (plain text), so
- * the editor still works. Never rejects.
+ * The CodeMirror extension for a language id, matched case-insensitively
+ * ('Go' and 'go' are the same). A language without support (plaintext,
+ * shell, toml, ...) resolves to no extension without importing anything; a
+ * failed import also resolves to no extension (plain text), so the editor
+ * still works. Never rejects.
  */
 export async function languageFor(language: string): Promise<Extension> {
-  const load = LANGUAGE_LOADERS[language];
-  if (!load) return [];
+  const id = language.toLowerCase();
+  // Own keys only, so an id such as 'constructor' is not looked up on
+  // Object.prototype.
+  if (!Object.hasOwn(LANGUAGE_LOADERS, id)) return [];
+  const load = LANGUAGE_LOADERS[id];
   try {
     return await load();
   } catch (err) {
