@@ -254,3 +254,28 @@ func TestFingerprintedAssets_StillLoadedFromManifest(t *testing.T) {
 		})
 	}
 }
+
+// TestHasDotSegment pins the segment rule of hasDotSegment, including
+// relative and empty-segment forms, and that it does not allocate.
+func TestHasDotSegment(t *testing.T) {
+	for p, want := range map[string]bool{
+		"":                     false,
+		"/":                    false,
+		"/assets/main.js":      false,
+		"/assets/a.b/c.js":     false,
+		"/assets/x.":           false,
+		"/a..b":                false,
+		"/.vite/manifest.json": true,
+		"/assets/.hidden":      true,
+		"/assets/sub/.d/x.js":  true,
+		"/assets//.x":          true,
+		"/.":                   true,
+		"/..":                  true,
+		".vite":                true,
+		"assets/.x":            true,
+	} {
+		assert.Equal(t, want, hasDotSegment(p), p)
+	}
+	allocs := testing.AllocsPerRun(100, func() { _ = hasDotSegment("/shoelace/assets/icons/check-circle.svg") })
+	assert.Zero(t, allocs)
+}

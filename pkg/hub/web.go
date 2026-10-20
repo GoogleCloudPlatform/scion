@@ -1291,13 +1291,10 @@ func (ws *WebServer) serveStaticAsset(w http.ResponseWriter, r *http.Request) {
 
 // hasDotSegment reports whether any segment of the slash path p starts
 // with a dot (for example /.vite/manifest.json or /assets/.hidden).
+// A segment starts with a dot exactly when the path does or a "/." occurs
+// in it, so the check scans the path without allocating.
 func hasDotSegment(p string) bool {
-	for _, seg := range strings.Split(p, "/") {
-		if strings.HasPrefix(seg, ".") {
-			return true
-		}
-	}
-	return false
+	return strings.HasPrefix(p, ".") || strings.Contains(p, "/.")
 }
 
 // firstSegmentIsDot reports whether the first segment of the URL path p
