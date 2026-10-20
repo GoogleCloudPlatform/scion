@@ -394,3 +394,32 @@ func TestImageRegistryEnvReadOnlyByHelper(t *testing.T) {
 		t.Fatalf("SCION_IMAGE_REGISTRY read outside config.ImageRegistryFromEnv: %v", bad)
 	}
 }
+
+func TestRedactImageRegistry(t *testing.T) {
+	tests := map[string]string{
+		"ghcr.io/org":                              "ghcr.io/org",
+		"user:secret@registry.example/team":        "***@registry.example/team",
+		"https://user:secret@registry.example/a/b": "https://***@registry.example/a/b",
+		"token@registry.example":                   "***@registry.example",
+		"registry.example/path@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "registry.example/path@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"user:pa/ss@registry.example/team": "***@registry.example/team",
+		"user:pa/ss@registry.example/team@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "***@registry.example/team@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"https://u:p/w@registry.example/x": "https://***@registry.example/x",
+		"registry.example/team/sub":        "registry.example/team/sub",
+		"a:b@c:d@registry.example:5000/x":  "***@registry.example:5000/x",
+		// A "://" inside a password is not a scheme.
+		"user:p://x@host.example/r": "***@host.example/r",
+		// A digest-like host with no repository path is not a digest.
+		"u:p@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef":        "***@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"user:pa/ss@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "***@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		// A short hex is not a digest: over-redacted, never shown.
+		"registry.example/path@sha256:abc": "***@sha256:abc",
+		"[::1]:5000/x@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "[::1]:5000/x@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		"": "",
+	}
+	for in, want := range tests {
+		if got := RedactImageRegistry(in); got != want {
+			t.Errorf("RedactImageRegistry(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

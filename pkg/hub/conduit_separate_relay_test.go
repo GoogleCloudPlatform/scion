@@ -131,7 +131,9 @@ func newSeparateRelayWorld(t *testing.T, mods ...func(*separateRelayWorld)) *sep
 		srv.config.SharedSigningSecret = testRelaySessionSecret
 		require.NoError(t, srv.StartConduitExternal(ctx, ConduitExternalOptions{
 			InstanceID: id, PeerAuth: externalRelayAuth(t, id), Store: regStore,
-			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(time.Now()),
+			// The clock also drives the stream re-check and its renewal
+			// driver, so it starts at the clock grants are minted on.
+			Registry: registry.New(regStore, registry.Config{}), Clock: clock.NewFake(cf.clock.Now()),
 			replayStore: replay,
 		}))
 	}

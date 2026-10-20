@@ -637,10 +637,45 @@ func (k *conduitGrantKeys) invalidate() {
 // A cached ring older than conduitGrantKeyRecheckFresh is read again first,
 // so a revocation stored by another node applies here within that time.
 func (k *conduitGrantKeys) recheckKeys(ctx context.Context) (grant.KeySet, error) {
+	keys, _, err := k.recheckKeysGen(ctx)
+	return keys, err
+}
+
+// recheckKeysGen is recheckKeys, also returning the cache generation the
+// keys came from (for reloadRecheckKeys).
+func (k *conduitGrantKeys) recheckKeysGen(ctx context.Context) (grant.KeySet, uint64, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.ring != nil && k.now().Sub(k.loadedAt) >= conduitGrantKeyRecheckFresh {
 		k.ring = nil
+	}
+	ring, err := k.currentLocked(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return ring.RecheckKeys(k.now(), k.retention()), k.gen, nil
+}
+
+// reloadRecheckKeys returns the re-check key set after one reload of the
+// ring from storage, for a grant whose kid was unknown in the keys of
+// generation seen (design v2.21.36 §3.5). If the cache changed since seen
+// (another renewal already reloaded it, or a key change was applied), that
+// newer ring is used without another read, so many streams meeting the same
+// new kid share one reload. A failed reload returns its error.
+//
+// Known edge: freshPublicKeys reads the ring without k.mu and installs its
+// result if the cache did not change during its read. One installed just
+// after this renewal's first read bumps gen with a ring that may be a read's
+// latency older than the store, so the reload is skipped. A false deny
+// would need the grant's kid committed within that latency and the grant
+// already due for renewal; the activation delay of a new key rules that
+// out. Comparing load times instead of generations is a 6.6c candidate.
+func (k *conduitGrantKeys) reloadRecheckKeys(ctx context.Context, seen uint64) (grant.KeySet, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.gen == seen {
+		k.ring = nil
+		k.gen++
 	}
 	ring, err := k.currentLocked(ctx)
 	if err != nil {
@@ -766,6 +801,10 @@ func (s *Server) RotateConduitGrantKey(ctx context.Context) (ConduitGrantKeyRota
 // conduitGrantKeysResponse is the body of GET /api/v1/conduit/grant-keys.
 type conduitGrantKeysResponse struct {
 	Keys []grant.WireKey `json:"keys"`
+	// TargetStreamDeadlines is the enforcement mode of target-side stream
+	// deadlines, "off" or "enforce" (design §3.5 Gating). Targets take it
+	// only from this hub-direct response.
+	TargetStreamDeadlines string `json:"target_stream_deadlines"`
 }
 
 // handleConduitGrantKeys serves GET /api/v1/conduit/grant-keys: the public
@@ -791,7 +830,7 @@ func (s *Server) handleConduitGrantKeys(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant keys unavailable", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, conduitGrantKeysResponse{Keys: grant.ToWire(keys)})
+	writeJSON(w, http.StatusOK, conduitGrantKeysResponse{Keys: grant.ToWire(keys), TargetStreamDeadlines: s.conduitTargetStreamDeadlines()})
 }
 
 // handleAdminConduitGrantKeyRotate serves POST
