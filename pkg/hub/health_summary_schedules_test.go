@@ -17,7 +17,9 @@ package hub
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -111,6 +113,109 @@ func TestScheduleAttention_NotReported(t *testing.T) {
 		Message: "Scheduled event data not available",
 	}}, scheduleAttention(nil))
 	assert.Empty(t, scheduleAttention(&HealthSummarySchedules{Failing: []HealthFailingSchedule{}}))
+}
+
+func TestHealthScheduleReasonCode(t *testing.T) {
+	assert.Equal(t, "creator_deleted", healthScheduleReasonCode(store.ScheduleStatusReasonCreatorDeleted))
+	assert.Equal(t, "cron_zone_unsupported", healthScheduleReasonCode(store.ScheduleStatusReasonCronZoneUnsupported))
+	assert.Equal(t, "other", healthScheduleReasonCode("some_later_reason"))
+	assert.Equal(t, "other", healthScheduleReasonCode("<b>markup</b>"))
+	assert.Equal(t, "other", healthScheduleReasonCode(""))
+}
+
+func TestSortPausedSchedules(t *testing.T) {
+	t1 := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	list := []store.Schedule{
+		{ID: "b", UpdatedAt: t1},
+		{ID: "c", UpdatedAt: t2},
+		{ID: "a", UpdatedAt: t1},
+		{ID: "d"},
+	}
+	sortPausedSchedules(list)
+	ids := []string{}
+	for _, sc := range list {
+		ids = append(ids, sc.ID)
+	}
+	assert.Equal(t, []string{"c", "a", "b", "d"}, ids)
+}
+
+// The filter re-check keeps only paused schedules with a reason.
+func TestIsSystemPausedSchedule(t *testing.T) {
+	assert.True(t, isSystemPausedSchedule(store.Schedule{Status: store.ScheduleStatusPaused, StatusReason: store.ScheduleStatusReasonCreatorDeleted}))
+	assert.True(t, isSystemPausedSchedule(store.Schedule{Status: store.ScheduleStatusPaused, StatusReason: "some_later_reason"}))
+	assert.False(t, isSystemPausedSchedule(store.Schedule{Status: store.ScheduleStatusPaused}))
+	assert.False(t, isSystemPausedSchedule(store.Schedule{Status: store.ScheduleStatusActive, StatusReason: store.ScheduleStatusReasonCreatorDeleted}))
+}
+
+// Each hub-paused schedule gets a fixed sentence for its reason, after the
+// failing items; an unknown reason gets the generic sentence.
+func TestScheduleAttention_PausedItems(t *testing.T) {
+	sec := &HealthSummarySchedules{
+		Failing: []HealthFailingSchedule{{ID: "f1", Name: "failing", ProjectID: "p1"}},
+		Total:   1,
+		Paused: []HealthPausedSchedule{
+			{ID: "s1", Name: "nightly", ProjectID: "p1", ProjectSlug: "alpha", Reason: "creator_deleted"},
+			{ID: "s2", Name: "zoned", ProjectID: "p2", Reason: "cron_zone_unsupported"},
+			{ID: "s3", Name: "later", ProjectID: "p2", Reason: "other"},
+			{ID: "s4", Name: "raw", ProjectID: "p2", Reason: "<b>stored</b>"},
+		},
+		PausedTotal: 6, PausedTruncated: true,
+	}
+	sub := func(id, name, project string) HealthAttentionSubject {
+		return HealthAttentionSubject{Type: HealthSubjectSchedule, ID: id, Name: name, ProjectID: project}
+	}
+	w := func(s HealthAttentionSubject, msg string) HealthAttentionItem {
+		return HealthAttentionItem{Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule, Subject: s, Message: msg}
+	}
+	assert.Equal(t, []HealthAttentionItem{
+		w(sub("f1", "failing", "p1"), "Scheduled event failing failed its last run"),
+		w(sub("s1", "nightly", "p1"), "Scheduled event alpha / nightly was paused by the hub: the agent that created it was deleted"),
+		w(sub("s2", "zoned", "p2"), "Scheduled event zoned was paused by the hub: its cron expression names a time zone, which is not supported"),
+		w(sub("s3", "later", "p2"), "Scheduled event later was paused by the hub: a reason this hub does not recognize"),
+		w(sub("s4", "raw", "p2"), "Scheduled event raw was paused by the hub: a reason this hub does not recognize"),
+		w(HealthAttentionSubject{Type: HealthSubjectSchedules}, "2 more scheduled events were paused by the hub"),
+	}, scheduleAttention(sec))
+}
+
+// When the paused scan was limited, PausedTotal is a lower bound and the
+// extra item says so.
+func TestScheduleAttention_PausedScanLimited(t *testing.T) {
+	sec := &HealthSummarySchedules{
+		Paused:      []HealthPausedSchedule{{ID: "s1", Name: "n", ProjectID: "p", Reason: "creator_deleted"}},
+		PausedTotal: 2, PausedTruncated: true, PausedScanLimited: true,
+	}
+	items := scheduleAttention(sec)
+	assert.Len(t, items, 2)
+	assert.Equal(t, "At least 1 more scheduled event was paused by the hub", items[1].Message)
+	assert.Equal(t, HealthSubjectSchedules, items[1].Subject.Type)
+
+	sec.PausedTotal = 1
+	items = scheduleAttention(sec)
+	assert.Len(t, items, 2)
+	assert.Equal(t, "More scheduled events may have been paused by the hub", items[1].Message)
+}
+
+// When only the paused list could not be read, the failing items stay and
+// one warning replaces the paused items.
+func TestScheduleAttention_PausedUnavailable(t *testing.T) {
+	sec := &HealthSummarySchedules{
+		Failing:           []HealthFailingSchedule{{ID: "f1", Name: "failing", ProjectID: "p1"}},
+		Total:             1,
+		PausedUnavailable: true,
+	}
+	assert.Equal(t, []HealthAttentionItem{
+		{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+			Subject: HealthAttentionSubject{Type: HealthSubjectSchedule, ID: "f1", Name: "failing", ProjectID: "p1"},
+			Message: "Scheduled event failing failed its last run",
+		},
+		{
+			Severity: HealthAttentionWarning, Kind: HealthAttentionSchedule,
+			Subject: HealthAttentionSubject{Type: HealthSubjectSchedules},
+			Message: "Hub-paused scheduled event data not available",
+		},
+	}, scheduleAttention(sec))
 }
 
 // Failing schedules add attention items after the agent items and never

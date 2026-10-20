@@ -3386,6 +3386,10 @@ type ScheduleFilter struct {
 	// LastRunStatus, when set, keeps only schedules whose most recent run
 	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
 	LastRunStatus string
+	// SystemPausedOnly, when true, keeps only paused schedules with a
+	// non-empty StatusReason: schedules the hub paused itself. A schedule a
+	// user paused (empty reason) is left out.
+	SystemPausedOnly bool
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.

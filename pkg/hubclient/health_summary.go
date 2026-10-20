@@ -318,6 +318,30 @@ type HealthSummarySchedules struct {
 	Total       int  `json:"total"`
 	Truncated   bool `json:"truncated"`
 	ScanLimited bool `json:"scan_limited"`
+	// Paused lists schedules the hub paused itself, with their reason.
+	// A schedule a user paused is not listed. Nil from an older hub.
+	Paused []HealthPausedSchedule `json:"paused"`
+	// PausedUnavailable is true when the hub could not list them; the
+	// failing list is still reported.
+	PausedUnavailable bool `json:"paused_unavailable"`
+	// PausedTotal is a lower bound when PausedScanLimited is true.
+	PausedTotal       int  `json:"paused_total"`
+	PausedTruncated   bool `json:"paused_truncated"`
+	PausedScanLimited bool `json:"paused_scan_limited"`
+}
+
+// HealthPausedSchedule is one schedule the hub paused, with its reason.
+type HealthPausedSchedule struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProjectID   string `json:"project_id"`
+	ProjectSlug string `json:"project_slug"`
+	EventType   string `json:"event_type"`
+	Target      string `json:"target"`
+	// Reason is "creator_deleted", "cron_zone_unsupported" or "other";
+	// a newer hub may add values.
+	Reason    string     `json:"reason"`
+	UpdatedAt *time.Time `json:"updated_at"`
 }
 
 // HealthFailingSchedule is one active schedule whose last run failed.
