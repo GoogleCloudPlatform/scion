@@ -650,8 +650,7 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	schedule.Status = store.ScheduleStatusPaused
-	schedule.StatusReason = store.ScheduleStatusReasonNone
+	schedule.Status, schedule.StatusReason = store.ScheduleStatusPaused, store.ScheduleStatusReasonNone
 	writeJSON(w, http.StatusOK, schedule)
 }
 

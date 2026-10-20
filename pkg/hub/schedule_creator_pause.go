@@ -78,8 +78,8 @@ func (s *Server) pauseScheduleWithReason(ctx context.Context, sched store.Schedu
 	prevRevisionKnown := sched.AuthorizationRevision != 0
 	sched.Status = store.ScheduleStatusPaused
 	sched.StatusReason = reason
-	return s.store.UpdateSchedule(ctx, &sched, store.ScheduleFieldMask{Status: true},
-		prevRevision, prevRevisionKnown, nil)
+	fields := store.ScheduleFieldMask{Status: true}
+	return s.store.UpdateSchedule(ctx, &sched, fields, prevRevision, prevRevisionKnown, nil)
 }
 
 // pauseSchedulesAuthoredByAgent pauses, with status reason creator_deleted,

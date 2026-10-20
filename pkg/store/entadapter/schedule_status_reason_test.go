@@ -47,7 +47,7 @@ func TestScheduleStatusReason(t *testing.T) {
 	got, err = s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, got.Status)
-	assert.Equal(t, store.ScheduleStatusReasonCronZoneUnsupported, got.StatusReason)
+	assert.Equal(t, store.ScheduleStatusReasonCronZoneUnsupported, got.StatusReason, "UpdateScheduleStatus stores the reason")
 
 	// A metadata-only UpdateSchedule leaves the reason alone, even when the
 	// struct passed carries a different one.
@@ -57,13 +57,13 @@ func TestScheduleStatusReason(t *testing.T) {
 		got.AuthorizationRevision, got.AuthorizationRevision != 0, nil))
 	got, err = s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, store.ScheduleStatusReasonCronZoneUnsupported, got.StatusReason)
+	assert.Equal(t, store.ScheduleStatusReasonCronZoneUnsupported, got.StatusReason, "a metadata-only write leaves the reason")
 
 	// UpdateScheduleStatus with no reason clears it.
 	require.NoError(t, s.UpdateScheduleStatus(ctx, sc.ID, store.ScheduleStatusPaused, store.ScheduleStatusReasonNone))
 	got, err = s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
-	assert.Empty(t, got.StatusReason)
+	assert.Empty(t, got.StatusReason, "UpdateScheduleStatus with no reason clears it")
 
 	// UpdateSchedule with the Status field writes the reason, and reports
 	// the stored one back.
@@ -84,7 +84,7 @@ func TestScheduleStatusReason(t *testing.T) {
 	got, err = s.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusActive, got.Status)
-	assert.Empty(t, got.StatusReason)
+	assert.Empty(t, got.StatusReason, "a Status write with no reason clears it")
 
 	// Create persists a reason.
 	pre := newTestSchedule(projectID, "created-paused")

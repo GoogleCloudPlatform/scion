@@ -208,7 +208,7 @@ func TestScheduleCreatorPause_ResumeClearsReasonAndReRecordsAuthority(t *testing
 
 	got := mustGetSchedule(t, s, sc.ID)
 	assert.Equal(t, store.ScheduleStatusActive, got.Status)
-	assert.Empty(t, got.StatusReason)
+	assert.Empty(t, got.StatusReason, "resume clears the reason")
 	assert.Equal(t, 2, got.AuthorizationRevision)
 	assert.NotEqual(t, authzHelperAgentID, got.InitiatorPrincipalID, "authority is re-recorded to the resumer")
 	assert.NotEqual(t, store.DelegationPrincipalAgent, got.InitiatorPrincipalKind)
