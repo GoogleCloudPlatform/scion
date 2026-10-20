@@ -550,7 +550,12 @@ export class ScionProfileNav extends LitElement {
       const res = await apiFetch(url);
       if (!res.ok) return false;
       const data = (await res.json()) as { projects?: Project[]; nextCursor?: string };
-      if ((data.projects || []).some((p) => p.githubInstallationId)) return true;
+      const projects = data.projects || [];
+      // An empty page ends the scan even if it carries a cursor. The hub only
+      // sets nextCursor when more rows follow, so this is a guard against a
+      // cursor that would loop, not a change in what is found.
+      if (projects.length === 0) return false;
+      if (projects.some((p) => p.githubInstallationId)) return true;
       cursor = (typeof data.nextCursor === 'string' && data.nextCursor) || '';
       if (!cursor) return false;
     }

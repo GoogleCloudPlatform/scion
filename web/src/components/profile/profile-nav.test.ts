@@ -285,6 +285,16 @@ describe('scion-profile-nav — GitHub Application link (ptone/scion#5311)', () 
     expect(githubLink(element)).toBeNull();
   });
 
+  it('an empty page ends the scan even when it carries a cursor', async () => {
+    element = await mount({ configured: true, installation_url: INSTALL_URL }, [
+      page(100),
+      [],
+      page(100, 0),
+    ]);
+    expect(projectRequests).toHaveLength(2);
+    expect(githubLink(element)).toBeNull();
+  });
+
   it('a failed projects request shows no link', async () => {
     element = await mount({ configured: true, installation_url: INSTALL_URL }, [page(3, 0)], 500);
     expect(githubLink(element)).toBeNull();

@@ -52,7 +52,8 @@ is upstream yet). Part of the webperf epic (#5301). Client only; no hub change.
   reads projects only when the app is configured with an installation URL,
   in pages of 100 that stop at the first match, at most 5 pages. That is the
   same 500-project window the old request saw, so the link shows in exactly
-  the same cases.
+  the same cases. An empty page also ends the scan (upstream review), as a
+  guard: the hub sets `nextCursor` only when more rows follow.
 
 ## Tests
 
