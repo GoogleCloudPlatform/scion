@@ -240,6 +240,34 @@ func TestPassthroughTranslationReview_ReassignedAgentSkipped(t *testing.T) {
 	assert.Equal(t, own.ID, kept.AppliedConfig.GCPIdentity.ServiceAccountID)
 }
 
+// TestPassthroughTranslationReview_ReassignedAgentWithTranslatedRowSkipped:
+// as ReassignedAgentSkipped, but the active assignment row left for the
+// previous account was recorded by translation. A row for an account other
+// than the assigned one does not select the agent.
+func TestPassthroughTranslationReview_ReassignedAgentWithTranslatedRowSkipped(t *testing.T) {
+	f := setupPTR(t, "ptr-reassigned-row")
+	a := f.translatedAgent(t, "ptr-reassigned-row-agent", f.other.ID, true)
+	require.NoError(t, f.store.ReplaceAgentServiceAccountAssignment(context.Background(), &store.AgentServiceAccountAssignment{
+		AgentID: a.ID, ProjectID: a.ProjectID, ServiceAccountID: f.record.ID,
+		Origin:              store.SAAssignmentOriginHostPassthroughTranslation,
+		AuthorityProvenance: recordedProv(store.DelegationPrincipalUser, f.other.ID, store.SourceCredentialSession),
+		EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+	own := wiringSA(t, f.store, store.ScopeProject, f.project.ID, "own-row-sa@ptr-project.iam.gserviceaccount.com")
+	got := mustGetAgent(t, f.store, a.ID)
+	got.AppliedConfig.GCPIdentity.ServiceAccountID = own.ID
+	got.AppliedConfig.GCPIdentity.ServiceAccountEmail = own.Email
+	require.NoError(t, f.store.UpdateAgent(context.Background(), got))
+
+	out, err := f.run(t, map[string]string{"block": "true"})
+
+	require.NoError(t, err)
+	assert.Contains(t, out, "skipped 1, blocked 0")
+	kept := mustGetAgent(t, f.store, a.ID)
+	assert.Equal(t, store.GCPMetadataModeAssign, kept.AppliedConfig.GCPIdentity.MetadataMode)
+	assert.Equal(t, own.ID, kept.AppliedConfig.GCPIdentity.ServiceAccountID)
+}
+
 func TestPassthroughTranslationReview_UndecidedCheckIsErrorNotBlocked(t *testing.T) {
 	t.Run("check did not complete", func(t *testing.T) {
 		f := setupPTR(t, "ptr-checkfail")
