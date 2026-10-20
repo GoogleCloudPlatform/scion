@@ -2,6 +2,7 @@
   "fields": [
     "agentMove",
     "asyncLaunch",
+    "asyncStart",
     "attach",
     "emptyPerAgentWorkspace",
     "nodeImageRegistry",

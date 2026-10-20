@@ -1225,6 +1225,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// AsyncStart indicates the broker can run a start or restart of an
+	// existing agent as an asynchronous launch (ptone/scion#4669). The hub
+	// sends start launch fields only to a broker that is not known to lack
+	// it.
+	AsyncStart bool `json:"asyncStart,omitempty"`
 	// EmptyPerAgentWorkspace indicates the broker can provision the
 	// empty-per-agent workspace sharing mode (private empty directory per
 	// agent on non-git projects). The hub refuses to dispatch such agents to
@@ -3386,6 +3391,10 @@ type ScheduleFilter struct {
 	// LastRunStatus, when set, keeps only schedules whose most recent run
 	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
 	LastRunStatus string
+	// SystemPausedOnly, when true, keeps only paused schedules with a
+	// non-empty StatusReason: schedules the hub paused itself. A schedule a
+	// user paused (empty reason) is left out.
+	SystemPausedOnly bool
 }
 
 // ToAPI converts a store.Agent to an api.AgentInfo for external consumption.

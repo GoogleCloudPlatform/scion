@@ -24,9 +24,12 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   attentionHref,
   truncateText,
+  pausedReasonLabel,
+  PAUSED_REASON_GENERIC,
   SCHEDULE_ERROR_MAX_CHARS,
   type HealthAttentionItem,
   type HealthFailingSchedule,
+  type HealthPausedSchedule,
 } from './health-attention.js';
 import './health-attention.js';
 import { hasInPageState } from '../../client/route-history.js';
@@ -35,12 +38,14 @@ import { elementStyleRules } from './__fixtures__/css-rules.js';
 async function mount(
   items: HealthAttentionItem[] | null,
   integrationsDetail = true,
-  failingSchedules: HealthFailingSchedule[] | null = null
+  failingSchedules: HealthFailingSchedule[] | null = null,
+  pausedSchedules: HealthPausedSchedule[] | null = null
 ): Promise<ShadowRoot> {
   const el = document.createElement('scion-health-attention');
   el.items = items;
   el.integrationsDetail = integrationsDetail;
   el.failingSchedules = failingSchedules;
+  el.pausedSchedules = pausedSchedules;
   document.body.appendChild(el);
   await el.updateComplete;
   return el.shadowRoot!;
@@ -281,6 +286,93 @@ describe('scion-health-attention failing schedules', () => {
     expect(root.querySelector('.last-error')!.textContent).toBe('Last error: ' + markup);
     expect(root.querySelector('.last-error')!.getAttribute('title')).toBe(markup);
     expect((window as unknown as { __scheduleErr?: number }).__scheduleErr).toBeUndefined();
+  });
+});
+
+const pausedItem: HealthAttentionItem = {
+  severity: 'warning',
+  kind: 'schedule',
+  subject: { type: 'schedule', id: 'sc 2', name: 'weekly', project_id: 'p 1' },
+  message:
+    'Scheduled event alpha / weekly was paused by the hub: the agent that created it was deleted',
+};
+
+const pausedRow: HealthPausedSchedule = {
+  id: 'sc 2',
+  name: 'weekly',
+  project_id: 'p 1',
+  project_slug: 'alpha',
+  event_type: 'message',
+  target: 'worker',
+  reason: 'creator_deleted',
+  updated_at: '2026-10-19T08:00:00Z',
+};
+
+describe('scion-health-attention hub-paused schedules', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('links a paused item to its project schedules page and shows the reason', async () => {
+    const root = await mount([pausedItem], true, [], [pausedRow]);
+    const li = root.querySelector('li[data-kind="schedule"]')!;
+    expect(li.querySelector('a')!.getAttribute('href')).toBe('/projects/p%201/schedules');
+    expect(li.querySelector('a')!.textContent).toBe(pausedItem.message);
+    const detail = li.querySelector('.paused-detail')!.textContent!;
+    expect(detail).toContain('Paused by the hub: the agent that created it was deleted');
+    expect(detail).toContain('Target: worker');
+    expect(detail).toContain('updated ');
+    expect(li.querySelector('.last-error')).toBeNull();
+  });
+
+  it('shows fixed text for each known reason', async () => {
+    const root = await mount([pausedItem], true, null, [
+      { ...pausedRow, reason: 'cron_zone_unsupported', target: '', updated_at: null },
+    ]);
+    expect(root.querySelector('.paused-detail')!.textContent!.trim()).toBe(
+      'Paused by the hub: its cron expression names a time zone, which is not supported'
+    );
+  });
+
+  it('shows the generic label for an unknown reason and never the code', async () => {
+    for (const reason of ['other', 'some_later_reason', '<b>stored</b>', '', 'toString']) {
+      const root = await mount([pausedItem], true, null, [{ ...pausedRow, reason, target: '' }]);
+      const detail = root.querySelector('.paused-detail')!;
+      expect(detail.textContent).toContain('Paused by the hub: ' + PAUSED_REASON_GENERIC);
+      expect(detail.querySelector('b')).toBeNull();
+      if (reason) expect(detail.textContent).not.toContain(reason);
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('renders markup in the target as text, never as elements', async () => {
+    const root = await mount([pausedItem], true, null, [
+      { ...pausedRow, target: '<img src=x onerror="window.__pausedErr=1">' },
+    ]);
+    const detail = root.querySelector('.paused-detail')!;
+    expect(detail.querySelector('img')).toBeNull();
+    expect(detail.textContent).toContain('Target: <img src=x onerror="window.__pausedErr=1">');
+    expect((window as unknown as { __pausedErr?: number }).__pausedErr).toBeUndefined();
+  });
+
+  it('shows no detail line without a matching row', async () => {
+    const root = await mount([pausedItem], true, null, [{ ...pausedRow, id: 'other' }]);
+    expect(root.querySelector('.detail')).toBeNull();
+    const none = await mount([pausedItem], true, null, null);
+    expect(none.querySelector('.detail')).toBeNull();
+  });
+});
+
+describe('pausedReasonLabel', () => {
+  it('maps known codes to fixed text and anything else to the generic label', () => {
+    expect(pausedReasonLabel('creator_deleted')).toBe('the agent that created it was deleted');
+    expect(pausedReasonLabel('cron_zone_unsupported')).toBe(
+      'its cron expression names a time zone, which is not supported'
+    );
+    expect(pausedReasonLabel('other')).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel('constructor')).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel(undefined)).toBe(PAUSED_REASON_GENERIC);
+    expect(pausedReasonLabel(null)).toBe(PAUSED_REASON_GENERIC);
   });
 });
 

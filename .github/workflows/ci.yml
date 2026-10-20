@@ -425,6 +425,29 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Image Go Directories
+        run: |
+          # Invoked directly rather than via `make check-image-go-dirs`, for the
+          # same reason as Check Authorization Guards above: make would collapse
+          # the script's exit 1 (violations) and exit 2 (nothing was analysed).
+          set +e
+          ./hack/check-image-go-dirs.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Image Go directories NOT checked::check-image-go-dirs --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-image-go-dirs.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Image Go directories::A Dockerfile that builds the root Go module does not copy one of its top-level Go directories, or an ignore file drops one from the build context. Add the COPY line, or a justified EXCLUDED_DIRS entry in hack/check-image-go-dirs.sh; details are in the step log above." ;;
+            *) echo "::error title=Image Go directories NOT checked::check-image-go-dirs.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       - name: Check Security Marker Gates
         run: |
           # Invoked directly rather than via `make check-security-marker-gates`:
