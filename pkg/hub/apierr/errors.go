@@ -92,6 +92,10 @@ const (
 	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
 	// running but the conduit session a stream needs is not connected.
 	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"
+	// ErrCodeAgentUpgradeRequired is returned (409) for a user stream open
+	// to an agent session that does not support stream renewal while the
+	// hub requires it (design §3.5, Q14).
+	ErrCodeAgentUpgradeRequired = "agent_upgrade_required"
 	// ErrCodeSendInProgress is returned (409) for a chat send whose
 	// idempotency key belongs to a send that is still running.
 	ErrCodeSendInProgress = "send_in_progress"

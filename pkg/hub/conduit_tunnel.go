@@ -127,6 +127,10 @@ const (
 	// and this node cannot deliver renewals on the route (contracts,
 	// Renewal path unavailable).
 	tunnelStreamRenewalUnavailable
+	// tunnelAgentUpgradeRequired: target-side deadlines are enforced in
+	// external relay mode and the target session does not renew stream
+	// authorization (contracts, Target lacks stream renewal).
+	tunnelAgentUpgradeRequired
 	tunnelInternal
 	// Placement refusals (409): the grant was refused for a pinned agent
 	// whose saved placement is inconsistent (mintConduitGrant), one entry
@@ -158,6 +162,7 @@ var conduitTunnelFailures = map[conduitTunnelFailure]struct {
 	tunnelGrantKeysUnavailable:     {http.StatusServiceUnavailable, ErrCodeUnavailable, relay.ReasonGrantKeysUnavailable},
 	tunnelConduitNotServing:        {http.StatusServiceUnavailable, ErrCodeUnavailable, ptyReasonConduitNotServing},
 	tunnelStreamRenewalUnavailable: {http.StatusServiceUnavailable, ErrCodeUnavailable, conduitReasonStreamRenewalUnavailable},
+	tunnelAgentUpgradeRequired:     {http.StatusConflict, ErrCodeAgentUpgradeRequired, conduitReasonStreamRenewalUnsupported},
 	tunnelInternal:                 {http.StatusInternalServerError, ErrCodeInternalError, ""},
 	tunnelPlacementPinStale:        {http.StatusConflict, ErrCodeRuntimeTargetPinStale, ""},
 	tunnelPlacementBrokerMissing:   {http.StatusConflict, ErrCodeRuntimeBrokerMissing, ""},
@@ -661,6 +666,9 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 	}
 	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		renews, canRenew := conduitTargetRenews(res), ts.s.conduitRouteCanRenew(res)
+		if ts.s.conduitTargetUpgradeRequired(ctx, ts.identity, renews, conduitRouteTunnel, agent.ID) {
+			return errConduitAgentUpgradeRequired
+		}
 		if ts.s.conduitRenewalPathUnavailable(ctx, ts.identity, renews, canRenew, conduitRouteTunnel, agent.ID) {
 			return errConduitStreamRenewalUnavailable
 		}
@@ -717,14 +725,16 @@ type conduitTunnelOpened struct {
 
 // conduitTunnelMintErrPassesThrough reports whether a mintConduitGrant
 // error keeps its own refusal: an authorization, request or experiment
-// refusal, a placement refusal (409), or a placement check that could not
+// refusal, a target without stream renewal (409), a placement refusal
+// (409), or a placement check that could not
 // read the store (registry unavailable). Any other mint error is the
 // signing key set failing.
 func conduitTunnelMintErrPassesThrough(err error) bool {
 	var placement *PlacementConflictError
 	return errors.Is(err, errConduitForbidden) || errors.Is(err, errConduitInvalid) || errors.Is(err, errConduitDisabled) ||
 		errors.As(err, &placement) || errors.Is(err, router.ErrRegistryUnavailable) ||
-		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitGrantInternal)
+		errors.Is(err, errConduitStreamRenewalUnavailable) || errors.Is(err, errConduitAgentUpgradeRequired) ||
+		errors.Is(err, errConduitGrantInternal)
 }
 
 // errConduitTunnelGrantKeys marks a grant that could not be signed.
@@ -779,6 +789,8 @@ func conduitTunnelOpenError(err error) error {
 		return tunnelRefusal(tunnelRegistryUnavailable, "conduit routing is temporarily unavailable")
 	case errors.Is(err, errConduitStreamRenewalUnavailable):
 		return tunnelRefusal(tunnelStreamRenewalUnavailable, "%s", conduitStreamRenewalUnavailableMessage)
+	case errors.Is(err, errConduitAgentUpgradeRequired):
+		return tunnelRefusal(tunnelAgentUpgradeRequired, "%s", conduitAgentUpgradeRequiredMessage)
 	case errors.Is(err, errConduitGrantInternal):
 		return tunnelRefusal(tunnelInternal, "internal error")
 	case errors.Is(err, errConduitTunnelGrantKeys):
