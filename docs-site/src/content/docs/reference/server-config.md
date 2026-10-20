@@ -1111,7 +1111,7 @@ The server reads the variables listed under [Tracked Boolean Variables](#tracked
 
 - **Supported Truthy Values:** `true`, `1`, `t`, `yes`, `y`, `on` (case-insensitive, whitespace-trimmed).
 - **Supported Falsy Values:** `false`, `0`, `f`, `no`, `n`, `off` (case-insensitive, whitespace-trimmed).
-- **Safety Warnings:** Unset or empty values are `false`, except for `SCION_SERVER_ADMIN_MODE`: when it is unset or empty, the server keeps the admin mode from its settings (a value of only spaces turns admin mode off). An **unrecognized non-empty value** (e.g., `SCION_LOG_GCP=trur`) triggers a **warning at startup** and is treated as `false`, except for `SCION_SERVER_ADMIN_MODE`, where it stops the server at startup.
+- **Safety Warnings:** Unset or empty values are `false`, except for `SCION_SERVER_ADMIN_MODE`: when it is unset or empty, the server keeps the admin mode from its settings (a value of only whitespace turns admin mode off). An **unrecognized non-empty value** (e.g., `SCION_LOG_GCP=trur`) triggers a **warning at startup** and is treated as `false`, except for `SCION_SERVER_ADMIN_MODE`, where it stops the server at startup.
 
 #### Tracked Boolean Variables:
 
