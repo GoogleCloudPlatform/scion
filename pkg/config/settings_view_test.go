@@ -15,6 +15,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -471,6 +473,12 @@ func TestLoadSettings_LegacyHarnessEntryKeepsLowerHarness(t *testing.T) {
 func TestLoadSettings_LegacyKeysMatchCaseInsensitively(t *testing.T) {
 	projectDir := setupSettingsViewTest(t, "",
 		"project_id: local-id\nhub:\n  projectID: hub-ci\n  brokerID: broker-ci\nprofiles:\n  dev:\n    runtime: docker\n    harness_overrides:\n      claude:\n        auth_selectedtype: vertex-ai\n")
+	resetWarnedUnusedKeysCache()
+	t.Cleanup(resetWarnedUnusedKeysCache)
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
 
 	vs, _, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
@@ -485,4 +493,10 @@ func TestLoadSettings_LegacyKeysMatchCaseInsensitively(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hub-ci", s.GetHubProjectID(), "a case-variant hub.projectId is the hub ID only")
 	assert.Equal(t, "local-id", s.ProjectID)
+
+	// The raw case-variant legacy keys were removed after conversion, so
+	// none is reported as an unrecognized key.
+	for _, raw := range []string{"projectID", "brokerID", "auth_selectedtype"} {
+		assert.NotContains(t, logs.String(), raw, "raw legacy key %s left in the merged settings", raw)
+	}
 }

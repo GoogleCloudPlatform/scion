@@ -303,9 +303,9 @@ func convertLegacySettingsLayer(fk, lower *koanf.Koanf) (converted map[string]in
 // hand-edited hub.projectID converts like hub.projectId).
 //
 // A harness config's harness is derived from the entry's name, like a
-// runtime's type, but its consumers do not fall back to the name when it is
-// empty, so the derived value is kept unless a lower layer (lower) already
-// sets that entry's harness.
+// runtime's type. It is kept, as the legacy conversion always set it, so a
+// legacy entry's name keeps resolving as its harness; it never overrides a
+// lower layer (lower) that already sets that entry's harness.
 func keepLegacySourcedLeaves(adapted map[string]interface{}, fk, lower *koanf.Koanf) map[string]interface{} {
 	ak := koanf.New(".")
 	if err := ak.Load(confmap.Provider(adapted, ""), nil); err != nil {
