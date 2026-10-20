@@ -6,7 +6,7 @@ Scion release notes are published weekly.
 
 ## Latest: Week of October 12 -- 18, 2026
 
-The CLI's local-only mode is gone. Every command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
+The CLI's local-only mode is gone. Every agent command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
 
@@ -62,7 +62,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Migration guides
 
-- [Local-only mode removal](/scion/reference/local-mode-removal/): every command now goes through a Hub; existing agents are imported on first `scion server start`.
+- [Local-only mode removal](/scion/reference/local-mode-removal/): every agent command now goes through a Hub; after `scion server start`, each repository's existing agents are imported on its first command.
 - [Migrating from raw message delivery](/scion/reference/raw-message-removal/): raw keystroke delivery through messages is removed. `scion message --raw` fails before sending anything, and any message request that still carries `raw` is refused with `422 raw_input_removed`. Use `scion keys` or `POST .../keys` instead.
 - [Migrating from grove names](/scion/reference/grove-removal/): the grove→project rename.
 
